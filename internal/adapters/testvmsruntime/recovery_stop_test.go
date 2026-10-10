@@ -110,6 +110,8 @@ func TestForceStopRecoveryRequiresDurableEvidenceAndFreshOwnership(t *testing.T)
 					if incident.Diagnostics["original_incident_id"] != slot.IncidentID ||
 						!strings.Contains(incident.Diagnostics["vm_1_console_log"], "console evidence") ||
 						strings.Contains(incident.Diagnostics["vm_1_console_log"], "synthetic-secret") ||
+						!strings.Contains(incident.Diagnostics["vm_1_qmp_log"], "QMP evidence") ||
+						strings.Contains(incident.Diagnostics["vm_1_qmp_log"], "synthetic-secret") ||
 						incident.Command == nil || incident.Command.DurationMS != 60000 {
 						t.Fatalf("pre-force evidence missing or unredacted: %#v", incident)
 					}
@@ -123,6 +125,8 @@ func TestForceStopRecoveryRequiresDurableEvidenceAndFreshOwnership(t *testing.T)
 					return nil, nil, nil
 				case strings.HasPrefix(joined, "console "):
 					return []byte("console evidence token=synthetic-secret"), nil, nil
+				case strings.HasPrefix(joined, "query /1.0/instances/"):
+					return []byte("QMP evidence token=synthetic-secret"), nil, nil
 				default:
 					return []byte("native evidence"), nil, nil
 				}
@@ -161,6 +165,12 @@ func TestRecoveryDiagnosticsBoundsAndReportsMissingNativeEvidence(t *testing.T) 
 		if len(args) > 0 && args[0] == "console" {
 			return nil, nil, errors.New("console log unavailable")
 		}
+		if len(args) == 2 && args[0] == "query" {
+			if args[1] == "/1.0/instances/e2e-vm-1/logs/qemu.qmp.log?project=subyard-e2e-vms" {
+				return []byte(`{"type":"error","error":"synthetic-missing-log","error_code":404}`), nil,
+					&CommandError{Name: "incus", Args: args, ExitCode: 1, Message: "QMP log unavailable"}
+			}
+		}
 		return nil, nil, nil
 	}}
 	rt := &Runtime{Config: fixtureConfig(t), Runner: runner}
@@ -171,21 +181,27 @@ func TestRecoveryDiagnosticsBoundsAndReportsMissingNativeEvidence(t *testing.T) 
 			t.Fatalf("missing evidence silently omitted: %#v", diagnostics)
 		}
 	}
+	if !strings.Contains(diagnostics["vm_1_qmp_log"], "unavailable:") ||
+		strings.Contains(diagnostics["vm_1_qmp_log"], "synthetic-missing-log") ||
+		diagnostics["vm_2_qmp_log"] != "empty native response (no measurement)" {
+		t.Fatalf("missing QMP evidence silently omitted: %#v", diagnostics)
+	}
 	for index, ctx := range runner.contexts {
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > time.Second {
 			t.Fatalf("diagnostic probe %d lacks bounded deadline", index)
 		}
 	}
-	if !strings.HasPrefix(runner.calls[0][1], "list") || runner.calls[2][1] != "console" {
-		t.Fatalf("native state/console did not precede project/journal: %#v", runner.calls)
+	if !strings.HasPrefix(runner.calls[0][1], "list") || runner.calls[2][1] != "console" ||
+		strings.Join(runner.calls[3][1:], " ") != "query /1.0/instances/e2e-vm-1/logs/qemu.qmp.log?project=subyard-e2e-vms" {
+		t.Fatalf("native state/console/QMP did not precede project/journal: %#v", runner.calls)
 	}
 }
 
 func TestRecoveryDiagnosticsKeepsFailedGuestEvidenceWhenPeerProbesStall(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.handler = func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
-		if len(args) > 1 && args[1] == "e2e-vm-1" {
+		if strings.Contains(strings.Join(args, " "), "e2e-vm-1") {
 			ctx := runner.contexts[len(runner.contexts)-1]
 			<-ctx.Done()
 			return nil, nil, ctx.Err()
@@ -195,6 +211,8 @@ func TestRecoveryDiagnosticsKeepsFailedGuestEvidenceWhenPeerProbesStall(t *testi
 	rt := &Runtime{Config: fixtureConfig(t), Runner: runner}
 	diagnostics := rt.recoveryDiagnostics(context.Background(), "e2e-vm-2")
 	if diagnostics["vm_2_console_log"] != "failed guest evidence" ||
+		diagnostics["vm_2_qmp_log"] != "failed guest evidence" ||
+		!strings.Contains(diagnostics["vm_1_qmp_log"], "unavailable:") ||
 		!strings.Contains(diagnostics["vm_1_console_log"], "unavailable:") {
 		t.Fatalf("failed guest console was lost behind stalled peer probes: %#v", diagnostics)
 	}

@@ -902,6 +902,11 @@ next lease provisions its requested environment from a validated base. Failure t
 incident or prove ownership leaves the slot quarantined without deletion. Ordinary resource
 shortage is a retryable admission refusal and does not quarantine a healthy empty slot.
 
+Guest lease-key and context cleanup shares a five-second budget per running VM before stop.
+Quarantine key cleanup has one five-second phase budget. A cleanup timeout retains its
+diagnostic evidence and leaves the parent context available for native stop and recovery;
+cancellation of the parent still prevents force stop.
+
 If a disposable guest remains `RUNNING` after recovery's 60-second graceful stop, recovery saves
 a fresh durable incident and force-stop event before refreshing the exact project, generation and
 lease-epoch markers. It then attempts a native force stop with a 30-second command budget and
@@ -944,9 +949,11 @@ immutable JSON artifact under `$SUBYARD_HOME/logs/test-vms-broker-incidents/` an
 
 Local incident collection has a five-second budget with one-second native probes. It prioritizes
 VM state, QEMU information/logs and the guest console log, which can retain kernel suspend or
-panic output without a responsive guest agent. Project and bounded service journal observations
-follow. Empty responses, probe failures and exhausted budgets are recorded as missing measurements;
-the existing artifact redaction and size limits apply. Force-stop events link the fresh incident
+panic output, plus QEMU's QMP control log, without a responsive guest agent. Project and bounded
+service journal observations follow. Empty responses, probe failures and exhausted budgets are recorded as missing measurements;
+the existing artifact redaction and size limits apply. QMP sections retain the latest 64 KiB after
+redacting the complete log, with an explicit truncation marker; other sections retain their existing
+limits. Force-stop events link the fresh incident
 and report the graceful command and forced-stop durations when available.
 
 The host sink also saves a bounded observation in `test-vms-broker-incidents/host/<incident_id>.json`:

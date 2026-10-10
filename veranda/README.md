@@ -34,6 +34,20 @@ The [CI workflow](../.github/workflows/veranda.yml) runs these native client con
 on Linux amd64/arm64, Windows and macOS. It does not build or upload desktop candidates.
 Core, shipped-profile and Go RPC acceptance remain independent and required.
 
+The [real sleep fixture](../dev/e2e/veranda-sleep.py) emits bounded `sleep-stage` lines and
+keeps private `progress-1.json` and `progress-2.json` records in its marked guest directory.
+They retain prerequisites, RTC preparation, the power-write return and settings restoration.
+The fixture requires a nonzero canonical RTC alarm readback before suspend; this does not prove IRQ delivery.
+`power-write-prepared` records intent before the final timing checks; it does not prove the
+guest entered suspend. Acceptance still requires the clock and kernel-counter proof after
+resume. The fixture temporarily raises the kernel console log level and records the existing
+console-suspend setting without changing it. Disabling console suspension also forces the
+kernel's virtual-console switch path, so logging preserves that setting. It records unavailable
+instrumentation and restores the original log level with ownership guards. An instrumented
+pass does not establish uninstrumented suspend behavior or a wake fix.
+Progress records survive fixture cleanup but are lost when disposable VM disks are deleted;
+retain controller and broker diagnostics before recovery.
+
 ## Delivery gates
 
 Linux supports local and remote Linux owner hosts. Windows and macOS are intended as

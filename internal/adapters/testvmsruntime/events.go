@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -193,7 +194,11 @@ func (recorder EventRecorder) SaveIncident(
 		if !safeIncidentSection(name) {
 			continue
 		}
-		artifact.Diagnostics[name] = redactBrokerText(value, 256<<10)
+		if name == "vm_1_qmp_log" || name == "vm_2_qmp_log" {
+			artifact.Diagnostics[name] = redactBrokerLogTail(value)
+		} else {
+			artifact.Diagnostics[name] = redactBrokerText(value, 256<<10)
+		}
 	}
 	if err := validateIncidentArtifact(artifact); err != nil {
 		return IncidentArtifact{}, err
@@ -508,6 +513,29 @@ func errorString(err error) string {
 }
 
 func redactBrokerText(value string, maximum int) string {
+	value = sanitizeBrokerText(value)
+	if len(value) > maximum {
+		value = value[:maximum]
+	}
+	return value
+}
+
+func redactBrokerLogTail(value string) string {
+	// Redact complete input before slicing: a private key can cross the tail boundary.
+	value = sanitizeBrokerText(value)
+	const maximum = 64 << 10
+	const omitted = "[earlier log omitted]\n"
+	if len(value) <= maximum {
+		return value
+	}
+	start := len(value) - (maximum - len(omitted))
+	for !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return omitted + value[start:]
+}
+
+func sanitizeBrokerText(value string) string {
 	value = strings.ReplaceAll(value, "\x00", "")
 	value = strings.Map(func(character rune) rune {
 		if character == '\n' || character == '\t' {
@@ -523,9 +551,6 @@ func redactBrokerText(value string, maximum int) string {
 	value = secretJSON.ReplaceAllString(value, `${1}"[redacted]"`)
 	value = secretYAML.ReplaceAllString(value, "${1}[redacted]")
 	value = privateKeyPEM.ReplaceAllString(value, "private-key [redacted]")
-	if len(value) > maximum {
-		value = value[:maximum]
-	}
 	return value
 }
 

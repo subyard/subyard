@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import select
 import shlex
@@ -34,13 +35,16 @@ def classify(observed):
               'sleep_mode': 'unknown', 'supports_mem': False, 'pm_test_none': False,
               'suspend_success': None, 'suspend_fail': None, 'rtc_wakeup_enabled': False,
               'wakealarm_unused': False, 'root_access': False, 'clocks_available': False,
+              's2idle_callback_capable': False,
               'sleep_acceptance': 'unmeasured'}
     fields = {'linux', 'root', 'state', 'mem_sleep', 'pm_test', 'success', 'fail',
-              'wakeup', 'wakealarm', 'write_access', 'clocks'}
+              'wakeup', 'wakealarm', 'write_access', 'clocks', 's2idle_callback'}
     try:
         if type(observed) is not dict or set(observed) != fields:
             return result
         if any(type(observed[name]) is not bool for name in ['linux', 'root', 'write_access', 'clocks']):
+            return result
+        if observed['s2idle_callback'] is not None and type(observed['s2idle_callback']) is not bool:
             return result
         for name in ['state', 'mem_sleep', 'pm_test', 'success', 'fail', 'wakeup', 'wakealarm']:
             if observed[name] is not None and (type(observed[name]) is not str or len(observed[name]) > 256):
@@ -95,10 +99,92 @@ def classify(observed):
         result['clocks_available'] = observed['clocks']
         if not result['clocks_available']:
             raise ValueError()
+        # The fixture selects s2idle even when another mode is currently selected.
+        # Exposed enabled callbacks are necessary, not proof of selection or sleep.
+        reason = 's2idle_callback_observation_invalid'
+        if observed['s2idle_callback'] is None:
+            raise ValueError()
+        reason = 's2idle_callback_unavailable'
+        result['s2idle_callback_capable'] = observed['s2idle_callback']
+        if not result['s2idle_callback_capable']:
+            raise ValueError()
         result.update(result='ready', reason='ready')
     except (ValueError, TypeError, AttributeError):
         result['reason'] = reason
     return result
+
+
+def s2idle_callback_capability():
+    """Read only: every online CPU needs an enabled index>0 enter_s2idle state."""
+    root = '/sys/devices/system/cpu'
+
+    def read(path, limit=256):
+        try:
+            with open(path, 'rb') as source:
+                wire = source.read(limit + 1)
+        except FileNotFoundError:
+            return None
+        if len(wire) > limit or not wire.endswith(b'\n'):
+            raise ValueError()
+        return wire[:-1].decode('ascii')
+
+    def online():
+        value = read(root + '/online', 4096)
+        if value is None or not re.fullmatch(r'(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?(?:,(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?)*', value):
+            raise ValueError()
+        cpus = []
+        for part in value.split(','):
+            bounds = part.split('-')
+            first, last = int(bounds[0]), int(bounds[-1])
+            if not 0 <= first <= last <= 65535 or len(cpus) + last - first + 1 > 256:
+                raise ValueError()
+            cpus.extend(range(first, last + 1))
+        if cpus != sorted(set(cpus)):
+            raise ValueError()
+        return cpus
+
+    try:
+        before = online()
+        capable = True
+        for cpu in before:
+            directory = root + '/cpu' + str(cpu) + '/cpuidle'
+            try:
+                with os.scandir(directory) as entries:
+                    names = []
+                    for count, entry in enumerate(entries):
+                        if count >= 64:
+                            raise ValueError()
+                        if entry.name.startswith('state'):
+                            if not re.fullmatch(r'state(?:0|[1-9][0-9]*)', entry.name) or int(entry.name[5:]) >= 32:
+                                raise ValueError()
+                            names.append(entry.name)
+                if len(names) > 32:
+                    raise ValueError()
+            except FileNotFoundError:
+                names = []
+            enabled = False
+            for name in names:
+                if name == 'state0':
+                    continue
+                state = directory + '/' + name
+                disable = read(state + '/disable')
+                if disable not in {'0', '1'}:
+                    raise ValueError()
+                counters = [read(state + '/s2idle/' + key) for key in ['usage', 'time']]
+                if counters == [None, None]:
+                    continue
+                if any(value is None or not re.fullmatch(r'0|[1-9][0-9]*', value)
+                       or len(value) > 20 or int(value) > 2**64 - 1 for value in counters):
+                    raise ValueError()
+                enabled |= disable == '0'
+            capable &= enabled
+        if before != online():
+            raise ValueError()
+        return capable
+    except InterruptedError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def prerequisites():
@@ -120,7 +206,8 @@ def prerequisites():
 
     observed = {'linux': sys.platform == 'linux', 'root': hasattr(os, 'geteuid') and os.geteuid() == 0,
                 'state': None, 'mem_sleep': None, 'pm_test': None, 'success': None, 'fail': None,
-                'wakeup': None, 'wakealarm': None, 'write_access': False, 'clocks': False}
+                'wakeup': None, 'wakealarm': None, 'write_access': False, 'clocks': False,
+                's2idle_callback': None}
     if not observed['linux'] or not observed['root']:
         return classify(observed)
     nodes = {'state': '/sys/power/state', 'mem_sleep': '/sys/power/mem_sleep', 'pm_test': '/sys/power/pm_test',
@@ -135,13 +222,15 @@ def prerequisites():
         observed['clocks'] = 0 <= monotonic <= boottime <= 2**64 - 1
     except (OSError, AttributeError, ValueError):
         pass
+    observed['s2idle_callback'] = s2idle_callback_capability()
     return classify(observed)
 
 
 def self_test():
     sample = {'linux': True, 'root': True, 'state': 'freeze mem disk', 'mem_sleep': '[s2idle] deep',
               'pm_test': '[none] core processors platform devices freezer', 'success': '3', 'fail': '0',
-              'wakeup': 'enabled', 'wakealarm': '', 'write_access': True, 'clocks': True}
+              'wakeup': 'enabled', 'wakealarm': '', 'write_access': True, 'clocks': True,
+              's2idle_callback': True}
     ready = classify(sample)
     assert ready['result'] == 'ready' and ready['sleep_mode'] == 's2idle' and ready['sleep_acceptance'] == 'unmeasured'
     for mode in ['shallow', 'deep']:
@@ -155,14 +244,96 @@ def self_test():
         ('wakealarm', None, 'wakealarm_unavailable'), ('wakealarm', '123', 'wakealarm_busy'),
         ('write_access', False, 'root_access_unavailable'),
         ('clocks', False, 'clocks_unavailable'), ('root', 1, 'observation_invalid'),
+        ('s2idle_callback', False, 's2idle_callback_unavailable'),
+        ('s2idle_callback', None, 's2idle_callback_observation_invalid'),
+        ('s2idle_callback', 1, 'observation_invalid'),
     ]:
         result = classify({**sample, field: value})
         assert result['result'] == 'blocked' and result['reason'] == reason
         assert set(result) == set(ready) and result['sleep_acceptance'] == 'unmeasured'
     assert classify({})['reason'] == 'observation_invalid'
     assert classify({**sample, 'private-value': 'private-value'})['reason'] == 'observation_invalid'
+    s2idle_callback_self_test()
     acceptance_self_test()
     print('ok: bounded sleep prerequisite classification; kernel capabilities unmeasured')
+
+
+def s2idle_callback_self_test():
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix='veranda-s2idle-capability-', dir='/tmp') as directory:
+        root = Path(directory)
+        root.chmod(0o700)
+        nodes = {'/sys/power/state': 'freeze mem disk', '/sys/power/mem_sleep': '[s2idle] deep',
+                 '/sys/power/pm_test': '[none] devices', '/sys/power/suspend_stats/success': '3',
+                 '/sys/power/suspend_stats/fail': '0', '/sys/class/rtc/rtc0/device/power/wakeup': 'enabled',
+                 '/sys/class/rtc/rtc0/wakealarm': '', '/sys/devices/system/cpu/online': '0-1'}
+        def fixture(path, value):
+            target = root / path.lstrip('/')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(value + '\n')
+            target.chmod(0o600)
+            return target
+        for path, value in nodes.items():
+            fixture(path, value)
+        original_open, original_descriptor, original_scan = open, os.open, os.scandir
+        scenario, online_reads = ['missing'], [0]
+        def mapped(path):
+            return root / str(path).lstrip('/') if str(path).startswith('/sys/') else path
+        def read(path, *args, **kwargs):
+            if str(path).endswith('/state1/s2idle/usage') and scenario[0] == 'unreadable':
+                raise PermissionError()
+            if str(path) == '/sys/devices/system/cpu/online':
+                online_reads[0] += 1
+                if scenario[0] == 'online-change' and online_reads[0] == 2:
+                    return original_open(fixture('/sys/devices/system/cpu/online-after', '0'), *args, **kwargs)
+            return original_open(mapped(path), *args, **kwargs)
+        def no_write(*_args):
+            raise AssertionError('blocked readiness reached a PM or alarm write')
+        with patch('builtins.open', read), patch.object(os, 'open', lambda path, *args: original_descriptor(mapped(path), *args)), \
+                patch.object(os, 'scandir', lambda path: original_scan(mapped(path))), patch.object(os, 'geteuid', lambda: 0), \
+                patch.object(time, 'clock_gettime_ns', lambda _clock: 100), patch.dict(globals(), {'node_write': no_write}), \
+                redirect_stdout(StringIO()):
+            blocked = prerequisites()
+            assert blocked['reason'] == 's2idle_callback_unavailable' and not blocked['s2idle_callback_capable']
+            cleanup = ['unmeasured']
+            try:
+                suspend_cycle(root, 1, 2, 1, cleanup)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError()
+            assert cleanup == ['unmeasured']
+            # Index zero cannot satisfy the kernel's index>0 s2idle search.
+            for cpu in [0, 1]:
+                state = '/sys/devices/system/cpu/cpu' + str(cpu) + '/cpuidle/state0'
+                for name, value in [('disable', '0'), ('s2idle/usage', '0'), ('s2idle/time', '0')]:
+                    fixture(state + '/' + name, value)
+            assert prerequisites()['reason'] == 's2idle_callback_unavailable'
+            for cpu in [0, 1]:
+                state = '/sys/devices/system/cpu/cpu' + str(cpu) + '/cpuidle/state1'
+                for name, value in [('disable', '0'), ('s2idle/usage', '0'), ('s2idle/time', str(2**64 - 1))]:
+                    fixture(state + '/' + name, value)
+            scenario[0] = 'capable'
+            assert prerequisites()['result'] == 'ready'
+            path = '/sys/devices/system/cpu/cpu1/cpuidle/state1'
+            for name, value, reason in [('disable', '1', 's2idle_callback_unavailable'),
+                                        ('disable', '2', 's2idle_callback_observation_invalid'),
+                                        ('s2idle/usage', '01', 's2idle_callback_observation_invalid'),
+                                        ('s2idle/time', str(2**64), 's2idle_callback_observation_invalid')]:
+                fixture(path + '/' + name, value)
+                assert prerequisites()['reason'] == reason
+                fixture(path + '/' + name, str(2**64 - 1) if name.endswith('time') else '0')
+            for scenario[0] in ['unreadable', 'online-change']:
+                online_reads[0] = 0
+                assert prerequisites()['reason'] == 's2idle_callback_observation_invalid'
+            scenario[0] = 'malformed-online'
+            fixture('/sys/devices/system/cpu/online', '0-256')
+            assert prerequisites()['reason'] == 's2idle_callback_observation_invalid'
+        record = json.loads(private_read(root / 'progress-1.json', os.geteuid()))
+        assert record['prerequisite_reason'] == 's2idle_callback_unavailable'
+        assert not record['rtc_programmed'] and not record['power_write_prepared']
 
 
 def private_read(path, uid=0, limit=4096):
@@ -191,6 +362,47 @@ def put(root, name, value):
     finally:
         os.close(fd)
     os.replace(root / (name + '.tmp'), root / name)
+
+
+def sleep_progress(root, cycle, phase, measurements):
+    """Durable diagnostic boundaries, never an acceptance proof or raw guest dump."""
+    phases = {'prerequisites', 'rtc-programmed', 'power-write-prepared', 'power-write-returned',
+              'restoration-started', 'restoration-returned'}
+    choices = {'prerequisite_result': {'ready', 'blocked'},
+               'prerequisite_reason': {'ready', 'observation_invalid', 'unsupported_platform', 'root_required',
+                                       'power_state_unavailable', 'mem_unsupported', 'mem_sleep_unavailable',
+                                       'pm_test_unavailable', 'pm_test_active', 'suspend_counters_unavailable',
+                                       'rtc_wakeup_unavailable', 'rtc_wakeup_disabled', 'wakealarm_unavailable',
+                                       'wakealarm_busy', 'root_access_unavailable', 'clocks_unavailable',
+                                       's2idle_callback_unavailable', 's2idle_callback_observation_invalid'},
+               'sleep_mode': {'unknown', 's2idle', 'shallow', 'deep'},
+               'console_visibility': {'unmeasured', 'unavailable', 'raised', 'already-visible'},
+               'console_suspend': {'unmeasured', 'unavailable', 'enabled', 'already-disabled'},
+               'kernel_cleanup': {'unmeasured', 'unverified', 'verified', 'failed'}}
+    booleans = {'rtc_programmed', 'power_write_prepared', 'power_write_returned'}
+    numbers = {'suspend_success_before', 'suspend_fail_before', 'suspend_success_after', 'suspend_fail_after',
+               'monotonic_before_ns', 'boottime_before_ns', 'monotonic_after_ns', 'boottime_after_ns'}
+    if (type(cycle) is not int or cycle not in {1, 2} or phase not in phases
+            or type(measurements) is not dict or not set(measurements) <= choices.keys() | booleans | numbers
+            or any(type(value) is not str or value not in choices[name]
+                   for name, value in measurements.items() if name in choices)
+            or any(type(value) is not bool for name, value in measurements.items() if name in booleans)
+            or any(value is not None and (type(value) is not int or not 0 <= value <= 2**64 - 1)
+                   for name, value in measurements.items() if name in numbers)):
+        raise ValueError()
+    record = {'schema_version': 1, 'cycle': cycle, 'phase': phase, **measurements}
+    if len(json.dumps(record).encode()) > 4096:
+        raise ValueError()
+    # The ready path has one durable record before the guarded power write.
+    # Earlier stage lines retain visibility without spending its one-second window on fsyncs.
+    if phase not in {'prerequisites', 'rtc-programmed'} or measurements.get('prerequisite_result') != 'ready':
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            put(root, 'progress-' + str(cycle) + '.json', record)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    print('sleep-stage: cycle=' + str(cycle) + ' phase=' + phase, flush=True)
 
 
 def valid_context_ids(run, slot, vm, purpose, token, environment_type):
@@ -592,7 +804,14 @@ def pending_query(value, now_ms):
     return True
 
 
-def restore_sleep(mode, programmed, mode_changed):
+def printk_values(value):
+    words = value.split()
+    if len(words) != 4 or any(not word.isascii() or not word.isdecimal() or not 0 <= int(word) <= 15 for word in words):
+        raise ValueError()
+    return tuple(map(int, words))
+
+
+def restore_sleep(mode, programmed, mode_changed, console_original=None, console_programmed=None):
     restored = True
     alarm, sleep = '/sys/class/rtc/rtc0/wakealarm', '/sys/power/mem_sleep'
     try:
@@ -614,11 +833,29 @@ def restore_sleep(mode, programmed, mode_changed):
                 raise ValueError()
     except (OSError, ValueError):
         restored = False
+    try:
+        if console_programmed is not None:
+            current = printk_values(node_read('/proc/sys/kernel/printk'))
+            original = printk_values(console_original)
+            if current not in {console_programmed, original}:
+                raise ValueError()
+            if current != original:
+                node_write('/proc/sys/kernel/printk', console_original)
+                if printk_values(node_read('/proc/sys/kernel/printk')) != original:
+                    raise ValueError()
+    except (OSError, ValueError):
+        restored = False
     return restored
 
 
-def suspend_cycle(pid, arm_deadline, cleanup_status, query_clock=None):
+def suspend_cycle(root, cycle, pid, arm_deadline, cleanup_status, query_clock=None):
     ready = prerequisites()
+    progress = {'prerequisite_result': ready['result'], 'sleep_mode': ready['sleep_mode'],
+                'prerequisite_reason': ready['reason'],
+                'suspend_success_before': ready['suspend_success'], 'suspend_fail_before': ready['suspend_fail'],
+                'rtc_programmed': False, 'power_write_prepared': False, 'power_write_returned': False,
+                'kernel_cleanup': 'unmeasured', 'console_visibility': 'unmeasured', 'console_suspend': 'unmeasured'}
+    sleep_progress(root, cycle, 'prerequisites', progress)
     if ready['result'] != 'ready':
         raise ValueError()
     sleep = '/sys/power/mem_sleep'
@@ -629,14 +866,51 @@ def suspend_cycle(pid, arm_deadline, cleanup_status, query_clock=None):
     identity = process_identity(pid)
     mono = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     before = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    progress.update(monotonic_before_ns=mono, boottime_before_ns=before, kernel_cleanup='unverified')
     programmed, restore_failed, mode_changed = None, False, False
+    console_original, console_programmed = None, None
     cleanup_status[0] = 'unverified'
     proof = None
     try:
+        # Preserve useful PM info on the serial console without dumping a journal.
+        # Missing optional visibility is explicit; ambiguous writes still fail closed.
+        try:
+            console_original = node_read('/proc/sys/kernel/printk')
+            levels = printk_values(console_original)
+        except (OSError, ValueError):
+            progress['console_visibility'] = 'unavailable'
+        else:
+            if levels[0] < 7:
+                console_programmed = (7, *levels[1:])
+                node_write('/proc/sys/kernel/printk', ' '.join(map(str, console_programmed)))
+                if printk_values(node_read('/proc/sys/kernel/printk')) != console_programmed:
+                    raise ValueError()
+                progress['console_visibility'] = 'raised'
+            else:
+                progress['console_visibility'] = 'already-visible'
+        # Observe the console policy without changing the kernel's PM console path.
+        try:
+            console_suspend = node_read('/sys/module/printk/parameters/console_suspend')
+            if console_suspend not in {'Y', 'N'}:
+                raise ValueError()
+        except (OSError, ValueError):
+            progress['console_suspend'] = 'unavailable'
+        else:
+            progress['console_suspend'] = 'enabled' if console_suspend == 'Y' else 'already-disabled'
         node_write(sleep, 's2idle')
         mode_changed = True
         node_write(alarm, '+12')
-        programmed = node_read(alarm)
+        candidate = node_read(alarm)
+        if (not candidate.isascii() or not candidate.isdecimal()
+                or not 1 <= int(candidate) <= 2**64 - 1 or candidate != str(int(candidate))):
+            raise ValueError()
+        programmed = candidate
+        progress['rtc_programmed'] = True
+        sleep_progress(root, cycle, 'rtc-programmed', progress)
+        progress['power_write_prepared'] = True
+        sleep_progress(root, cycle, 'power-write-prepared', progress)
+        # Diagnostic fsync/output may consume time; retain the original timing
+        # guards immediately before the actual sleep syscall.
         if time.monotonic() > arm_deadline:
             raise ValueError()
         if query_clock is not None:
@@ -644,10 +918,13 @@ def suspend_cycle(pid, arm_deadline, cleanup_status, query_clock=None):
         node_write('/sys/power/state', 'mem')
         after = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
         awake = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        progress.update(power_write_returned=True, boottime_after_ns=after, monotonic_after_ns=awake)
+        sleep_progress(root, cycle, 'power-write-returned', progress)
         success = int(node_read('/sys/power/suspend_stats/success'))
         fail = int(node_read('/sys/power/suspend_stats/fail'))
         if not 0 <= success <= 2**64 - 1 or not 0 <= fail <= 2**64 - 1:
             raise ValueError()
+        progress.update(suspend_success_after=success, suspend_fail_after=fail)
         proof = {'sleep_mode': 's2idle', 'boot_unchanged': boot == node_read('/proc/sys/kernel/random/boot_id'),
                  'process_unchanged': identity == process_identity(pid),
                  'suspend_success_delta': success - ready['suspend_success'],
@@ -657,7 +934,15 @@ def suspend_cycle(pid, arm_deadline, cleanup_status, query_clock=None):
     finally:
         handlers = {number: signal.signal(number, signal.SIG_IGN) for number in [signal.SIGTERM, signal.SIGINT]}
         try:
-            restore_failed = not restore_sleep(ready['sleep_mode'], programmed, mode_changed)
+            try:
+                sleep_progress(root, cycle, 'restoration-started', progress)
+            finally:
+                # A diagnostic failure must never prevent restoration.
+                restore_failed = not restore_sleep(ready['sleep_mode'], programmed, mode_changed,
+                                                   console_original, console_programmed)
+                cleanup_status[0] = 'failed' if restore_failed else 'verified'
+                progress['kernel_cleanup'] = cleanup_status[0]
+                sleep_progress(root, cycle, 'restoration-returned', progress)
         finally:
             for number, handler in handlers.items():
                 signal.signal(number, handler)
@@ -714,8 +999,221 @@ def checked_native(value):
     return value
 
 
+def sleep_progress_self_test():
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from unittest.mock import patch
+    invalid_alarms = {'alarm-empty': '', 'alarm-zero': '0', 'alarm-negative': '-1', 'alarm-plus': '+12',
+                      'alarm-leading-zero': '01', 'alarm-nonascii': '\u0661', 'alarm-overflow': str(2**64)}
+    for scenario in ['success', 'write-error', 'late-arm', 'late-query', 'foreign-console',
+                     'console-unavailable', 'restoration-log-error', 'alarm-max', 'foreign-alarm', *invalid_alarms]:
+        with tempfile.TemporaryDirectory(prefix='veranda-sleep-progress-', dir='/tmp') as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            nodes = {'/sys/power/mem_sleep': 's2idle [deep]', '/sys/class/rtc/rtc0/wakealarm': '',
+                     '/proc/sys/kernel/random/boot_id': 'synthetic-private-boot-id',
+                     '/sys/power/suspend_stats/success': '3', '/sys/power/suspend_stats/fail': '0',
+                     '/proc/sys/kernel/printk': '4\t4\t1\t7',
+                     '/sys/module/printk/parameters/console_suspend': 'Y'}
+            stages, wrote, snapshot_types, alarm_reads = [], [], [], []
+            original_progress, original_fsync = sleep_progress, os.fsync
+            def report(root, cycle, phase, measurements):
+                stages.append(phase)
+                if phase == 'restoration-started':
+                    snapshots = 2 if 'power-write-returned' in stages else 1 if 'power-write-prepared' in stages else 0
+                    assert snapshot_types == [stat.S_IFREG, stat.S_IFDIR] * snapshots
+                if phase == 'restoration-started' and scenario == 'restoration-log-error':
+                    raise OSError('synthetic diagnostic failure')
+                original_progress(root, cycle, phase, measurements)
+            def read(path):
+                if path == '/sys/class/rtc/rtc0/wakealarm':
+                    alarm_reads.append(nodes[path])
+                if path == '/proc/sys/kernel/printk' and scenario == 'console-unavailable':
+                    raise OSError('synthetic missing console setting')
+                return nodes[path]
+            def write(path, value):
+                wrote.append((path, value))
+                if path == '/sys/power/state':
+                    assert snapshot_types == [stat.S_IFREG, stat.S_IFDIR]
+                    if scenario == 'write-error':
+                        raise OSError('synthetic suspend failure')
+                    nodes['/sys/power/suspend_stats/success'] = '4'
+                    nodes['/sys/class/rtc/rtc0/wakealarm'] = ''
+                    if scenario == 'foreign-console':
+                        nodes['/proc/sys/kernel/printk'] = '8 4 1 7'
+                    if scenario == 'foreign-alarm':
+                        nodes['/sys/class/rtc/rtc0/wakealarm'] = 'foreign'
+                else:
+                    if path == '/sys/class/rtc/rtc0/wakealarm' and value == '+12':
+                        nodes[path] = invalid_alarms.get(scenario, str(2**64 - 1) if scenario == 'alarm-max' else '1234')
+                    else:
+                        nodes[path] = ('[s2idle] deep' if value == 's2idle' else 's2idle [deep]') if path == '/sys/power/mem_sleep' else value
+            def clock(number):
+                resumed = ('/sys/power/state', 'mem') in wrote
+                if number == time.CLOCK_MONOTONIC:
+                    return 1100000000 if resumed else 1000000000
+                return 14100000000 if resumed else 5001000000 if scenario == 'late-query' and 'power-write-prepared' in stages else 2000000000
+            def fsync(fd):
+                snapshot_types.append(stat.S_IFMT(os.fstat(fd).st_mode))
+                original_fsync(fd)
+            ready = {'result': 'ready', 'reason': 'ready', 'sleep_mode': 'deep', 'suspend_success': 3, 'suspend_fail': 0}
+            output, cleanup = StringIO(), ['unmeasured']
+            with patch.dict(globals(), {'node_read': read, 'node_write': write, 'prerequisites': lambda: ready,
+                                       'process_identity': lambda _pid: 'synthetic-private-process-id', 'sleep_progress': report}), \
+                    patch.object(time, 'clock_gettime_ns', clock), \
+                    patch.object(time, 'monotonic', lambda: 2 if scenario == 'late-arm' and 'power-write-prepared' in stages else 0), \
+                    patch.object(os, 'fsync', fsync), redirect_stdout(output):
+                failed = False
+                try:
+                    proof = suspend_cycle(root, 1, 2, 1, cleanup, {'started_boottime_ms': 2000, 'timeout_ms': 5000})
+                    assert proof['settings_restored'] and proof['suspend_success_delta'] == 1
+                except (OSError, ValueError):
+                    failed = True
+            assert failed == (scenario not in {'success', 'console-unavailable', 'alarm-max'})
+            assert stages[:1 if scenario in invalid_alarms else 3] == (['prerequisites'] if scenario in invalid_alarms else
+                                                                      ['prerequisites', 'rtc-programmed', 'power-write-prepared'])
+            assert stages[-2:] == ['restoration-started', 'restoration-returned']
+            assert ('power-write-returned' in stages) == (scenario not in {'write-error', 'late-arm', 'late-query'} | invalid_alarms.keys())
+            assert (('/sys/power/state', 'mem') in wrote) == (scenario not in {'late-arm', 'late-query'} | invalid_alarms.keys())
+            assert nodes['/sys/power/mem_sleep'] == 's2idle [deep]'
+            assert nodes['/sys/class/rtc/rtc0/wakealarm'] == invalid_alarms.get(scenario, 'foreign' if scenario == 'foreign-alarm' else '0')
+            ambiguous_alarm = scenario in invalid_alarms and invalid_alarms[scenario] not in {'', '0'} or scenario == 'foreign-alarm'
+            assert cleanup[0] == ('failed' if scenario == 'foreign-console' or ambiguous_alarm else 'verified')
+            assert len(alarm_reads) == (2 if scenario in invalid_alarms or scenario == 'foreign-alarm' else 3)
+            assert (('/sys/class/rtc/rtc0/wakealarm', '0') in wrote) == (scenario not in invalid_alarms and scenario != 'foreign-alarm')
+            assert nodes['/proc/sys/kernel/printk'] == ('8 4 1 7' if scenario == 'foreign-console' else '4\t4\t1\t7')
+            assert nodes['/sys/module/printk/parameters/console_suspend'] == 'Y'
+            data = private_read(root / 'progress-1.json', os.geteuid())
+            record = json.loads(data)
+            assert record['phase'] == 'restoration-returned' and record['kernel_cleanup'] == cleanup[0]
+            assert record['rtc_programmed'] == (scenario not in invalid_alarms)
+            assert record['power_write_prepared'] == (scenario not in invalid_alarms)
+            assert record['console_visibility'] == ('unavailable' if scenario == 'console-unavailable' else 'raised')
+            assert record['suspend_success_before'] == 3 and record['boottime_before_ns'] == 2000000000
+            if record['power_write_returned']:
+                assert record['boottime_after_ns'] == 14100000000 and record['suspend_success_after'] == 4
+            assert len(data) <= 4096 and stat.S_IFREG in snapshot_types and stat.S_IFDIR in snapshot_types
+            assert 'synthetic-private' not in data.decode() + output.getvalue()
+            for bad in [{'token': 'synthetic-private'}, {'boottime_before_ns': 2**64},
+                        {'sleep_mode': 'synthetic-private'}, {'rtc_programmed': 1},
+                        {'console_suspend': 'synthetic-private'}]:
+                try:
+                    original_progress(root, 1, 'prerequisites', bad)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError()
+            assert private_read(root / 'progress-1.json', os.geteuid()) == data
+    for scenario in ['enabled', 'already-disabled', 'missing', 'invalid']:
+        with tempfile.TemporaryDirectory(prefix='veranda-sleep-console-', dir='/tmp') as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = '/sys/module/printk/parameters/console_suspend'
+            original = 'N' if scenario == 'already-disabled' else 'invalid' if scenario == 'invalid' else 'Y'
+            nodes = {'/sys/power/mem_sleep': 's2idle [deep]', '/sys/class/rtc/rtc0/wakealarm': '',
+                     '/proc/sys/kernel/random/boot_id': 'synthetic-private-boot-id',
+                     '/sys/power/suspend_stats/success': '3', '/sys/power/suspend_stats/fail': '0',
+                     '/proc/sys/kernel/printk': '4 4 1 7', path: original}
+            writes = []
+            def read(node):
+                if node == path:
+                    if scenario == 'missing':
+                        raise OSError('synthetic missing setting')
+                return nodes[node]
+            def write(node, value):
+                writes.append((node, value))
+                if node == '/sys/power/state':
+                    nodes['/sys/power/suspend_stats/success'] = '4'
+                    nodes['/sys/class/rtc/rtc0/wakealarm'] = ''
+                elif node == '/sys/class/rtc/rtc0/wakealarm':
+                    nodes[node] = '1234' if value == '+12' else value
+                else:
+                    nodes[node] = ('[s2idle] deep' if value == 's2idle' else 's2idle [deep]') if node == '/sys/power/mem_sleep' else value
+            def clock(number):
+                resumed = ('/sys/power/state', 'mem') in writes
+                return (1100000000 if resumed else 1000000000) if number == time.CLOCK_MONOTONIC else (14100000000 if resumed else 2000000000)
+            ready = {'result': 'ready', 'reason': 'ready', 'sleep_mode': 'deep', 'suspend_success': 3, 'suspend_fail': 0}
+            output, cleanup, failed = StringIO(), ['unmeasured'], False
+            with patch.dict(globals(), {'node_read': read, 'node_write': write, 'prerequisites': lambda: ready,
+                                       'process_identity': lambda _pid: 'synthetic-private-process-id'}), \
+                    patch.object(time, 'clock_gettime_ns', clock), patch.object(time, 'monotonic', lambda: 0), redirect_stdout(output):
+                try:
+                    proof = suspend_cycle(root, 1, 2, 1, cleanup)
+                    assert proof['settings_restored'] and proof['suspend_success_delta'] == 1
+                except (OSError, ValueError):
+                    failed = True
+            assert not failed and ('/sys/power/state', 'mem') in writes
+            assert cleanup[0] == 'verified' and nodes[path] == original
+            assert not any(node == path for node, _value in writes)
+            assert nodes['/sys/power/mem_sleep'] == 's2idle [deep]' and nodes['/proc/sys/kernel/printk'] == '4 4 1 7'
+            data = private_read(root / 'progress-1.json', os.geteuid())
+            record = json.loads(data)
+            assert record['phase'] == 'restoration-returned' and record['kernel_cleanup'] == cleanup[0]
+            assert record['console_suspend'] == ('unavailable' if scenario in {'missing', 'invalid'} else 'already-disabled' if scenario == 'already-disabled' else 'enabled')
+            assert len(data) <= 4096 and 'synthetic-private' not in data.decode() + output.getvalue()
+    with tempfile.TemporaryDirectory(prefix='veranda-sleep-blocked-', dir='/tmp') as directory:
+        root = Path(directory)
+        root.chmod(0o700)
+        with patch.dict(globals(), {'prerequisites': lambda: {'result': 'blocked', 'reason': 'rtc_wakeup_disabled', 'sleep_mode': 'unknown',
+                                                            'suspend_success': None, 'suspend_fail': None}}), \
+                redirect_stdout(StringIO()):
+            try:
+                suspend_cycle(root, 1, 2, 1, ['unmeasured'])
+            except ValueError:
+                pass
+            else:
+                raise AssertionError()
+        assert json.loads(private_read(root / 'progress-1.json', os.geteuid()))['prerequisite_result'] == 'blocked'
+
+
+def owner_identity_self_test():
+    from io import BytesIO
+    from types import SimpleNamespace
+    from unittest.mock import call, patch
+    with tempfile.TemporaryDirectory(prefix='veranda-sleep-owner-', dir='/tmp') as directory:
+        root = Path(directory)
+        root.chmod(0o700)
+        source = root / 'src'
+        source.mkdir(mode=0o700)
+        source.chmod(0o700)
+        run, uid = 'a' * 8, os.getuid()
+        child = SimpleNamespace(stdin=BytesIO(), stdout=BytesIO(), poll=lambda: 0, wait=lambda **_: 0)
+        with patch.dict(globals(), {'context': lambda: (root, source, run, '2'),
+                                    'process_identity': lambda _pid: 'owned-start'}), \
+                patch.object(sys, 'argv', [__file__, '--rpc-proxy']), \
+                patch.object(signal, 'signal'), patch.object(time, 'sleep'), \
+                patch.object(threading, 'Thread') as thread, \
+                patch.object(subprocess, 'Popen', return_value=child) as popen, \
+                patch.object(subprocess, 'run') as execute, \
+                patch.object(pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=1234, pw_gid=4321)), \
+                patch.object(os, 'getgrouplist', return_value=[4321, 54]) as groups:
+            thread.return_value = SimpleNamespace(start=lambda: None)
+            rpc_proxy()
+            owner_action('event')
+            thread.side_effect = lambda target, **_: SimpleNamespace(start=target)
+            owner_cycle(2)
+        calls = [popen.call_args, *execute.call_args_list]
+        for call, arguments, timeout in zip(calls, [('rpc', '--stdio'), ('start', '--yes'), ('stop', '--force', '--yes')], [None, 45, 8]):
+            assert call.args[0] == [str(source / '.build/yard'), '-Y', 'pv-' + run, *arguments]
+            assert call.kwargs['cwd'] == source
+            assert (call.kwargs['user'], call.kwargs['group'], call.kwargs['extra_groups']) == (1234, 4321, [4321, 54])
+            env = call.kwargs['env']
+            assert (env['HOME'], env['USER'], env['LOGNAME'], env['SUBYARD_OPERATOR_HOME']) == ('/home/dev', 'dev', 'dev', '/home/dev')
+            assert env['SUBYARD_CONFIG_HOME'] == '/var/tmp/subyard-preview-' + run + '/config'
+            assert call.kwargs.get('timeout') == timeout
+        assert len(calls) == 3 and os.getuid() == uid
+        assert groups.call_args_list == [call('dev', 4321)] * 3
+        assert not list(root.glob('proxy-*.json'))
+        record = root / 'owner-2.json'
+        assert record.stat().st_uid == uid and stat.S_IMODE(record.stat().st_mode) == 0o600
+        value = json.loads(private_read(record, uid))
+        assert value['samples'] == 31 and value['state_changed'] and value['cycle'] == 2
+
+
 def acceptance_self_test():
     global node_read, node_write
+    owner_identity_self_test()
+    sleep_progress_self_test()
     ids = ['a' * 8, 'slot-001', '1', 'veranda-sleep', 'b' * 32, 'subyard-pair']
     assert valid_context_ids(*ids)
     for slot in ['001', 'slot-000', 'slot-1000', 'private-value']:
@@ -885,7 +1383,7 @@ def acceptance_client(native, peer_config, destination):
             if time.monotonic() - arm_started > 1:
                 raise ValueError()
             query_clock = json.loads(private_read(root / 'query-clock.json')) if cycle == 1 else None
-            proof = suspend_cycle(child.pid, time.monotonic() + 1, kernel_cleanup, query_clock)
+            proof = suspend_cycle(root, cycle, child.pid, time.monotonic() + 1, kernel_cleanup, query_clock)
             receipt['cycles'].append(proof)
             put(root, 'cycle-' + str(cycle) + '.wake', b'sleep-cycle-v1\n')
             owner = checked_owner(json.loads(peer('observe-' + str(cycle))), cycle)

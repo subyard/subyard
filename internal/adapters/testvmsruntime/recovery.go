@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -418,6 +419,8 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 }
 
 func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, guestLeaseCleanupTimeout)
+	defer cancel()
 	exists, err := runtime.projectPresence(ctx)
 	if err != nil {
 		return fmt.Errorf("inventory quarantined slot project before guest-key removal: %w", err)
@@ -471,7 +474,7 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 	if payload, err := os.ReadFile(cfg.failureLog()); err == nil {
 		diagnostics["legacy_failure_log"] = string(payload)
 	}
-	// Native state and console evidence do not depend on a responsive guest agent.
+	// Native state, console and QMP evidence do not depend on a responsive guest agent.
 	// Give each probe its own ceiling so a stalled probe cannot consume all later evidence.
 	probe := func(section string, args ...string) {
 		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Second)
@@ -497,6 +500,8 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 		probe(fmt.Sprintf("vm_%d_state", selector), "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "s")
 		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
 		probe(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
+		qmpPath := "/1.0/instances/" + url.PathEscape(vm) + "/logs/qemu.qmp.log?project=" + url.QueryEscape(cfg.Project)
+		probe(fmt.Sprintf("vm_%d_qmp_log", selector), "query", qmpPath)
 	}
 	capacityCtx, cancelCapacity := context.WithTimeout(ctx, time.Second)
 	diagnostics["capacity"] = runtime.capacityEvidence(capacityCtx)

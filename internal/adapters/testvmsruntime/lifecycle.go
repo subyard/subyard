@@ -21,6 +21,8 @@ const (
 	// Keep best-effort trim below the facade request lifetime so verified stop retains its budget.
 	retainedGuestTrimTimeout      = 15 * time.Second
 	retainedGuestTrimTotalTimeout = 30 * time.Second
+	// Guest-agent cleanup must not prevent native stop when the agent is unresponsive.
+	guestLeaseCleanupTimeout = 5 * time.Second
 )
 
 func (runtime *Runtime) AcquireSlot(
@@ -635,10 +637,12 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 		}
 		if strings.TrimSpace(state) == "RUNNING" {
 			evidence.guestKeyCleanupAttempts++
+			cleanupCtx, cancelCleanup := context.WithTimeout(ctx, guestLeaseCleanupTimeout)
 			keyCleanupErr := errors.Join(
-				runtime.installManagedGuestKeys(ctx, vm),
-				runtime.removeLeaseContext(ctx, vm),
+				runtime.installManagedGuestKeys(cleanupCtx, vm),
+				runtime.removeLeaseContext(cleanupCtx, vm),
 			)
+			cancelCleanup()
 			if runtime.allocation == nil {
 				runtime.trimRetainedGuest(trimCtx, vm)
 			}

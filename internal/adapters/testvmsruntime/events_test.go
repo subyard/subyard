@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestEventRecorderPersistsRedactedImmutableSpoolAndAcknowledges(t *testing.T) {
@@ -592,6 +595,60 @@ func TestBrokerSchemaMigrationWindowAcceptsOnlyCurrentAndPrevious(t *testing.T) 
 				got,
 				test.want,
 			)
+		}
+	}
+}
+
+func TestEventRecorderKeepsRecentQMPRecordsAfterFullRedaction(t *testing.T) {
+	recorder := EventRecorder{StateDir: testkit.TempDir(t), Source: "test-yard"}
+	slot := LeaseSlot{SlotID: "slot-001", ResourceGeneration: 7, LeaseEpoch: 3, State: SlotRecovering}
+	ordinary := "ordinary-start\n" + strings.Repeat("x", 280<<10) + "ordinary-end"
+	qmp := strings.Repeat("old QMP record € token=x\n", 16000) +
+		"-----BEGIN OPENSSH PRIVATE KEY-----\n" + strings.Repeat("pem-boundary-secret\n", 12000) +
+		"-----END OPENSSH PRIVATE KEY-----\n" +
+		"token=private-qmp-token\nQUERY: system_powerdown latest-control\nEvent: POWERDOWN latest-event\n"
+	cut := len(qmp) - (64 << 10)
+	if !(strings.Index(qmp, "-----BEGIN") < cut && cut < strings.Index(qmp, "-----END")) {
+		t.Fatal("fixture must cross the raw tail boundary inside a private key")
+	}
+	diagnostics := map[string]string{"vm_1_qmp_log": qmp, "vm_2_qmp_log": qmp}
+	for _, section := range []string{"project", "service_journal", "vm_1_info_log", "vm_2_info_log", "vm_1_console_log", "vm_2_console_log"} {
+		diagnostics[section] = ordinary
+	}
+	incident, err := recorder.SaveIncident(slot, errors.New("stop timeout"), diagnostics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(recorder.incidentDirectory(), incident.IncidentID+".json")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) >= maxIncidentBytes {
+		t.Fatalf("bounded incident too large: %d", len(payload))
+	}
+	for _, secret := range []string{"pem-boundary-secret", "private-qmp-token", "token=x"} {
+		if strings.Contains(string(payload), secret) {
+			t.Fatalf("durable incident contains %q", secret)
+		}
+	}
+	batch, err := recorder.Export()
+	if err != nil || len(batch.Incidents) != 1 {
+		t.Fatalf("export: incidents=%d error=%v", len(batch.Incidents), err)
+	}
+	for _, artifact := range []IncidentArtifact{incident, batch.Incidents[0]} {
+		for _, section := range []string{"vm_1_qmp_log", "vm_2_qmp_log"} {
+			value := artifact.Diagnostics[section]
+			if len(value) > 64<<10 || !utf8.ValidString(value) ||
+				!strings.HasPrefix(value, "[earlier log omitted]\n") ||
+				!strings.Contains(value, "latest-control") || !strings.Contains(value, "latest-event") {
+				t.Fatalf("recent bounded QMP evidence missing in %s", section)
+			}
+		}
+		for section := range diagnostics {
+			if !strings.HasSuffix(section, "_qmp_log") && artifact.Diagnostics[section] != ordinary[:256<<10] {
+				t.Fatalf("ordinary section retention changed: %s", section)
+			}
 		}
 	}
 }

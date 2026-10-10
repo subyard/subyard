@@ -128,7 +128,9 @@ if grep -Eq '_migrate[[:space:]]+(apply|finalize|rollback|cleanup)' \
   "$ROOT/scripts/install-runtime-release.sh"; then
   fail 'current runtime installer still owns superseded migration choreography'
 fi
-artifact_one="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.0.0-test \
+# Checkout and packaging umasks must not change public runtime permissions.
+chmod 0700 "$ROOT/config/preview/subyard-preview" "$ROOT/scripts/prepare-preview-route.sh"
+artifact_one="$(umask 0077; "$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.0.0-test \
   --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json")"
 bundle_one="$release/subyard-1.0.0-test-linux-amd64.tar.gz"
 [ -x "$release/subyard-install.sh" ] \
@@ -197,8 +199,15 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
 [ "$(stat -c '%a' "$bundle_extract/config/preview/instructions.md")" = 644 ] \
   && cmp -s "$ROOT/config/preview/instructions.md" "$bundle_extract/config/preview/instructions.md" \
   || fail 'runtime bundle changed preview instruction bytes or public data mode'
-[ "$(stat -c '%a' "$bundle_extract/config/profiles/package-fixture/asset.txt")" = 644 ] \
-  || fail 'runtime bundle inherited restrictive source data permissions'
+[ "$(stat -c '%a' "$bundle_extract/scripts/prepare-preview-route.sh")" = 755 ] \
+  && cmp -s "$ROOT/scripts/prepare-preview-route.sh" "$bundle_extract/scripts/prepare-preview-route.sh" \
+  && [ "$(stat -c '%a' "$bundle_extract/config/profiles/package-fixture/asset.txt")" = 644 ] \
+  && cmp -s "$fixture_profile/asset.txt" "$bundle_extract/config/profiles/package-fixture/asset.txt" \
+  || fail 'runtime bundle permissions depend on checkout or packaging umask'
+[ "$(stat -c '%a' "$ROOT/config/preview/subyard-preview")" = 700 ] \
+  && [ "$(stat -c '%a' "$ROOT/scripts/prepare-preview-route.sh")" = 700 ] \
+  && [ "$(stat -c '%a' "$fixture_profile/asset.txt")" = 600 ] \
+  || fail 'packaging changed source permissions'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
   || fail 'packaged native profile executable does not run'
 (

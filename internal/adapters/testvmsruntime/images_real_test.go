@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,16 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	if gracefulErr == nil {
 		t.Fatal("firmware fixture unexpectedly stopped gracefully; stalled-stop reproduction incomplete")
 	}
+	// Normal query must preserve native missing-log failures instead of treating
+	// the API error envelope as successful log content.
+	missingCtx, cancelMissing := context.WithTimeout(ctx, time.Second)
+	_, missingErr := rt.incus(missingCtx, "query", "/1.0/instances/"+url.PathEscape(vm)+
+		"/logs/qemu.qmp.missing.log?project="+url.QueryEscape(rt.Config.Project))
+	cancelMissing()
+	var missingCommand *CommandError
+	if !errors.As(missingErr, &missingCommand) || missingCommand.ExitCode <= 0 {
+		t.Fatalf("native missing-log query did not return a nonzero CLI failure: %v", missingErr)
+	}
 	initial, err := rt.eventRecorder().SaveIncident(slot, gracefulErr, rt.recoveryDiagnostics(ctx, vm))
 	must(err)
 	slot.IncidentID = initial.IncidentID
@@ -210,6 +221,12 @@ func TestRealBrokerStorageContract(t *testing.T) {
 	if len(batch.Incidents) != 2 || len(batch.Events) != 2 ||
 		batch.Events[0].Kind != "vm.force_stop_planned" || batch.Events[1].Kind != "vm.force_stop_succeeded" {
 		t.Fatalf("missing durable stalled-stop/fallback evidence: incidents=%d events=%#v", len(batch.Incidents), batch.Events)
+	}
+	for _, incident := range batch.Incidents {
+		qmp := incident.Diagnostics["vm_1_qmp_log"]
+		if !strings.Contains(qmp, "QUERY:") && !strings.Contains(qmp, "Event:") {
+			t.Fatalf("native QMP record was not captured before force stop: incident=%s", incident.IncidentID)
+		}
 	}
 	if state := command("list", vm, "--project", rt.Config.Project, "-f", "csv", "-c", "s"); state != "STOPPED" {
 		t.Fatalf("force stop did not reach STOPPED: %s", state)

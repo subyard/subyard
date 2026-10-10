@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,106 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 		prompt.Requests[0].Summary != "Revoke test VM lease slot" ||
 		prompt.Requests[0].Default != domain.ConfirmationDefaultYes {
 		t.Fatalf("confirmation requests=%#v", prompt.Requests)
+	}
+}
+
+func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation uint64
+		mutate     func(*testvmsruntime.LeaseSlot)
+		wantOK     bool
+	}{
+		{name: "completed recovery", wantOK: true},
+		{name: "unchanged generation", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.ResourceGeneration-- }},
+		{name: "replacement generation", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.ResourceGeneration++ }},
+		{name: "replacement epoch", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.LeaseEpoch++ }},
+		{name: "lease still present", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.LeaseID = "retained-lease" }},
+		{name: "still quarantined", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.State = testvmsruntime.SlotQuarantined }},
+		{name: "still recovering", mutate: func(slot *testvmsruntime.LeaseSlot) { slot.State = testvmsruntime.SlotRecovering }},
+		{name: "generation overflow", generation: ^uint64(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = append(environment, "NESTED_E2E_VMS=1", "SUBYARD_OPERATION_ID=test-vms-recover")
+			incus := lifecycleIncus()
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = "Running"
+			incus.Instances["subyard/yard"] = instance
+			generation := tc.generation
+			if generation == 0 {
+				generation = 337
+			}
+			expected := testvmsruntime.LeaseIdentity{SlotID: "slot-002", ResourceGeneration: generation, LeaseEpoch: 330}
+			pool := testvmsruntime.LeasePool{
+				SchemaVersion: testvmsruntime.LeaseSchemaVersion, ResourceType: "agent-e2e", ResourceID: "test-vms",
+				Slots: []testvmsruntime.LeaseSlot{
+					{SlotID: "slot-001", ResourceGeneration: 1, State: testvmsruntime.SlotAvailable},
+					{SlotID: expected.SlotID, ResourceGeneration: expected.ResourceGeneration, LeaseEpoch: expected.LeaseEpoch,
+						State: testvmsruntime.SlotQuarantined, LeaseID: "quarantined-lease"},
+				},
+			}
+			store := testvmsruntime.LeaseStore{Path: filepath.Join(root, "recovery-leases.json"), SlotCount: 2}
+			payload, err := json.Marshal(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, store.Path, payload, 0o600)
+			probe := &testVMStatusProbe{}
+			publish := func() {
+				payload, err := json.Marshal(struct {
+					SchemaVersion int                      `json:"schema_version"`
+					Status        string                   `json:"status"`
+					Pool          testvmsruntime.LeasePool `json:"pool"`
+				}{SchemaVersion: 1, Status: "ok", Pool: pool})
+				if err != nil {
+					t.Fatal(err)
+				}
+				probe.output = payload
+			}
+			publish()
+			runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+				Schema: 1, OperationID: "test-vms-recover", Status: "ok",
+			}}}}
+			runner.Steps[0].Apply = func(domain.AdapterRequest) {
+				if _, started, err := store.BeginExpectedRecovery(expected); err != nil || !started {
+					t.Fatalf("begin recovery: started=%v error=%v", started, err)
+				}
+				finished, err := store.FinishRecovery(expected.SlotID, nil, "", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.mutate != nil {
+					tc.mutate(&finished)
+				}
+				pool.Slots[1] = finished
+				publish()
+			}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
+				Environment: environment, WorkingDir: root, Incus: incus, ProjectData: probe, AdapterRunner: runner,
+				Prompt: &testkit.Prompt{Answers: []bool{true}}, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if tc.wantOK {
+				if code != 0 {
+					t.Fatalf("completed recovery returned %d: %s", code, stderr.String())
+				}
+			} else if code != 1 || !strings.Contains(stderr.String(), "test VM physical cleanup did not publish the approved available slot") {
+				t.Fatalf("unproved recovery: code=%d stderr=%q", code, stderr.String())
+			}
+			if len(runner.Requests) != 1 || runner.Requests[0].Action != "recover" ||
+				!slices.Equal(runner.Requests[0].Arguments, []string{
+					"recover-slot-2", "--expect-resource-generation", strconv.FormatUint(expected.ResourceGeneration, 10),
+					"--expect-lease-epoch", "330", "--yes",
+				}) {
+				t.Fatalf("approved target identity was not forwarded: %#v", runner.Requests)
+			}
+		})
 	}
 }
 

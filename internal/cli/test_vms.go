@@ -594,7 +594,11 @@ func (cli *CLI) executeTestVMs(
 		if verifyErr != nil {
 			return result, verifyErr
 		}
-		if current.State != testvmsruntime.SlotAvailable || current.LeaseID != "" || current.ResourceGeneration != execution.identity.ResourceGeneration || (execution.action == "retire-legacy" && current.LegacyRetained) {
+		expectedGeneration := execution.identity.ResourceGeneration
+		if execution.action == "recover" {
+			expectedGeneration++
+		}
+		if expectedGeneration == 0 || current.State != testvmsruntime.SlotAvailable || current.LeaseID != "" || current.ResourceGeneration != expectedGeneration || current.LeaseEpoch != execution.identity.LeaseEpoch || (execution.action == "retire-legacy" && current.LegacyRetained) {
 			return result, errors.New("test VM physical cleanup did not publish the approved available slot")
 		}
 	}

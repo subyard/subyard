@@ -187,9 +187,10 @@ cat > "$TMP/bin/dpkg" <<'MOCK'
 exit 0
 MOCK
 chmod +x "$TMP/bin/dpkg"
-YARD_KIND=vm
 MOCK_INCUS_DEVICES=subyard-docker-apparmor
-run_create
+YARD_KIND=vm VM_PIN_IPV4=1 VM_FREE_PAGE_REPORTING=0 SUBYARD_INCUS_AGENT_WAIT_TIMEOUT=1 run_create
+grep -Fxq 'exec yard --project subyard -- true' "$MOCK_INCUS_LOG" \
+  || fail 'VM cleanup did not verify agent readiness'
 grep -q 'device remove yard subyard-docker-apparmor' "$MOCK_INCUS_LOG" \
   || fail 'VM kept a stale container-only mask'
 

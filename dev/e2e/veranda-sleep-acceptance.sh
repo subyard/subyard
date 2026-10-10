@@ -32,21 +32,56 @@ LEASE_PURPOSE=veranda-sleep
 owner_setup=0 owner_ready=0 client_started=0
 evidence_failed=0
 
-payload() {
+sleep_guest() {
   local vm="$1"; shift
   guest "$vm" env SUBYARD_E2E_RUN_ID="$LEASE_RUN" SUBYARD_E2E_SLOT="$LEASE_SLOT" \
     SUBYARD_E2E_VM="$vm" SUBYARD_E2E_TYPE=subyard-pair SUBYARD_E2E_PURPOSE="$LEASE_PURPOSE" \
-    SUBYARD_E2E_SLEEP_TOKEN="$sleep_token" \
+    SUBYARD_E2E_SLEEP_TOKEN="$sleep_token" "$@"
+}
+payload() {
+  local vm="$1"; shift
+  sleep_guest "$vm" \
     /usr/bin/python3 "${GUEST_DIRS[$vm]}/src/dev/e2e/veranda-sleep.py" "$@"
+}
+native_diagnostics() {
+  sleep_guest 1 timeout --signal=KILL 5s /usr/bin/python3 -c '
+import importlib.util, json, re, sys
+result = {"schema_version": 1, "status": "unavailable", "locations": []}
+try:
+    spec = importlib.util.spec_from_file_location("sleep_fixture", sys.argv[1])
+    fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+    root, source, run, vm = fixture.context()
+    if vm != "1": raise ValueError()
+    data = fixture.private_read(root / "native.log", limit=65536).decode("utf-8")
+    pattern = r"^thread \x27[^\x27\n]{1,128}\x27 panicked at (?:[A-Za-z0-9_./-]+/)?(client_tests\.rs|client\.rs|transport\.rs|transport_tests\.rs|ssh\.rs|sessions\.rs|connections\.rs|local_fleet\.rs|lib\.rs):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}):$"
+    for match in re.finditer(pattern, data, re.M):
+        name, line, column = match.groups()
+        if int(line) > 1000000 or int(column) > 1000000: continue
+        location = {"source": name, "line": int(line), "column": int(column)}
+        if location not in result["locations"]: result["locations"].append(location)
+        if len(result["locations"]) == 3: break
+    result["status"] = "available" if result["locations"] else "no_matching_location"
+except Exception:
+    pass
+print("sleep-native-diagnostic: " + json.dumps(result, sort_keys=True))
+' "${GUEST_DIRS[1]}/src/dev/e2e/veranda-sleep.py"
 }
 preview() {
   local phase="$1"
   guest 2 bash -c '
+    cd "$1/src" || exit
     log="$1/$2.log"; : > "$log"; chmod 0600 "$log"
-    exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
+    rc=0
+    /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
       SUBYARD_E2E_RUN_ID="$3" SUBYARD_E2E_VM=2 SUBYARD_E2E_TYPE=subyard-pair \
       bash -c '\''cd "$1"; shift; exec bash "$@"'\'' subyard \
-      "$1/src" "$1/src/dev/e2e/preview-lifecycle.sh" "$2" > "$log" 2>&1
+      "$1/src" "$1/src/dev/e2e/preview-lifecycle.sh" "$2" > "$log" 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+      printf "sleep-preview: phase=%s exit_code=%s\n" "$2" "$rc"
+      # The preview fixture logs contain only synthetic diagnostics.
+      tail -c 65000 "$log" | tail -n 80 || true
+    fi
+    exit "$rc"
   ' subyard "${GUEST_DIRS[2]}" "$phase" "$LEASE_RUN"
 }
 retain_evidence() {
@@ -101,6 +136,9 @@ cleanup_acceptance() {
   local original=$? failed=0 vm rc
   trap - EXIT INT TERM
   set +e
+  if [ "$original" != 0 ] && [ "$client_started" = 1 ]; then
+    native_diagnostics || printf 'sleep-native-diagnostic: {"schema_version":1,"status":"unavailable","locations":[]}\n'
+  fi
   phase_end "$original"
   for vm in 1 2; do
     [ -n "${GUEST_DIRS[$vm]:-}" ] || continue
