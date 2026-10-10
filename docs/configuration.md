@@ -84,6 +84,14 @@ highest precedence. It is never persisted by config sync. `yard [-Y <yard>] conf
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).
 
+`init` validates the effective `INCUS_PROJECT` before confirmation or host changes, including
+with `--reset` and `--configs`. Incus project names cannot contain underscores, must start and
+end with a letter or digit, and must be 2–64 bytes long. Named yards default to `subyard-<yard>`;
+set an explicit valid `INCUS_PROJECT` when that derivation is invalid. Names are preserved exactly.
+Configuration inspection and editing remain available to repair existing settings. An underscore
+in the yard name also requires a valid `YARD_INSTANCE_NAME` override because Incus instance names
+use hostname rules.
+
 ### Yard resource limits
 
 `LIMITS_CPU` and `LIMITS_MEMORY` are optional Incus resource limits for both container and VM

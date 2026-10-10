@@ -406,6 +406,11 @@ func (cli *CLI) prepareInitExecution(
 	if err != nil {
 		return nil, err
 	}
+	projectName := loaded.Context.IncusProject
+	// Incus further restricts the lowercase names accepted by the setting catalog.
+	if len(projectName) < 2 || len(projectName) > 64 || !domain.SafeName(projectName) || strings.ContainsRune(projectName, '_') || projectName[len(projectName)-1] == '-' {
+		return nil, fmt.Errorf("invalid effective INCUS_PROJECT %q for yard %q: must use lowercase letters, digits or hyphens, start and end with a letter or digit, and be 2-64 bytes long; set a valid INCUS_PROJECT override", projectName, loaded.Context.YardName)
+	}
 	mode := request.mode
 	baseline, err := captureInitIntegrationBaseline(loaded)
 	if err != nil {

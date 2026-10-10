@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -290,6 +292,110 @@ func TestPrepareInitConfigsUsesReadOnlyConvergence(t *testing.T) {
 			)
 			if err != nil || execution.configsChanged != test.changed {
 				t.Fatalf("execution=%#v err=%v", execution, err)
+			}
+		})
+	}
+}
+
+func TestPrepareInitValidatesEffectiveIncusProject(t *testing.T) {
+	for _, test := range []struct {
+		name, yard, saved, override, project string
+		invalid                              bool
+	}{
+		{name: "default", yard: "default", project: "subyard"},
+		{name: "named", yard: "demo", project: "subyard-demo"},
+		{name: "derived underscore", yard: "demo_yard", project: "subyard-demo_yard", invalid: true},
+		{name: "saved underscore", yard: "demo", saved: "custom_project", project: "custom_project", invalid: true},
+		{name: "command underscore", yard: "demo", override: "custom_project", project: "custom_project", invalid: true},
+		{name: "saved override", yard: "demo_yard", saved: "custom-project", project: "custom-project"},
+		{name: "command repairs saved value", yard: "demo_yard", saved: "custom_project", override: "custom-project", project: "custom-project"},
+		{name: "trailing hyphen", yard: "demo", override: "custom-", project: "custom-", invalid: true},
+		{name: "one byte override", yard: "default", override: "a", project: "a", invalid: true},
+		{name: "two byte override", yard: "default", override: "a1", project: "a1"},
+		{name: "64 byte override", yard: "default", override: strings.Repeat("a", 64), project: strings.Repeat("a", 64)},
+		{name: "65 byte override", yard: "default", override: strings.Repeat("a", 65), project: strings.Repeat("a", 65), invalid: true},
+		{name: "64 byte derivation", yard: strings.Repeat("a", 56), project: "subyard-" + strings.Repeat("a", 56)},
+		{name: "65 byte derivation", yard: strings.Repeat("a", 57), project: "subyard-" + strings.Repeat("a", 57), invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			if test.yard != "default" {
+				path := filepath.Join(root, "state", "yards", test.yard, "config.env")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				content := ""
+				if test.saved != "" {
+					content = "INCUS_PROJECT=" + test.saved + "\n"
+				}
+				writeCLIFile(t, path, content, 0o600)
+			}
+			if test.override != "" {
+				environment = append(environment, "INCUS_PROJECT="+test.override)
+			}
+			platform := newInitPlatformFixture()
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, InitPlatform: platform})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Existing invalid configurations must remain readable for repair.
+			loaded, err := program.loadContext(test.yard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Context.IncusProject != test.project {
+				t.Fatalf("effective project=%q, want %q", loaded.Context.IncusProject, test.project)
+			}
+			execution, err := program.prepareInitExecution(context.Background(), loaded, nil, nil)
+			if test.invalid {
+				if err == nil || !strings.Contains(err.Error(), "invalid effective INCUS_PROJECT") || execution != nil {
+					t.Fatalf("invalid project reached preparation: execution=%#v err=%v", execution, err)
+				}
+			} else if err != nil || execution.loaded.Context.IncusProject != test.project {
+				t.Fatalf("valid project was rejected or changed: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestInvalidIncusProjectBlocksCLIAndRPCInitBeforeApply(t *testing.T) {
+	for _, arguments := range [][]string{nil, {"--reset"}, {"--configs"}} {
+		t.Run(fmt.Sprint(arguments), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			environment = append(environment, "INCUS_PROJECT=invalid_project")
+			platform := newInitPlatformFixture()
+			prompt := &testkit.Prompt{}
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", WorkingDir: root, Environment: environment,
+				Arguments: append([]string{"init", "--yes"}, arguments...), InitPlatform: platform,
+				Prompt: prompt, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "invalid effective INCUS_PROJECT") {
+				t.Fatalf("CLI init: code=%d stderr=%q", code, stderr.String())
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := &rpcHandler{cli: program, loaded: loaded}
+			defer handler.closePlans()
+			params, err := json.Marshal(map[string]any{"command": "init", "arguments": arguments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "invalid-project", Params: params}, nil)
+			if err == nil || !strings.Contains(err.Error(), "invalid effective INCUS_PROJECT") {
+				t.Fatalf("RPC init plan accepted invalid project: %v", err)
+			}
+			if len(prompt.Requests) != 0 || len(platform.preflightFresh) != 0 || len(platform.applied) != 0 || platform.teardowns != 0 || platform.configs != 0 {
+				t.Fatalf("invalid project reached confirmation/preflight/apply: %#v", platform)
+			}
+			if _, err := os.Stat(filepath.Join(root, "state", "host-id")); !os.IsNotExist(err) {
+				t.Fatalf("invalid project published host identity: %v", err)
 			}
 		})
 	}
