@@ -7,10 +7,10 @@ mapfile -t unformatted < <(gofmt -l "$ROOT/config/profiles/github")
 [ "${#unformatted[@]}" -eq 0 ] \
   || { printf 'FAIL: gofmt required: %s\n' "${unformatted[*]}" >&2; exit 1; }
 go -C "$ROOT" vet ./config/profiles/github/...
-for mask in 0002 0022 0077; do
-  printf 'GitHub profile race tests: umask=%s\n' "$mask"
-  (umask "$mask"; go -C "$ROOT" test -race -count=1 ./config/profiles/github/...)
-done
+printf 'GitHub profile race tests: full suite umask=0022\n'
+(umask 0022; go -C "$ROOT" test -race -count=1 ./config/profiles/github/...)
+bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \
+  './config/profiles/github/broker:TestLoadConfigAndKeyRejectUnsafeFiles|TestProtectedFilesRejectSymlinksAndOversize'
 bash "$ROOT/config/profiles/github/tests/cleanup.sh"
 bash "$ROOT/config/profiles/github/tests/teardown-identity.sh"
 bash "$ROOT/config/profiles/github/tests/composition.sh"

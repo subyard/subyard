@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2154 # Variables come from the generic host-free ledger harness.
 # OpenClaw-owned consumer materialization and exclusive handoff assertions.
-# Sourced by the encrypted-ledger host-free harness after fixture trust is established.
+# Sourced by this profile's credential runner after fixture trust is established.
 secret='super-secret-static-value'
 printf '%s' "$secret" | yard_one keys add staging-file --kind file --zone canonical --consumer staging-env --yes >/dev/null
 shared_id="$(yard_one keys list | awk -F '\t' '$8=="staging-file" {print $1}')"
@@ -154,10 +154,4 @@ yard_one keys sync @two --now --yes >/dev/null
   || fail 'tombstone did not synchronize'
 
 
-while IFS= read -r output_file; do
-  for leaked in "$secret" "$blocked_prod" exclusive-bot-token; do
-    if grep -Fq -- "$leaked" "$output_file" 2>/dev/null; then fail "plaintext appeared in output file $output_file"; fi
-  done
-done < <(find "$TMP" -maxdepth 1 -type f -name '*.out' -print)
-
-credential_scenario_values+=(exclusive-bot-token)
+assert_credential_outputs_private "$secret" "$blocked_prod" exclusive-bot-token

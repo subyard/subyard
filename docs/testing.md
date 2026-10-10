@@ -9,8 +9,18 @@ Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow
 for both adding tests and choosing which existing checks to run.
 
 Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
-fixture roots. Keep raw calls for creation-semantics tests. The Go race gate runs uncached under
-umasks `0002`, `0022` and `0077` in separate processes.
+fixture roots. Keep raw calls for creation-semantics tests. The full core Go race suite runs
+uncached once under umask `0022`. The explicit file-creation and permission selection in
+[`tests/run.sh`](../tests/run.sh) also runs uncached under `0002` and `0077` in separate
+processes. This covers private persistence and public output modes, while fixtures that
+explicitly chmod unsafe inputs keep their ordinary full-suite coverage. The shared
+[`go-permission-umasks.sh`](../tests/helpers/go-permission-umasks.sh) checks that every selected
+test exists before running the additional masks; update the selection when renaming a test
+or adding a distinct creation-mode boundary.
+
+Profile settings/descriptor Go checks run once under `0022` through `profile-go.sh`.
+The GitHub profile runs its full Go race suite under `0022` and repeats only its explicit
+broker protected-file checks under `0002` and `0077`.
 
 ## Execution and reporting principles
 

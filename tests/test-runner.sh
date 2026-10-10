@@ -6,8 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fixture="$tmp/source with spaces"
-mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites} "$tmp/tools"
+mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
+cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/go"
 cp "$tmp/tools/go" "$tmp/tools/gofmt"
@@ -16,6 +17,18 @@ cat > "$tmp/tools/go" <<'SH'
 set -eu
 [ "${TMPDIR:-}" = /tmp ] || exit 25
 case " $* " in
+  *' test -list '*)
+    if [ "${RUNNER_FAIL_LIST:-}" = 1 ]; then
+      printf '%s\n' 'fixture permission test discovery failed'
+      exit 28
+    fi
+    while [ "$1" != -list ]; do shift; done
+    shift
+    # List exactly the explicitly requested top-level names, as go test does.
+    tr '|()^$' '\n' <<< "$1" | while IFS= read -r name; do
+      [ -z "$name" ] || [ "$name" = "${RUNNER_MISSING_TEST:-}" ] || printf '%s\n' "$name"
+    done
+    ;;
   *' test -race '*)
     printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG"
     if [ "$(umask)" = "${RUNNER_FAIL_UMASK:-}" ]; then
@@ -59,9 +72,12 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 run_fixture success
 awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }
   !/-count=1/ { exit 1 }
+  $1 == "0022" && /-run / { exit 1 }
+  $1 != "0022" && (!/-run / || /\.\/cmd\/\.\.\./ || /\.\/internal\/\.\.\./) { exit 1 }
   { masks[$1]++; count++ }
   END { if (count != 3 || masks["0002"] != 1 || masks["0022"] != 1 || masks["0077"] != 1) exit 1 }
-' "$tmp/success.go" || fail 'Go tests did not run uncached under each umask'
+' "$tmp/success.go" || fail 'full/focused Go race runs did not preserve uncached umask coverage'
+grep -Fq './cmd/... ./internal/...' "$tmp/success.go" || fail 'full core race suite was narrowed'
 summary="$(summary_path success)"
 awk -F '\t' '
   NR == 1 { if ($0 != "kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog") exit 1; next }
@@ -98,6 +114,26 @@ grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/umask-failure.out" \
   || fail 'early Go failure was hidden by trailing package output'
 ! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
 ! grep -q 'RUN build' "$tmp/umask-failure.out" || fail 'runner built after a failed Go run'
+
+rc=0
+RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
+[ "$rc" -eq 24 ] || fail 'focused permission checks hid a failed Go run'
+[ "$(wc -l < "$tmp/focused-failure.go")" -eq 2 ] || fail 'focused failure did not stop before umask 0077'
+grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/focused-failure.out" \
+  || fail 'focused Go failure detail was suppressed'
+! grep -q 'RUN build' "$tmp/focused-failure.out" || fail 'runner built after a focused Go failure'
+
+rc=0
+RUNNER_MISSING_TEST=TestProjectStoreConformance run_fixture missing-selection || rc=$?
+[ "$rc" -eq 1 ] || fail 'renamed/deleted permission test was silently skipped'
+grep -Fq 'selected Go permission test missing: TestProjectStoreConformance' "$tmp/missing-selection.out" \
+  || fail 'missing permission test was not identified'
+[ "$(wc -l < "$tmp/missing-selection.go")" -eq 1 ] || fail 'missing selection ran extra masks'
+rc=0
+RUNNER_FAIL_LIST=1 run_fixture list-failure || rc=$?
+[ "$rc" -eq 28 ] || fail 'permission test discovery hid its native failure'
+grep -Fq 'fixture permission test discovery failed' "$tmp/list-failure.out" \
+  || fail 'permission test discovery output was lost'
 
 # Preserve the child's exact failure and stop before the next test/suite.
 printf '#!/usr/bin/env bash\nprintf "expected failure detail\\n" >&2\nexit 23\n' > "$fixture/tests/unit.sh"
@@ -211,8 +247,28 @@ mkdir -p "$fixture/tests/helpers"
 cp "$ROOT/tests/helpers/profile-go.sh" "$fixture/tests/helpers/profile-go.sh"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/profile-go.log" \
   bash "$fixture/tests/helpers/profile-go.sh" example > "$tmp/profile-go.out" 2>&1
-[ "$(wc -l < "$tmp/profile-go.log")" -eq 3 ] \
+[ "$(wc -l < "$tmp/profile-go.log")" -eq 1 ] \
   || fail 'standalone profile Go checks did not complete with isolated fixtures'
+grep -q '^0022 .*test -race -count=1 ./config/profiles/example/tests$' "$tmp/profile-go.log" \
+  || fail 'descriptor profile tests did not run once under umask 0022'
+
+# GitHub repeats protected broker inputs, not its client/issuer/SSH suites.
+mkdir -p "$fixture/config/profiles/github/tests"
+cp "$ROOT/config/profiles/github/tests/run.sh" "$fixture/config/profiles/github/tests/run.sh"
+for check in cleanup teardown-identity composition; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/config/profiles/github/tests/$check.sh"
+done
+TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
+  bash "$fixture/config/profiles/github/tests/run.sh" > "$tmp/github-go.out" 2>&1
+awk '!/-count=1/ { exit 1 }
+  $1 == "0022" { if (/-run / || !/\.\/config\/profiles\/github\/\.\.\./) exit 1; full++ }
+  $1 == "0002" || $1 == "0077" {
+    if (!/-run / || /\.\.\./ || !/TestLoadConfigAndKeyRejectUnsafeFiles/ || !/TestProtectedFilesRejectSymlinksAndOversize/) exit 1
+    focused[$1]++
+  }
+  END { if (NR != 3 || full != 1 || focused["0002"] != 1 || focused["0077"] != 1) exit 1 }
+' "$tmp/github-go.log" || fail 'GitHub full/focused permission coverage drifted'
+rm -r "$fixture/config/profiles/github"
 
 printf '#!/usr/bin/env bash\nexit 29\n' > "$fixture/config/profiles/example/tests/run.sh"
 rc=0

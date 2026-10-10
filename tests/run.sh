@@ -97,11 +97,27 @@ check_manifests() {
 }
 
 check_go_race() {
-  local mask
-  for mask in 0002 0022 0077; do
-    printf 'Go race tests: umask=%s\n' "$mask"
-    (umask "$mask"; go -C "$ROOT" test -race -count=1 ./cmd/... ./internal/...)
-  done
+  printf 'Go race tests: full suite umask=0022\n'
+  (umask 0022; go -C "$ROOT" test -race -count=1 ./cmd/... ./internal/...)
+  # Actual publication/private-mode contracts, including public 0644/0755 outputs.
+  # Fixtures that chmod their inputs retain coverage in the full suite above.
+  bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \
+    './internal/testkit:TestWriteFileSetsExactModeOnCreateAndReplace|TestTempDirIsPrivate' \
+    './internal/state:TestProjectStoreConformance' \
+    './internal/config:TestWritePersistentAssignmentPreservesUnrelatedRecords|TestCreatePersistentFileRefusesExistingTarget|TestCreatePersistentFileCreatesMissingConfigurationRoot|TestYardRegistrationRepairMovesFlatRegistrationToRecovery' \
+    './internal/configsync:TestConfigurationSourceRecordIsProtectedAndIdempotent|TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings|TestVersionedConfigSyncDefaultYardAssets' \
+    './internal/migration:TestSourceInstallMigrationAndRecovery' \
+    './internal/testyardmigration:TestCommitAcceptsCompatiblePublishedRegistrationModes' \
+    './internal/releasetransition:TestPOSIXV2StoreCASPersistsProtectedLedgerAndRejectsStaleSnapshot|TestPOSIXV2StoreCheckpointEvidenceIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreSupersededJournalIsWriteOnceAndIdempotentForExactBytes|TestPOSIXV2StoreRecoversDeterministicPendingCreate|TestPOSIXV2StorePinsParentDirectoryAcrossSymlinkSwap|TestPOSIXV2StoreUsesSharedMigrationUpdateLock' \
+    './internal/adapters/credentialruntime:TestProtectedJSONAtomicWriteAndCounter|TestSetupCredentialImportMaterializeAndResume' \
+    './internal/adapters/projectruntime:TestPatchStorePublishesProtectedArtifact' \
+    './internal/adapters/remotecontrol:TestTransactionalRestoresExistingFilesAndRemovesNewFiles' \
+    './internal/adapters/networkruntime:TestEnsureHostLockCreatesAndPreservesValidatedInode' \
+    './internal/adapters/testvmsruntime:TestBackendApplyInstallsCurrentEngineAndPublishesRoute|TestBrokerInputPublicationAndDirectory' \
+    './internal/adapters/configmaterial:TestTOMLMaterializationPreservesRuntimeFields' \
+    './internal/ownerinventory:TestCacheUsesPrivateAtomicFile' \
+    './internal/sshtrust:TestFirstTrustConsentAndVerification' \
+    './internal/audit:TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes'
 }
 
 run_check syntax check_syntax

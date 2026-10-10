@@ -68,11 +68,11 @@ func TestRegistryV2RejectsAmbiguousDomainGraphsAndUnknownKinds(t *testing.T) {
 		"overlap":            strings.Replace(validRegistryV2, `"fromEpoch":2,"toEpoch":3`, `"fromEpoch":1,"toEpoch":2`, 1),
 		"not one epoch":      strings.Replace(validRegistryV2, `"fromEpoch":2,"toEpoch":3`, `"fromEpoch":2,"toEpoch":4`, 1),
 		"missing dependency": strings.Replace(validRegistryV2, `"dependsOn":["project-v2"]`, `"dependsOn":["missing"]`, 1),
-		"forward dependency": strings.Replace(validRegistryV2, `"kind":"test-vms-settings-v1-to-v2"`, `"kind":"test-vms-settings-v1-to-v2","dependsOn":["project-v2"]`, 1),
-		"cycle": strings.Replace(
+		"forward dependency": strings.Replace(
 			strings.Replace(validRegistryV2, `"kind":"test-vms-settings-v1-to-v2"`, `"kind":"test-vms-settings-v1-to-v2","dependsOn":["project-v2"]`, 1),
-			`"dependsOn":["settings-v2"]`, `"dependsOn":["settings-v2"]`, 1,
+			`,"dependsOn":["settings-v2"]`, "", 1,
 		),
+		"cycle":                strings.Replace(validRegistryV2, `"kind":"test-vms-settings-v1-to-v2"`, `"kind":"test-vms-settings-v1-to-v2","dependsOn":["project-v2"]`, 1),
 		"duplicate dependency": strings.Replace(validRegistryV2, `"dependsOn":["project-v2"]`, `"dependsOn":["project-v2","project-v2"]`, 1),
 		"current mismatch":     strings.Replace(validRegistryV2, `"settings": 3`, `"settings": 4`, 1),
 		"domain map mismatch":  strings.Replace(validRegistryV2, `"currentEpochs": {`, `"currentEpochs": {"foreign":1,`, 1),
@@ -109,39 +109,28 @@ func TestRegistryV2PathRejectsUnknownUnsupportedAndFutureEpochs(t *testing.T) {
 
 func TestRegistryV2RetirementPreservesPrefixDigestAcrossRemainingSuffix(t *testing.T) {
 	catalog := registryV2TestCatalog(t)
-	original := RegistryV2{
-		SchemaVersion: RegistrySchemaV2,
-		MinimumEpochs: map[string]int{"settings": 1},
-		CurrentEpochs: map[string]int{"settings": 3},
-		Migrations: []MigrationDefinitionV2{
-			{ID: "settings-v2", Domain: "settings", FromEpoch: 1, ToEpoch: 2, Kind: "test-vms-settings-v1-to-v2"},
-			{ID: "settings-v3", Domain: "settings", FromEpoch: 2, ToEpoch: 3, Kind: "settings-fixture-v2-to-v3"},
-		},
-	}
-	if err := original.Validate(catalog); err != nil {
-		t.Fatal(err)
-	}
-	retiredDigest, err := original.MigrationPrefixDigest("settings", 2)
+	original, _, err := ParseRegistryV2([]byte(pinnedCheckpointRegistryV2Payload), catalog)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for epoch, want := range map[int]Fingerprint{2: pinnedSettingsV2PrefixDigest, 3: pinnedSettingsV3PrefixDigest} {
+		if got, err := original.MigrationPrefixDigest("settings", epoch); err != nil || got != want {
+			t.Fatalf("historical prefix at epoch %d = %q, want %q, err=%v", epoch, got, want, err)
+		}
 	}
 	retired := original
 	retired.MinimumEpochs = cloneEpochs(original.MinimumEpochs)
 	retired.MinimumEpochs["settings"] = 2
 	retired.Migrations = append([]MigrationDefinitionV2(nil), original.Migrations[1:]...)
 	retired.RetiredPrefixes = map[string]RetiredMigrationPrefixV2{
-		"settings": {ThroughEpoch: 2, Digest: retiredDigest},
+		"settings": {ThroughEpoch: 2, Digest: pinnedSettingsV2PrefixDigest},
 	}
 	if err := retired.Validate(catalog); err != nil {
 		t.Fatalf("retired registry invalid: %v", err)
 	}
-	want, err := original.MigrationPrefixDigest("settings", 3)
-	if err != nil {
-		t.Fatal(err)
-	}
 	got, err := retired.MigrationPrefixDigest("settings", 3)
-	if err != nil || got != want {
-		t.Fatalf("prefix digest after retirement = %q, want %q, err=%v", got, want, err)
+	if err != nil || got != pinnedSettingsV3PrefixDigest {
+		t.Fatalf("prefix digest after retirement = %q, want %q, err=%v", got, pinnedSettingsV3PrefixDigest, err)
 	}
 }
 

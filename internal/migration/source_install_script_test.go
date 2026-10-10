@@ -3,6 +3,7 @@ package migration
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -172,23 +173,113 @@ func TestSourceInstallLeafDoesNotOwnReleaseAuthorizationOrJournal(t *testing.T) 
 }
 
 func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) {
-	payload, err := os.ReadFile(filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(payload)
-	for _, required := range []string{
-		`source_recovery="$DATA_HOME/recovery/pre-go-source"`,
-		`source-install-manifest.json`,
-		`$'schema=1\nphase=complete\nstep=complete'`,
-		`$'schema=1\nphase=applying\nstep=entrypoint-switch'`,
-		`.sourceRoot | select(type == "string" and startswith("/"))`,
-		`SOURCE_INGRESS_ROOT="$recovered_source"`,
-		`source recovery metadata is unsafe or invalid`,
-	} {
-		if !strings.Contains(source, required) {
-			t.Fatalf("bootstrap omits interrupted source recovery binding %q", required)
-		}
+	requireJQ(t)
+	for _, scenario := range []string{"entrypoint-switch", "complete", "invalid-json", "wrong-data-home", "outside-home", "relative-root", "symlink-manifest"} {
+		t.Run(scenario, func(t *testing.T) {
+			home := testkit.TempDir(t)
+			data, config, bin := filepath.Join(home, "data"), filepath.Join(home, "config"), filepath.Join(home, "bin")
+			runtimeRoot, source := filepath.Join(data, "runtime"), filepath.Join(home, "source")
+			candidate := filepath.Join(runtimeRoot, "releases/fixture-test-candidate")
+			cache := filepath.Join(data, "releases/fixture-test")
+			recovery := filepath.Join(data, "recovery/pre-go-source")
+			for _, directory := range []string{bin, filepath.Join(source, "bin"), filepath.Join(candidate, "bin"), cache, recovery} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for link, target := range map[string]string{
+				filepath.Join(runtimeRoot, "current"): "releases/fixture-test-candidate",
+				filepath.Join(bin, "yard"):            filepath.Join(runtimeRoot, "current/bin/yard"),
+				filepath.Join(bin, "sy"):              filepath.Join(source, "bin/yard"),
+			} {
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Publishing and transition application stop at local recorder boundaries.
+			// The bootstrap itself runs unchanged, with its offline cache preseeded.
+			writeTestFile(t, filepath.Join(source, "bin/yard"), 0o700, "#!/bin/sh\nexit 99\n")
+			ingressLog, installerLog := filepath.Join(home, "ingress"), filepath.Join(home, "installer")
+			writeTestFile(t, filepath.Join(candidate, "bin/yard"), 0o700, `#!/bin/sh
+set -eu
+[ "$1" = update ] || exit 99
+printf '%s\n' "${SUBYARD_SOURCE_INGRESS_V1_ROOT-unset}" > "$TEST_INGRESS_LOG"
+exit 23
+`)
+			installer := filepath.Join(cache, "subyard-install-runtime-release.sh")
+			installerPayload := "#!/bin/sh\nset -eu\n[ \"$3\" = --publish-only ] || exit 99\nprintf 'publish-only\\n' > \"$TEST_INSTALLER_LOG\"\nprintf 'releases/fixture-test-candidate\\n'\n"
+			writeTestFile(t, installer, 0o700, installerPayload)
+			writeTestFile(t, installer+".sha256", 0o600, fmt.Sprintf("%x\n", sha256.Sum256([]byte(installerPayload))))
+			for _, arch := range []string{"amd64", "arm64"} {
+				for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
+					writeTestFile(t, filepath.Join(cache, "subyard-fixture-test-linux-"+arch+".tar.gz"+suffix), 0o600, "fixture\n")
+				}
+			}
+			manifest := map[string]any{"schemaVersion": 2, "sourceRoot": source, "dataHome": data, "configHome": config}
+			state := "schema=1\nphase=applying\nstep=entrypoint-switch\n"
+			switch scenario {
+			case "complete":
+				state = "schema=1\nphase=complete\nstep=complete\n"
+			case "wrong-data-home":
+				manifest["dataHome"] = filepath.Join(home, "other-data")
+			case "outside-home":
+				manifest["sourceRoot"] = filepath.Dir(home)
+			case "relative-root":
+				manifest["sourceRoot"] = "source"
+			}
+			payload, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "invalid-json" {
+				payload = []byte("invalid JSON")
+			}
+			manifestPath := filepath.Join(recovery, "source-install-manifest.json")
+			if scenario == "symlink-manifest" {
+				ownedManifest := filepath.Join(home, "manifest.json")
+				writeTestFile(t, ownedManifest, 0o600, string(payload))
+				if err := os.Symlink(ownedManifest, manifestPath); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeTestFile(t, manifestPath, 0o600, string(payload))
+			}
+			writeTestFile(t, filepath.Join(recovery, "transaction"), 0o600, state)
+			command := exec.Command("bash", filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"),
+				"--version", "fixture-test", "--offline", "--yes")
+			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "SHELL=/bin/bash", "TMPDIR=/tmp",
+				"SUBYARD_HOME=" + data, "SUBYARD_CONFIG_HOME=" + config, "YARD_BIN_DIR=" + bin,
+				"YARD_SHELL_RC=" + filepath.Join(home, ".bashrc"), "YARD_LOGIN_RC=" + filepath.Join(home, ".profile"),
+				"TEST_INGRESS_LOG=" + ingressLog, "TEST_INSTALLER_LOG=" + installerLog}
+			output, err := command.CombinedOutput()
+			if scenario == "entrypoint-switch" || scenario == "complete" {
+				if exitStatus(err) != 23 {
+					t.Fatalf("bootstrap did not reach the transition recorder: %v\n%s", err, output)
+				}
+				want := source + "\n"
+				if scenario == "complete" {
+					want = "unset\n"
+				}
+				if got := string(readTestFile(t, ingressLog)); got != want {
+					t.Fatalf("transition source ingress = %q, want %q", got, want)
+				}
+			} else {
+				if exitStatus(err) != 1 || !strings.Contains(string(output), "source recovery metadata is unsafe or invalid") {
+					t.Fatalf("unsafe recovery was not refused: %v\n%s", err, output)
+				}
+				for _, path := range []string{installerLog, ingressLog} {
+					if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("unsafe recovery reached recorder %s: %v", path, err)
+					}
+				}
+			}
+			if got := string(readTestFile(t, filepath.Join(recovery, "transaction"))); got != state {
+				t.Fatalf("bootstrap changed recovery state: %q", got)
+			}
+			if target, err := os.Readlink(filepath.Join(bin, "sy")); err != nil || target != filepath.Join(source, "bin/yard") {
+				t.Fatalf("bootstrap changed interrupted source link: target=%q err=%v", target, err)
+			}
+		})
 	}
 }
 

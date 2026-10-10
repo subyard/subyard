@@ -626,14 +626,7 @@ printf -v command_root_q '%q' "$command_root"
 grep -Fxq "chown -R dev:dev $command_root_q" "$TMP/run.sh" \
   && grep -Fq 'exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev sh -c' \
     "$TMP/run.sh" \
-  && grep -Fq 'fixture argument\ with\ spaces' "$TMP/run.sh" \
-  || fail "guest command does not run as dev or preserve its argv"
-grep -Fxq 'export SUBYARD_E2E_YARD=test-yard' "$TMP/run.sh" \
-  && grep -Fxq 'export SUBYARD_E2E_PROJECT=Subyard-2' "$TMP/run.sh" \
-  && grep -Fxq "export SUBYARD_E2E_RUN_ID=$run_a" "$TMP/run.sh" \
-  && grep -Fxq 'export SUBYARD_E2E_PURPOSE=contract-tests' "$TMP/run.sh" \
-  && grep -Fxq 'export SUBYARD_E2E_GENERATION=7' "$TMP/run.sh" \
-  || fail "guest command omitted public lease context"
+  || fail "guest command does not run as dev"
 write_guest_command 1 "$command_root" ./bin/yard --version > "$TMP/yard-run.sh"
 grep -Fxq '/usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev make build' \
   "$TMP/yard-run.sh" \
@@ -653,8 +646,6 @@ normalized_progress="$({
 [ "$normalized_progress" = "$(printf '%s\n%s\n%s\n%s' \
   'download 100%' 'plain output' 'apt 100%' 'final line without newline')" ] \
   || fail "runner did not coalesce terminal progress to its final update"
-grep -Fq '2>&1 | normalize_terminal_progress' "$ROOT/dev/agent-e2e.sh" \
-  || fail "normal guest streams bypass terminal-progress normalization"
 
 mkdir -p "$TMP/direct-bin"
 cat > "$TMP/direct-bin/ssh" <<'SH'
@@ -1252,10 +1243,6 @@ resume_rc=$?
 set -e
 [ "$resume_rc" = 2 ] && grep -Fq 'current task plan' <<<"$resume_output" \
   || fail 'P0 allowed cross-lease resume instead of directing task-plan progress'
-grep -Fq 'P0_CURRENT_PHASE=final-verify' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && grep -Fq 'run_phase cleanup cleanup_lane' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && [ "$(grep -c '^    verify_boundary$' "$ROOT/dev/e2e/p0-acceptance.sh")" -eq 1 ] \
-  || fail 'continuous P0 can skip final cleanup or boundary verification'
 grep -Fq 'mapfile -t SLOT_IDS' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'prepare_slot "$TARGET_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   && grep -Fq 'prepare_slot "$PEER_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
@@ -3110,14 +3097,36 @@ guest() {
   esac
   "$@"
 }
-run_guest 1 "$bundle" "$(sha256sum "$bundle" | awk '{print $1}')" \
-  sh -c 'test -f tracked.txt && test ! -e .git' \
-  || fail "mock guest command failed"
-guest_directory="${GUEST_DIRS[1]:-}"
-case "$guest_directory" in /tmp/subyard-worktree.*) ;; *) fail "guest run directory was not retained for cleanup" ;; esac
-[ -d "$guest_directory" ] || fail "mock guest run directory is missing"
-cleanup_guest 1 || fail "guest run directory cleanup failed"
-[ ! -e "$guest_directory" ] || fail "guest run directory survived cleanup"
+for guest_exit in 0 23; do
+  set +e
+  run_guest 1 "$bundle" "$(sha256sum "$bundle" | awk '{print $1}')" \
+    sh -ec '
+      test -f tracked.txt && test ! -e .git
+      test "$1" = "argument with spaces"
+      test "$SUBYARD_E2E_YARD" = "$2"
+      test "$SUBYARD_E2E_PROJECT" = "$3"
+      test "$SUBYARD_E2E_RUN_ID" = "$4"
+      test "$SUBYARD_E2E_PURPOSE" = "$5"
+      test "$SUBYARD_E2E_GENERATION" = "$6"
+      test "$SUBYARD_E2E_VM" = 1
+      printf "stdout first\rstdout final\n"
+      printf "stderr first\rstderr final\n" >&2
+      exit "$7"
+    ' fixture 'argument with spaces' "$E2E_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
+      "$LEASE_PURPOSE" "$LEASE_GENERATION" "$guest_exit" \
+    > "$TMP/guest-output" 2> "$TMP/guest-error"
+  guest_rc=$?
+  set -e
+  [ "$guest_rc" = "$guest_exit" ] \
+    || fail "mock guest command lost its argv, lease context or exit status: $guest_rc"
+  [ "$(cat "$TMP/guest-output")" = $'\n== e2e-vm-1 ==\nstdout final\nstderr final' ] \
+    || fail 'guest streams bypassed terminal-progress normalization'
+  guest_directory="${GUEST_DIRS[1]:-}"
+  case "$guest_directory" in /tmp/subyard-worktree.*) ;; *) fail "guest run directory was not retained for cleanup" ;; esac
+  [ -d "$guest_directory" ] || fail "mock guest run directory is missing"
+  cleanup_guest 1 || fail "guest run directory cleanup failed"
+  [ ! -e "$guest_directory" ] || fail "guest run directory survived cleanup"
+done
 
 set +e
 bash -c '
@@ -3513,6 +3522,58 @@ reboot_lane_dispatch="$(awk '
   /^esac$/ { if (capture) { result = block; capture = 0 } }
   END { printf "%s", result }
 ' "$ROOT/dev/e2e/p0-acceptance.sh")"
+# The full branch must clean up before final verification, and failures must
+# retain their exit status rather than reaching the success path.
+for full_failure in success cleanup final-boundary; do
+  full_log="$TMP/full-dispatch-$full_failure.log"
+  full_capacity="$TMP/full-dispatch-$full_failure-capacity"
+  mkdir "$full_capacity"
+  printf 'retained\n' > "$full_capacity/marker"
+  set +e
+  P0_DISPATCH="$reboot_lane_dispatch" FULL_FAILURE="$full_failure" \
+    CAPACITY_LOG_DIR="$full_capacity" bash -c '
+      set -euo pipefail
+      P0_LANE=full
+      VM_COUNT=2
+      boundary_calls=0
+      capacity_cache_snapshot() { printf "build\tmodules\n"; }
+      home_state() { printf "private-%s\n" "$1"; }
+      run_phase() { shift; "$@"; }
+      preflight_lane() { :; }
+      start_capacity_monitors() { :; }
+      verify_boundary() {
+        boundary_calls=$((boundary_calls + 1))
+        [ "$boundary_calls" = 1 ] || printf "final-boundary\n"
+        [ "$FULL_FAILURE:$boundary_calls" != final-boundary:2 ] || return 45
+      }
+      transport_probes() { :; }
+      run_full_matrix_phase() { :; }
+      release_smoke_lane() { :; }
+      peer_lane() { :; }
+      cleanup_lane() {
+        printf "cleanup\n"
+        [ "$FULL_FAILURE" != cleanup ] || return 45
+      }
+      p0_monotonic_seconds() { printf "1\n"; }
+      verify_cache_lifecycle() { :; }
+      capacity_report() { :; }
+      die() { printf "%s\n" "$*" >&2; exit 46; }
+      eval "$P0_DISPATCH"
+    ' > "$full_log" 2>&1
+  full_rc=$?
+  set -e
+  full_expected=cleanup
+  [ "$full_failure" = cleanup ] || full_expected+=$'\nfinal-boundary'
+  full_expected_rc=45
+  [ "$full_failure" != success ] || full_expected_rc=0
+  [ "$full_rc" = "$full_expected_rc" ] && [ "$(cat "$full_log")" = "$full_expected" ] \
+    || fail "full P0 lost cleanup/final verification ordering or $full_failure status: $(cat "$full_log")"
+  if [ "$full_failure" = success ]; then
+    [ ! -e "$full_capacity" ] || fail 'full P0 retained completed capacity logs'
+  else
+    [ "$(cat "$full_capacity/marker")" = retained ] || fail 'failed full P0 discarded capacity evidence'
+  fi
+done
 reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish; do

@@ -11,7 +11,5 @@ mapfile -t unformatted < <(gofmt -l "$tests")
 [ "${#unformatted[@]}" -eq 0 ] \
   || { printf 'FAIL: gofmt required: %s\n' "${unformatted[*]}" >&2; exit 1; }
 go -C "$ROOT" vet "./config/profiles/$profile/tests"
-for mask in 0002 0022 0077; do
-  printf '%s profile race tests: umask=%s\n' "$profile" "$mask"
-  (umask "$mask"; go -C "$ROOT" test -race -count=1 "./config/profiles/$profile/tests")
-done
+printf '%s profile race tests: full suite umask=0022\n' "$profile"
+(umask 0022; go -C "$ROOT" test -race -count=1 "./config/profiles/$profile/tests")

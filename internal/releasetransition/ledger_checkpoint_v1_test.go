@@ -7,6 +7,73 @@ import (
 	"testing"
 )
 
+// These compatibility vectors pin schema 1 bytes and SHA-256 prefix proofs.
+// Keep them literal: generating them with today's writer would hide format drift.
+const (
+	pinnedSettingsV2PrefixDigest        Fingerprint = "4f797a7d2346b237e0ded078391c8b5c6e5de0779125538b320f91b4ac2cec13"
+	pinnedSettingsV3PrefixDigest        Fingerprint = "6aa9ec03951772bfa196bf19e605e97d97b70b0cffa24d5909b26a8a5ad5daf7"
+	pinnedCheckpointRegistryV2Payload               = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":3},"migrations":[{"id":"settings-v2","domain":"settings","fromEpoch":1,"toEpoch":2,"kind":"test-vms-settings-v1-to-v2"},{"id":"settings-v3","domain":"settings","fromEpoch":2,"toEpoch":3,"kind":"settings-fixture-v2-to-v3"}]}` + "\n"
+	pinnedCheckpointProjectionV2Payload             = `{"schemaVersion":2,"domains":{"settings":{"epoch":2,"applied":["settings-v2"]}}}` + "\n"
+	pinnedLedgerCheckpointV1Payload                 = `{"schemaVersion":1,"registryDigest":"1f947ac1497631dc5fb100d8492595c1a63ebf7418e8230329110d518dc26b74","legacyProjection":{"exists":true,"fingerprint":"2d463e50a574030827f91f71e24a07db2339e9e84f6ba84e4c304cdd0894c105","epochs":{"settings":2}},"domains":{"settings":{"epoch":2,"compactedThrough":2,"prefixDigest":"4f797a7d2346b237e0ded078391c8b5c6e5de0779125538b320f91b4ac2cec13","appliedSuffix":[]}}}` + "\n"
+)
+
+func TestLedgerCheckpointV1ReadsAndAdvancesPinnedHistoryAfterRetirement(t *testing.T) {
+	registry, digest, err := ParseRegistryV2([]byte(pinnedCheckpointRegistryV2Payload), registryV2TestCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := protectedSnapshotFromPayload([]byte(pinnedCheckpointProjectionV2Payload))
+	checkpoint := protectedSnapshotFromPayload([]byte(pinnedLedgerCheckpointV1Payload))
+	historical, err := ParseMigrationLedger(projection, checkpoint, registry, digest)
+	if err != nil {
+		t.Fatalf("read historical checkpoint: %v", err)
+	}
+	payload, _, err := MarshalLedgerCheckpointV1(historical.Checkpoint, registry, digest, projection)
+	if err != nil || string(payload) != pinnedLedgerCheckpointV1Payload {
+		t.Fatalf("historical checkpoint bytes changed: %s, err=%v", payload, err)
+	}
+
+	registry.MinimumEpochs["settings"] = 2
+	registry.Migrations = registry.Migrations[1:]
+	registry.RetiredPrefixes = map[string]RetiredMigrationPrefixV2{
+		"settings": {ThroughEpoch: 2, Digest: pinnedSettingsV2PrefixDigest},
+	}
+	if err := registry.Validate(registryV2TestCatalog(t)); err != nil {
+		t.Fatal(err)
+	}
+	digest = fingerprintPayload([]byte("retired registry"))
+	actual, err := ParseMigrationLedger(projection, checkpoint, registry, digest)
+	if err != nil {
+		t.Fatalf("read historical checkpoint after retirement: %v", err)
+	}
+	pending, err := registry.PendingPath(actual.Ledger)
+	if err != nil || len(pending) != 1 || pending[0].ID != "settings-v3" {
+		t.Fatalf("pending path after retirement = %#v, err=%v", pending, err)
+	}
+	next, err := actual.Ledger.Advance(registry, pending[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := advanceLedgerCheckpointV1(actual.Checkpoint, next, registry, digest, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _, err = MarshalLedgerCheckpointV1(advanced, registry, digest, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err = ParseMigrationLedger(projection, protectedSnapshotFromPayload(payload), registry, digest)
+	if err != nil {
+		t.Fatalf("read advanced historical checkpoint: %v", err)
+	}
+	state := actual.Checkpoint.Domains["settings"]
+	if actual.Ledger.Domains["settings"].Epoch != 3 || state.CompactedThrough != 2 ||
+		state.PrefixDigest != pinnedSettingsV2PrefixDigest || len(state.AppliedSuffix) != 1 || state.AppliedSuffix[0] != "settings-v3" ||
+		!bytes.Equal(actual.ProjectionSnapshot.Payload, projection.Payload) {
+		t.Fatalf("advanced historical checkpoint lost prefix, suffix, or projection: %#v", actual)
+	}
+}
+
 func TestLedgerCheckpointV1AllowsCompatibleRegistrySuffixGrowth(t *testing.T) {
 	registry, digest, err := ParseRegistryV2([]byte(validRegistryV2), registryV2TestCatalog(t))
 	if err != nil {

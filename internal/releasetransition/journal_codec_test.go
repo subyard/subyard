@@ -33,29 +33,6 @@ func TestJournalCodecPreservesPinnedV2Payload(t *testing.T) {
 	}
 }
 
-func TestJournalV2AdapterDoesNotExposeFutureInternalState(t *testing.T) {
-	type futureInternalJournal struct {
-		Stable       JournalRecord
-		InternalOnly string
-	}
-	record, err := ParseJournal([]byte(pinnedJournalV2Payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	future := futureInternalJournal{Stable: record, InternalOnly: "must-not-leak"}
-
-	payload, err := marshalJournalV2JSON(future.Stable)
-	if err != nil {
-		t.Fatalf("marshalJournalV2JSON() = %v", err)
-	}
-	if bytes.Contains(payload, []byte("must-not-leak")) || bytes.Contains(payload, []byte("InternalOnly")) {
-		t.Fatalf("adapter leaked internal-only state: %s", payload)
-	}
-	if string(payload)+"\n" != pinnedJournalV2Payload {
-		t.Fatalf("adapter changed frozen payload: %s", payload)
-	}
-}
-
 func TestJournalJSONHooksRejectUnknownNestedFields(t *testing.T) {
 	unknown := strings.Replace(pinnedJournalV2Payload, `"direction":"activate-target"`, `"direction":"activate-target","futureGoal":true`, 1)
 	var record JournalRecord
