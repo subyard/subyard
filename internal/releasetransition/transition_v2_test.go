@@ -2658,6 +2658,10 @@ func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T)
 		t.Fatalf("drift inspection = %#v, err=%v", repeat, err)
 	}
 	firstDriftPlan := repeat.Plan
+	if !strings.Contains(repeat.Outcome.Message, "completed migrations remain applied") ||
+		!strings.Contains(repeat.Outcome.Message, "activation.test-runtime") {
+		t.Fatalf("repair diagnosis lost completed history or affected resource: %q", repeat.Outcome.Message)
+	}
 	if !slices.Contains(repeat.Decisions, RedactedDecision{
 		Resource: "activation.test-runtime", Scope: "activation",
 		Decision: DecisionCanonicalize, Result: "converged",

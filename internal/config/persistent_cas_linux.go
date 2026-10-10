@@ -257,6 +257,9 @@ func preparePersistentPendingAt(parent int, name string, desired []byte) error {
 			_ = unix.Close(fd)
 		}
 	}()
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		return err
+	}
 	for remaining := desired; len(remaining) > 0; {
 		written, writeErr := unix.Write(fd, remaining)
 		if writeErr != nil {

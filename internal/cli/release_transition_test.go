@@ -646,6 +646,7 @@ esac
 			}
 			mutations := 0
 			options := testyardmigration.Options{
+				RepositoryRoot: repositoryRoot(t), Environment: []string{"SUBYARD_OPERATOR_HOME=" + root},
 				ConfigHome: configHome, DataHome: filepath.Join(root, "data"), Incus: incus, Executable: incus,
 				RunYard: func(context.Context, string, io.Writer, ...string) error {
 					mutations++

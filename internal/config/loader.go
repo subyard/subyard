@@ -24,6 +24,7 @@ type LoadOptions struct {
 	SyncSource              bool
 	ConfigLocked            bool
 	AllowPendingTransaction bool
+	AllowResetYard          bool // teardown retry only; requires a validated ownership marker
 	LayerPaths              *LayerPaths
 	YardDirs                []string
 }
@@ -182,6 +183,10 @@ func load(
 	if !domain.SafeName(yardName) {
 		return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
 	}
+	resetFallback, err := YardFallbackReset(configHome, yardName)
+	if err != nil {
+		return domain.Context{}, nil, err
+	}
 	gitRoot := filepath.Join(configHome, GitSettingsRelativePath)
 	gitShared := filepath.Join(gitRoot, "overrides", "shared", "config.env")
 	gitHost := filepath.Join(gitRoot, "config.env")
@@ -205,6 +210,9 @@ func load(
 		}
 		if yardName != "default" && options.YardSettingsFile == "" {
 			localYard, err = findYardFile(root, yardName, values, options.YardDirs)
+			if errors.Is(err, ErrUnknownYard) && options.AllowResetYard && resetFallback {
+				localYard, err = "", nil
+			}
 			if err != nil {
 				return domain.Context{}, nil, err
 			}
@@ -216,7 +224,10 @@ func load(
 	if options.YardSettingsFile != "" && yardName != "default" {
 		localYard = options.YardSettingsFile
 	}
-	if yardName != "default" && localYard == "" && gitYard == "" {
+	if resetFallback && !options.SyncSource {
+		gitYard = ""
+	}
+	if yardName != "default" && localYard == "" && gitYard == "" && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
 	if yardName != "default" {
@@ -249,7 +260,7 @@ func load(
 			}
 		}
 	}
-	if yardName != "default" && !yardPresent {
+	if yardName != "default" && !yardPresent && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
 	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker); err != nil {
@@ -265,6 +276,9 @@ func load(
 	if options.LayerPaths != nil {
 		gitSharedAssets, gitHostAssets, gitYardAssets = options.LayerPaths.GitSharedAssets, options.LayerPaths.GitHostAssets, options.LayerPaths.GitYardAssets[yardName]
 		sharedAssets, hostAssets, yardAssets = options.LayerPaths.SharedAssets, options.LayerPaths.HostAssets, options.LayerPaths.YardAssets[yardName]
+	}
+	if resetFallback && !options.SyncSource {
+		gitYardAssets = ""
 	}
 	for _, layer := range []struct {
 		path, assets, scope, role, assetRole string

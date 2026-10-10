@@ -17,7 +17,7 @@ import (
 )
 
 func TestInitProfileProvisionsSelectedHook(t *testing.T) {
-	for _, scenario := range []string{"existing", "fresh", "declined", "failed", "address changed"} {
+	for _, scenario := range []string{"existing", "fresh", "declined", "failed", "address changed", "release ready", "release drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			cli, loaded, path, runner := provisionEndpointFixture(t)
 			delete(cli.baseEnv, "AGENTS")
@@ -46,6 +46,15 @@ func TestInitProfileProvisionsSelectedHook(t *testing.T) {
 			cli.options.Stdout, cli.options.Stderr = &stdout, &stderr
 			options := cli.options
 			options.Environment = withoutCommandSetting(withoutCommandSetting(options.Environment, "AGENTS"), "CODING_TOOL_INTEGRATIONS")
+			var readyMarker string
+			if strings.HasPrefix(scenario, "release ") {
+				root := options.RepositoryRoot
+				runtimeRoot := filepath.Join(root, "init-runtime")
+				options.Environment = append(options.Environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+				journal, _ := installUnfinishedV2MutationGateFixture(t, root, options.Environment, runtimeRoot)
+				readyMarker, _ = completeConfigApplyGateFixture(t, root, options.Environment, runtimeRoot, journal)
+				writeCLIFile(t, readyMarker, "ready\n", 0600)
+			}
 			addresses := cli.provisionEndpointAddresses
 			cli, err = New(options)
 			if err != nil {
@@ -70,13 +79,24 @@ func TestInitProfileProvisionsSelectedHook(t *testing.T) {
 			if scenario == "failed" {
 				runner.Steps[1].Err = errors.New("install failed")
 			}
+			if scenario == "release drift" {
+				runner.Steps[1].Apply = func(domain.AdapterRequest) {
+					if err := os.Remove(readyMarker); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			code := cli.Run(context.Background())
 			want := 0
-			if scenario == "declined" || scenario == "failed" || scenario == "address changed" {
+			if scenario == "declined" || scenario == "failed" || scenario == "address changed" || scenario == "release drift" {
 				want = 1
 			}
 			if code != want {
 				t.Fatalf("code=%d want=%d stdout=%s stderr=%s", code, want, stdout.String(), stderr.String())
+			}
+			if scenario == "release drift" && (!strings.Contains(stderr.String(), "release readiness after init") ||
+				!strings.Contains(stderr.String(), "transition-required") || strings.Contains(stderr.String(), "Subyard initialized")) {
+				t.Fatalf("init reported success before inspecting profile effects: %s", stderr.String())
 			}
 			stored, err := os.ReadFile(path)
 			if err != nil {

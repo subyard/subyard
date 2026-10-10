@@ -346,15 +346,15 @@ func (activation *testYardRouteConsumerActivation) PrepareOwner(
 }
 
 func (activation *testYardRouteConsumerActivation) Prepare(ctx context.Context) (string, error) {
-	return testyardmigration.PrepareRouteConsumers(ctx, activation.options)
+	return testyardmigration.PrepareRouteConsumersActivation(ctx, activation.options)
 }
 
 func (activation *testYardRouteConsumerActivation) Verify(ctx context.Context, before string) error {
-	return testyardmigration.VerifyRouteConsumers(ctx, activation.options, before)
+	return testyardmigration.VerifyRouteConsumersActivation(ctx, activation.options, before)
 }
 
 func (activation *testYardRouteConsumerActivation) Commit(ctx context.Context, before string) error {
-	return testyardmigration.CommitRouteConsumers(ctx, activation.options, before)
+	return testyardmigration.CommitRouteConsumersActivation(ctx, activation.options, before)
 }
 
 func (cli *CLI) routeConsumerActivationReconciler(

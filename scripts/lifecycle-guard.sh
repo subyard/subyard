@@ -11,6 +11,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib-power.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib/ssh-listener.sh
+. "$SCRIPT_DIR/lib/ssh-listener.sh"
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 DEV_USER="${DEV_USER:-dev}"
@@ -50,72 +52,11 @@ vscode_remote_state() {
   fi
 }
 
-SSH_SERVICE_WAS_ACTIVE=0
-SSH_SOCKET_WAS_ACTIVE=0
-SSH_RESTORE_NEEDED=0
 PROFILE_RESTORE_NEEDED=0
 paused_profiles=""
 
-# Stop only the SSH listener, never established sessions. With Debian's KillMode=process the
-# per-session sshd children survive, so the activity probe can see them while no new Remote-SSH
-# window can enter between the probe and `incus stop`.
-ssh_listener_quiesce() {
-  local result rest
-  if ! result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
-    service=0; socket=0
-    if systemctl is-active --quiet ssh; then service=1; fi
-    if systemctl is-active --quiet ssh.socket; then socket=1; fi
-    if [ "$service" = 1 ] && [ "$(systemctl show ssh --property=KillMode --value)" != process ]; then
-      printf "unsupported\n"
-      exit 0
-    fi
-    printf "snapshot:%s:%s\n" "$service" "$socket"
-  ' 2>/dev/null)"; then
-    return 1
-  fi
-  case "$result" in
-    snapshot:[01]:[01])
-      rest="${result#snapshot:}"
-      SSH_SERVICE_WAS_ACTIVE="${rest%%:*}"
-      SSH_SOCKET_WAS_ACTIVE="${rest##*:}"
-      SSH_RESTORE_NEEDED=1
-      ;;
-    unsupported) return 2 ;;
-    *) return 1 ;;
-  esac
-  if ! incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
-      --env SERVICE="$SSH_SERVICE_WAS_ACTIVE" --env SOCKET="$SSH_SOCKET_WAS_ACTIVE" -- \
-      sh -eu -c '
-        [ "$SOCKET" = 0 ] || systemctl stop ssh.socket
-        [ "$SERVICE" = 0 ] || systemctl stop ssh
-      ' >/dev/null 2>&1; then
-    ssh_listener_restore
-    return 1
-  fi
-  return 0
-}
-
-ssh_listener_restore() {
-  if [ "$SSH_SERVICE_WAS_ACTIVE" = 0 ] && [ "$SSH_SOCKET_WAS_ACTIVE" = 0 ]; then
-    SSH_RESTORE_NEEDED=0
-    return 0
-  fi
-  if ! incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" \
-      --env SERVICE="$SSH_SERVICE_WAS_ACTIVE" --env SOCKET="$SSH_SOCKET_WAS_ACTIVE" -- \
-      sh -eu -c '
-        [ "$SOCKET" = 0 ] || systemctl start ssh.socket
-        [ "$SERVICE" = 0 ] || systemctl start ssh
-      ' >/dev/null 2>&1; then
-    warn "could not restore the yard SSH listener after cancelling stop"
-    return 0
-  fi
-  SSH_SERVICE_WAS_ACTIVE=0
-  SSH_SOCKET_WAS_ACTIVE=0
-  SSH_RESTORE_NEEDED=0
-}
-
 restore_ssh_listener_on_exit() {
-  [ "$SSH_RESTORE_NEEDED" = 0 ] || ssh_listener_restore
+  ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
   if [ "$PROFILE_RESTORE_NEEDED" = 1 ]; then
     "$SCRIPT_DIR/profile-services.sh" --resume "$paused_profiles" || warn 'could not resume profile owner services'
   fi
@@ -142,7 +83,10 @@ case "$action" in
     if [ "$cur" = RUNNING ]; then
       if [ "$force" = 0 ] && [ "$reconcile" = 0 ]; then
         quiesce_rc=0
-        ssh_listener_quiesce || quiesce_rc=$?
+        ssh_listener_capture "$YARD_INSTANCE_NAME" || quiesce_rc=$?
+        if [ "$quiesce_rc" = 0 ]; then
+          ssh_listener_fence || quiesce_rc=4
+        fi
         case "$quiesce_rc" in
           0) ;;
           2) die "cannot safely pause new SSH connections: ssh.service KillMode is not 'process'; use '$(yard_cmd_hint) stop --force' only for emergency shutdown" ;;
@@ -162,11 +106,11 @@ case "$action" in
         fi
         case "$vcstate" in
           active)
-            ssh_listener_restore
+            ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
             die "VS Code Remote-SSH or another SSH session is still connected to '$SSH_HOST' — close every remote window (File > Close Remote Connection) and shell, then retry; use '$(yard_cmd_hint) stop --force' only for emergency shutdown"
             ;;
           unknown)
-            ssh_listener_restore
+            ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
             die "could not verify that VS Code Remote-SSH is idle — retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown"
             ;;
         esac
@@ -175,10 +119,10 @@ case "$action" in
       fi
       info "stopping $YARD_INSTANCE_NAME"
       if ! power_stop_instance "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
-        ssh_listener_restore
+        ssh_listener_restore || warn "could not restore the yard SSH listener after cancelling stop"
         die "could not stop $YARD_INSTANCE_NAME"
       fi
-      SSH_RESTORE_NEEDED=0
+      SSH_LISTENER_RESTORE_NEEDED=0
     else
       info "$YARD_INSTANCE_NAME already stopped (${cur:-unknown})"
     fi

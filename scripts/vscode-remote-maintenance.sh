@@ -56,5 +56,6 @@ check_active() {
 
 case "${1:-}" in
   check-active) check_active ;;
+  check-ssh) if ssh_session_active; then printf 'active\n'; else printf 'idle\n'; fi ;;
   *) printf 'usage: check-active\n' >&2; exit 2 ;;
 esac

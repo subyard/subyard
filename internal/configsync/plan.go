@@ -324,6 +324,21 @@ func validateCandidate(
 		layerPaths.YardAssets[name] = filepath.Join(options.ConfigHome, "yards", name, "overrides", "agents")
 		layerPaths.GitYardAssets[name] = filepath.Join(source.root, "hosts", source.hostID, "yards", name, "overrides", "agents")
 	}
+	// Reset yards are absent from effective inventory, but their retained authored
+	// source must still satisfy the same schema and runtime configuration checks.
+	for _, name := range assetYards {
+		reset, err := config.YardFallbackReset(options.ConfigHome, name)
+		if err != nil {
+			return err
+		}
+		if !reset || gitYards[name] == "" {
+			continue
+		}
+		sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
+		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, DisablePrivate: true, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, SyncSource: true}); err != nil {
+			return fmt.Errorf("yard %s retained source: %w", name, err)
+		}
+	}
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
 	load := func(name string) error {
 		loaded, err := config.Load(config.LoadOptions{
@@ -341,6 +356,13 @@ func validateCandidate(
 		return err
 	}
 	for _, name := range yardNames {
+		reset, err := config.YardFallbackReset(options.ConfigHome, name)
+		if err != nil {
+			return err
+		}
+		if reset && localYards[name] == "" {
+			continue
+		}
 		if err := load(name); err != nil {
 			return err
 		}

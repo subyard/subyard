@@ -34,7 +34,9 @@ type ownerInputFile struct {
 }
 
 func ownerInputFiles(loaded config.Loaded) (map[string]ownerInputFile, error) {
-	paths := map[string]bool{}
+	paths := map[string]bool{
+		config.YardResetMarkerPath(loaded.Context.Paths.ConfigHome, loaded.Context.YardName): true,
+	}
 	for _, layer := range loaded.ConfigurationLayers {
 		if filepath.IsAbs(layer.Path) {
 			paths[layer.Path] = true

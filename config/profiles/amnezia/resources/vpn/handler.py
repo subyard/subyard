@@ -22,7 +22,21 @@ PROJECT = os.environ.get('INCUS_PROJECT', '')
 def run(*args, check=True, timeout=None):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
     if check and result.returncode:
-        raise RuntimeError('owner or guest command failed: ' + args[0])
+        operation = 'command'
+        if args[:1] == ('incus',):
+            operation = 'incus'
+            if args[1:2] == ('query',):
+                operation = 'incus query'
+            elif args[1:3] in (('config', 'set'), ('config', 'unset')):
+                operation = 'incus config ' + args[2]
+            elif args[1:4] in (('config', 'device', 'add'), ('config', 'device', 'remove')):
+                operation = 'incus config device ' + args[3]
+            elif args[1:2] == ('exec',) and args[5:8] == ('--', 'python3', RUNTIME) and args[8:9] in (
+                    ('up',), ('down',), ('observe',), ('observe-management',)):
+                operation = 'incus guest runtime ' + args[8]
+        elif args[:1] in (('ip',), ('ss',)):
+            operation = args[0]
+        raise RuntimeError(f'owner or guest command failed: {operation}; exit={result.returncode}')
     return result
 
 

@@ -394,6 +394,18 @@ journals keep their recorded scope; a reconstructed all-local scope may resume o
 when its complete observation binding matches that journal exactly. Config
 reconciliation leaves stopped or absent yards untouched.
 
+Current route-consumer activation uses each managed yard's effective host-access policy.
+Yards that forbid host access do not receive or probe the shared E2E route mount; a missing
+mount on such a yard is converged. Native device ownership checks still apply to every
+managed yard, and an existing forbidden mount blocks inspection until its owning lifecycle
+removes it. The historical one-time route migration retains its frozen contract.
+
+Ordinary `init`, including profile provisioning, checks host-wide release readiness after
+all lifecycle effects and before reporting successful completion. Remaining drift returns
+the release outcome and safe continuation; it does not reopen completed migrations or run
+an automatic migration from `start`. A later activation repair requires a fresh assessment
+and authorization.
+
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
 failures as errors. The operation boundary renders current `Outcome.Warnings`
@@ -1039,6 +1051,18 @@ The generic VM settings are:
 
 The block-volume adapter formats only a newly marked blank volume. It never hides nonempty `/srv`
 or overwrites an existing filesystem. The ordinary teardown state-retention policy still applies.
+
+Explicit `teardown --reset-config` extends the typed teardown assessment with metadata-only local
+settings inventory, namespace identities and the yard fallback ownership marker. Settings removal
+runs under the configuration root lock only after native physical teardown verification; local
+registrations are removed last. Stale settings, marker or namespace changes refuse apply. The
+marker is separate from the deleted yard scope and suppresses only nonlocal yard scalar/asset
+fallback, preserving shared/host resolution and the authored source. Completed named reset retries
+never infer a new physical deletion target from defaults. The physical boundary fences reachable
+SSH listeners, rejects proven active sessions, and uses existing profile service pause/remove hooks;
+absent SSH and an unavailable guest agent are valid cleanup states. Incus daemon unavailability
+fails closed. See [configuration reset](configuration.md#resetting-one-yard).
+
 Reporting returns unused guest pages to the immediate owner; it does not change configured memory,
 inflate the balloon, or reserve capacity for other workloads.
 The owner persists guest reporting order 1 through a root-owned `/etc/tmpfiles.d` rule and applies it

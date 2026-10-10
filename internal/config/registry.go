@@ -78,6 +78,13 @@ func FindYardRegistrationFile(configDir, configHome, name string) (string, error
 	if name == "default" || !domain.SafeName(name) {
 		return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 	}
+	reset, err := YardFallbackReset(configHome, name)
+	if err != nil {
+		return "", err
+	}
+	if reset {
+		return findFirstYardFile([]string{filepath.Join(configHome, "yards", name, "config.env"), filepath.Join(configHome, "yards", name+".env")}, name)
+	}
 	candidates := append(YardFileCandidates(configDir, configHome, name), filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
 	return findFirstYardFile(candidates, name)
 }

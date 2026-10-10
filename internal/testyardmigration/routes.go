@@ -33,11 +33,12 @@ type routeConsumersState struct {
 }
 
 type managedYard struct {
-	Project  string
-	Instance string
-	Yard     string
-	Status   string
-	Mounted  bool
+	Project          string
+	Instance         string
+	Yard             string
+	Status           string
+	Mounted          bool
+	AllowsHostAccess bool
 }
 
 // PrepareRouteConsumerActivation distinguishes a retained registration from a
@@ -105,6 +106,16 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (State
 // PrepareRouteConsumers snapshots every existing non-owner local yard before
 // the preceding owner operation changes e2e-yard into test-yard.
 func PrepareRouteConsumers(ctx context.Context, options Options) (string, error) {
+	return prepareRouteConsumers(ctx, options, false)
+}
+
+// PrepareRouteConsumersActivation snapshots current route consumers according
+// to their effective host-access policy, independently of the frozen migration.
+func PrepareRouteConsumersActivation(ctx context.Context, options Options) (string, error) {
+	return prepareRouteConsumers(ctx, options, true)
+}
+
+func prepareRouteConsumers(ctx context.Context, options Options, activation bool) (string, error) {
 	if err := validateOptions(&options); err != nil {
 		return "", err
 	}
@@ -122,12 +133,12 @@ func PrepareRouteConsumers(ctx context.Context, options Options) (string, error)
 	if _, err := inspectCurrentRoute(options); err != nil {
 		return "", err
 	}
-	yards, err := inspectManagedYards(ctx, options)
+	yards, err := inspectRouteConsumerYards(ctx, options, activation)
 	if err != nil {
 		return "", err
 	}
 	for _, yard := range yards {
-		if yard.Yard == LegacyYard || yard.Yard == CurrentYard {
+		if yard.Yard == LegacyYard || yard.Yard == CurrentYard || !yard.AllowsHostAccess {
 			continue
 		}
 		prepared.Consumers = append(prepared.Consumers, routeConsumerSnapshot{
@@ -147,6 +158,16 @@ func PrepareRouteConsumers(ctx context.Context, options Options) (string, error)
 // CommitRouteConsumers publishes the canonical route when needed and
 // live-attaches the shared read-only route registry to every prepared consumer.
 func CommitRouteConsumers(ctx context.Context, options Options, before string) error {
+	return commitRouteConsumers(ctx, options, before, false)
+}
+
+// CommitRouteConsumersActivation repairs only consumers whose effective policy
+// permits host access. It retains native ownership and prepared-inventory guards.
+func CommitRouteConsumersActivation(ctx context.Context, options Options, before string) error {
+	return commitRouteConsumers(ctx, options, before, true)
+}
+
+func commitRouteConsumers(ctx context.Context, options Options, before string, activation bool) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
@@ -155,9 +176,9 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 		return err
 	}
 	if !prepared.Active {
-		return VerifyRouteConsumers(ctx, options, before)
+		return verifyRouteConsumers(ctx, options, false, prepared, activation)
 	}
-	yards, err := validateCommitInventory(ctx, options, prepared, false)
+	yards, err := validateCommitInventory(ctx, options, prepared, false, activation)
 	if err != nil {
 		return err
 	}
@@ -181,7 +202,7 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 	if err := validateRouteSource(options); err != nil {
 		return err
 	}
-	yards, err = validateCommitInventory(ctx, options, prepared, true)
+	yards, err = validateCommitInventory(ctx, options, prepared, true, activation)
 	if err != nil {
 		return err
 	}
@@ -191,7 +212,7 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 		}
 	}
 	for _, yard := range yards {
-		if yard.Yard == LegacyYard || yard.Mounted {
+		if yard.Yard == LegacyYard || yard.Mounted || !yard.AllowsHostAccess {
 			continue
 		}
 		if _, err := runIncus(
@@ -217,7 +238,7 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 			)
 		}
 	}
-	if err := verifyRouteConsumers(ctx, options, true, prepared); err != nil {
+	if err := verifyRouteConsumers(ctx, options, true, prepared, activation); err != nil {
 		return err
 	}
 	fmt.Fprintln(options.Stdout, "reconciled shared E2E routes in existing local yards")
@@ -228,6 +249,16 @@ func CommitRouteConsumers(ctx context.Context, options Options, before string) e
 // created after the migration are accepted only when their own init already
 // attached the exact product-owned device.
 func VerifyRouteConsumers(ctx context.Context, options Options, before string) error {
+	return verifyPreparedRouteConsumers(ctx, options, before, false)
+}
+
+// VerifyRouteConsumersActivation checks the current eligible consumer set;
+// registration-only changes do not require replaying the historical migration.
+func VerifyRouteConsumersActivation(ctx context.Context, options Options, before string) error {
+	return verifyPreparedRouteConsumers(ctx, options, before, true)
+}
+
+func verifyPreparedRouteConsumers(ctx context.Context, options Options, before string, activation bool) error {
 	if err := validateOptions(&options); err != nil {
 		return err
 	}
@@ -235,7 +266,7 @@ func VerifyRouteConsumers(ctx context.Context, options Options, before string) e
 	if err != nil {
 		return err
 	}
-	return verifyRouteConsumers(ctx, options, false, prepared)
+	return verifyRouteConsumers(ctx, options, false, prepared, activation)
 }
 
 // VerifyRouteConsumersRollback checks the exact non-owner mount snapshot.
@@ -268,6 +299,7 @@ func verifyRouteConsumers(
 	options Options,
 	exact bool,
 	prepared routeConsumersState,
+	activation bool,
 ) error {
 	registration, err := inspectRegistration(options)
 	if err != nil {
@@ -295,7 +327,7 @@ func verifyRouteConsumers(
 	if !routeReady {
 		return errors.New("canonical test-yard route is unavailable")
 	}
-	yards, err := inspectManagedYards(ctx, options)
+	yards, err := inspectRouteConsumerYards(ctx, options, activation)
 	if err != nil {
 		return err
 	}
@@ -316,7 +348,7 @@ func verifyRouteConsumers(
 		}
 	}
 	for _, yard := range yards {
-		if yard.Yard == LegacyYard {
+		if yard.Yard == LegacyYard || !yard.AllowsHostAccess {
 			continue
 		}
 		if !yard.Mounted {
@@ -359,6 +391,7 @@ func validateCommitInventory(
 	options Options,
 	prepared routeConsumersState,
 	requireCurrent bool,
+	activation bool,
 ) ([]managedYard, error) {
 	registration, err := inspectRegistration(options)
 	if err != nil {
@@ -370,7 +403,7 @@ func validateCommitInventory(
 			registration.state,
 		)
 	}
-	yards, err := inspectManagedYards(ctx, options)
+	yards, err := inspectRouteConsumerYards(ctx, options, activation)
 	if err != nil {
 		return nil, err
 	}
@@ -487,11 +520,12 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 			)
 		}
 		result = append(result, managedYard{
-			Project:  instance.Project,
-			Instance: instance.Name,
-			Yard:     yardName,
-			Status:   instance.Status,
-			Mounted:  mounted,
+			Project:          instance.Project,
+			Instance:         instance.Name,
+			Yard:             yardName,
+			Status:           instance.Status,
+			Mounted:          mounted,
+			AllowsHostAccess: true,
 		})
 	}
 	sort.Slice(result, func(left, right int) bool {
@@ -499,6 +533,29 @@ func inspectManagedYards(ctx context.Context, options Options) ([]managedYard, e
 			consumerKey(result[right].Project, result[right].Instance)
 	})
 	return result, nil
+}
+
+func inspectRouteConsumerYards(ctx context.Context, options Options, activation bool) ([]managedYard, error) {
+	// Validate every native device before applying policy exclusions: a denied
+	// consumer must not hide a foreign, inherited or malformed route mount.
+	yards, err := inspectManagedYards(ctx, options)
+	if err != nil || !activation {
+		return yards, err
+	}
+	for index := range yards {
+		loaded, err := loadBrokerYard(options, yards[index].Yard)
+		if err != nil {
+			return nil, fmt.Errorf("inspect route consumer eligibility: %w", err)
+		}
+		yards[index].AllowsHostAccess = loaded.Environment["ALLOWS_HOST_ACCESS"] != "false"
+		if !yards[index].AllowsHostAccess && yards[index].Mounted {
+			return nil, fmt.Errorf(
+				"managed yard %s/%s has the shared E2E route mount but its effective policy forbids host access",
+				yards[index].Project, yards[index].Instance,
+			)
+		}
+	}
+	return yards, nil
 }
 
 func inspectCurrentRoute(options Options) (bool, error) {
@@ -617,7 +674,7 @@ func consumerKey(project, instance string) string {
 func nonOwnerYards(yards []managedYard) map[string]managedYard {
 	result := map[string]managedYard{}
 	for _, yard := range yards {
-		if yard.Yard == LegacyYard || yard.Yard == CurrentYard {
+		if yard.Yard == LegacyYard || yard.Yard == CurrentYard || !yard.AllowsHostAccess {
 			continue
 		}
 		result[consumerKey(yard.Project, yard.Instance)] = yard

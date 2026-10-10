@@ -35,6 +35,7 @@ configuration:
 | `overrides/host/` | File settings specific to this owner host |
 | `yards/<name>/config.env` | Yard definition and scalar settings, including `default` |
 | `yards/<name>/overrides/` | File settings specific to one yard |
+| `.yard-reset-<name>` | Local ownership marker suppressing previous nonlocal yard fallback after an explicit reset |
 | `secrets/` | Secret inputs, not settings |
 | `generated/` | Materialized consumers, not settings |
 | `keys/` | Encrypted credential ledger and its state |
@@ -49,6 +50,36 @@ Subyard rejects any managed path that is writable by its group or by other users
 choose the group and other read bits for existing files; Subyard does not treat those read bits as a
 confidentiality policy. New sensitive files are created with mode `0600` by default, without
 silently changing the mode of existing files during update or apply.
+
+## Resetting one yard
+
+Ordinary `yard teardown` preserves the selected yard's definition and local settings.
+`--keep-data` also retains its project, volume and shared infrastructure. To recreate a named yard
+with a fresh preset, use:
+
+```sh
+yard -Y demo teardown --reset-config
+yard -Y demo init --profile <profile>
+```
+
+`--reset-config` cannot be combined with `--keep-data`. It removes the captured selected-yard local
+registration, legacy local flat definition and all local overrides after physical cleanup verifies.
+An interrupted physical cleanup retains the configuration for retry; overrides are removed before
+registrations so an interrupted settings cleanup retains the original target identity. Active SSH
+sessions block teardown; an unfinished guest without SSH or an unavailable guest agent does not
+require a separate stop. An unavailable Incus daemon remains an error.
+
+The reset preserves HostID, credentials, shared and host settings, neighboring yards, and shared
+bridge/pool resources still in use. It leaves Git-authored definitions, their offline cache, and
+repository legacy definitions intact. A protected local marker prevents their yard scalars and
+file assets from silently reactivating the removed registration or influencing its replacement.
+A new local registration keeps that boundary; shared and host fallback still applies. Sync can
+refresh the retained Git source without registering the reset yard again.
+
+The default yard supports the same local reset and remains the implicit default context. Named
+yards disappear from configured inventory after reset. A repeated completed reset is available on
+the owner host with the same explicit local command; remote inventory cannot select a removed name.
+Recreate the yard on its owner before selecting it through remote inventory again.
 
 ## Scalar settings
 

@@ -112,6 +112,7 @@ type CLI struct {
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
 	configApplyRepair            *configApplyRepairPermit
+	allowResetYard               bool
 	resourceSessionTransport     string
 	resourceWire                 string
 	profileInitRepair            *configApplyRepairPermit
@@ -421,6 +422,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 		commandArguments = append([]string{"--yes"}, commandArguments...)
 	}
 	definition, core := cli.manifest.Lookup(name)
+	if core && definition.Handler == "@teardown" {
+		if execution, err := prepareTeardownExecution(commandArguments); err == nil && execution.resetConfig {
+			cli.allowResetYard = true
+		}
+	}
 	resourceDefinition, profileResource := cli.resources.Lookup(name)
 	if !core && !profileResource {
 		cli.errorf("unknown command %q\nTry %q.", name, cli.options.Program+" --help")
@@ -912,7 +918,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.options.Program)
 		return 0
 	case "@teardown":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s teardown [--keep-data]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s teardown [--keep-data | --reset-config]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "  --reset-config  remove selected local settings after cleanup; suppress previous nonlocal yard fallback")
 		return 0
 	}
 	if profileResource {
@@ -3098,7 +3105,7 @@ func (cli *CLI) operationOrchestrator(
 			"SUBYARD_PROJECT_DEVICE", "SUBYARD_PROJECT_EXISTS", "SUBYARD_PROJECT_PROFILES",
 			"SUBYARD_PROJECT_REMOVE_SOFT", "SUBYARD_PROJECT_REBUILD",
 			"SUBYARD_POWER_DESIRED", "SUBYARD_SUDO_PREAUTHORIZED", "SUBYARD_TEARDOWN_KEEP_DATA",
-			"SUBYARD_TEARDOWN_KEEP_SHARED",
+			"SUBYARD_TEARDOWN_KEEP_SHARED", "SUBYARD_TEARDOWN_RESET_CONFIG",
 			"SUBYARD_TEARDOWN_INVENTORY",
 			"SUBYARD_TEARDOWN_ARTIFACTS",
 			"SUBYARD_DISPATCHER_PATH",
@@ -3527,6 +3534,7 @@ func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (c
 		OperatorHome:     operatorHome,
 		YardName:         yard,
 		YardSettingsFile: yardSettingsFile,
+		AllowResetYard:   cli.allowResetYard,
 		Environment:      cli.env,
 	})
 }

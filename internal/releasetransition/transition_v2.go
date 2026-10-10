@@ -376,7 +376,17 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) (ou
 		}
 		base.Status = StatusMigrationRequired
 		base.Code = CodeTransitionRequired
-		base.Message = "the inspected release transition has not started"
+		resources := make([]string, 0)
+		for _, decision := range observation.decisions {
+			if decision.Scope == "activation" {
+				resources = append(resources, decision.Resource)
+			}
+		}
+		base.Message = "completed migrations remain applied; a new release activation repair requires authorization"
+		if len(resources) != 0 {
+			base.Message += ": " + strings.Join(resources, ", ")
+		}
+		base.Message = boundedFailureText(base.Message, maxDiagnosticText)
 		base.Retry = "run yard update"
 		return base
 	}

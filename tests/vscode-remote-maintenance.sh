@@ -20,6 +20,15 @@ out="$(sh "$ROOT/scripts/vscode-remote-maintenance.sh" check-active)"
 
 out="$(VSCODE_USER=missing-user sh "$ROOT/scripts/vscode-remote-maintenance.sh" check-active)"
 [ "$out" = unknown ] || fail "missing VS Code user was reported as $out"
+out="$(VSCODE_USER=missing-user sh "$ROOT/scripts/vscode-remote-maintenance.sh" check-ssh)"
+[ "$out" = idle ] || fail "SSH-only probe included a background editor or required a user"
+for process in sshd sshd-session; do
+  printf '%s\n' "$process" > "$SUBYARD_PROC_ROOT/123/comm"
+  out="$(VSCODE_USER=missing-user sh "$ROOT/scripts/vscode-remote-maintenance.sh" check-ssh)"
+  [ "$out" = active ] || fail "SSH-only probe missed $process without the developer account"
+  out="$(VSCODE_USER=missing-user sh "$ROOT/scripts/vscode-remote-maintenance.sh" check-active)"
+  [ "$out" = unknown ] || fail "SSH-only action changed check-active's missing-user protocol"
+done
 if sh "$ROOT/scripts/vscode-remote-maintenance.sh" sync >/dev/null 2>&1; then
   fail "retired extension-sync action is still accepted"
 fi

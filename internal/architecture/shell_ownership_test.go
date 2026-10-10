@@ -233,6 +233,8 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 	allowedSources := map[string]bool{
 		"runtime.sh": true, "engine-context.sh": true, "ui.sh": true,
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
+		"ssh-listener.sh":          true,
+		"teardown-session.sh":      true,
 		"ai-observer-proxy.sh":     true,
 		"preview-proxy.sh":         true,
 		"lib-vm-page-reporting.sh": true, "lib-vm-storage.sh": true,
@@ -385,6 +387,8 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/lib/host.sh":                  {"library", "scripts/01-install-incus.sh", `lib/host.sh`},
 		"scripts/lib/runtime.sh":               {"library", "scripts/01-install-incus.sh", `lib/runtime.sh`},
 		"scripts/lib/ssh-config.sh":            {"library", "scripts/07-ssh-access.sh", `lib/ssh-config.sh`},
+		"scripts/lib/ssh-listener.sh":          {"library", "scripts/lifecycle-guard.sh", `lib/ssh-listener.sh`},
+		"scripts/lib/teardown-session.sh":      {"library", "scripts/teardown-physical.sh", `lib/teardown-session.sh`},
 		"scripts/lib/ui.sh":                    {"library", "scripts/01-install-incus.sh", `lib/ui.sh`},
 		"scripts/lifecycle-guard.sh":           {"leaf", goPrepared, `"lifecycle-guard.sh"`},
 		"scripts/provision-profile.sh":         {"profile", goPrepared, `"scripts/provision-profile.sh"`},

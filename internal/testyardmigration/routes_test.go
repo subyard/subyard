@@ -214,6 +214,158 @@ func TestRouteConsumersSkipOwnerGuestProbeForStoppedCanonicalYard(t *testing.T) 
 	}
 }
 
+func TestRouteConsumersActivationUsesEffectiveHostAccessPolicy(t *testing.T) {
+	options, state := routeConsumerFixture(t, StateCurrent, true)
+	write(t, state.extra, "1\n")
+	writeIsolatedRouteTemplate(t, options)
+	// Resolve the role from the Git yard layer, even when the local override
+	// contains only the endpoint and the invoking yard allows host access.
+	write(t, filepath.Join(options.ConfigHome, config.GitSettingsRelativePath, "yards", "demo", "config.env"),
+		"YARD_TEMPLATE=isolated\n")
+	write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"), "SSH_PORT=2233\n")
+	options.Environment = withEnvironment(options.Environment, "ALLOWS_HOST_ACCESS", "true")
+	ctx := context.Background()
+	before, err := PrepareRouteConsumersActivation(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(before, `"yard":"demo"`) {
+		t.Fatalf("host-isolated yard entered the prepared consumer set: %s", before)
+	}
+	if err := VerifyRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), "lacks the shared") {
+		t.Fatalf("allowed missing mount did not produce drift: %v", err)
+	}
+	if err := CommitRouteConsumersActivation(ctx, options, before); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(read(t, state.defaultDevice)); got != "correct" {
+		t.Fatalf("allowed consumer was not repaired: %q", got)
+	}
+	if got := strings.TrimSpace(read(t, state.extraDevice)); got != "missing" {
+		t.Fatalf("denied consumer received a host mount: %q", got)
+	}
+	if strings.Contains(read(t, state.calls), "config device add yard-demo ") ||
+		strings.Contains(read(t, state.calls), "exec yard-demo ") {
+		t.Fatal("denied consumer reached route mutation or guest verification")
+	}
+	if err := VerifyRouteConsumersActivation(ctx, options, before); err != nil {
+		t.Fatal(err)
+	}
+	// Historical verification still enforces its frozen whole-host contract.
+	if err := VerifyRouteConsumers(ctx, options, before); err == nil {
+		t.Fatal("historical migration unexpectedly adopted activation eligibility")
+	}
+	// Both removing an isolated yard and adding a converged eligible yard are
+	// inventory changes without route work.
+	write(t, state.extra, "0\n")
+	if err := VerifyRouteConsumersActivation(ctx, options, before); err != nil {
+		t.Fatalf("removing an isolated yard created drift: %v", err)
+	}
+	write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"), "YARD_TEMPLATE=\nSSH_PORT=2233\n")
+	write(t, state.extraDevice, "correct\n")
+	write(t, state.extra, "1\n")
+	if err := VerifyRouteConsumersActivation(ctx, options, before); err != nil {
+		t.Fatalf("adding a converged consumer created drift: %v", err)
+	}
+	write(t, state.extra, "0\n")
+	if err := VerifyRouteConsumersActivation(ctx, options, before); err != nil {
+		t.Fatalf("removing a converged consumer created drift: %v", err)
+	}
+}
+
+func TestRouteConsumersActivationRejectsExcludedDeviceConflicts(t *testing.T) {
+	for _, device := range []string{"wrong", "inherited", "malformed", "correct"} {
+		t.Run(device, func(t *testing.T) {
+			options, state := routeConsumerFixture(t, StateCurrent, true)
+			write(t, state.extra, "1\n")
+			writeIsolatedRouteTemplate(t, options)
+			write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"),
+				"SSH_PORT=2233\nYARD_TEMPLATE=isolated\n")
+			ctx := context.Background()
+			before, err := PrepareRouteConsumersActivation(ctx, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, state.extraDevice, device+"\n")
+			expected := "foreign"
+			if device == "correct" {
+				expected = "forbids host access"
+			}
+			if _, err := PrepareRouteConsumersActivation(ctx, options); err == nil || !strings.Contains(err.Error(), expected) {
+				t.Fatalf("excluded route-device preparation: %v", err)
+			}
+			if err := VerifyRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), expected) {
+				t.Fatalf("excluded route-device verification: %v", err)
+			}
+			if err := CommitRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), expected) {
+				t.Fatalf("excluded route-device commit: %v", err)
+			}
+			if strings.Contains(read(t, state.calls), "config device") {
+				t.Fatal("conflicting device reached mutation")
+			}
+		})
+	}
+}
+
+func TestRouteConsumersHistoricalMigrationPreservesConsumerContract(t *testing.T) {
+	options, state := routeConsumerFixture(t, StateCurrent, true)
+	write(t, state.extra, "1\n")
+	writeIsolatedRouteTemplate(t, options)
+	write(t, filepath.Join(options.ConfigHome, "yards", "demo", "config.env"), "SSH_PORT=2233\nYARD_TEMPLATE=isolated\n")
+	ctx := context.Background()
+	before, err := PrepareRouteConsumers(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(before, `"yard":"demo"`) {
+		t.Fatal("historical snapshot changed its frozen whole-host consumer set")
+	}
+	if err := CommitRouteConsumers(ctx, options, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRouteConsumers(ctx, options, before); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(read(t, state.extraDevice)); got != "correct" {
+		t.Fatalf("historical mount contract changed: %q", got)
+	}
+}
+
+func TestRouteConsumersActivationRejectsEligibilityChangeBeforeCommit(t *testing.T) {
+	for _, template := range []string{"", "isolated"} {
+		t.Run(template, func(t *testing.T) {
+			options, state := routeConsumerFixture(t, StateCurrent, true)
+			write(t, state.extra, "1\n")
+			writeIsolatedRouteTemplate(t, options)
+			registration := filepath.Join(options.ConfigHome, "yards", "demo", "config.env")
+			settings := "SSH_PORT=2233\nYARD_TEMPLATE="
+			write(t, registration, settings+template+"\n")
+			ctx := context.Background()
+			before, err := PrepareRouteConsumersActivation(ctx, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := "isolated"
+			if template == "isolated" {
+				next = ""
+			}
+			write(t, registration, settings+next+"\n")
+			if err := CommitRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), "inventory changed") {
+				t.Fatalf("changed eligibility was not fenced: %v", err)
+			}
+			if strings.Contains(read(t, state.calls), "config device") {
+				t.Fatal("stale eligibility reached consumer mutation")
+			}
+		})
+	}
+}
+
+func writeIsolatedRouteTemplate(t *testing.T, options Options) {
+	t.Helper()
+	write(t, filepath.Join(options.RepositoryRoot, "config", "yards", "profiles", "isolated.env"),
+		"ALLOWS_HOST_ACCESS=false\nHOST_MOUNTS=\nHOST_LINKS=\nHOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n")
+}
+
 type routeFixtureState struct {
 	calls         string
 	yardCalls     string
@@ -222,6 +374,7 @@ type routeFixtureState struct {
 	defaultDevice string
 	defaultStatus string
 	extra         string
+	extraDevice   string
 	ownerAddress  string
 }
 
@@ -256,6 +409,7 @@ func routeConsumerFixture(
 		defaultDevice: filepath.Join(root, "default-device"),
 		defaultStatus: filepath.Join(root, "default-status"),
 		extra:         filepath.Join(root, "extra"),
+		extraDevice:   filepath.Join(root, "extra-device"),
 		ownerAddress:  filepath.Join(root, "owner-address"),
 	}
 	write(t, state.owner, owner+"\n")
@@ -309,6 +463,12 @@ device_json() {
     correct)
       printf '{"subyard-e2e-routes":{"type":"disk","source":"%s","path":"/var/lib/subyard/e2e-routes","readonly":"true"}}' "$ROUTE_SOURCE"
       ;;
+    inherited)
+      printf '{}'
+      ;;
+    malformed)
+      printf '{"subyard-e2e-routes":{"type":"disk","source":"%s","path":"/var/lib/subyard/e2e-routes"}}' "$ROUTE_SOURCE"
+      ;;
     wrong)
       printf '{"subyard-e2e-routes":{"type":"disk","source":"/foreign","path":"/var/lib/subyard/e2e-routes","readonly":"true"}}'
       ;;
@@ -339,7 +499,12 @@ if [ "$*" = "list --all-projects --format=json" ]; then
   fi
   if [ "$(cat "$ROUTE_EXTRA")" = 1 ]; then
     printf ','
-    instance_json subyard-demo yard-demo demo STOPPED '{}'
+    extra_devices="$(device_json "$ROUTE_EXTRA_DEVICE")"
+    if [ "$(cat "$ROUTE_EXTRA_DEVICE")" = inherited ]; then
+      printf '{"name":"yard-demo","project":"subyard-demo","status":"STOPPED","config":{"user.subyard.managed":"true","user.subyard.name":"demo"},"devices":{},"expanded_devices":{"subyard-e2e-routes":{"type":"disk"}}}'
+    else
+      instance_json subyard-demo yard-demo demo STOPPED "$extra_devices"
+    fi
   fi
   printf ']\n'
   exit 0
@@ -383,7 +548,7 @@ exit 2
 		t.Fatal(err)
 	}
 	currentDevice := filepath.Join(root, "current-device")
-	extraDevice := filepath.Join(root, "extra-device")
+	extraDevice := state.extraDevice
 	write(t, currentDevice, "correct\n")
 	write(t, extraDevice, "missing\n")
 	environment := append(
@@ -401,13 +566,15 @@ exit 2
 		"ROUTE_HOST_KEY="+hostKey,
 		"ROUTE_SOURCE="+filepath.Join(dataHome, "e2e", "routes"),
 		"ROUTE_ROOT="+routeRoot,
+		"SUBYARD_OPERATOR_HOME="+root,
 	)
 	return Options{
-		Executable:  executable,
-		Incus:       incus,
-		ConfigHome:  configHome,
-		DataHome:    dataHome,
-		Environment: environment,
+		RepositoryRoot: brokerRepository(t, filepath.Join(root, "candidate")),
+		Executable:     executable,
+		Incus:          incus,
+		ConfigHome:     configHome,
+		DataHome:       dataHome,
+		Environment:    environment,
 	}, state
 }
 

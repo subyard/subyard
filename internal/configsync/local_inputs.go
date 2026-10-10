@@ -150,12 +150,14 @@ func candidateYardNames(configHome string, source sourceSnapshot, previous Manif
 
 func observeLocalInputs(configHome string, source sourceSnapshot, previous Manifest) ([]localInputObservation, error) {
 	paths := map[string]bool{"config.env": true, "overrides/shared/config.env": true, "yards/default/config.env": true}
+	paths[filepath.Base(config.YardResetMarkerPath(configHome, "default"))] = true
 	yards, err := candidateYardNames(configHome, source, previous)
 	if err != nil {
 		return nil, err
 	}
 	for _, name := range yards {
 		paths[filepath.ToSlash(filepath.Join("yards", name, "config.env"))] = true
+		paths[filepath.Base(config.YardResetMarkerPath(configHome, name))] = true
 	}
 	for path := range source.files {
 		paths[localSettingsPath(path)] = true

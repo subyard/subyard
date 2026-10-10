@@ -104,7 +104,7 @@ check_go_race() {
   bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \
     './internal/testkit:TestWriteFileSetsExactModeOnCreateAndReplace|TestTempDirIsPrivate' \
     './internal/state:TestProjectStoreConformance' \
-    './internal/config:TestWritePersistentAssignmentPreservesUnrelatedRecords|TestCreatePersistentFileRefusesExistingTarget|TestCreatePersistentFileCreatesMissingConfigurationRoot|TestYardRegistrationRepairMovesFlatRegistrationToRecovery' \
+    './internal/config:TestWritePersistentAssignmentPreservesUnrelatedRecords|TestCreatePersistentFileRefusesExistingTarget|TestCreatePersistentFileCreatesMissingConfigurationRoot|TestYardRegistrationRepairMovesFlatRegistrationToRecovery|TestYardResetMarkerModeDoesNotDependOnUmask' \
     './internal/configsync:TestConfigurationSourceRecordIsProtectedAndIdempotent|TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings|TestVersionedConfigSyncDefaultYardAssets' \
     './internal/migration:TestSourceInstallMigrationAndRecovery' \
     './internal/testyardmigration:TestCommitAcceptsCompatiblePublishedRegistrationModes' \

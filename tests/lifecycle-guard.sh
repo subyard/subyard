@@ -177,6 +177,27 @@ grep -Fxq ssh-restore "$MOCK_INCUS_LOG" \
 if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "failed listener quiescence reached incus stop"; fi
 
 reset_case
+MOCK_QUIESCE_STATE=unsupported
+if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
+  fail "stop accepted an unsupported SSH KillMode"
+fi
+grep -Fq 'KillMode' "$TMP/out" || fail "unsupported SSH listener failure is unclear"
+if grep -Fxq ssh-quiesce "$MOCK_INCUS_LOG"; then fail "unsupported listener was stopped"; fi
+
+reset_case
+MOCK_QUIESCE_RC=9
+if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
+  fail "stop accepted unavailable listener state"
+fi
+if grep -Fxq ssh-quiesce "$MOCK_INCUS_LOG"; then fail "unavailable listener was stopped"; fi
+
+reset_case
+MOCK_VSCODE_STATE=active
+"$ROOT/scripts/lifecycle-guard.sh" stop --reconcile > "$TMP/out" 2>&1
+grep -Fxq stop "$MOCK_INCUS_LOG" || fail "reconcile stop did not reach incus stop"
+if grep -Fxq ssh-snapshot "$MOCK_INCUS_LOG"; then fail "reconcile stop entered the session guard"; fi
+
+reset_case
 printf 'unmanaged\n' > "$MOCK_PROFILE_MARKER"
 "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1
 if grep -Fxq profile-stop "$MOCK_INCUS_LOG" || grep -Fxq profile-start "$MOCK_INCUS_LOG"; then

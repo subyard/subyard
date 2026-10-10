@@ -490,12 +490,15 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}, nil)
 		if err == nil && execution.profileProvisionChanged() {
 			result, err = cli.executeInitProfileProvision(ctx, execution, orchestrator, prepared.Plan, diagnostics)
-			if err == nil {
-				fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
-			}
 		}
 		if err == nil && cli.profileInitRepair != nil {
 			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
+		}
+		if err == nil && !cli.releaseTransitionChild {
+			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
+		}
+		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() {
+			fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 		}
 		return result, err
 	}

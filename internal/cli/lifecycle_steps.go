@@ -170,7 +170,12 @@ func checkTeardownSnapshot(before, after *teardownSnapshot) error {
 	return nil
 }
 
-func (execution *teardownExecution) binding() string { return operationStateDigest(execution.snapshot) }
+func (execution *teardownExecution) binding() string {
+	return operationStateDigest(struct {
+		Physical      *teardownSnapshot
+		Configuration *teardownConfigSnapshot
+	}{execution.snapshot, execution.configSnapshot})
+}
 func (execution *teardownExecution) steps(yard domain.Context) []domain.OperationStep {
 	if execution == nil || execution.snapshot == nil {
 		return nil
@@ -190,7 +195,7 @@ func (execution *teardownExecution) steps(yard domain.Context) []domain.Operatio
 			decision = domain.StepConditional
 			desired = "absent only if no surviving instance or registered local yard uses shared infrastructure"
 		}
-		if execution.keepData && resource.Kind != "instance" {
+		if execution.completedReset || execution.keepData && resource.Kind != "instance" {
 			decision = domain.StepSkip
 			desired = "preserved"
 		}
@@ -203,10 +208,27 @@ func (execution *teardownExecution) steps(yard domain.Context) []domain.Operatio
 		}
 		steps = append(steps, domain.OperationStep{ID: fmt.Sprintf("artifact-%d", index), Target: "yard-artifact/" + artifact.Path, Observed: map[bool]string{true: "present", false: "absent"}[artifact.Binding != ""], Desired: "absent", Decision: decision, Preconditions: []string{"captured artifact metadata remains unchanged"}, Verify: "selected-yard artifact absent", Consequence: "remove the captured selected-yard artifact"})
 	}
+	if execution.resetConfig && execution.configSnapshot != nil {
+		for index, artifact := range execution.configSnapshot.Artifacts {
+			decision := domain.StepApply
+			if artifact.Binding == "" {
+				decision = domain.StepSkip
+			}
+			steps = append(steps, domain.OperationStep{ID: fmt.Sprintf("local-settings-%d", index), Target: "yard-local-settings/" + artifact.Path, Observed: map[bool]string{true: "present", false: "absent"}[artifact.Binding != ""], Desired: "absent", Decision: decision, Preconditions: []string{"captured local settings metadata and namespace unchanged", "physical teardown verified"}, Verify: "selected local settings absent", Consequence: "remove captured selected-yard local settings and overrides"})
+		}
+		decision := domain.StepApply
+		if execution.configSnapshot.Reset {
+			decision = domain.StepSkip
+		}
+		steps = append(steps, domain.OperationStep{ID: "yard-fallback-ownership", Target: "yard/" + yard.YardName + "/fallback-ownership", Observed: map[bool]string{true: "local", false: "inherited"}[execution.configSnapshot.Reset], Desired: "local", Decision: decision, Preconditions: []string{"captured ownership marker unchanged", "physical teardown verified"}, Verify: "previous nonlocal yard fallback suppressed", Consequence: "preserve shared sources and prevent old yard settings reactivation"})
+	}
 	return steps
 }
 
 func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execution *teardownExecution) error {
+	if execution.completedReset {
+		return nil
+	}
 	if execution.revokeAgent {
 		status, err := (sshagentruntime.Manager{Config: sshagentruntime.Config{Directory: sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName)}}).Status(ctx)
 		if err != nil {

@@ -24,6 +24,9 @@ import (
 
 type teardownExecution struct {
 	keepData        bool
+	resetConfig     bool
+	configSnapshot  *teardownConfigSnapshot
+	completedReset  bool
 	changed         bool
 	physicalChanged bool
 	networkRemoval  *yardnetwork.RemovalPlan
@@ -84,11 +87,16 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 		case "-y", "--yes":
 		case "--keep-data":
 			execution.keepData = true
+		case "--reset-config":
+			execution.resetConfig = true
 		case "-h", "--help":
 			return nil, errors.New("help is not an executable teardown operation")
 		default:
 			return nil, fmt.Errorf("unknown teardown argument %q", argument)
 		}
+	}
+	if execution.keepData && execution.resetConfig {
+		return nil, errors.New("--reset-config cannot be combined with --keep-data")
 	}
 	return execution, nil
 }
@@ -96,6 +104,7 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 func (execution *teardownExecution) policy(definition command.Definition, yard domain.Context) domain.CommandPolicy {
 	consequences := []string{
 		"delete yard instance " + yard.YardInstanceName,
+		"refuse deletion while a reachable yard has an active SSH session",
 		"remove this yard's SSH config and project state",
 	}
 	if execution.keepData {
@@ -109,6 +118,9 @@ func (execution *teardownExecution) policy(definition command.Definition, yard d
 	}
 	if execution.networkRemoval != nil {
 		consequences = append(consequences, execution.networkRemoval.Consequences...)
+	}
+	if execution.resetConfig {
+		consequences = append(consequences, "remove all captured local settings and overrides for this yard after physical cleanup verifies", "keep a local ownership marker that suppresses previous Git and repository yard fallback; preserve shared and host settings")
 	}
 	return domain.CommandPolicy{
 		Name: definition.Name, Effect: domain.CommandEffect(definition.Effect),
@@ -127,7 +139,7 @@ func (execution *teardownExecution) actionPlan(
 	if execution.keepData {
 		action = "yard.teardown.keep-data"
 	}
-	if !execution.physicalChanged && execution.snapshot != nil && execution.snapshot.Agent != nil && execution.snapshot.Agent.State() == "locked" && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
+	if !execution.resetConfig && !execution.physicalChanged && execution.snapshot != nil && execution.snapshot.Agent != nil && execution.snapshot.Agent.State() == "locked" && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
 		action = "yard.network.save"
 		if execution.networkRemoval.Stored.Policy.Isolation {
 			action = "yard.network.apply"
@@ -211,6 +223,45 @@ func (cli *CLI) observeTeardownExecution(
 		}
 	}
 	execution.physicalChanged = execution.changed
+	if execution.resetConfig {
+		observed, err := captureTeardownConfig(loaded.Context)
+		if err != nil {
+			return err
+		}
+		if observed.Reset && loaded.Context.YardName != "default" {
+			_, registrationErr := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
+			if errors.Is(registrationErr, config.ErrUnknownYard) && (incusState.InstanceFound || incusState.ProjectFound || incusState.VolumeFound || incusState.ProfileFound) {
+				return errors.New("completed configuration reset has no registered physical target; refusing derived resource deletion")
+			}
+			if registrationErr != nil && !errors.Is(registrationErr, config.ErrUnknownYard) {
+				return registrationErr
+			}
+			execution.completedReset = errors.Is(registrationErr, config.ErrUnknownYard)
+			if execution.completedReset {
+				for _, artifact := range snapshot.Artifacts {
+					if artifact.Binding != "" {
+						return errors.New("unregistered reset yard acquired runtime artifacts; register the target before teardown")
+					}
+				}
+				if snapshot.Agent.State() != "locked" {
+					return errors.New("unregistered reset yard acquired an SSH signing grant")
+				}
+				execution.physicalChanged = false
+				execution.changed = false
+			}
+		}
+		if execution.configSnapshot != nil {
+			if err := checkTeardownConfig(execution.configSnapshot, observed); err != nil {
+				return err
+			}
+		} else {
+			execution.configSnapshot = observed
+		}
+		execution.changed = execution.changed || !observed.Reset
+		for _, artifact := range observed.Artifacts {
+			execution.changed = execution.changed || artifact.Binding != ""
+		}
+	}
 	if execution.revokeAgent && snapshot.Agent.State() != "locked" {
 		execution.changed = true
 	}
@@ -226,6 +277,9 @@ func (cli *CLI) observeTeardownExecution(
 		return domain.ErrPlanStale
 	}
 	execution.networkRemoval = &removal
+	if execution.completedReset && removal.Cleanup {
+		return errors.New("unregistered reset yard acquired network policy; register the target before teardown")
+	}
 	execution.changed = execution.changed || removal.Cleanup
 	return nil
 }
@@ -277,6 +331,10 @@ func (cli *CLI) executeTeardown(
 	} else {
 		contextValues["SUBYARD_TEARDOWN_KEEP_DATA"] = "0"
 	}
+	contextValues["SUBYARD_TEARDOWN_RESET_CONFIG"] = "0"
+	if execution.resetConfig {
+		contextValues["SUBYARD_TEARDOWN_RESET_CONFIG"] = "1"
+	}
 	yards, err := cli.powerYardContexts(loaded)
 	if err != nil {
 		return domain.AdapterResult{}, fmt.Errorf("discover local yards before teardown: %w", err)
@@ -323,6 +381,9 @@ func (cli *CLI) executeTeardown(
 	}
 	if err == nil && result.Status == "ok" {
 		err = cli.verifyTeardown(ctx, loaded, execution)
+	}
+	if err == nil && result.Status == "ok" && execution.resetConfig {
+		err = cli.resetTeardownConfiguration(ctx, loaded, execution)
 	}
 	return result, err
 }

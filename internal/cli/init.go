@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -852,10 +853,24 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := finalizer.Apply(ctx, execution.approvedFinalize); err != nil {
 		return err
 	}
-	if execution.profileProvision == nil {
-		fmt.Fprintln(output, "  [ ok ] Subyard initialized")
-	}
 	return nil
+}
+
+// Inspection follows every lifecycle effect, including profile provisioning.
+// Release-transition children leave completion to their protected owner.
+func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) error {
+	outcome, err := cli.inspectMutationGate(ctx, yard)
+	if err != nil {
+		return fmt.Errorf("inspect release readiness after init: %w", err)
+	}
+	if outcome == nil {
+		return nil
+	}
+	payload, err := json.Marshal(publicMutationGateOutcome(*outcome))
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("release readiness after init: %s", payload)
 }
 
 func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *CLI) error {

@@ -419,6 +419,51 @@ class OwnerHandlerTest(unittest.TestCase):
                 handler.prepare('down')
         status.assert_called_once()
 
+    def test_child_failure_reports_only_known_operation_and_original_exit_code(self):
+        private = 'synthetic-private-value'
+        cases = [
+            (('incus', 'query', private), 'incus query'),
+            (('incus', 'exec', private, '--project', private, '--', 'python3', handler.RUNTIME,
+              'up', '--endpoint', private), 'incus guest runtime up'),
+            (('incus', 'config', 'device', 'add', private, 'amnezia-vpn', 'proxy',
+              'listen=' + private), 'incus config device add'),
+            (('incus', 'config', 'device', 'remove', private, private), 'incus config device remove'),
+            (('incus', 'config', 'set', private, private, private), 'incus config set'),
+            (('incus', 'config', 'unset', private, private), 'incus config unset'),
+            (('incus', private), 'incus'),
+            ((private, private), 'command'),
+        ]
+        for verb in ('down', 'observe', 'observe-management'):
+            cases.append((('incus', 'exec', private, '--project', private, '--',
+                           'python3', handler.RUNTIME, verb), 'incus guest runtime ' + verb))
+        for index, (arguments, operation) in enumerate(cases, 1):
+            failure = subprocess.CompletedProcess(arguments, index, private.encode(), private.encode())
+            with self.subTest(operation=operation), \
+                    mock.patch.object(handler.subprocess, 'run', return_value=failure) as child, \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(RuntimeError) as caught:
+                    handler.run(*arguments)
+                self.assertEqual(str(caught.exception),
+                                 f'owner or guest command failed: {operation}; exit={index}')
+                self.assertNotIn(private, str(caught.exception))
+                self.assertEqual(output.getvalue() + errors.getvalue(), '')
+                self.assertEqual(child.call_args.kwargs['stderr'], subprocess.DEVNULL)
+                self.assertIs(handler.run(*arguments, check=False), failure)
+
+        failure = subprocess.CompletedProcess([], 23, private.encode(), private.encode())
+        with mock.patch.object(subprocess, 'run', return_value=failure), \
+                mock.patch.dict(os.environ, SUBYARD_ENGINE_CONTEXT='1', YARD_INSTANCE_NAME=private,
+                                INCUS_PROJECT=private), \
+                mock.patch.object(sys, 'argv', ['vpn', 'up']), \
+                contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as status:
+                runpy.run_path(str(PROFILE / 'resources/vpn/handler.py'), run_name='__main__')
+        self.assertEqual(status.exception.code, 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertEqual(errors.getvalue().strip(), 'vpn: owner or guest command failed: incus query; exit=23')
+
     def test_guest_shutdown_timeout_is_bounded_and_reported_as_unverified(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             handler.run(sys.executable, '-c', 'import time; time.sleep(1)', timeout=0.02)

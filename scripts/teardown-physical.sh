@@ -42,7 +42,7 @@ approved_names() { python3 "$TEARDOWN_GUARD" list "$1"; }
 guard_resource() { python3 "$TEARDOWN_GUARD" guard "$1" "$2" "$INCUS_PROJECT" "${3:-}" || die "plan_stale: teardown resource changed after confirmation"; }
 require_root "removing the NetworkManager guard, ufw rules, and the Incus storage data needs root"
 
-if [ "$KEEP_DATA" = 0 ] && command -v incus >/dev/null 2>&1 && ! incus info >/dev/null 2>&1; then
+if command -v incus >/dev/null 2>&1 && ! incus info >/dev/null 2>&1; then
   die "incus is installed but its daemon is unreachable — start or repair incusd before teardown (a down daemon must not be treated as 'nothing to remove'; see incident #33)"
 fi
 
@@ -54,6 +54,9 @@ bridge_gone=0; pool_gone=0
 
 python3 "$TEARDOWN_GUARD" guard-all "$INCUS_PROJECT" || die "plan_stale: teardown inventory changed before apply"
 python3 "$TEARDOWN_GUARD" guard-artifacts || exit 75
+# shellcheck source=scripts/lib/teardown-session.sh
+. "$SCRIPT_DIR/lib/teardown-session.sh"
+teardown_session_guard "$YARD_INSTANCE_NAME"
 bash "$SCRIPT_DIR/profile-services.sh" --remove
 
 echo "Instance:"
@@ -189,7 +192,9 @@ case "$state_cleanup" in
   preserved) warn "kept non-canonical yard state path: $YARD_STATE_DIR" ;;
   *) die "unexpected yard state cleanup result" ;;
 esac
-if [ -n "${YARD_NAME:-}" ]; then
+if [ "${SUBYARD_TEARDOWN_RESET_CONFIG:-0}" = 1 ]; then
+  : # The Go configuration boundary retains its captured directory until physical verification.
+elif [ -n "${YARD_NAME:-}" ]; then
   rmdir "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME" 2>/dev/null || true
   rmdir "$SUBYARD_CONFIG_HOME/yards" 2>/dev/null || true
 else
@@ -220,16 +225,11 @@ if [ "$KEEP_DATA" = 0 ]; then
 fi
 
 echo
-if [ "$KEEP_DATA" = 1 ]; then ok "Subyard teardown done (data kept)."; else ok "Subyard teardown done."; fi
-cat <<MSG
-
-Verify the host is clean (use sudo — plain 'incus' fails without the incus-admin group):
-  sudo incus list --all-projects      # expect an empty table
-  sudo incus network list             # no '$BRIDGE'
-  ip route show default               # only your real gateway — no veth/$BRIDGE default
-  ip -br link show | grep -iE 'veth|$BRIDGE' || echo 'no incus interfaces (good)'
-
-Rebuild any time:   yard init
-To ALSO remove Incus itself (DANGEROUS — only if nothing else on this host uses it):
-  sudo apt-get remove --purge incus incus-client     # all instances must be gone first
-MSG
+trap - EXIT
+if [ "${SUBYARD_TEARDOWN_RESET_CONFIG:-0}" = 1 ]; then
+  ok "Yard runtime cleanup applied; verification and local settings cleanup follow."
+elif [ "$KEEP_DATA" = 1 ]; then
+  ok "Subyard teardown done (data kept)."
+else
+  ok "Subyard teardown done."
+fi
