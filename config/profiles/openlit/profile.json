@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "selected_provision_only": true,
+  "owner_service": "owner.sh",
+  "runtime": {
+    "activation_id": "openlit-runtime",
+    "handler": "runtime.sh"
+  }
+}

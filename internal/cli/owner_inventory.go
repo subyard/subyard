@@ -419,10 +419,32 @@ func (cli *CLI) allOwnerInventories(
 func (cli *CLI) allOwnerInventoriesReadOnly(
 	ctx context.Context, loaded config.Loaded, force bool,
 ) []ownerInventoryResult {
+	return cli.observeOwnerInventories(ctx, loaded, force, false)
+}
+
+// Status may refresh controller metadata for a previously verified owner. Other
+// read consumers keep strict identity checks and never adopt a host rename.
+func (cli *CLI) allOwnerInventoriesForStatus(
+	ctx context.Context, loaded config.Loaded,
+) []ownerInventoryResult {
+	return cli.observeOwnerInventories(ctx, loaded, false, true)
+}
+
+func (cli *CLI) observeOwnerInventories(
+	ctx context.Context, loaded config.Loaded, force, refreshTrusted bool,
+) []ownerInventoryResult {
 	local, err := cli.ownerInventoryReadOnly(ctx, loaded)
 	results := []ownerInventoryResult{{inventory: local, fetchedAt: local.ObservedAt, err: err}}
 	root := loaded.Context.Paths.DataHome + "/owner-inventory"
-	connections, err := (ownerinventory.Connections{Root: root}).ListReadOnly()
+	connectionStore := ownerinventory.Connections{Root: root}
+	var connections []ownerinventory.Connection
+	if refreshTrusted {
+		// Complete any durable controller transaction before validating the
+		// published connections, which may contain both sides of a rename.
+		connections, err = connectionStore.List()
+	} else {
+		connections, err = connectionStore.ListReadOnly()
+	}
 	if err != nil {
 		return append(results, ownerInventoryResult{err: err})
 	}
@@ -487,6 +509,22 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 				}
 				return
 			}
+			if refreshTrusted && connection.Trust != nil {
+				read := (ownerinventory.Service{
+					Cache: cache, Store: &connectionStore, Clock: cli.options.Clock,
+					Fetch: func(fetchCtx context.Context, _ string) (domain.OwnerInventory, error) {
+						client, err := connectionStore.TrustedSSHClient(connection, "ssh", 3*time.Second)
+						if err != nil {
+							return domain.OwnerInventory{}, err
+						}
+						return ownerinventory.RefreshConnection(fetchCtx, client, connectionStore, connection, nowUTC(cli))
+					},
+				}).Read(common, connection.HostID, force)
+				remote[index] = ownerInventoryResult{
+					inventory: read.Inventory, fetchedAt: read.FetchedAt, stale: read.Stale, err: read.Err,
+				}
+				return
+			}
 			process, transportErr := transport.SSH("ssh", connection.Destination, 3*time.Second)
 			if transportErr == nil {
 				process.Timeout = 8 * time.Second
@@ -494,6 +532,10 @@ func (cli *CLI) allOwnerInventoriesReadOnly(
 				if fetchErr == nil {
 					remote[index] = ownerInventoryResult{inventory: inventory, fetchedAt: now}
 					return
+				}
+				if refreshTrusted && connection.Trust == nil && errors.Is(fetchErr, ownerinventory.ErrIntegrity) &&
+					inventory.HostID != "" && inventory.HostID != connection.HostID {
+					fetchErr = fmt.Errorf("%w; legacy owner connection has no managed SSH trust; run yard host repair %s to confirm its SSH key and owner identity", fetchErr, connection.HostID)
 				}
 				transportErr = fetchErr
 			}

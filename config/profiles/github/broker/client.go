@@ -30,7 +30,11 @@ type Client struct {
 
 func (client Client) socketPath() (string, error) {
 	if client.SocketPath != "" {
-		return client.SocketPath, nil
+		path, err := filepath.Abs(client.SocketPath)
+		if err != nil {
+			return "", errors.New("cannot resolve GitHub broker socket path")
+		}
+		return path, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -78,13 +82,27 @@ func (client Client) request(ctx context.Context, method, path string, body io.R
 		return nil, response.StatusCode, errors.New("broker response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Only broker-owned diagnostics may pass through; never upstream bodies.
+		for _, safe := range []error{errRepositoryUnavailable, errInstallationLookup, errTokenRejected} {
+			if strings.TrimSpace(string(payload)) == safe.Error() {
+				return nil, response.StatusCode, safe
+			}
+		}
 		return nil, response.StatusCode, errors.New("GitHub broker rejected the request")
 	}
 	return payload, response.StatusCode, nil
 }
 
-func (client Client) token(ctx context.Context) (Token, error) {
-	body, _, err := client.request(ctx, http.MethodPost, "/token", nil)
+func (client Client) token(ctx context.Context, repository string) (Token, error) {
+	var selection io.Reader
+	if repository != "" {
+		if !validRepository(repository) {
+			return Token{}, errors.New("invalid GitHub repository; use owner/repo")
+		}
+		body, _ := json.Marshal(map[string]string{"repository": repository})
+		selection = strings.NewReader(string(body))
+	}
+	body, _, err := client.request(ctx, http.MethodPost, "/token", selection)
 	if err != nil {
 		return Token{}, err
 	}
@@ -98,7 +116,7 @@ func (client Client) token(ctx context.Context) (Token, error) {
 	return token, nil
 }
 
-func runChild(ctx context.Context, command []string, token string, stdin io.Reader, stdout, stderr io.Writer) int {
+func runChild(ctx context.Context, client Client, command []string, token, repository string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(command) == 0 {
 		fmt.Fprintln(stderr, "github-broker: run requires a command")
 		return 2
@@ -115,20 +133,36 @@ func runChild(ctx context.Context, command []string, token string, stdin io.Read
 	environment := make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && (key == "GH_TOKEN" || key == "GITHUB_TOKEN" || key == "GIT_CONFIG_COUNT") {
+		if ok && (key == "GH_TOKEN" || key == "GITHUB_TOKEN" || key == "GIT_CONFIG_COUNT" || (repository != "" && key == "GH_REPO")) {
 			continue
 		}
 		environment = append(environment, entry)
 	}
 	// Git reads these only for this command and its children. No credential store
 	// or user configuration is changed. Store/erase are deliberately no-ops.
-	const helper = `!f() { if [ "$1" = get ]; then printf 'username=x-access-token\npassword=%s\n\n' "$GH_TOKEN"; fi; }; f`
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "github-broker: cannot locate Git credential client")
+		return 1
+	}
+	socket, err := client.socketPath()
+	if err != nil {
+		fmt.Fprintln(stderr, "github-broker:", err)
+		return 1
+	}
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+	helper := "!" + quote(executable) + " _github-client --socket " + quote(socket) + " credential"
 	environment = append(environment, "GH_TOKEN="+token,
-		"GIT_CONFIG_COUNT="+strconv.Itoa(count+2),
+		"GIT_CONFIG_COUNT="+strconv.Itoa(count+3),
 		"GIT_CONFIG_KEY_"+strconv.Itoa(count)+"=credential.https://github.com.helper",
 		"GIT_CONFIG_VALUE_"+strconv.Itoa(count)+"=",
 		"GIT_CONFIG_KEY_"+strconv.Itoa(count+1)+"=credential.https://github.com.helper",
-		"GIT_CONFIG_VALUE_"+strconv.Itoa(count+1)+"="+helper)
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(count+1)+"="+helper,
+		"GIT_CONFIG_KEY_"+strconv.Itoa(count+2)+"=credential.https://github.com.useHttpPath",
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(count+2)+"=true")
+	if repository != "" {
+		environment = append(environment, "GH_REPO="+repository)
+	}
 
 	process := exec.CommandContext(ctx, command[0], command[1:]...)
 	process.Env = environment
@@ -150,6 +184,7 @@ func runChild(ctx context.Context, command []string, token string, stdin io.Read
 type credentialInput struct {
 	protocol string
 	host     string
+	path     string
 }
 
 func readCredentialInput(input io.Reader) (credentialInput, error) {
@@ -171,6 +206,8 @@ func readCredentialInput(input io.Reader) (credentialInput, error) {
 			result.protocol = value
 		case "host":
 			result.host = value
+		case "path":
+			result.path = value
 		}
 	}
 	if err := scanner.Err(); err != nil || limited.N == 0 {
@@ -183,7 +220,7 @@ func readCredentialInput(input io.Reader) (credentialInput, error) {
 }
 
 func printHelp(output io.Writer) {
-	fmt.Fprintln(output, "usage: subyard-github [--socket PATH] run -- COMMAND [ARGS...]")
+	fmt.Fprintln(output, "usage: subyard-github [--socket PATH] run [--repo OWNER/REPO] -- COMMAND [ARGS...]")
 	fmt.Fprintln(output, "       subyard-github [--socket PATH] credential get|store|erase")
 	fmt.Fprintln(output, "       subyard-github [--socket PATH] status")
 	fmt.Fprintln(output, "run supplies short-lived GitHub CLI and Git HTTPS authorization only to COMMAND.")
@@ -209,29 +246,58 @@ func RunClient(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	}
 	switch args[0] {
 	case "run":
-		if len(args) < 3 || args[1] != "--" {
-			fmt.Fprintln(stderr, "github-broker: run requires -- COMMAND [ARGS...]")
+		args = args[1:]
+		repository := ""
+		if len(args) >= 2 && args[0] == "--repo" {
+			repository, args = args[1], args[2:]
+			if !validRepository(repository) {
+				fmt.Fprintln(stderr, "github-broker: invalid GitHub repository; use owner/repo")
+				return 2
+			}
+		}
+		if len(args) < 2 || args[0] != "--" {
+			fmt.Fprintln(stderr, "github-broker: run requires [--repo OWNER/REPO] -- COMMAND [ARGS...]")
 			return 2
 		}
-		token, err := client.token(ctx)
+		command := args[1:]
+		repository, err := commandRepository(ctx, command, repository)
+		if err != nil {
+			fmt.Fprintln(stderr, "github-broker:", err)
+			return 2
+		}
+		// Direct Git commands authorize at each credential URL. They must not
+		// fail first on an unrelated default installation or checkout origin.
+		token := Token{}
+		if filepath.Base(command[0]) != "git" || repository != "" {
+			token, err = client.token(ctx, repository)
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, "github-broker:", err)
 			return 1
 		}
-		return runChild(ctx, args[2:], token.Value, stdin, stdout, stderr)
+		return runChild(ctx, client, command, token.Value, repository, stdin, stdout, stderr)
 	case "credential":
 		if len(args) != 2 || (args[1] != "get" && args[1] != "store" && args[1] != "erase") {
 			fmt.Fprintln(stderr, "github-broker: credential requires get, store, or erase")
 			return 2
 		}
-		if _, err := readCredentialInput(stdin); err != nil {
+		input, err := readCredentialInput(stdin)
+		if err != nil {
 			fmt.Fprintln(stderr, "github-broker:", err)
 			return 1
 		}
 		if args[1] != "get" {
 			return 0
 		}
-		token, err := client.token(ctx)
+		repository := ""
+		if input.path != "" {
+			repository = strings.TrimSuffix(input.path, ".git")
+			if !validRepository(repository) {
+				fmt.Fprintln(stderr, "github-broker: invalid GitHub credential repository")
+				return 1
+			}
+		}
+		token, err := client.token(ctx, repository)
 		if err != nil {
 			fmt.Fprintln(stderr, "github-broker:", err)
 			return 1

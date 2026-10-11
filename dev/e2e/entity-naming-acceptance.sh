@@ -53,6 +53,7 @@ start_lease_keeper
 bundle="$LOCAL_TEMP/worktree.tar.gz"
 build_bundle "$ROOT" "$bundle"
 bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
+printf 'evidence: source_bundle_sha256=%s\n' "$bundle_hash"
 prepare_guest 1 "$bundle" "$bundle_hash"
 guest_root="${GUEST_DIRS[1]}"
 guest 1 chown -R dev:dev "$guest_root"

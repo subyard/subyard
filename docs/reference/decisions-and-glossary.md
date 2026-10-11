@@ -551,8 +551,12 @@ acceptance is distinct from package/VM readiness; see [Paseo](../paseo.md).
 
 ## GitHub App token broker
 
-App ID, installation ID and the RSA private key form one synchronized encrypted connection.
-Instances serving the same App installation use the same identifiers. One atomic owner-side
+App ID, default installation ID and the RSA private key form one synchronized encrypted connection.
+Repository-targeted requests discover that App's installation on the repository with owner-side
+App authentication; personal and organization installations remain independently selectable.
+Empty requests retain the configured default. No token aggregates installations or overrides their
+grants. Git HTTPS selects by credential URL; CLI wrappers select a repository explicitly or from
+supported native `gh` context. One atomic owner-side
 consumer file prevents mixing IDs and keys across revisions; local paths and transport identities
 are excluded. Existing PEM-only entries migrate through ordinary init, preserving local-only scope.
 

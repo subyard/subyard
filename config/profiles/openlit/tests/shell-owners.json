@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "owners": [
+    {
+      "path": "config/profiles/openlit/guest.sh",
+      "kind": "profile",
+      "owner": "config/profiles/openlit/owner.sh",
+      "reference": "guest.sh"
+    }
+  ]
+}

@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+// Exercise the same executable recursion as the installed credential helper.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "_github-client" {
+		os.Exit(RunClient(context.Background(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
 func brokerServer(t *testing.T, handler http.Handler) string {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "github.sock")
@@ -160,7 +168,7 @@ case "$credentials" in *"password=$GH_TOKEN"*) ;; *) exit 10 ;; esac
 [ "$(git config --get test.inherited)" = preserved ]
 printf '%s\n\n' "$credentials" | git credential approve
 `}, strings.NewReader(""), &stdout, &stderr)
-	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 || mints != 1 {
+	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 || mints != 2 {
 		t.Fatalf("Git wrapper failed: code=%d mints=%d (output withheld)", code, mints)
 	}
 	if data, err := os.ReadFile(configPath); err != nil || string(data) != original {

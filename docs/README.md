@@ -20,6 +20,7 @@ choices that widen it.
 
 ## Optional integrations
 
+- [OpenLIT native telemetry](openlit.md) — collect optional Claude Code and Codex native logs and metrics inside a yard.
 - [Android emulator leases](android.md) — request isolated phone/tablet runtimes and clean image caches.
 
 - [Paseo Desktop](paseo.md) — expose coding agents through a headless Paseo daemon and its hosted
