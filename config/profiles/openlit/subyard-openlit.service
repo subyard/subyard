@@ -1,0 +1,18 @@
+# Managed by Subyard OpenLIT profile.
+[Unit]
+Description=Subyard yard-local OpenLIT and native telemetry collector
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/var/lib/subyard/openlit
+ExecStart=/usr/bin/docker compose --env-file database.env -f compose.yaml up -d --pull never --wait --wait-timeout 60
+ExecStop=/usr/bin/docker compose --env-file database.env -f compose.yaml stop --timeout 20
+TimeoutStartSec=90
+TimeoutStopSec=90
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
