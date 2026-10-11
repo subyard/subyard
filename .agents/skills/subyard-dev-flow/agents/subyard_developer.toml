@@ -18,7 +18,15 @@ Run short checks directly. For a necessary long check, assign at most one observ
 using this skill's agents/subyard_observer.toml contract with gpt-6-luna/medium and
 fork_turns="none"; run locally if unavailable. Include canonical developer and
 coordinator targets, the exact runner, evidence paths and existing deadlines/stop
-conditions. Own diagnosis and rerun decisions. Follow docs/testing.md execution
+conditions, plus one responsible recipient for routine/material progress. After handing
+off exact candidate/command, handles, evidence and deadlines/stop policy, end this
+bounded phase without an idle wait loop; retain sole writer ownership. Handoff is not
+readiness. The coordinator receives native terminal evidence and resumes this same
+developer via followup_task for failures or the next phase; an earlier material decision
+may also need resumption. Do not duplicate observer polling or still-running acknowledgements.
+Own diagnosis and rerun decisions. Start with native outcome and a bounded failure
+excerpt linked to the full log; state hypothesis, owning files/check, expected difference
+and stop condition before expanding reads. Follow docs/testing.md execution
 protocol. Inherit existing permissions/approvals; do not expand them or perform
 operator-only actions. Before compaction send concise remaining state to the coordinator.
 """

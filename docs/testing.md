@@ -27,17 +27,23 @@ broker protected-file checks under `0002` and `0077`.
 Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)
 for roles and model settings. Preserve required coverage and candidate identity.
 
-- Only the assigned observer reads progress/logs; developer and coordinator may do independent work,
-  without duplicate polls or status requests. Process control, lease heartbeats and cleanup
-  remain runner-owned.
+- Only the assigned observer reads active progress/logs. The developer ends its bounded phase
+  after handing off the exact candidate, command, handles, evidence and deadlines/stop policy;
+  it retains writer ownership without an idle wait loop. The coordinator resumes that same
+  developer with `followup_task` for diagnosis or the next phase after native terminal evidence,
+  or a material event requiring an owned decision. This handoff is not readiness. Process control,
+  lease heartbeats and cleanup remain runner-owned.
 - Prefer supported completion events; necessary timed waits may still invoke the model.
-  Send interim messages only for material results, changed conditions or decisions.
-  Send failures, blocked/interrupted execution and cleanup problems immediately to both the
-  assigned developer and coordinator (canonical targets in the observer assignment).
+  Send routine/material progress to one responsible canonical recipient named in the assignment
+  (normally the coordinator while the developer phase has ended). Preserve operator updates.
+  Do not send duplicate progress to both roles or acknowledge/follow up merely to say still running.
+  Send failures, observation errors, blocked/interrupted execution and cleanup problems immediately
+  to both the assigned developer and coordinator (canonical targets in the observer assignment).
   Escalate questions and approvals when observed;
   never answer approvals for the operator.
-- Read native summaries/receipts first. Return one final report: run/check identity, check
-  and overall candidate statuses where applicable, original exit code, total duration and
+- Save the FULL native terminal tool object before any final artifact/projection read, even for
+  empty stdout with a nonzero exit. Then read native summaries/receipts first. Return one final report:
+  run/check identity, check and overall candidate statuses where applicable, original exit code, total duration and
   evidence paths. Verify every field; mark unavailable values explicitly. Use native duration
   or launch-to-completion time, never an individual wait's wall time. Preserve full logs;
   identify shortened output and include a relevant failure excerpt with its complete log path.
@@ -53,8 +59,93 @@ Start the prescribed runner once; retain its process/session handle and evidence
 Set wait intervals explicitly, about once a minute within tool limits and applicable rules:
 `exec_command` initial `yield_time_ms=30000`, then `write_stdin` with empty `chars` and
 `yield_time_ms=55000`; an enclosing `functions.exec` uses `yield_time_ms=60000` to cover
-the inner wait and bounded reads. Resume a yielded script cell before another process poll:
-its cell ID is distinct from the process session ID. Short default waits add model returns.
+the inner wait and bounded reads. One enclosing call contains only one long process poll;
+do not serialize several long polls in it. Resume a yielded script cell before another
+process poll: its cell ID is distinct from the process session ID. On an unchanged timeout, continue
+the same wait without rereading plans, receipts or logs or sending an acknowledgement. Short
+default waits add model returns; explicit outer timed yields can still cause model returns.
+Each completed timed observation step also returns to the model; this protocol does not remove inference.
+
+Copy the prescribed command as an exact code block/argv, with no prose punctuation. Before launch,
+verify its arguments, candidate, output directory, expected checks and capture paths. Keep one
+observer and one runner owner; never restart a runner to repair observation.
+
+[`dev/project-run-events.py`](../dev/project-run-events.py) reads only new complete JSONL records,
+omits heartbeats and returns a bounded batch plus the next cursor. Accept the whole successful
+projection before persisting its cursor outside the loop. It binds device/inode, observed size and
+a bounded anchor at the processed newline; truncation/replacement or malformed complete records
+produce explicit diagnostics, never an automatic offset reset. The journal stays untouched.
+An incomplete tail is deferred. Drain `backlog` batches without another long wait so failures and
+terminal events beyond the cap are reached. At native completion, an incomplete tail is incomplete
+observation evidence. The anchor detects changes near the cursor, not arbitrary historical edits;
+the existing journal remains append-only evidence, not a writable observation state.
+A single record must fit the byte cap (8 KiB in the template); oversized lines are diagnostics.
+If a valid native record needs a larger cap, adjust projection and output budgets explicitly.
+
+For tool-based observation, initialize `store("observer-run", state)` once with the process
+`session_id`, absolute `journal` path, unused `terminal_path` under `.build/` without newlines,
+`cursor: null`, `backlog: false` and `terminal: false`. Bind that state to the assigned candidate/command and retain
+it when resuming a cell or starting the next observation step. This single-run template executes
+poll and delta projection in the same cell; use the assigned working directory. After a material
+return, route progress to the designated recipient and alerts/terminal evidence to both roles,
+then continue the same state through cleanup. If the outer call yields, use `functions.wait` on
+that exact cell (up to 60000 ms within client limits); do not start another cell until it finishes.
+If launch itself returns a terminal exit, save that full native launch object and its artifact first,
+initialize `terminal: true` and drain projection without a process poll. Keep the accepted cursor
+and stream identity with handles/evidence in any compaction handoff; do not initialize it again.
+
+```js
+// @exec: {"yield_time_ms": 60000, "max_output_tokens": 24000}
+// observer-poll-template
+const state = load("observer-run");
+const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+if (!state.terminal && !state.backlog) {
+  const native = await tools.write_stdin({session_id: state.session_id, chars: "", yield_time_ms: 55000});
+  if (native.exit_code !== undefined && native.exit_code !== null) {
+    state.terminal = true;
+    store("observer-native-terminal", native); // Full object, before any artifact read.
+    store("observer-run", state);
+    const body = JSON.stringify(native, null, 2) + "\n";
+    await tools.apply_patch("*** Begin Patch\n*** Add File: " + state.terminal_path + "\n"
+      + body.trimEnd().split("\n").map(line => "+" + line).join("\n") + "\n*** End Patch");
+  }
+}
+while (true) {
+  let delta = {events: [], backlog: false};
+  let observation_error;
+  if (!state.projection_disabled) {
+    try {
+      const command = "python3 dev/project-run-events.py --max-bytes 8192 " + quote(state.journal)
+        + (state.cursor === null ? "" : " --cursor " + quote(JSON.stringify(state.cursor)));
+      const projection = await tools.exec_command({cmd: command, max_output_tokens: 24000});
+      if (projection.exit_code !== 0) throw new Error(projection.output.trim() || "projection did not finish");
+      delta = JSON.parse(projection.output);
+      state.cursor = delta.cursor; // Advance only after accepting the complete projection.
+      state.backlog = delta.backlog;
+    } catch (error) {
+      observation_error = error.message;
+      state.projection_disabled = true; // Continue native polling; repair observation explicitly.
+      state.backlog = false;
+    }
+  }
+  store("observer-run", state);
+  if (observation_error || delta.events.length || (state.terminal && !state.backlog)) {
+    text({events: delta.events, observation_error, terminal: state.terminal,
+      backlog: state.backlog, incomplete_bytes: delta.incomplete_bytes,
+      native_terminal: state.terminal ? state.terminal_path : undefined});
+    break;
+  }
+  if (!state.backlog) break; // Unchanged: no text/notify or second long poll.
+}
+```
+
+Keep the full native object in the persistent store if writing its artifact fails; report that
+failure to both roles and retrieve it without polling the terminal handle again. Projection errors
+after terminal cannot replace its exit code or lose the object. Observation errors leave the journal
+cursor unchanged and disable projection until explicitly repaired; continue the same runner's native
+completion/cleanup. Full logs and native receipts retain authority. The template is an observation
+step, not a runner, receipt writer or replacement controller. Its host-free checks are
+`python3 -B dev/project-run-events-test.py` and `node dev/observer-poll-test.mjs`.
 
 For parallel acceptance, read new `check-result` events/current receipt as well as process
 completion. Report failed/blocked checks when observed, without waiting for `run-result`;
@@ -62,6 +153,8 @@ keep observing the same controller through completion and cleanup unless the ass
 directs an owned interruption. Then return the final report and end the bounded assignment.
 Make the native final summary/evidence available to both developer and coordinator; they need
 not rewrite it. Stopping an observer does not establish that its runner or lease has drained.
+The developer remains the sole writer when resumed. Assign independent review only after the
+writer has stopped and relevant checks have finished; a long-run handoff alone does not meet that gate.
 
 ### Report deviations from the guide
 
