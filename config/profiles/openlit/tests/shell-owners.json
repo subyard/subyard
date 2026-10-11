@@ -2,22 +2,10 @@
   "schema_version": 1,
   "owners": [
     {
-      "path": "config/profiles/openlit/owner.sh",
-      "kind": "profile",
-      "owner": "config/profiles/openlit/profile.json",
-      "reference": "owner.sh"
-    },
-    {
       "path": "config/profiles/openlit/guest.sh",
       "kind": "profile",
       "owner": "config/profiles/openlit/owner.sh",
       "reference": "guest.sh"
-    },
-    {
-      "path": "config/profiles/openlit/runtime.sh",
-      "kind": "profile",
-      "owner": "config/profiles/openlit/profile.json",
-      "reference": "runtime.sh"
     }
   ]
 }
