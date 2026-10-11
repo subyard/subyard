@@ -78,7 +78,11 @@ class CatalogRPC:
                 self.catalogs[method] = self.rpc.call(method, params, before_send=before_send)
             return self.catalogs[method]
         self.refresh()
-        return self.rpc.call(method, params, before_send=before_send)
+        try:
+            return self.rpc.call(method, params, before_send=before_send)
+        finally:
+            # before_send fences may themselves refresh the read catalogs.
+            self.refresh()
 
 
 def _records(rpc, method, key):
@@ -121,6 +125,14 @@ def _group_name_differs(group, entry, project, host_name):
             and group.get("name") != _group_name(project, host_name))
 
 
+def _pending_groups(groups, pending, root):
+    return [group for group in groups
+            if group["id"] not in pending["before_ids"]
+            and group.get("parentPath") == root
+            and group.get("createdFrom") == "migration" and _local(group)
+            and group.get("parentGroupId") is None]
+
+
 def _group(state, entry, project, rpc, host_name):
     name = _group_name(project, host_name)
     groups = _records(rpc, "projectGroup.list", "groups")
@@ -148,12 +160,7 @@ def _group(state, entry, project, rpc, host_name):
     if pending:
         # parentPath plus the before-ID set gives identity evidence independent
         # of the editable group name. A name match by itself is never adopted.
-        matches = [group for group in groups
-                   if group["id"] not in pending["before_ids"]
-                   and group.get("parentPath") == project.root
-                   and group.get("createdFrom") == "migration"
-                   and _local(group)
-                   and group.get("parentGroupId") is None]
+        matches = _pending_groups(groups, pending, project.root)
         if len(matches) > 1:
             raise RpcError("Ambiguous pending Orca group identity")
         if matches:
@@ -204,7 +211,10 @@ def _write_and_read(rpc, method, params, path):
     except RpcError as error:
         if not error.unknown:
             raise
-    return _repo_at(_records(rpc, "repo.list", "repos"), path)
+    repo = _repo_at(_records(rpc, "repo.list", "repos"), path)
+    if repo is not None and params.get("repo") != "id:" + repo["id"]:
+        raise RpcError("Orca repository identity changed during update: " + path)
+    return repo
 
 
 def _apply_repo(state, entry, root, group_id, rpc):
@@ -258,6 +268,12 @@ def _apply_repo(state, entry, root, group_id, rpc):
         repo = _repo_at(_records(rpc, "repo.list", "repos"), root.path)
         if repo is None:
             raise RpcError("Orca repository creation has no confirmed result: " + root.path)
+    # The verified local catalog identity must survive every later write failure,
+    # including initial naming and membership of an interrupted registration.
+    confirmed = entry.setdefault("confirmed_repos", {})
+    if confirmed.get(root.path) != repo["id"]:
+        confirmed[root.path] = repo["id"]
+        state.save()
     if pending:
         # Initial naming remains pending across interruption, but a user's
         # non-default name always wins.
@@ -307,7 +323,7 @@ def _report_catalog(report, scan, state, rpc, host_name):
     project_roots = {project.root for project in scan.projects}
     project_roots.update(entry["root"] for entry in state.data["projects"].values())
     for repo in repos:
-        if _local(repo) and repo["path"] not in desired and any(
+        if _local(repo) and repo["path"] not in desired and not verify_missing(scan, repo["path"]) and any(
                 repo["path"] == root or repo["path"].startswith(root + "/") for root in project_roots):
             report["warnings"].append("Existing Orca record is outside the current discovered set and is retained: " + repo["path"])
     for project in scan.projects:
@@ -362,6 +378,84 @@ def _report_catalog(report, scan, state, rpc, host_name):
         report["errors"].append(
             f"Orca repository admission limit reached ({REPOSITORY_LIMIT} records including pending additions); "
             f"{report['deferred']} new registrations deferred; existing records are retained")
+    _report_cleanup(report, scan, state, rpc, groups, repos)
+
+
+def _report_cleanup(report, scan, state, rpc, groups, repos):
+    active = {project.project_id for project in scan.projects}
+    snapshots = None
+    folders = None
+    for project_id, entry, repo, reason in _cleanup_records(scan, state, groups, repos):
+        if not verify_missing(scan, repo["path"]):
+            # Confirmed identities of removed projects stay visible when a mount
+            # or the original workspace boundary cannot prove absence.
+            if project_id in active:
+                continue
+            reason = reason or "workspace absence is unverified"
+        if reason is None and (state.apply or project_id in active):
+            if any(repo["path"] in warning and "session tabs" in warning for warning in report["warnings"]):
+                reason = "session tabs are retained"
+            elif any(repo["path"] in warning and "live terminals" in warning for warning in report["warnings"]):
+                reason = "live terminals are retained"
+            elif report["errors"]:
+                reason = "cleanup safety checks are incomplete; repository is retained"
+            else:
+                reason = "repository removal is pending"
+        if reason is None:
+            try:
+                if snapshots is None:
+                    snapshots = _session_snapshots(rpc)
+                if _has_saved_tabs(snapshots, repo):
+                    reason = "session tabs are retained"
+                elif _has_terminal_reference(rpc, repo, snapshots):
+                    reason = "live terminals are retained"
+                else:
+                    reason = "repository removal is pending"
+            except RpcError:
+                reason = "session inventory is unavailable; cleanup is retained"
+        report["cleanup"].append({"projectId": project_id, "path": repo["path"],
+                                  "repoId": repo["id"], "removedProject": project_id not in active,
+                                  "reason": reason, "nextAction": (
+                                      "Inspect sessions and remove the exact repository in Orca"
+                                      if reason == "legacy repository identity is unconfirmed"
+                                      else "Inspect retained sessions or ownership, then retry Orca sync")})
+    for project_id, entry in state.data["projects"].items():
+        if project_id in active:
+            continue
+        reported = {item["path"] for item in report["cleanup"] if item["projectId"] == project_id}
+        for path in entry.get("pending_repos", {}):
+            if path not in reported:
+                report["cleanup"].append({"projectId": project_id, "path": path, "repoId": None,
+                                          "removedProject": True,
+                                          "reason": "repository creation identity is pending",
+                                          "nextAction": "Inspect the Orca catalog after runtime recovery, then retry sync"})
+        if entry.get("pending_group"):
+            report["cleanup"].append({"projectId": project_id, "path": entry["root"], "repoId": None,
+                                      "removedProject": True,
+                                      "reason": "project group creation identity is pending",
+                                      "nextAction": "Inspect the Orca catalog after runtime recovery, then retry sync"})
+        group_id = entry.get("group_id")
+        group = next((group for group in groups if group["id"] == group_id), None)
+        if (group is None or not _local(group)
+                or any(item["projectId"] == project_id for item in report["cleanup"])
+                or any(repo.get("projectGroupId") == group_id for repo in repos)
+                or any(group.get("parentGroupId") == group_id for group in groups)):
+            continue
+        # Native folders and child groups deliberately retain their parent. Only
+        # an otherwise empty mapped group represents pending project cleanup.
+        reason = ("project group removal is pending" if verify_missing(scan, entry["root"])
+                  else "workspace absence is unverified")
+        try:
+            if folders is None:
+                folders = _records(rpc, "folderWorkspace.list", "folderWorkspaces")
+            if any(folder.get("projectGroupId") == group_id for folder in folders):
+                continue
+        except RpcError:
+            reason = "project group inventory is unavailable; cleanup is retained"
+        report["cleanup"].append({"projectId": project_id, "path": entry["root"],
+                                  "groupId": group_id, "repoId": None, "removedProject": True,
+                                  "reason": reason, "nextAction": "Retry Orca sync"})
+    report["cleanupReady"] = not any(item["removedProject"] for item in report["cleanup"])
 
 
 def _session_snapshots(rpc):
@@ -481,34 +575,98 @@ def _close_stale_terminal_layouts(scan, rpc, repo, snapshots, same_runtime):
         raise RpcError("Orca terminal layout cleanup changed; retry sync")
 
 
+def _cleanup_records(scan, state, groups, repos):
+    """Share exact ownership evidence between cleanup and read-only reporting."""
+    desired = {root.path for project in scan.projects for root in project.roots}
+    active = {project.project_id for project in scan.projects}
+    local_groups = {group["id"] for group in groups if _local(group)}
+    records = []
+    for project_id, entry in state.data["projects"].items():
+        root = entry["root"]
+        confirmed = entry.get("confirmed_repos", {})
+        legacy_paths = {root, *entry.get("known_roots", []), *entry.get("pending_repos", {})}
+        legacy_removed = project_id not in active and verify_missing(scan, root)
+        for repo in repos:
+            path = repo["path"]
+            if (path in desired or not (path == root or path.startswith(root + "/"))
+                    or not (path == root or path in confirmed or repo.get("kind", "git") == "git")):
+                continue
+            exact = confirmed.get(path) == repo["id"]
+            grouped = (entry.get("group_id") in local_groups
+                       and repo.get("projectGroupId") == entry.get("group_id"))
+            # A replacement at a remembered path is never adopted during cleanup.
+            if path in confirmed and not exact:
+                records.append((project_id, entry, repo, "repository identity changed"))
+            elif exact or grouped or (legacy_removed and path in legacy_paths):
+                if not _local(repo):
+                    reason = "repository belongs to another execution host"
+                elif repo.get("projectGroupId") not in (None, entry.get("group_id")):
+                    reason = "repository belongs to another project group"
+                else:
+                    reason = None
+                records.append((project_id, entry, repo, reason))
+            elif _local(repo) and repo.get("projectGroupId") is None:
+                records.append((project_id, entry, repo, "legacy repository identity is unconfirmed"))
+        # A remembered ID moved elsewhere must also remain visible and retained.
+        for path, repo_id in confirmed.items():
+            repo = next((repo for repo in repos if repo["id"] == repo_id), None)
+            if repo is not None and repo["path"] != path:
+                records.append((project_id, entry, dict(repo, path=path), "repository path changed"))
+    return records
+
+
 def _prune_missing(report, scan, state, rpc, approved_ids=None):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
     if report["errors"] or any(not project.roots for project in scan.projects):
         return
-    groups = {group["id"] for group in _records(rpc, "projectGroup.list", "groups") if _local(group)}
-    owners = {entry["group_id"]: entry["root"] for entry in state.data["projects"].values()
-              if entry.get("group_id") in groups}
-    active_roots = {project.root for project in scan.projects
-                    if state.data["projects"].get(project.project_id, {}).get("group_id") in owners}
-    desired = {root.path for project in scan.projects for root in project.roots}
-    candidates = []
-    for repo in _records(rpc, "repo.list", "repos"):
-        root = owners.get(repo.get("projectGroupId"))
-        if repo.get("projectGroupId") is None:
-            # Legacy or interrupted registrations may not have membership yet.
-            # Only nested Git paths of a reconciled active project are owned here.
-            root = next((root for root in active_roots if repo["path"].startswith(root + "/")), None)
-        if (root and _local(repo) and repo["path"] not in desired
-                and (repo["path"] == root or repo["path"].startswith(root + "/"))
-                and (repo["path"] == root or repo.get("kind", "git") == "git")
-                and verify_missing(scan, repo["path"])):
-            candidates.append(repo)
-    for repo in candidates:
+    active = {project.project_id for project in scan.projects}
+    # Removed projects cannot pass through registration again. Recover only
+    # submitted identities, without creating or renaming native resources.
+    if any(project_id not in active and (entry.get("pending_group") or entry.get("pending_repos"))
+           for project_id, entry in state.data["projects"].items()):
+        rpc.refresh()
+    groups = _records(rpc, "projectGroup.list", "groups")
+    intent_runtime = rpc.runtime_id
+    repos = _records(rpc, "repo.list", "repos")
+    if rpc.runtime_id != intent_runtime:
+        raise RpcError("Orca cleanup runtime changed; retry sync")
+    for project_id, entry in state.data["projects"].items():
+        if project_id in active or not verify_missing(scan, entry["root"]):
+            continue
+        pending = entry.get("pending_group")
+        if pending:
+            matches = _pending_groups(groups, pending, entry["root"])
+            if len(matches) > 1:
+                raise RpcError("Ambiguous pending Orca group identity; cleanup retained")
+            if matches:
+                entry["group_id"] = matches[0]["id"]
+                entry["group_name"] = pending["name"]
+                del entry["pending_group"]
+                state.save()
+            elif pending["runtime_id"] != rpc.runtime_id:
+                del entry["pending_group"]
+                state.save()
+        for path, pending in list(entry.get("pending_repos", {}).items()):
+            if (pending.get("runtime_id") != rpc.runtime_id
+                    and not any(repo["path"] == path for repo in repos)
+                    and verify_missing(scan, path)):
+                del entry["pending_repos"][path]
+                state.save()
+    candidates = _cleanup_records(scan, state, groups, repos)
+    for project_id, entry, repo, reason in candidates:
+        if reason or not verify_missing(scan, repo["path"]):
+            continue
         if approved_ids is not None and repo["id"] not in approved_ids[0]:
             raise RpcError("plan_stale: unapproved Orca cleanup repository")
         if time.monotonic() >= state.deadline:
             raise RpcError("Orca registration time budget exhausted")
+        # Legacy ownership comes from the persisted project/path relation, not
+        # from absence alone. Pin the actual catalog ID before any native write.
+        confirmed = entry.setdefault("confirmed_repos", {})
+        if confirmed.get(repo["path"]) != repo["id"]:
+            confirmed[repo["path"]] = repo["id"]
+            state.save()
         # This API also covers saved tabs of now-missing linked worktrees.
         try:
             snapshots = _session_snapshots(rpc)
@@ -533,6 +691,9 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
         if saved and not _only_stale_terminal_layouts(snapshots, repo):
             report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
             continue
+        if not saved and _has_terminal_reference(rpc, repo, snapshots):
+            report["warnings"].append("Missing Orca checkout has live terminals and is retained: " + repo["path"])
+            continue
         if saved:
             latest = _session_snapshots(rpc)
             if (_has_saved_tabs(latest, repo) and not _only_stale_terminal_layouts(latest, repo)
@@ -554,37 +715,81 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
             if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
                     or not verify_missing(scan, repo["path"])):
                 raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+        def before_remove(runtime_id):
+            same_runtime(runtime_id)
+            latest_tabs = _session_snapshots(rpc)
+            if _has_saved_tabs(latest_tabs, repo) or _has_terminal_reference(rpc, repo, latest_tabs):
+                raise RpcError("Orca cleanup session state changed; retry sync")
+            rpc.refresh()
+            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
+                    or not verify_missing(scan, repo["path"])):
+                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+            same_runtime(rpc.runtime_id)
+
         try:
-            rpc.call("repo.rm", {"repo": "id:" + repo["id"]}, before_send=same_runtime)
+            rpc.call("repo.rm", {"repo": "id:" + repo["id"]}, before_send=before_remove)
         except RpcError as error:
             if not error.unknown:
                 raise
-        if any(item["id"] == repo["id"] for item in _records(rpc, "repo.list", "repos")):
+        remaining = _records(rpc, "repo.list", "repos")
+        if any(item["id"] == repo["id"] for item in remaining):
             raise RpcError("Orca repository removal is unconfirmed: " + repo["path"])
-    active = {project.project_id for project in scan.projects}
+        # Keep the original identity if a replacement appeared during removal;
+        # retiring it would let a later legacy-path retry adopt the new record.
+        if not any(item["path"] == repo["path"] for item in remaining):
+            if project_id in active:
+                entry.get("confirmed_repos", {}).pop(repo["path"], None)
+            entry.get("pending_repos", {}).pop(repo["path"], None)
+            state.save()
     for project_id, entry in list(state.data["projects"].items()):
         group_id = entry.get("group_id")
-        if project_id in active or group_id not in owners or not verify_missing(scan, entry["root"]):
+        if project_id in active or not verify_missing(scan, entry["root"]):
             continue
-        if approved_ids is not None and group_id not in approved_ids[1]:
-            raise RpcError("plan_stale: unapproved Orca cleanup group")
         rpc.refresh()
         groups = _records(rpc, "projectGroup.list", "groups")
         repos = _records(rpc, "repo.list", "repos")
+        # Keep prior IDs until the whole removed project retires. A replacement
+        # arriving after this read must never fall back to legacy path ownership.
+        live_ids = {repo["id"] for repo in repos}
+        retained_confirmed = any(repo_id in live_ids or any(repo["path"] == path for repo in repos)
+                                 for path, repo_id in entry.get("confirmed_repos", {}).items())
         folders = _records(rpc, "folderWorkspace.list", "folderWorkspaces")
-        if (any(repo.get("projectGroupId") == group_id for repo in repos + folders)
+        if group_id is not None and (any(repo.get("projectGroupId") == group_id for repo in repos + folders)
                 or any(group.get("parentGroupId") == group_id for group in groups)):
             continue
         group = next((item for item in groups if item["id"] == group_id), None)
-        if group is None or not _local(group) or not verify_missing(scan, entry["root"]):
+        if group is not None and not _local(group):
             continue
-        try:
-            rpc.call("projectGroup.delete", {"groupId": group_id})
-        except RpcError as error:
-            if not error.unknown:
-                raise
-        if any(group["id"] == group_id for group in _records(rpc, "projectGroup.list", "groups")):
-            raise RpcError("Orca project group removal is unconfirmed")
+        if group is not None:
+            if approved_ids is not None and group_id not in approved_ids[1]:
+                raise RpcError("plan_stale: unapproved Orca cleanup group")
+            proof_runtime = rpc.runtime_id
+
+            def before_group_remove(runtime_id):
+                if runtime_id != proof_runtime:
+                    raise RpcError("Orca cleanup runtime changed; retry sync")
+                rpc.refresh()
+                current_groups = _records(rpc, "projectGroup.list", "groups")
+                current_repos = _records(rpc, "repo.list", "repos")
+                current_folders = _records(rpc, "folderWorkspace.list", "folderWorkspaces")
+                if (next((item for item in current_groups if item["id"] == group_id), None) != group
+                        or any(item.get("projectGroupId") == group_id for item in current_repos + current_folders)
+                        or any(item.get("parentGroupId") == group_id for item in current_groups)
+                        or not verify_missing(scan, entry["root"]) or rpc.runtime_id != proof_runtime):
+                    raise RpcError("Orca cleanup group changed; retry sync")
+
+            try:
+                rpc.call("projectGroup.delete", {"groupId": group_id}, before_send=before_group_remove)
+            except RpcError as error:
+                if not error.unknown:
+                    raise
+            if any(group["id"] == group_id for group in _records(rpc, "projectGroup.list", "groups")):
+                raise RpcError("Orca project group removal is unconfirmed")
+        # An empty or already absent group says nothing about ungrouped records.
+        if (retained_confirmed or entry.get("pending_repos") or entry.get("pending_group")
+                or any(owner == project_id for owner, _, _, _ in _cleanup_records(scan, state, groups, repos))):
+            state.save()
+            continue
         del state.data["projects"][project_id]
         state.save()
 
@@ -593,7 +798,8 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
     deadline = deadline if deadline is not None else time.monotonic() + 65
     report = {"ready": False, "registered": 0,
               "total": sum(len(project.roots) for project in scan.projects),
-              "errors": list(scan.errors), "warnings": list(scan.warnings), "projects": []}
+              "errors": list(scan.errors), "warnings": list(scan.warnings), "projects": [],
+              "cleanup": [], "cleanupReady": True}
     try:
         with State(state_dir, apply, deadline) as state:
             rpc = CatalogRPC(rpc)
@@ -685,12 +891,16 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                             continue
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
-                _prune_missing(report, scan, state, rpc, approved_ids)
+                try:
+                    _prune_missing(report, scan, state, rpc, approved_ids)
+                except RpcError as error:
+                    report["errors"].append(str(error))
             rpc.refresh()
             _report_catalog(report, scan, state, rpc, host_name)
     except (RpcError, StateError) as error:
         report["errors"].append(str(error))
     report["errors"] = list(dict.fromkeys(report["errors"]))
     report["warnings"] = list(dict.fromkeys(report["warnings"]))
-    report["ready"] = not report["errors"] and report["registered"] == report["total"]
+    report["ready"] = (not report["errors"] and report["registered"] == report["total"]
+                       and report["cleanupReady"])
     return report

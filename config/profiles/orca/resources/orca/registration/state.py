@@ -72,11 +72,22 @@ class State:
                 or not isinstance(self.data.get("projects"), dict)):
             raise ValueError()
         ids = set()
+        repo_ids = set()
         for project_id, entry in self.data["projects"].items():
             if (not isinstance(project_id, str) or not project_id or not isinstance(entry, dict)
                     or not isinstance(entry.get("root"), str) or not entry["root"].startswith("/")
+                    or entry["root"] == "/" or os.path.normpath(entry["root"]) != entry["root"]
                     or not isinstance(entry.get("pending_repos", {}), dict)):
                 raise ValueError()
+            confirmed = entry.get("confirmed_repos", {})
+            if not isinstance(confirmed, dict):
+                raise ValueError()
+            for path, repo_id in confirmed.items():
+                if (not isinstance(path, str) or os.path.normpath(path) != path
+                        or not (path == entry["root"] or path.startswith(entry["root"] + "/"))
+                        or not isinstance(repo_id, str) or not repo_id or repo_id in repo_ids):
+                    raise ValueError()
+                repo_ids.add(repo_id)
             if (not isinstance(entry.get("known_roots", []), list)
                     or not all(isinstance(path, str) and path.startswith(entry["root"] + "/")
                                and os.path.normpath(path) == path for path in entry.get("known_roots", []))):

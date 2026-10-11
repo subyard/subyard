@@ -331,6 +331,7 @@ if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.w
   exit 1
 fi
 jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
+jq -r '.cleanup[]? | "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction' <<<"\$report" >&2
 jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
 jq -e '.ready' <<<"\$report" >/dev/null || status=1
 [ "\$status" -ne 0 ] || $settings_command
@@ -986,12 +987,17 @@ cmd_status() {
       total="$(jq -r '.total' <<<"$report")"
       if jq -e '.ready' <<<"$report" >/dev/null; then
         ok "checkouts registered: $registered/$total (project groups and kinds verified)"
+      elif jq -e '.registered == .total and (.errors | length) == 0 and (.cleanup | length) > 0' <<<"$report" >/dev/null; then
+        info "checkouts registered: $registered/$total; project cleanup pending; run '$(yard_cmd_hint) orca sync'"
       else
         warn "checkouts registered: $registered/$total; registration incomplete; run '$(yard_cmd_hint) orca sync'"
       fi
       while IFS= read -r diagnostic; do
         warn "$diagnostic"
       done < <(jq -r '.errors[], .warnings[]' <<<"$report")
+      while IFS= read -r diagnostic; do
+        info "$diagnostic"
+      done < <(jq -r '.cleanup[]? | "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction' <<<"$report")
       if jq -e '.discovery' <<<"$report" >/dev/null; then
         info "repository discovery: $(jq -r '.discovery.state + " (generation " + (.discovery.generation | tostring) + ")"' <<<"$report")"
         while IFS= read -r diagnostic; do

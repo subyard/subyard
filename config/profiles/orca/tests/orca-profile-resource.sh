@@ -296,6 +296,9 @@ case "${1:-}" in
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status --host-name owner-host ')
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
+        elif [ -e "$state_root/project-cleanup-pending" ]; then
+          printf '%s\n' '{"ready":false,"registered":2,"total":2,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"session tabs are retained","nextAction":"Inspect retained sessions, then retry Orca sync"}]}'
+          exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
           printf '%s\n' '{"ready":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
           exit 1
@@ -585,6 +588,16 @@ if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract obse
   fail 'running native observation errors were downgraded to conditional scope'
 fi
 rm -f "$TMP/project-counts-fail"
+
+touch "$TMP/project-cleanup-pending"
+ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-cleanup-pending.out"
+grep -Fq '[ .. ] checkouts registered: 2/2; project cleanup pending' "$TMP/status-cleanup-pending.out" \
+  || fail 'status rendered expected cleanup drift as a warning'
+grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: session tabs are retained; Inspect retained sessions' \
+  "$TMP/status-cleanup-pending.out" || fail 'status omitted a removed-project cleanup reason'
+! grep -Fq '[warn]' "$TMP/status-cleanup-pending.out" \
+  || fail 'expected cleanup drift generated a warning'
+rm -f "$TMP/project-cleanup-pending"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \

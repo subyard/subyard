@@ -15,7 +15,7 @@ from support import Catalog, COMPONENT, init_git, project
 
 class MainTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.root = project(self.workspaces)
@@ -44,6 +44,22 @@ class MainTests(unittest.TestCase):
         listener.settimeout(0.05)
         stopped = threading.Event()
         failures = []
+        workers = []
+
+        def respond(connection):
+            try:
+                with connection:
+                    connection.settimeout(2)
+                    with connection.makefile("rb") as source:
+                        request = json.loads(source.readline())
+                    if request["authToken"] != "fixture-token":
+                        raise AssertionError("wrong token")
+                    result = self.rpc.call(request["method"], request.get("params"))
+                    response = {"id": request["id"], "ok": True, "result": result,
+                                "_meta": {"runtimeId": "runtime-1"}}
+                    connection.sendall(json.dumps(response).encode() + b"\n")
+            except Exception as error:
+                failures.append(error)
 
         def serve():
             while not stopped.is_set():
@@ -51,19 +67,11 @@ class MainTests(unittest.TestCase):
                     connection, _ = listener.accept()
                 except socket.timeout:
                     continue
-                try:
-                    with connection:
-                        connection.settimeout(2)
-                        with connection.makefile("rb") as source:
-                            request = json.loads(source.readline())
-                        if request["authToken"] != "fixture-token":
-                            raise AssertionError("wrong token")
-                        result = self.rpc.call(request["method"], request.get("params"))
-                        response = {"id": request["id"], "ok": True, "result": result,
-                                    "_meta": {"runtimeId": "runtime-1"}}
-                        connection.sendall(json.dumps(response).encode() + b"\n")
-                except Exception as error:
-                    failures.append(error)
+                # Native Orca accepts parallel connections; pre-send fences read
+                # through another connection while the mutation socket waits.
+                worker = threading.Thread(target=respond, args=(connection,))
+                workers.append(worker)
+                worker.start()
             listener.close()
 
         thread = threading.Thread(target=serve)
@@ -73,6 +81,9 @@ class MainTests(unittest.TestCase):
             stopped.set()
             thread.join(3)
             self.assertFalse(thread.is_alive())
+            for worker in workers:
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
             self.assertEqual([], failures)
         self.addCleanup(finish)
 
@@ -198,6 +209,9 @@ class MainTests(unittest.TestCase):
                 path = self.root / ".build/cleanup-trial" / command
                 init_git(path)
                 repo = self.rpc.call("repo.add", {"path": str(path), "kind": "git"})["repo"]
+                # Confirm the real native identity while the checkout is present.
+                self.assertEqual(0, self.run_cli("sync")[0])
+                self.rpc.repos[-1]["projectGroupId"] = None
                 shutil.rmtree(path)
                 code, report = self.run_cli(command)
                 self.assertEqual(0, code, report)

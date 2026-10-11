@@ -302,13 +302,16 @@ first registration, existing project checkouts in a mixed user group move into a
 project group; unrelated entries and the user group's properties are preserved. Group
 names may coincide or be renamed without merging project identities.
 
-When registration succeeds, sync removes proven missing checkouts from their Subyard-managed
-Orca groups. This includes existing registrations from earlier Subyard versions. Ownership
-requires membership in the recorded project group and a path inside that project.
-Ungrouped Git records below an active, reconciled project root are also cleaned up,
-including legacy or interrupted registrations. Explicit membership in an unrelated
-group, remote records and manually added nested folders are left alone. Periodic
-discovery uses the same cleanup rules as explicit sync.
+Subyard durably records each confirmed native repository ID with its exact path, before
+subsequent naming or membership writes. When registration succeeds, sync removes proven
+missing checkouts belonging to that project. A matching saved ID and path remain owned
+after group membership or the group itself disappears. A replacement ID at the same
+path is retained. For older state without repository IDs, membership in the recorded
+local group still establishes ownership. If the whole project root is independently
+proven missing, its exact saved root and remembered checkout paths also establish legacy
+ownership, including ungrouped records. Missing paths without that prior association
+are retained. Explicit membership in an unrelated group and remote records are left
+alone. Project hooks, explicit sync and periodic discovery use this same mechanism.
 Records with live terminals, other saved tabs or unverified tab state are retained with a warning.
 Exposed agent sessions, launch drafts, chat leaves and saved terminal buffers are also retained.
 An absent checkout's terminal layouts can be removed when all belong to that exact checkout,
@@ -322,6 +325,15 @@ against concurrent revival of the same null-handle tab. Orca's removal API then 
 saved worktree metadata; no files on disk are deleted.
 Empty groups of removed Subyard projects are also removed, unless they contain child groups
 or native Orca folder workspaces. These rules apply to project hooks as well as explicit sync.
+Repository ownership survives partial cleanup and is retired only after native readback
+confirms removal. Removing an empty group does not discard outstanding repository identities
+or unconfirmed creation intents. A failed project hook leaves enough state for the next sync
+or discovery portion to retry; the original project action is not rolled back.
+
+`status` and `sync` include pending cleanup for removed projects, with the path, retention
+reason and next action. Ordinary missing-record drift is reported as cleanup state. A removed
+project that still has a protected registration leaves cleanup incomplete; sync returns
+nonzero until that registration can be safely removed or is removed through Orca itself.
 
 Cleanup is skipped on registration or workspace-boundary errors. An unfinished background
 pass never proves absence: cleanup requires an independent filesystem check below the same
@@ -331,6 +343,42 @@ that lose Git metadata retain their old records with a warning. Sync does not re
 Manually deleted Orca entries and groups for existing directories are registered again.
 If the root gains or loses Git, its kind changes on the existing entry, preserving its ID
 and session data.
+
+### Legacy registration repair
+
+After upgrading and refreshing the installed helper with `yard init`, inspect `yard orca
+status` and run `yard orca sync`. Legacy registrations associated with a removed project's
+saved paths are cleaned automatically under the same filesystem and session checks. Retry
+sync after correcting an unavailable mount, catalog or runtime; restarting does not authorize
+discarding saved sessions.
+
+For a retained record without a prior Subyard path association, inspect its exact path,
+native ID, host, group membership and sessions in the connected Orca client. Keep live
+terminals, saved agent/chat state and linked worktrees until their contents have been handled.
+Do not edit Orca's database or manufacture IDs in Subyard's sidecar.
+
+For an explicitly selected local repo-backed setup with no remaining sessions, the pinned
+[native project CLI](https://github.com/stablyai/orca/blob/2bb20586ebc39d605e16d95f57420e20a16e7485/src/cli/specs/project.ts)
+supports this manual repair. Run it as the yard's development user against the managed server
+profile, replacing `PROJECT_ID` and `SETUP_ID` with the inspected native identities:
+
+```sh
+yard shell
+export XDG_CONFIG_HOME=/srv/agents/orca/config
+export XDG_DATA_HOME=/srv/agents/orca/data
+export XDG_STATE_HOME=/srv/agents/orca/state
+/usr/bin/orca-ide repo list --json
+/usr/bin/orca-ide project setups --project PROJECT_ID --host local --json
+# Recheck the exact ID, path, locality and absence of sessions before removing it.
+/usr/bin/orca-ide project setup-delete --setup SETUP_ID --json
+/usr/bin/orca-ide repo list --json
+```
+
+`setup-delete` takes a setup ID, not a repository path or repository ID. A repo-backed setup
+removal deletes its registration; an independent setup removal only deletes setup metadata.
+Confirm the former repository ID is absent, then return to the owner shell and run `yard orca
+sync`. If no exact local repo-backed setup matches, use the native client's registration
+removal after the same checks. This manual action is separate from automatic reconciliation.
 
 An individual registration failure does not undo a successful Subyard project action;
 the command displays a warning and other checkouts are still attempted. Explicit `orca sync`

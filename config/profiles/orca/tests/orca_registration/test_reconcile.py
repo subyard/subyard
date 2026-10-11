@@ -19,7 +19,7 @@ class ReconcileTests(unittest.TestCase):
         self.discover = discover
         self.reconcile = reconcile
         self.error = RpcError
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.state = Path(self.tmp.name) / "state"
@@ -449,7 +449,41 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual([], self.rpc.groups)
         self.assertEqual({}, self.sidecar()["projects"])
 
-    def test_missing_ungrouped_git_checkouts_pruned_with_the_same_safety_guards(self):
+    def test_failed_empty_group_delete_remains_pending_in_read_only_status(self):
+        self.assertTrue(self.run_sync()["ready"])
+        group_id = self.rpc.groups[0]["id"]
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def fail_delete(method, params=None, **kwargs):
+            if method == "projectGroup.delete":
+                raise self.error("group deletion rejected")
+            return original(method, params, **kwargs)
+
+        self.rpc.call = fail_delete
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual([], self.rpc.repos)
+        self.assertEqual(group_id, self.sidecar()["projects"]["sample-id"]["group_id"])
+        before = self.sidecar()
+        self.rpc.calls.clear()
+        report = self.run_sync(apply=False)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cleanupReady"])
+        self.assertEqual([], report["errors"])
+        self.assertEqual([], report["warnings"])
+        self.assertEqual([{"projectId": "sample-id", "path": str(self.root), "groupId": group_id,
+                           "repoId": None, "removedProject": True,
+                           "reason": "project group removal is pending", "nextAction": "Retry Orca sync"}],
+                         report["cleanup"])
+        self.assertEqual(before, self.sidecar())
+        self.assertTrue(all(method in ("repo.list", "projectGroup.list", "folderWorkspace.list")
+                            for method, _ in self.rpc.calls))
+        self.rpc.call = original
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual([], self.rpc.groups)
+        self.assertEqual({}, self.sidecar()["projects"])
+
+    def test_missing_unconfirmed_ungrouped_checkouts_are_retained(self):
         self.assertTrue(self.run_sync()["ready"])
         path = self.root / ".build/cleanup-trial/checkout"
         init_git(path)
@@ -475,8 +509,362 @@ class ReconcileTests(unittest.TestCase):
         report = self.reconcile(self.discover(self.workspaces, recursive=False),
                                 self.rpc, self.state, known_paths=[])
         self.assertTrue(report["ready"], report)
-        self.assertEqual(before[:1] + retained, self.rpc.repos)
-        self.assertTrue(any("session tabs" in warning for warning in report["warnings"]))
+        self.assertEqual(before, self.rpc.repos)
+        self.assertTrue(any(item["repoId"] == repo["id"]
+                            and item["reason"] == "legacy repository identity is unconfirmed"
+                            for item in report["cleanup"]))
+        self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_confirmed_identity_is_saved_before_naming_and_membership_failure(self):
+        for method in ("repo.update", "projectGroup.moveProject"):
+            with self.subTest(method=method):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / method
+                original = self.rpc.call
+
+                def fail_write(current, params=None, **kwargs):
+                    if current == method:
+                        repo = self.rpc.repos[0]
+                        self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
+                                         ["confirmed_repos"][str(self.root)])
+                        raise self.error("write rejected")
+                    return original(current, params, **kwargs)
+
+                self.rpc.call = fail_write
+                self.assertFalse(self.run_sync()["ready"])
+                repo = self.rpc.repos[0]
+                self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
+                                 ["confirmed_repos"][str(self.root)])
+                self.rpc.call = original
+                self.assertTrue(self.run_sync()["ready"])
+
+    def test_removed_confirmed_ungrouped_project_and_absent_group_are_pruned(self):
+        for absent_group in (False, True):
+            with self.subTest(absent_group=absent_group):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / str(absent_group)
+                if not self.root.exists():
+                    self.root = project(self.workspaces)
+                self.assertTrue(self.run_sync()["ready"])
+                self.rpc.repos[0]["projectGroupId"] = None
+                if absent_group:
+                    self.rpc.groups.clear()
+                shutil.rmtree(self.root.parent)
+                before = self.sidecar()
+                report = self.run_sync(apply=False)
+                self.assertFalse(report["ready"])
+                self.assertEqual("repository removal is pending", report["cleanup"][0]["reason"])
+                self.assertEqual([], report["warnings"])
+                self.assertEqual(before, self.sidecar())
+                self.assertTrue(self.run_sync()["ready"])
+                self.assertEqual([], self.rpc.repos)
+                self.assertEqual([], self.rpc.groups)
+                self.assertEqual({}, self.sidecar()["projects"])
+                self.assertTrue(self.run_sync()["ready"])
+
+    def test_removed_project_failed_hook_keeps_identity_for_later_sync(self):
+        init_git(self.root / "nested")
+        self.assertTrue(self.run_sync()["ready"])
+        for repo in self.rpc.repos:
+            repo["projectGroupId"] = None
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+        remaining = self.rpc.repos[1]
+
+        def fail_second(method, params=None, **kwargs):
+            if method == "repo.rm" and params["repo"] == "id:" + remaining["id"]:
+                raise self.error("removal rejected")
+            return original(method, params, **kwargs)
+
+        self.rpc.call = fail_second
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual(remaining["id"],
+                         self.sidecar()["projects"]["sample-id"]["confirmed_repos"][remaining["path"]])
+        self.assertEqual(remaining["id"], report["cleanup"][0]["repoId"])
+        self.rpc.call = original
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
+
+    def test_replacement_appearing_after_remove_keeps_original_identity_across_retries(self):
+        self.assertTrue(self.run_sync()["ready"])
+        original = copy.deepcopy(self.rpc.repos[0])
+        replacement = dict(original, id="replacement", projectGroupId=None)
+        shutil.rmtree(self.root.parent)
+
+        def replace_after_remove(method, params):
+            if method == "repo.rm" and params["repo"] == "id:" + original["id"]:
+                self.rpc.repos.append(replacement)
+
+        self.rpc.after = replace_after_remove
+        for apply in (True, True, False, True):
+            report = self.run_sync(apply=apply)
+            self.assertFalse(report["ready"])
+            self.assertEqual([replacement], self.rpc.repos)
+            self.assertEqual(original["id"], self.sidecar()["projects"]["sample-id"]
+                             ["confirmed_repos"][original["path"]])
+            self.assertEqual("repository identity changed", report["cleanup"][0]["reason"])
+        self.assertEqual(["id:" + original["id"]],
+                         [params["repo"] for method, params in self.rpc.calls if method == "repo.rm"])
+
+    def test_delayed_replacement_during_partial_cleanup_keeps_original_identity(self):
+        init_git(self.root / "nested")
+        self.assertTrue(self.run_sync()["ready"])
+        original, held = copy.deepcopy(self.rpc.repos)
+        self.rpc.snapshots = [{"worktree": held["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        shutil.rmtree(self.root.parent)
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertEqual(original["id"], self.sidecar()["projects"]["sample-id"]
+                         ["confirmed_repos"][original["path"]])
+        replacement = dict(original, id="delayed-replacement", projectGroupId=None)
+        self.rpc.repos.append(replacement)
+        self.rpc.snapshots.clear()
+        for apply in (True, False, True):
+            report = self.run_sync(apply=apply)
+            self.assertFalse(report["ready"])
+            self.assertEqual([replacement], self.rpc.repos)
+            self.assertEqual("repository identity changed", report["cleanup"][0]["reason"])
+            self.assertEqual(original["id"], self.sidecar()["projects"]["sample-id"]
+                             ["confirmed_repos"][original["path"]])
+
+    def test_removed_project_recovers_interrupted_group_creation_without_recreating(self):
+        from state import StateError
+
+        def interrupted(method, params):
+            if method == "projectGroup.create":
+                raise StateError("interrupted create")
+
+        # Leave the native group and fsynced intent at the interrupted boundary.
+        self.rpc.after = interrupted
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertIn("pending_group", self.sidecar()["projects"]["sample-id"])
+        self.rpc.after = None
+        shutil.rmtree(self.root.parent)
+        self.rpc.calls.clear()
+        before = self.sidecar()
+        report = self.run_sync(apply=False)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cleanupReady"])
+        self.assertEqual("project group creation identity is pending", report["cleanup"][0]["reason"])
+        self.assertEqual(before, self.sidecar())
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual([], self.rpc.groups)
+        self.assertEqual({}, self.sidecar()["projects"])
+        self.assertFalse(any(method in ("projectGroup.create", "projectGroup.update") for method, _ in self.rpc.calls))
+
+    def test_removed_project_pending_intents_settle_only_after_runtime_recovery(self):
+        self.assertTrue(self.run_sync()["ready"])
+        self.rpc.groups.clear()
+        self.rpc.repos.clear()
+        data = self.sidecar()
+        entry = data["projects"]["sample-id"]
+        entry.pop("group_id")
+        entry["pending_group"] = {"before_ids": [], "runtime_id": self.rpc.runtime_id, "name": "Sample"}
+        entry["pending_repos"][str(self.root / "pending")] = {
+            "before_ids": [], "runtime_id": self.rpc.runtime_id, "name": "pending"}
+        (self.state / "subyard-registration.json").write_text(json.dumps(data))
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True):
+            report = self.run_sync(apply=apply)
+            self.assertFalse(report["ready"])
+            self.assertEqual(2, len(report["cleanup"]))
+            self.assertIn("pending_group", self.sidecar()["projects"]["sample-id"])
+        self.rpc.runtime_id = "recovered-runtime"
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
+        self.assertTrue(self.run_sync()["ready"])
+
+    def test_removed_project_ambiguous_pending_group_remains_visible_and_retained(self):
+        from state import StateError
+
+        def interrupted(method, params):
+            if method == "projectGroup.create":
+                raise StateError("interrupted create")
+
+        self.rpc.after = interrupted
+        self.assertFalse(self.run_sync()["ready"])
+        self.rpc.after = None
+        self.rpc.groups.append(dict(self.rpc.groups[0], id="ambiguous-group"))
+        shutil.rmtree(self.root.parent)
+        before = self.sidecar()
+        groups = copy.deepcopy(self.rpc.groups)
+        self.rpc.calls.clear()
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cleanupReady"])
+        self.assertIn("Ambiguous pending Orca group identity", " ".join(report["errors"]))
+        self.assertEqual("project group creation identity is pending", report["cleanup"][0]["reason"])
+        self.assertEqual(before, self.sidecar())
+        self.assertEqual(groups, self.rpc.groups)
+        self.assertFalse(any(method == "projectGroup.delete" for method, _ in self.rpc.calls))
+
+    def test_empty_group_does_not_erase_retained_removed_project_identity(self):
+        self.assertTrue(self.run_sync()["ready"])
+        repo = self.rpc.repos[0]
+        repo["projectGroupId"] = None
+        self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertEqual([], self.rpc.groups)
+        self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
+                         ["confirmed_repos"][repo["path"]])
+        self.assertEqual("session tabs are retained", report["cleanup"][0]["reason"])
+        before = self.sidecar()
+        self.assertFalse(self.run_sync(apply=False)["ready"])
+        self.assertEqual(before, self.sidecar())
+        self.rpc.snapshots.clear()
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
+
+    def test_removed_project_without_saved_tabs_keeps_live_orphan_terminal(self):
+        self.assertTrue(self.run_sync()["ready"])
+        repo = self.rpc.repos[0]
+        repo["projectGroupId"] = None
+        shutil.rmtree(self.root.parent)
+        self.rpc.terminals = [{"ptyId": "live", "worktreeId": repo["id"] + "::" + repo["path"],
+                               "executionHostId": "local", "connected": True}]
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertIn(repo, self.rpc.repos)
+        self.assertEqual("live terminals are retained", report["cleanup"][0]["reason"])
+        self.rpc.terminals.clear()
+        self.assertTrue(self.run_sync()["ready"])
+
+    def test_removed_confirmed_identity_excludes_replacement_foreign_and_remote(self):
+        for changes, reason in (({"id": "replacement"}, "repository identity changed"),
+                                ({"projectGroupId": "manual"}, "repository belongs to another project group"),
+                                ({"executionHostId": "remote"}, "repository belongs to another execution host"),
+                                ({"connectionId": "remote"}, "repository belongs to another execution host"),
+                                ({"path": "/manual/moved"}, "repository path changed")):
+            with self.subTest(changes=changes):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / reason / next(iter(changes))
+                if not self.root.exists():
+                    self.root = project(self.workspaces)
+                self.assertTrue(self.run_sync()["ready"])
+                self.rpc.repos[0].update(changes)
+                before = copy.deepcopy(self.rpc.repos)
+                shutil.rmtree(self.root.parent)
+                report = self.run_sync()
+                self.assertFalse(report["ready"])
+                self.assertEqual(before, self.rpc.repos)
+                self.assertEqual(reason, report["cleanup"][0]["reason"])
+                self.assertIn("sample-id", self.sidecar()["projects"])
+
+    def test_removed_legacy_ungrouped_known_paths_are_pruned(self):
+        init_git(self.root / "nested")
+        self.assertTrue(self.run_sync()["ready"])
+        data = self.sidecar()
+        del data["projects"]["sample-id"]["confirmed_repos"]
+        (self.state / "subyard-registration.json").write_text(json.dumps(data))
+        for repo in self.rpc.repos:
+            repo["projectGroupId"] = None
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync(apply=False)
+        self.assertFalse(report["ready"])
+        self.assertEqual(2, len(report["cleanup"]))
+        self.assertEqual({"repository removal is pending"}, {item["reason"] for item in report["cleanup"]})
+        self.assertEqual(data, self.sidecar())
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual([], self.rpc.repos)
+        self.assertEqual({}, self.sidecar()["projects"])
+        self.assertTrue(self.run_sync()["ready"])
+
+    def test_legacy_unremembered_missing_path_retains_manual_diagnostic(self):
+        self.assertTrue(self.run_sync()["ready"])
+        repo = self.rpc.call("repo.add", {"path": str(self.root / "unknown"), "kind": "git"})["repo"]
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True, True):
+            report = self.run_sync(apply=apply)
+            self.assertFalse(report["ready"])
+            detail = next(item for item in report["cleanup"] if item["repoId"] == repo["id"])
+            self.assertEqual("legacy repository identity is unconfirmed", detail["reason"])
+            self.assertIn("in Orca", detail["nextAction"])
+            self.assertIn(repo, self.rpc.repos)
+            self.assertIn("sample-id", self.sidecar()["projects"])
+
+    def test_removed_legacy_pending_add_pins_native_identity_before_failed_remove(self):
+        self.assertTrue(self.run_sync()["ready"])
+        data = self.sidecar()
+        del data["projects"]["sample-id"]["confirmed_repos"]
+        pending_path = str(self.root / "pending")
+        data["projects"]["sample-id"]["pending_repos"][pending_path] = {
+            "before_ids": [self.rpc.repos[0]["id"]], "name": "pending", "runtime_id": self.rpc.runtime_id}
+        (self.state / "subyard-registration.json").write_text(json.dumps(data))
+        pending = self.rpc.call("repo.add", {"path": pending_path, "kind": "git"})["repo"]
+        self.rpc.repos[0]["projectGroupId"] = None
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def fail_remove(method, params=None, **kwargs):
+            if method == "repo.rm" and params["repo"] == "id:" + pending["id"]:
+                self.assertEqual(pending["id"], self.sidecar()["projects"]["sample-id"]
+                                 ["confirmed_repos"][pending_path])
+                raise self.error("removal rejected")
+            return original(method, params, **kwargs)
+
+        self.rpc.call = fail_remove
+        self.assertFalse(self.run_sync()["ready"])
+        self.assertIn(pending_path, self.sidecar()["projects"]["sample-id"]["pending_repos"])
+        self.rpc.call = original
+        self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
+
+    def test_remove_rechecks_new_sessions_and_identity_at_send_boundary(self):
+        for change in ("saved", "live", "path", "group", "remote", "runtime", "directory"):
+            with self.subTest(change=change):
+                self.rpc = Catalog()
+                self.state = Path(self.tmp.name) / ("send-" + change)
+                if not self.root.exists():
+                    self.root = project(self.workspaces)
+                self.assertTrue(self.run_sync()["ready"])
+                repo = self.rpc.repos[0]
+                shutil.rmtree(self.root.parent)
+                original = self.rpc.call
+
+                def changed(method, params=None, before_send=None):
+                    if method == "repo.rm":
+                        if change == "saved":
+                            self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+                        elif change == "live":
+                            self.rpc.terminals = [{"ptyId": "new-live", "worktreeId": repo["id"] + "::/live",
+                                                   "executionHostId": "local", "connected": True}]
+                        elif change == "path":
+                            repo["path"] = "/manual/moved"
+                        elif change == "group":
+                            repo["projectGroupId"] = "manual"
+                        elif change == "remote":
+                            repo["executionHostId"] = "remote"
+                        elif change == "runtime":
+                            self.rpc.runtime_id = "new-runtime"
+                        else:
+                            self.root.mkdir(parents=True)
+                    return original(method, params, before_send=before_send)
+
+                self.rpc.call = changed
+                report = self.run_sync()
+                self.assertFalse(report["ready"])
+                self.assertIn(repo, self.rpc.repos)
+                self.assertIn("sample-id", self.sidecar()["projects"])
+                self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+
+    def test_confirmed_identity_state_validation_is_strict(self):
+        self.assertTrue(self.run_sync()["ready"])
+        before = self.sidecar()
+        invalid = (["repo"], {str(self.root): ""}, {str(self.root): 1},
+                   {str(self.root / "../outside"): "repo"}, {"/elsewhere": "repo"},
+                   {str(self.root): "repo", str(self.root / "nested"): "repo"})
+        for confirmed in invalid:
+            with self.subTest(confirmed=confirmed):
+                data = copy.deepcopy(before)
+                data["projects"]["sample-id"]["confirmed_repos"] = confirmed
+                (self.state / "subyard-registration.json").write_text(json.dumps(data))
+                self.rpc.calls.clear()
+                report = self.run_sync()
+                self.assertFalse(report["ready"])
+                self.assertIn("state is unavailable or invalid", " ".join(report["errors"]))
+                self.assertEqual([], self.rpc.calls)
 
     def test_cleanup_preserves_session_tabs_manual_and_remote_records(self):
         init_git(self.root / "gone")
@@ -812,7 +1200,11 @@ class ReconcileTests(unittest.TestCase):
 
         self.rpc.call = timeout_then_saved_tab
         report = self.run_sync()
-        self.assertTrue(report["ready"], report)
+        self.assertFalse(report["ready"], report)
+        self.assertFalse(report["cleanupReady"])
+        self.assertTrue(any(item.get("groupId") == retired["projectGroupId"]
+                            and item["reason"] == "project group removal is pending"
+                            for item in report["cleanup"]))
         self.assertEqual(before_groups, self.rpc.groups)
         self.assertEqual(before_repos, self.rpc.repos)
         self.assertEqual(2, list_calls)

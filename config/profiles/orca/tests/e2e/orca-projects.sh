@@ -305,14 +305,19 @@ if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then
   exit 0
 fi
 
-stage 'pruning missing ungrouped build checkouts through explicit and periodic sync'
+stage 'pruning confirmed ungrouped build checkouts through explicit and periodic sync'
 pause_discovery
 for mode in sync periodic; do
   stale_build="$clone_root/.build/cleanup-trial/$mode/checkout"
   guest_dev git init -q "$stale_build"
-  legacy_repo="$(orca_rpc repo.add "$(rpc_params --arg path "$stale_build" '{path:$path,kind:"git"}')")"
-  jq -e '.repo.projectGroupId == null' <<<"$legacy_repo" >/dev/null \
-    || die 'legacy cleanup fixture already belongs to a group'
+  rpc_write repo.add "$(rpc_params --arg path "$stale_build" '{path:$path,kind:"git"}')"
+  yard orca sync --yes >/dev/null
+  stale_build_id="$(repo_id "$stale_build")"
+  rpc_write projectGroup.moveProject "$(rpc_params --arg repo "id:$stale_build_id" \
+    '{repo:$repo,groupId:null}')"
+  catalog | jq -e --arg id "$stale_build_id" \
+    '.repos | any(.id == $id and .projectGroupId == null)' >/dev/null \
+    || die 'confirmed cleanup fixture did not lose its group membership'
   guest_dev rm -rf -- "$stale_build"
   if [ "$mode" = sync ]; then
     yard orca sync --yes >/dev/null
@@ -325,6 +330,106 @@ for mode in sync periodic; do
   fi
   assert_absent_repo "$stale_build"
 done
+
+stage 'reconciling removed projects after group loss and incomplete project hooks'
+pause_discovery
+removal_source="$STATE/host/removal-source"
+mkdir -p "$removal_source"
+printf 'remove retry\n' > "$removal_source/content.txt"
+for mode in ordinary hook sync periodic legacy; do
+  stage "removed-project cleanup: $mode"
+  removal_name="cleanup-removal-$mode"
+  removal_root="/srv/workspaces/$removal_name/src"
+  yard sync "$removal_source" --name "$removal_name" --yes >/dev/null
+  guest_dev git init -q "$removal_root/child"
+  # Explicit sync adopts known native roots; recursive discovery is paused here.
+  rpc_write repo.add "$(rpc_params --arg path "$removal_root/child" '{path:$path,kind:"git"}')"
+  yard orca sync --yes >/dev/null
+  removal_id="$(repo_id "$removal_root")" \
+    || die "removed-project fixture root registration missing: $mode"
+  removal_child_id="$(repo_id "$removal_root/child")" \
+    || die "removed-project fixture child registration missing: $mode"
+  removal_group="$(group_id "$removal_root")" \
+    || die "removed-project fixture group missing: $mode"
+  removal_selector="id:$removal_id::$removal_root"
+  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+    removal_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+      create "$removal_selector")"
+    removal_tab="$(jq -er '.tab_id' <<<"$removal_session")"
+    removal_pty="$(jq -er '.pty_id' <<<"$removal_session")"
+  fi
+  if [ "$mode" != ordinary ]; then
+    # Native group deletion detaches its records, preserving their exact IDs.
+    rpc_write projectGroup.delete "$(rpc_params --arg group "$removal_group" '{groupId:$group}')"
+    catalog | jq -e --arg id "$removal_id" --arg path "$removal_root" \
+      '.repos | any(.id == $id and .path == $path and .projectGroupId == null)' >/dev/null \
+      || die 'native group loss changed the removed-project candidate identity'
+  fi
+  if [ "$mode" = legacy ]; then
+    # Simulate a pre-upgrade sidecar, retaining its actual project/root mapping.
+    guest_dev python3 -B - "$removal_root" <<'YARD'
+import json, sys
+from pathlib import Path
+path = Path('/srv/agents/orca/subyard-registration.json')
+state = json.loads(path.read_text())
+entries = [entry for entry in state['projects'].values() if entry['root'] == sys.argv[1]]
+assert len(entries) == 1
+entries[0].pop('confirmed_repos')
+path.write_text(json.dumps(state))
+YARD
+  fi
+  yard remove "$removal_name" --yes >"$STATE/remove-$mode.out" 2>"$STATE/remove-$mode.err" \
+    || die "project removal failed: $mode"
+  guest_dev test ! -e "$removal_root" || die 'project removal left its workspace behind'
+  catalog | jq -e --arg id "$removal_child_id" '.repos | all(.id != $id)' >/dev/null \
+    || die 'partial removed-project cleanup retained the unprotected child'
+  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+    [ "$(repo_id "$removal_root")" = "$removal_id" ] \
+      || die 'removed-project cleanup lost a live-session registration'
+    orca_rpc session.tabs.listAll | jq -e --arg id "$removal_tab" \
+      '.snapshots | any(.tabs | any(.id == $id))' >/dev/null \
+      || die 'incomplete project hook removed a protected session'
+    guest_dev jq -e --arg path "$removal_root" --arg id "$removal_id" \
+      '.projects | any(.confirmed_repos[$path] == $id)' \
+      /srv/agents/orca/subyard-registration.json >/dev/null \
+      || die 'incomplete project hook discarded durable repository ownership'
+    yard orca status >"$STATE/remove-status-$mode.out" 2>"$STATE/remove-status-$mode.err"
+    grep -Fq "$removal_root" "$STATE/remove-status-$mode.out" "$STATE/remove-status-$mode.err" \
+      || die 'status omitted the retained registration of a removed project'
+    if yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err"; then
+      die 'sync reported complete cleanup while the removed project retained a session'
+    fi
+    grep -Fq "$removal_root" "$STATE/remove-retry-$mode.out" "$STATE/remove-retry-$mode.err" \
+      || die 'sync omitted the pending removed-project cleanup reason'
+    stop_result="$(orca_rpc terminal.stopExact "$(rpc_params \
+      --arg selector "$removal_selector" --arg pty "$removal_pty" \
+      '{worktree:$selector,expectedPtyIds:[$pty],keepHistory:true}')")"
+    jq -e '.stopped == 1 and .postStopVerified == true' <<<"$stop_result" >/dev/null \
+      || die 'removed-project terminal stop was not verified'
+    guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+      pending "$removal_selector" --tab-id "$removal_tab" --pty-id "$removal_pty"
+    if [ "$mode" = sync ]; then
+      yard orca sync --yes >/dev/null
+    else
+      resume_discovery
+      for _ in $(seq 1 60); do
+        catalog | jq -e --arg id "$removal_id" '.repos | all(.id != $id)' >/dev/null && break
+        sleep 2
+      done
+      pause_discovery
+    fi
+    guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
+      absent "$removal_selector" --tab-id "$removal_tab" --pty-id "$removal_pty"
+  fi
+  assert_absent_repo "$removal_root"
+  groups | jq -e --arg id "$removal_group" '.groups | all(.id != $id)' >/dev/null \
+    || die 'removed-project cleanup retained its empty owned group'
+  guest_dev jq -e --arg path "$removal_root" '.projects | all(.root != $path)' \
+    /srv/agents/orca/subyard-registration.json >/dev/null \
+    || die 'verified removed-project cleanup retained stale ownership'
+  yard orca sync --yes >/dev/null
+done
+resume_discovery
 if [ "${SUBYARD_E2E_ORCA_CLEANUP_ONLY:-}" = 1 ]; then
   sleep 3
   yard orca restart --yes >/dev/null
@@ -334,7 +439,10 @@ if [ "${SUBYARD_E2E_ORCA_CLEANUP_ONLY:-}" = 1 ]; then
   assert_repo "$clone_root" git "$clone_group" clone-project
   assert_repo "$folder_root" folder "$folder_group" folder-project
   assert_repo "$bind_root" folder "$bind_group" bind-project
-  printf 'ok: explicit and periodic Orca cleanup persists after restart\n'
+  for mode in ordinary hook sync periodic legacy; do
+    assert_absent_repo "/srv/workspaces/cleanup-removal-$mode/src"
+  done
+  printf 'ok: removed-project hook retry, group loss, legacy cleanup and session retention persist after restart\n'
   exit 0
 fi
 
