@@ -115,7 +115,7 @@ func TestCandidateBlockedInspectionCheckReturnsStructuredPublicOutcome(t *testin
 	for _, compact := range []bool{false, true} {
 		t.Run(fmt.Sprintf("check/compact=%t", compact), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			runtime := New(Config{Stdout: &stdout, Stderr: &stderr, Environment: map[string]string{"HOME": root}})
+			runtime := New(Config{Stdout: &stdout, Stderr: &stderr, Inputs: fixtureCommandInputs(map[string]string{"HOME": root})})
 			arguments := []string{"--check", "--runtime-root", root}
 			if compact {
 				arguments = append(arguments, "--json")
@@ -279,13 +279,13 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 				}
 			}
 			runtime := New(Config{
-				Environment: map[string]string{"HOME": root, "YARD_RELEASE_CACHE": cache},
-				Stdout:      &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+				Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RELEASE_CACHE": cache}),
+				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 			})
 
 			_, err := runtime.PrepareTransition(
 				context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
-				filepath.Join(root, "config"), "default", nil,
+				filepath.Join(root, "config"), "default",
 			)
 			if err == nil || !strings.Contains(err.Error(),
 				"release transition operator-action-required: code="+string(test.code)+
@@ -351,12 +351,12 @@ esac
 	}
 
 	release := New(Config{
-		Environment: map[string]string{"HOME": root},
-		Stdout:      &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		Inputs: fixtureCommandInputs(map[string]string{"HOME": root}),
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 	prepared, err := release.PrepareTransition(
 		context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
-		configHome, "default", nil,
+		configHome, "default",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -496,10 +496,10 @@ esac
 	}
 
 	runtime := New(Config{
-		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 	outcome, err := runtime.InspectMutationGate(
-		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
 	)
 	if err != nil || outcome != nil {
 		t.Fatalf("protected rollback inspection outcome=%#v err=%v", outcome, err)
@@ -542,9 +542,9 @@ esac
 	var reportOutput bytes.Buffer
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-	currentRuntime := New(Config{Environment: environment, Stdout: &reportOutput})
+	currentRuntime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &reportOutput})
 	defer currentRuntime.Close()
-	check, err := currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	check, err := currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ esac
 		t.Fatal(err)
 	}
 	reportOutput.Reset()
-	check, err = currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+	check, err = currentRuntime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestFrozenRollbackRequiresMatchingCheckpointProjection(t *testing.T) {
 			} else if scenario == "changed-projection" {
 				testkit.WriteFile(t, filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json"), append(projection, '\n'), 0o600)
 			}
-			runtime := New(Config{Environment: fixture.environment()})
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment())})
 			verified, err := runtime.verifyPublishedCandidate(context.Background(), publishedCandidate{
 				release: releasetransition.ReleaseID(fixture.target), root: root,
 			}, fixture.runtimeRoot, nil)
@@ -865,7 +865,7 @@ esac
 					t.Fatal(err)
 				}
 			}
-			runtime := New(Config{Environment: fixture.environment(), Installer: fixture.installer, Stderr: &bytes.Buffer{}})
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer, Stderr: &bytes.Buffer{}})
 			defer runtime.Close()
 			inspection, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
 			if scenario == "ready" || scenario == "same-release" {
@@ -873,7 +873,7 @@ esac
 					t.Fatalf("historical completion inspection = %#v, %v", inspection, err)
 				}
 				_, publicationErr := runtime.PrepareTransition(context.Background(),
-					[]string{"--runtime-root", fixture.runtimeRoot, "--version", "2.0.0"}, fixture.configHome, "default", nil,
+					[]string{"--runtime-root", fixture.runtimeRoot, "--version", "2.0.0"}, fixture.configHome, "default",
 				)
 				if publicationErr == nil || !strings.Contains(publicationErr.Error(), "release download failed; current runtime was not changed") {
 					t.Fatalf("completed rollback history blocked fresh forward publication: %v", publicationErr)
@@ -1035,14 +1035,14 @@ func TestPrepareTransitionUsesExactPublishedRecoveryWithoutLatestOrPublication(t
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
 	transport := &countingErrorTransport{}
 	runtime := New(Config{
-		Environment: fixture.environment(), Installer: fixture.installer,
+		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 		HTTPClient: &http.Client{Transport: transport},
 	})
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err != nil {
 		cause := err
@@ -1119,7 +1119,7 @@ esac
 `, marker, recoveringInspection, driftInspection, grants, marker, ready, marker, interrupted)
 	writeProtectedRuntimeFixtureEngine(t, fixture, engine)
 	runtime := New(Config{
-		Environment: fixture.environment(), Installer: fixture.installer,
+		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 
@@ -1138,7 +1138,7 @@ esac
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err != nil {
 		t.Fatalf("prepare completed activation repair: %v", err)
@@ -1190,7 +1190,7 @@ esac
 
 	resumed, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err != nil {
 		t.Fatalf("prepare activation repair resume: %v", err)
@@ -1269,7 +1269,7 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 `, response))
-			runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
 			if inspection, err := runtime.inspectProtectedTransition(
 				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
 			); err == nil || inspection != nil {
@@ -1314,7 +1314,7 @@ case "${1:-}" in
   *) exit 64 ;;
 esac
 `, string(payload)))
-			runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
 			if protected, err := runtime.inspectProtectedTransition(
 				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
 			); err == nil || protected != nil {
@@ -1337,14 +1337,14 @@ func TestPrepareTransitionCheckOfProtectedRecoveryIsReadOnly(t *testing.T) {
 	transport := &countingErrorTransport{}
 	var stdout bytes.Buffer
 	runtime := New(Config{
-		Environment: fixture.environment(), Installer: fixture.installer,
+		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 		Stdout: &stdout, Stderr: &bytes.Buffer{},
 		HTTPClient: &http.Client{Transport: transport},
 	})
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--check", "--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1508,13 +1508,13 @@ func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 			}
 			runtime := New(Config{
 				RepositoryRoot: repositoryRoot,
-				Environment:    environment, Installer: fixture.installer,
+				Inputs:         fixtureCommandInputs(environment), Installer: fixture.installer,
 				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 			})
 			arguments = append(arguments, "--runtime-root", fixture.runtimeRoot)
 
 			_, err := runtime.PrepareTransition(
-				context.Background(), arguments, fixture.configHome, "default", nil,
+				context.Background(), arguments, fixture.configHome, "default",
 			)
 			if err == nil {
 				t.Fatal("arbitrary recovery candidate was accepted")
@@ -1549,7 +1549,7 @@ func TestPrepareTransitionUsesExactDirectCandidateForV0111RecoveryPlan(t *testin
 	var stdout bytes.Buffer
 	runtime := New(Config{
 		RepositoryRoot: directRoot,
-		Environment:    fixture.environment(), Installer: fixture.installer,
+		Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 		Stdout: &stdout, Stderr: &bytes.Buffer{},
 	})
 
@@ -1557,7 +1557,7 @@ func TestPrepareTransitionUsesExactDirectCandidateForV0111RecoveryPlan(t *testin
 		context.Background(), []string{
 			"--check", "--offline", "--version", fixture.candidateVersion,
 			"--runtime-root", fixture.runtimeRoot,
-		}, fixture.configHome, "default", nil,
+		}, fixture.configHome, "default",
 	)
 	if err != nil {
 		t.Fatalf("prepare exact standalone recovery check: %v", err)
@@ -1635,7 +1635,7 @@ func TestV0111RecoveryValidatesAugmentedConsequenceBoundaryBeforeConverge(t *tes
 				var stdout bytes.Buffer
 				runtime := New(Config{
 					RepositoryRoot: fixture.candidate.root,
-					Environment:    fixture.environment(), Installer: fixture.installer,
+					Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 					Stdout: &stdout, Stderr: &bytes.Buffer{},
 				})
 				defer runtime.Close()
@@ -1647,7 +1647,7 @@ func TestV0111RecoveryValidatesAugmentedConsequenceBoundaryBeforeConverge(t *tes
 					arguments = append(arguments, "--check")
 				}
 				prepared, err := runtime.PrepareTransition(
-					context.Background(), arguments, fixture.configHome, "default", nil,
+					context.Background(), arguments, fixture.configHome, "default",
 				)
 				if test.wantPreparationError {
 					if err == nil {
@@ -1725,7 +1725,7 @@ func TestPreparedV0111RecoveryAddsOneRedactedConsequenceAndConverges(t *testing.
 			fixture := newV0111CandidateRoutingFixture(t)
 			runtime := New(Config{
 				RepositoryRoot: fixture.candidate.root,
-				Environment:    fixture.environment(), Installer: fixture.installer,
+				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 			})
 			defer runtime.Close()
@@ -1734,7 +1734,7 @@ func TestPreparedV0111RecoveryAddsOneRedactedConsequenceAndConverges(t *testing.
 				"--runtime-root", fixture.runtimeRoot,
 			)
 			prepared, err := runtime.PrepareTransition(
-				context.Background(), arguments, fixture.configHome, "default", nil,
+				context.Background(), arguments, fixture.configHome, "default",
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -1815,7 +1815,7 @@ func TestPreparedV0111RecoveryRevalidatesArtifactsAndJournalBeforeConverge(t *te
 			fixture := newV0111CandidateRoutingFixture(t)
 			runtime := New(Config{
 				RepositoryRoot: fixture.candidate.root,
-				Environment:    fixture.environment(), Installer: fixture.installer,
+				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 				Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 			})
 			defer runtime.Close()
@@ -1823,7 +1823,7 @@ func TestPreparedV0111RecoveryRevalidatesArtifactsAndJournalBeforeConverge(t *te
 				context.Background(), []string{
 					"--offline", "--version", fixture.candidateVersion,
 					"--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default", nil,
+				}, fixture.configHome, "default",
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -1891,14 +1891,14 @@ func TestV0111ScopeBlockerReportsTruthfulStandaloneRetry(t *testing.T) {
 			var stdout bytes.Buffer
 			runtime := New(Config{
 				RepositoryRoot: test.repositoryRoot(fixture),
-				Environment:    fixture.environment(), Installer: fixture.installer,
+				Inputs:         fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 				Stdout: &stdout, Stderr: &bytes.Buffer{},
 			})
 			defer runtime.Close()
 			prepared, err := runtime.PrepareTransition(
 				context.Background(), []string{
 					"--check", "--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default", nil,
+				}, fixture.configHome, "default",
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -1927,7 +1927,7 @@ func TestV0111ScopeBlockerReportsTruthfulStandaloneRetry(t *testing.T) {
 				context.Background(), []string{
 					"--version", fixture.candidateVersion,
 					"--runtime-root", fixture.runtimeRoot,
-				}, fixture.configHome, "default", nil,
+				}, fixture.configHome, "default",
 			)
 			if err == nil || !strings.Contains(err.Error(), "next: "+test.wantRetry) ||
 				strings.Contains(err.Error(), "yard update --check") {
@@ -1974,12 +1974,12 @@ func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *
 			test.tamper(t, fixture)
 			var stdout bytes.Buffer
 			runtime := New(Config{
-				Environment: fixture.environment(), Installer: fixture.installer,
+				Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 				Stdout: &stdout, Stderr: &bytes.Buffer{},
 			})
 			prepared, err := runtime.PrepareTransition(
 				context.Background(), []string{"--check", "--runtime-root", fixture.runtimeRoot},
-				fixture.configHome, "default", nil,
+				fixture.configHome, "default",
 			)
 			if err != nil {
 				t.Fatalf("prepare public check: %v", err)
@@ -2007,7 +2007,7 @@ func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *
 
 			_, err = runtime.PrepareTransition(
 				context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
-				fixture.configHome, "default", nil,
+				fixture.configHome, "default",
 			)
 			if err == nil || !strings.Contains(err.Error(),
 				"release transition operator-action-required: code="+string(test.code)) ||
@@ -2024,7 +2024,7 @@ func TestPrepareTransitionReportsProtectedInspectionFailuresAsPublicOutcomes(t *
 func TestPrepareTransitionRejectsDifferentTargetBeforePublication(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
 	runtime := New(Config{
-		Environment: fixture.environment(), Installer: fixture.installer,
+		Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 
@@ -2032,7 +2032,7 @@ func TestPrepareTransitionRejectsDifferentTargetBeforePublication(t *testing.T) 
 		context.Background(), []string{
 			"--version", "9.9.9", "--runtime-root", fixture.runtimeRoot,
 		},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err == nil || !strings.Contains(err.Error(), "exact") {
 		t.Fatalf("different-target update error = %v", err)
@@ -2112,11 +2112,11 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 				capture, fixture.recoveringResponse())
 			test.tamper(t, fixture, payload)
 			runtime := New(Config{
-				Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+				Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 			})
 
 			outcome, err := runtime.InspectMutationGate(
-				context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+				context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
 			)
 			if err != nil || outcome == nil ||
 				outcome.Status != releasetransition.StatusOperatorActionRequired ||
@@ -2166,7 +2166,7 @@ esac
 		t.Fatal(err)
 	}
 	runtime := New(Config{
-		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 	type gateResult struct {
 		outcome *releasetransition.Outcome
@@ -2175,7 +2175,7 @@ esac
 	result := make(chan gateResult, 1)
 	go func() {
 		outcome, err := runtime.InspectMutationGate(
-			context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+			context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
 		)
 		result <- gateResult{outcome: outcome, err: err}
 	}()
@@ -2475,11 +2475,11 @@ esac
 func TestMutationGateInspectsSemanticallyUnsafeCompleteJournal(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
 	runtime := New(Config{
-		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 
 	outcome, err := runtime.InspectMutationGate(
-		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2529,10 +2529,10 @@ esac
 	writeProtectedRuntimeFixtureEngine(t, fixture, engine)
 
 	runtime := New(Config{
-		Environment: fixture.environment(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 	if _, err := runtime.InspectMutationGate(
-		context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil,
+		context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
 	); err != nil {
 		t.Fatal(err)
 	}

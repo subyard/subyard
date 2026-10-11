@@ -476,7 +476,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		)
 	}
 	command.Env = releaseMigrationEnvironment(
-		runtime.config.Environment, repositoryRoot, runtimeRoot,
+		runtime.config.Inputs, runtime.config.Context, repositoryRoot, runtimeRoot,
 	)
 	if grant != "" {
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")

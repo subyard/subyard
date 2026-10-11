@@ -148,7 +148,7 @@ func configLayoutRollbackFixture(t *testing.T, metadata string) (*Runtime, optio
 			t.Fatal(err)
 		}
 	}
-	runtime := New(Config{Environment: map[string]string{"HOME": root}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root}), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: candidate.release, Direction: releasetransition.DirectionActivatePrevious}
 	return runtime, options{root: runtimeRoot}, candidate, request, called
 }

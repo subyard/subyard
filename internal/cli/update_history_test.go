@@ -9,15 +9,274 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/audit"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+type protectedOwnerInputCase struct {
+	name, override string
+	mounts, agents *string
+	blocked        bool
+}
+
+func protectedOwnerInputCases() []protectedOwnerInputCase {
+	explicitMounts, emptyMounts, agents := "explicit:/mnt/explicit:ro:0700", "", "codex"
+	derivedMounts := "derived:/mnt/derived:ro:0700"
+	return []protectedOwnerInputCase{
+		{name: "derived settings"},
+		{name: "canonical override", override: "HOST_MOUNTS=" + explicitMounts, mounts: &explicitMounts},
+		{name: "empty override", override: "HOST_MOUNTS=", mounts: &emptyMounts},
+		{name: "legacy override", override: "AGENTS=" + agents, agents: &agents},
+		{name: "unsafe explicit override", override: "HOST_MOUNTS=derived:/mnt/derived:ro:0700", mounts: &derivedMounts, blocked: true},
+	}
+}
+
+func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t *testing.T) {
+	for _, entrypoint := range []string{"readiness", "migrate"} {
+		t.Run(entrypoint, func(t *testing.T) {
+			for _, test := range protectedOwnerInputCases() {
+				t.Run(test.name, func(t *testing.T) {
+					root, environment, runtimeRoot := updateReleaseFixture(t)
+					writeCLIFile(t, filepath.Join(root, "config", "host.env"), "HOST_MOUNTS=derived:/mnt/derived:ro:0700\n", 0o600)
+					capture := filepath.Join(root, "protected-owner-request.json")
+					environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "UPDATE_OWNER_CAPTURE="+capture, "SUBYARD_NO_AUDIT=1")
+					if test.override != "" {
+						environment = append(environment, test.override)
+					}
+					journalPath := installCompletedUpdateOwnerFixture(t, environment, runtimeRoot)
+					before, err := os.ReadFile(journalPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var stdout, stderr bytes.Buffer
+					program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
+					if err != nil {
+						t.Fatal(err)
+					}
+					loaded, err := program.loadContext("default")
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Readiness can follow loading a yard. Its effective settings must never
+					// replace the original command inputs of any protected operation.
+					program.env = loaded.Environment
+					if entrypoint == "readiness" {
+						outcome, err := program.inspectMutationGate(context.Background(), "default")
+						if err != nil || (outcome != nil) != test.blocked {
+							t.Fatalf("gate outcome=%#v err=%v", outcome, err)
+						}
+					} else {
+						prepared := &preparedCommand{CLI: program, Loaded: loaded, Arguments: []string{"--check", "--json"}, Plan: domain.OperationPlan{Confirmed: true}}
+						if err := prepared.prepareCurrentMigration(context.Background(), nil); err != nil {
+							t.Fatal(err)
+						}
+						defer prepared.Close()
+						result, err := prepared.execute(context.Background(), &application.Orchestrator{Clock: wallClock{}}, nil)
+						if err != nil {
+							t.Fatalf("current migration: %v (%#v)", err, result)
+						}
+						var report struct{ Outcome releasetransition.Outcome }
+						if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || (report.Outcome.Status == releasetransition.StatusOperatorActionRequired) != test.blocked || report.Outcome.ReachedGoal == test.blocked {
+							t.Fatalf("migrate report=%s err=%v", stdout.String(), err)
+						}
+					}
+					payload, err := os.ReadFile(capture)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var observed struct {
+						Mounts, Agents *string
+						Request        releasetransition.ProcessRequest
+					}
+					if err := json.Unmarshal(payload, &observed); err != nil {
+						t.Fatal(err)
+					}
+					want, _ := json.Marshal(struct{ Mounts, Agents *string }{test.mounts, test.agents})
+					got, _ := json.Marshal(struct{ Mounts, Agents *string }{observed.Mounts, observed.Agents})
+					wantIDs := []string{"DEV_SUDO", "DEV_UID", "DEV_USER", "FORWARD_SSH_AGENT", "HOST_BASE", "RESTRICTED_DISK_PATHS", "SHIFT_MODE", "SSH_PORT", "STORAGE_PATH"}
+					if strings.HasPrefix(test.override, "HOST_MOUNTS=") {
+						wantIDs = append(wantIDs, "HOST_MOUNTS")
+						slices.Sort(wantIDs)
+					}
+					if !bytes.Equal(got, want) || !slices.Equal(observed.Request.InheritedSettingIDs, wantIDs) || observed.Request.ConfigHome != loaded.Context.Paths.ConfigHome || observed.Request.RuntimeRoot != runtimeRoot || observed.Request.Yard != "default" {
+						t.Fatalf("wrong owner inputs: %s", payload)
+					}
+					after, err := os.ReadFile(journalPath)
+					if err != nil || !bytes.Equal(before, after) {
+						t.Fatalf("inspection changed completed journal: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) {
+	for _, test := range protectedOwnerInputCases() {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, runtimeRoot := updateReleaseFixture(t)
+			writeCLIFile(t, filepath.Join(root, "config", "host.env"), "HOST_MOUNTS=derived:/mnt/derived:ro:0700\n", 0o600)
+			capture := filepath.Join(root, "protected-owner-request.json")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "UPDATE_OWNER_CAPTURE="+capture)
+			if test.override != "" {
+				environment = append(environment, test.override)
+			}
+			journalPath := installCompletedUpdateOwnerFixture(t, environment, runtimeRoot)
+			before, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment,
+				Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.mounts == nil && loaded.Environment["HOST_MOUNTS"] == "" {
+				t.Fatal("fixture must derive the invoking yard's host mounts")
+			}
+			execution, err := program.prepareRelease(context.Background(), loaded,
+				[]string{"--check", "--json", "--version", "1.2.3"})
+			if err != nil {
+				if test.blocked && strings.Contains(err.Error(), "permits only exact target 1.2.2-aaaaaaaaaaaa") {
+					return
+				}
+				t.Fatalf("completed protected owner prevented newer release inspection: %v", err)
+			}
+			defer execution.Close()
+			if test.blocked {
+				t.Fatal("unsafe explicit override bypassed the protected target guard")
+			}
+			if err := execution.prepared.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var inspection releasetransition.Inspection
+			if err := json.Unmarshal(stdout.Bytes(), &inspection); err != nil || inspection.Outcome == nil ||
+				!strings.HasPrefix(string(inspection.Outcome.Target), "1.2.3-") ||
+				execution.yard != loaded.Context.YardName {
+				t.Fatalf("update changed its target or yard scope: %s, %v", stdout.String(), err)
+			}
+			payload, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var observed struct {
+				Mounts, Agents *string
+				Request        releasetransition.ProcessRequest
+			}
+			if err := json.Unmarshal(payload, &observed); err != nil {
+				t.Fatal(err)
+			}
+			want, _ := json.Marshal(struct{ Mounts, Agents *string }{test.mounts, test.agents})
+			got, _ := json.Marshal(struct{ Mounts, Agents *string }{observed.Mounts, observed.Agents})
+			if !bytes.Equal(got, want) || observed.Request.ConfigHome != loaded.Context.Paths.ConfigHome ||
+				observed.Request.Yard != loaded.Context.YardName || observed.Request.RuntimeRoot != runtimeRoot ||
+				!slices.Equal(observed.Request.InheritedSettingIDs, program.releaseTransitionInheritedSettingIDs()) {
+				t.Fatalf("owner received different explicit settings or scope: %s", payload)
+			}
+			after, err := os.ReadFile(journalPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("read-only inspection changed the completed journal: %v", err)
+			}
+		})
+	}
+}
+
+func installCompletedUpdateOwnerFixture(t *testing.T, environment []string, runtimeRoot string) string {
+	t.Helper()
+	release := releasetransition.ReleaseID("1.2.2-aaaaaaaaaaaa")
+	destination := filepath.Join(runtimeRoot, "releases", string(release))
+	for _, directory := range []string{"bin", "config"} {
+		if err := os.MkdirAll(filepath.Join(destination, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Model a historical owner that mistakes an invoking yard's resolved mounts
+	// for command overrides. Capture only synthetic settings and the protocol scope.
+	engine := `#!/bin/sh
+set -eu
+case "${1:-}" in
+--version) printf 'yard-engine 1.2.2\n' ;;
+_release-transition)
+request=$(cat)
+printf '%s' "$request" | jq '{Mounts: env.HOST_MOUNTS, Agents: env.AGENTS, Request: .}' > "$UPDATE_OWNER_CAPTURE"
+config_home=$(printf '%s' "$request" | jq -r .configHome)
+transaction=$(jq -r .transaction "$config_home/release-transition/v2/journal.json")
+target=$(printf '%s' "$request" | jq -r .target)
+jq -n --arg target "$target" --arg transaction "$transaction" --arg mounts "${HOST_MOUNTS:-}" '{
+  schemaVersion: 1, activationReconciliationOwned: true,
+  inspection: {
+    plan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    assessment: {action: "release.transition.v2", effect: "mutation", changed: false,
+      impacts: ["local-metadata", "persistent-data", "yard-runtime"], recovery: "reversible"},
+    outcome: {status: "ready", reachedGoal: true, active: $target, previous: "release-old",
+      target: $target, code: "ready", message: "verified", transaction: $transaction}
+  }
+} | if $mounts == "derived:/mnt/derived:ro:0700" then
+  .inspection.assessment.changed = true |
+  .inspection.assessment.consequences = ["repair route consumers"] |
+  .inspection.blockers = [{code: "precondition-blocked", resource: "activation.fixture-route-consumers",
+    message: "inherited invoking-yard mounts", retry: "run yard update --check"}] |
+  .inspection.outcome += {status: "operator-action-required", reachedGoal: false,
+    code: "precondition-blocked", message: "inherited invoking-yard mounts", retry: "run yard update --check"}
+  else . end'
+;;
+*) exit 64 ;;
+esac
+`
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+	writeCLIFile(t, filepath.Join(destination, "bin", "yard-engine"), engine, 0o700)
+	writeCLIFile(t, filepath.Join(destination, "config", "release-transition.json"), string(registry), 0o600)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n",
+		sha256.Sum256([]byte(engine)), sha256.Sum256(registry))
+	writeCLIFile(t, filepath.Join(destination, "runtime-files.sha256"), manifest, 0o600)
+	links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
+		ConfigHome:   configHome,
+		Releases:     releasetransition.ReleasePair{From: "release-old", Target: release},
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
+		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
+			return links.Activate(pair)
+		},
+		RegistryPayload:     registry,
+		ArtifactDigest:      releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256([]byte(manifest)))),
+		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := transition.Inspect(context.Background(), releasetransition.Goal{
+		Target: release, Direction: releasetransition.DirectionActivateTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{
+		Plan: inspection.Plan, Authorization: "fixture-authorization"})
+	if err != nil || outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("complete owner fixture: %#v, %v", outcome, err)
+	}
+	return filepath.Join(configHome, "release-transition", "v2", "journal.json")
+}
 
 func TestUpdateHistoryRecordsActivationRollbackFailureAndDecline(t *testing.T) {
 	root, environment, runtimeRoot := updateReleaseFixture(t)

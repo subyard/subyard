@@ -1252,7 +1252,7 @@ func executeReleaseTransitionRequest(
 		VerifyAuthorization: verifyAuthorization,
 	})
 	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
-		runtime := releaseruntime.New(releaseruntime.Config{RepositoryRoot: repositoryRoot, Stderr: io.Discard})
+		runtime := releaseruntime.NewSourceInspector(repositoryRoot, io.Discard)
 		defer runtime.Close()
 		proof, err := runtime.InspectSourceAdmission(ctx, request.RuntimeRoot, request.ConfigHome)
 		if err != nil {

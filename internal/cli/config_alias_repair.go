@@ -150,7 +150,7 @@ func (cli *CLI) aliasRepairContent(path string, content []byte, request configAl
 	return draft, nil
 }
 
-func (cli *CLI) inspectConfigSourceAdmission(ctx context.Context, runtime *releaseruntime.Runtime) (releaseruntime.SourceAdmission, error) {
+func (cli *CLI) inspectConfigSourceAdmission(ctx context.Context, runtime *releaseruntime.SourceInspector) (releaseruntime.SourceAdmission, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
 		return releaseruntime.SourceAdmission{}, errors.New("source repair requires verified installed release metadata")
@@ -173,7 +173,7 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 		return 2
 	}
 	values := cli.configSourceEnvironment()
-	runtime := releaseruntime.New(releaseruntime.Config{Environment: cli.env, RepositoryRoot: cli.options.RepositoryRoot, Stderr: cli.options.Stderr})
+	runtime := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
 	defer runtime.Close()
 	options, available, optionsErr := cli.mutationGateReleaseOptions()
 	if optionsErr != nil || !available {

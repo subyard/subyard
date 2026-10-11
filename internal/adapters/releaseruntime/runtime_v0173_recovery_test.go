@@ -22,9 +22,9 @@ func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
 	fixture := newV0173RecoveryFixture(t)
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-	runtime := New(Config{RepositoryRoot: fixture.candidate.root, Environment: environment, Stderr: &bytes.Buffer{}})
+	runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stderr: &bytes.Buffer{}})
 	defer runtime.Close()
-	_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default", nil)
+	_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--version", "0.17.5"}, fixture.configHome, "default")
 	if err == nil || !strings.Contains(err.Error(), filepath.Join(fixture.candidate.root, "bin", "yard")) ||
 		!strings.Contains(err.Error(), "migrate --check") || !strings.Contains(err.Error(), "retry yard update after recovery") {
 		t.Fatalf("update omitted concrete recovery commands: %v", err)
@@ -43,9 +43,9 @@ func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			environment := fixture.environment()
 			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-			runtime := New(Config{RepositoryRoot: fixture.candidate.root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
+			runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(environment), Stdout: &stdout, Stderr: &stderr})
 			defer runtime.Close()
-			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default")
 			if err != nil || check.Changed {
 				t.Fatalf("delegated check: %v, stderr=%s", err, stderr.String())
 			}
@@ -61,7 +61,7 @@ func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 			if !sameProtectedSnapshot(fixture.journal, checked) {
 				t.Fatal("read-only delegation changed the protected journal")
 			}
-			apply, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default", nil)
+			apply, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default")
 			if err != nil || apply.Changed || apply.TargetRelease != string(fixture.source.release) {
 				t.Fatalf("delegated apply: %#v, %v, stderr=%s", apply, err, stderr.String())
 			}
@@ -87,7 +87,7 @@ func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 				if err := os.Remove(fixture.statePath + ".fail"); err != nil {
 					t.Fatal(err)
 				}
-				resumed, prepareErr := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default", nil)
+				resumed, prepareErr := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default")
 				if prepareErr != nil {
 					t.Fatal(prepareErr)
 				}
@@ -127,7 +127,7 @@ func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 
 func TestV0173RecoveryRequiresExactActivationOnlyDefect(t *testing.T) {
 	fixture := newV0173RecoveryFixture(t)
-	runtime := New(Config{Environment: fixture.environment(), Stderr: &bytes.Buffer{}})
+	runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
 	defer runtime.Close()
 	protected, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
 	if err != nil || !isV0173ActivationOnlyBlocker(protected) {

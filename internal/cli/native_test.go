@@ -606,7 +606,7 @@ func TestReleaseRuntimeConfigCarriesExactRepositoryRoot(t *testing.T) {
 		Stdout:         &bytes.Buffer{},
 		Stderr:         &bytes.Buffer{},
 	}}
-	config := program.releaseRuntimeConfig(map[string]string{"HOME": t.TempDir()})
+	config := program.releaseRuntimeConfig(releaseruntime.RuntimeContext{})
 	if config.RepositoryRoot != repositoryRoot {
 		t.Fatalf("release runtime repository root = %q, want %q", config.RepositoryRoot, repositoryRoot)
 	}

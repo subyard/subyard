@@ -70,9 +70,11 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 		return err
 	}
 	prepared.Loaded = loaded
-	runtime := releaseruntime.New(cli.releaseRuntimeConfig(loaded.Environment))
+	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
+		OperatorHome: loaded.Context.Paths.OperatorHome, DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: loaded.Environment["YARD_RUNTIME_ROOT"], OperationID: cli.env["SUBYARD_OPERATION_ID"],
+	}))
 	operation, err := runtime.PrepareCurrentTransition(ctx, prepared.Arguments,
-		loaded.Context.Paths.ConfigHome, "default", cli.releaseTransitionInheritedSettingIDs())
+		loaded.Context.Paths.ConfigHome, "default")
 	if err != nil {
 		_ = runtime.Close()
 		return err

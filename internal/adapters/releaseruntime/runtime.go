@@ -27,7 +27,8 @@ import (
 )
 
 type Config struct {
-	Environment    map[string]string
+	Inputs         CommandInputs
+	Context        RuntimeContext
 	Installer      string
 	RepositoryRoot string
 	Stdout         io.Writer
@@ -156,8 +157,8 @@ func (runtime *Runtime) InspectMutationGate(
 	runtimeRoot string,
 	configHome string,
 	yard string,
-	inheritedSettingIDs []string,
 ) (*releasetransition.Outcome, error) {
+	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	inspection, err := runtime.inspectProtectedTransition(
 		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
 	)
@@ -479,8 +480,8 @@ func (runtime *Runtime) PrepareTransition(
 	arguments []string,
 	configHome string,
 	yard string,
-	inheritedSettingIDs []string,
 ) (Prepared, error) {
+	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, help, err := runtime.parse(arguments)
 	if err != nil {
 		return Prepared{}, err
@@ -541,7 +542,7 @@ func (runtime *Runtime) PrepareTransition(
 			ctx, parsed, configHome, yard, inheritedSettingIDs,
 		)
 	}
-	sourceIngress, err := sourceIngressRequestFromEnvironment(runtime.config.Environment)
+	sourceIngress, err := sourceIngressRequestFromEnvironment(runtime.config.Inputs.values)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -1748,18 +1749,18 @@ func inspectRuntimeLink(root, name string) (runtimeLinkState, error) {
 }
 
 func (runtime *Runtime) parse(arguments []string) (options, bool, error) {
-	home := runtime.config.Environment["SUBYARD_HOME"]
+	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
 	if home == "" {
-		home = filepath.Join(runtime.config.Environment["HOME"], ".subyard")
+		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")
 	}
 	result := options{channel: "stable", root: filepath.Join(home, "runtime"), cache: filepath.Join(home, "releases"),
-		repository: first(runtime.config.Environment["YARD_RELEASE_REPOSITORY"], "Subyard/Subyard"),
-		version:    runtime.config.Environment["YARD_RELEASE_VERSION"], baseURL: runtime.config.Environment["YARD_RELEASE_BASE_URL"],
-		tag: runtime.config.Environment["YARD_RELEASE_TAG"]}
-	if value := runtime.config.Environment["YARD_RUNTIME_ROOT"]; value != "" {
+		repository: first(runtime.config.Inputs.value("YARD_RELEASE_REPOSITORY", runtime.config.Context), "Subyard/Subyard"),
+		version:    runtime.config.Inputs.value("YARD_RELEASE_VERSION", runtime.config.Context), baseURL: runtime.config.Inputs.value("YARD_RELEASE_BASE_URL", runtime.config.Context),
+		tag: runtime.config.Inputs.value("YARD_RELEASE_TAG", runtime.config.Context)}
+	if value := runtime.config.Inputs.value("YARD_RUNTIME_ROOT", runtime.config.Context); value != "" {
 		result.root = value
 	}
-	if value := runtime.config.Environment["YARD_RELEASE_CACHE"]; value != "" {
+	if value := runtime.config.Inputs.value("YARD_RELEASE_CACHE", runtime.config.Context); value != "" {
 		result.cache = value
 	}
 	for index := 0; index < len(arguments); index++ {
@@ -1908,23 +1909,12 @@ func releaseBundleIdentity(version, bundle string) (string, string, error) {
 }
 
 func releaseMigrationEnvironment(
-	values map[string]string,
+	inputs CommandInputs,
+	context RuntimeContext,
 	repositoryRoot string,
 	runtimeRoot string,
 ) []string {
-	environment := make(map[string]string)
-	if values == nil {
-		for _, assignment := range os.Environ() {
-			name, value, ok := strings.Cut(assignment, "=")
-			if ok {
-				environment[name] = value
-			}
-		}
-	} else {
-		for name, value := range values {
-			environment[name] = value
-		}
-	}
+	environment := inputs.environment(context)
 	delete(environment, "YARD_ENGINE_PATH")
 	delete(environment, "SUBYARD_RELEASE_TRANSITION_GRANT_FD")
 	environment["SUBYARD_REPOSITORY_ROOT"] = repositoryRoot
@@ -2027,7 +2017,7 @@ func (runtime *Runtime) installWithOutput(
 	arguments ...string,
 ) error {
 	command := exec.CommandContext(ctx, runtime.config.Installer, arguments...)
-	command.Env = commandEnvironment(runtime.config.Environment)
+	command.Env = commandEnvironment(runtime.config.Inputs.environment(runtime.config.Context))
 	command.Stdout = stdout
 	command.Stderr = runtime.config.Stderr
 	return command.Run()

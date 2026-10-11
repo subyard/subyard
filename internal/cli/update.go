@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -71,12 +70,16 @@ func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition 
 }
 
 func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, arguments []string) (*releaseExecution, error) {
-	releaseEnvironment := maps.Clone(loaded.Environment)
-	releaseEnvironment["SUBYARD_OPERATION_ID"] = cli.env["SUBYARD_OPERATION_ID"]
-	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseEnvironment))
+	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
+		OperatorHome: loaded.Context.Paths.OperatorHome,
+		DataHome:     loaded.Context.Paths.DataHome,
+		ConfigHome:   loaded.Context.Paths.ConfigHome,
+		RuntimeRoot:  loaded.Environment["YARD_RUNTIME_ROOT"],
+		OperationID:  cli.env["SUBYARD_OPERATION_ID"],
+	}))
 	prepared, err := runtime.PrepareTransition(
 		ctx, arguments, loaded.Environment["SUBYARD_CONFIG_HOME"],
-		loaded.Context.YardName, cli.releaseTransitionInheritedSettingIDs(),
+		loaded.Context.YardName,
 	)
 	if err != nil {
 		_ = runtime.Close()
@@ -88,9 +91,10 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 	}, nil
 }
 
-func (cli *CLI) releaseRuntimeConfig(environment map[string]string) releaseruntime.Config {
+func (cli *CLI) releaseRuntimeConfig(context releaseruntime.RuntimeContext) releaseruntime.Config {
 	return releaseruntime.Config{
-		Environment:    environment,
+		Inputs:         cli.commandInputs,
+		Context:        context,
 		Installer:      filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),
 		RepositoryRoot: cli.options.RepositoryRoot,
 		Stdout:         cli.options.Stdout,
@@ -100,14 +104,7 @@ func (cli *CLI) releaseRuntimeConfig(environment map[string]string) releaserunti
 }
 
 func (cli *CLI) releaseTransitionInheritedSettingIDs() []string {
-	inheritedSettingIDs := make([]string, 0)
-	for name := range cli.baseEnv {
-		if _, setting := cli.catalog.LookupSetting(name); setting {
-			inheritedSettingIDs = append(inheritedSettingIDs, name)
-		}
-	}
-	sort.Strings(inheritedSettingIDs)
-	return inheritedSettingIDs
+	return cli.commandInputs.InheritedSettingIDs()
 }
 
 func (cli *CLI) printUpdatePreview(execution *releaseExecution) {

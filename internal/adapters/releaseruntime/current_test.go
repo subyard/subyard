@@ -80,9 +80,9 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	environment["YARD_RELEASE_TAG"] = "unrelated-tag"
 	environment["SUBYARD_SOURCE_INGRESS_V1_ROOT"] = "incomplete-untrusted-source"
 	var stdout bytes.Buffer
-	runtime := New(Config{Environment: environment, Installer: "/missing-installer", RepositoryRoot: "/untrusted-source", Stdout: &stdout, HTTPClient: &http.Client{Transport: currentNoNetwork{t}}})
+	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Installer: "/missing-installer", RepositoryRoot: "/untrusted-source", Stdout: &stdout, HTTPClient: &http.Client{Transport: currentNoNetwork{t}}})
 	defer runtime.Close()
-	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard", nil)
+	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	if _, err := os.Stat(filepath.Join(fixture.configHome, "release-transition")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("check mutated target: %v", err)
 	}
-	apply, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--yes"}, fixture.configHome, "recovery-yard", nil)
+	apply, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--yes"}, fixture.configHome, "recovery-yard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	}
 	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
 	before, _ := store.ReadCurrentJournal()
-	second, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard", nil)
+	second, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard")
 	if err != nil || second.Changed {
 		t.Fatalf("repeat assessment = %#v, %v", second, err)
 	}
@@ -191,7 +191,7 @@ func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testi
 	if err := store.CompareAndSwapMigrationLedger(checkpoint, completed, registry, digest); err != nil {
 		t.Fatal(err)
 	}
-	runtime := New(Config{Environment: fixture.environment()})
+	runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment())})
 	defer runtime.Close()
 	snapshot, err := runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
 	if err != nil {
@@ -256,14 +256,14 @@ esac
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 	runtime := New(Config{
-		Environment: environment, Installer: fixture.installer,
+		Inputs: fixtureCommandInputs(environment), Installer: fixture.installer,
 		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
 	defer runtime.Close()
 
 	prepared, err := runtime.PrepareTransition(
 		context.Background(), []string{"--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "default", nil,
+		fixture.configHome, "default",
 	)
 	if err != nil {
 		cause := err
@@ -283,16 +283,16 @@ esac
 func TestCurrentTransitionRejectsVersionSelectionAndCurrentDrift(t *testing.T) {
 	for _, arguments := range [][]string{{"--json"}, {"--version", "0.11.2"}, {"--offline"}, {"--rollback"}, {"--force"}, {"--runtime-root", "/tmp/runtime"}} {
 		runtime := New(Config{})
-		if _, err := runtime.PrepareCurrentTransition(context.Background(), arguments, "/tmp/config", "default", nil); err == nil {
+		if _, err := runtime.PrepareCurrentTransition(context.Background(), arguments, "/tmp/config", "default"); err == nil {
 			t.Fatalf("accepted flags %v", arguments)
 		}
 	}
 	fixture := newCurrentProcessFixture(t)
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
-	runtime := New(Config{Environment: environment, Stdout: &bytes.Buffer{}})
+	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &bytes.Buffer{}})
 	defer runtime.Close()
-	prepared, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard", nil)
+	prepared, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,9 +334,9 @@ func TestCurrentTransitionReportsPartialLedgerAndHumanNextAction(t *testing.T) {
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 	var stdout bytes.Buffer
-	runtime := New(Config{Environment: environment, Stdout: &stdout})
+	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &stdout})
 	defer runtime.Close()
-	prepared, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check"}, fixture.configHome, "recovery-yard", nil)
+	prepared, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check"}, fixture.configHome, "recovery-yard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,9 +407,9 @@ func TestCurrentTransitionPreActivationRefusesAndPostActivationResumes(t *testin
 			environment := fixture.environment()
 			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 			var stdout bytes.Buffer
-			runtime := New(Config{Environment: environment, Stdout: &stdout})
+			runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &stdout})
 			defer runtime.Close()
-			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard", nil)
+			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -430,7 +430,7 @@ func TestCurrentTransitionPreActivationRefusesAndPostActivationResumes(t *testin
 			if report.SchemaVersion != 1 || report.Journal.Transaction != string(fixture.candidateTx) {
 				t.Fatalf("report = %s", stdout.String())
 			}
-			apply, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard", nil)
+			apply, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard")
 			if preactivation {
 				if err == nil || !strings.Contains(err.Error(), "yard update") || report.Next != "yard update" || report.Current != string(fixture.source.release) {
 					t.Fatalf("preactivation apply = %v; report = %s", err, stdout.String())
@@ -464,9 +464,9 @@ func TestCurrentTransitionDoesNotClaimReadinessWithoutOwnerReconciliation(t *tes
 	environment := fixture.environment()
 	environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
 	var stdout bytes.Buffer
-	runtime := New(Config{Environment: environment, Stdout: &stdout})
+	runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &stdout})
 	defer runtime.Close()
-	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard", nil)
+	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "recovery-yard")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +480,7 @@ func TestCurrentTransitionDoesNotClaimReadinessWithoutOwnerReconciliation(t *tes
 	if report.Outcome.Status != releasetransition.StatusOperatorActionRequired || report.Outcome.Code != releasetransition.CodeDependencyUnavailable || len(report.Domains) != 0 {
 		t.Fatalf("unsupported owner report = %s", stdout.String())
 	}
-	if _, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard", nil); err == nil {
+	if _, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard"); err == nil {
 		t.Fatal("accepted owner without activation reconciliation")
 	}
 }
@@ -686,7 +686,7 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(sourceRoot, "private", "yards", "named.env"), []byte("# source-only fixture\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			runtime := New(Config{Environment: environment, RepositoryRoot: sourceRoot, Stdout: &stdout})
+			runtime := New(Config{Inputs: fixtureCommandInputs(environment), RepositoryRoot: sourceRoot, Stdout: &stdout})
 			defer runtime.Close()
 			wrong, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
 			if err != nil || wrong == nil || len(wrong.inspection.Blockers) != 1 || wrong.inspection.Blockers[0].Resource != "transition.observation-scope" {
@@ -696,11 +696,11 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			gate, err := runtime.InspectMutationGate(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+			gate, err := runtime.InspectMutationGate(context.Background(), fixture.runtimeRoot, fixture.configHome, "default")
 			if err != nil || gate == nil || scenario.resumes && gate.Status != releasetransition.StatusRecovering {
 				t.Fatalf("controller-local gate lost retained named scope: %#v, %v", gate, err)
 			}
-			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
+			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -715,7 +715,7 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			if err != nil || !sameCurrentSnapshot(before, after) {
 				t.Fatalf("scope search mutated snapshot: %v", err)
 			}
-			prepared, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default", nil)
+			prepared, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "default")
 			if !scenario.resumes {
 				if err == nil || report.Outcome.Status != releasetransition.StatusOperatorActionRequired || report.Next == "run yard migrate --check" || report.Next == "yard migrate" {
 					t.Fatalf("unsafe scope selection = %v; report=%s", err, stdout.String())

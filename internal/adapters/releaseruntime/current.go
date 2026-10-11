@@ -64,7 +64,8 @@ type currentSnapshot struct {
 
 // PrepareCurrentTransition inspects and completes the exact installed current
 // release. It never selects, downloads, or publishes a release.
-func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments []string, configHome, yard string, inheritedSettingIDs []string) (Prepared, error) {
+func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments []string, configHome, yard string) (Prepared, error) {
+	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	parsed, err := runtime.parseCurrent(arguments)
 	if err != nil {
 		return Prepared{}, err
@@ -294,11 +295,11 @@ func (runtime *Runtime) parseCurrent(arguments []string) (currentOptions, error)
 	if parsed.json && !parsed.check {
 		return parsed, errors.New("--json requires --check")
 	}
-	home := runtime.config.Environment["SUBYARD_HOME"]
+	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
 	if home == "" {
-		home = filepath.Join(runtime.config.Environment["HOME"], ".subyard")
+		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")
 	}
-	root := first(runtime.config.Environment["YARD_RUNTIME_ROOT"], filepath.Join(home, "runtime"))
+	root := first(runtime.config.Inputs.value("YARD_RUNTIME_ROOT", runtime.config.Context), filepath.Join(home, "runtime"))
 	var err error
 	parsed.root, err = validateReleaseRoot(root, "runtime root")
 	return parsed, err
@@ -523,9 +524,9 @@ func (runtime *Runtime) recoverCurrentScope(ctx context.Context, root, configHom
 	if len(names) > maximumContexts {
 		return failure("too many registered contexts to identify the original transition yard safely")
 	}
-	operatorHome := first(runtime.config.Environment["SUBYARD_OPERATOR_HOME"], runtime.config.Environment["HOME"])
+	operatorHome := first(runtime.config.Inputs.value("SUBYARD_OPERATOR_HOME", runtime.config.Context), runtime.config.Inputs.value("HOME", runtime.config.Context))
 	environment := map[string]string{"HOME": operatorHome, "SUBYARD_CONFIG_HOME": configHome}
-	if home := runtime.config.Environment["SUBYARD_HOME"]; home != "" {
+	if home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context); home != "" {
 		environment["SUBYARD_HOME"] = home
 	}
 	var selected *protectedTransitionInspection

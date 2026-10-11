@@ -50,7 +50,7 @@ func TestSourceAdmissionCandidateProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	adapter := New(Config{Environment: map[string]string{"HOME": filepath.Dir(request.RuntimeRoot)}})
+	adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(request.RuntimeRoot)})})
 	var reconcilers []releasetransition.V2ActivationReconciler
 	if mode := os.Getenv(sourceAdmissionProcessEnvironment); mode == "repair" || mode == "old-wire" {
 		reconcilers = []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: filepath.Join(request.ConfigHome, "source-repair-state"), desired: v0111FixtureFingerprint("repaired")}}
@@ -205,7 +205,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			}
 			installer := filepath.Join(root, "installer")
 			testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\nprintf 'releases/%s\\n'\n", candidate.root, candidateID, candidateID)), 0o700)
-			adapter := New(Config{Environment: map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}, Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 			defer adapter.Close()
 			if drift == "catalog" || strings.HasPrefix(drift, "unfinished") {
 				journal, err := releasetransition.ParseJournal(before)
@@ -242,7 +242,7 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			if drift == "unfinished same target" || strings.HasPrefix(drift, "current repair") {
 				version = "1.2.3"
 			}
-			prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default", nil)
+			prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default")
 			if drift == "catalog" || drift == "registry" || drift == "sealed asset" || strings.HasPrefix(drift, "unfinished") {
 				if err == nil {
 					t.Fatal("unsupported original history admitted a new candidate")

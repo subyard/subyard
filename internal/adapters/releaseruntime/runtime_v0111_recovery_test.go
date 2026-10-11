@@ -111,7 +111,7 @@ func TestV0111RecoveryUsesRealPublicTransitionAcrossProcesses(t *testing.T) {
 	var oldOutput bytes.Buffer
 	oldRuntime := New(Config{
 		RepositoryRoot: fixture.source.root,
-		Environment:    fixture.environment(),
+		Inputs:         fixtureCommandInputs(fixture.environment()),
 		Installer:      fixture.installer,
 		Stdout:         &oldOutput,
 		Stderr:         &bytes.Buffer{},
@@ -119,7 +119,7 @@ func TestV0111RecoveryUsesRealPublicTransitionAcrossProcesses(t *testing.T) {
 	oldPrepared, err := oldRuntime.PrepareTransition(
 		context.Background(),
 		[]string{"--check", "--offline", "--version", "0.11.1", "--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "recovery-yard", nil,
+		fixture.configHome, "recovery-yard",
 	)
 	if err != nil {
 		t.Fatalf("inspect unfinished source transition: %v", err)
@@ -142,7 +142,7 @@ func TestV0111RecoveryUsesRealPublicTransitionAcrossProcesses(t *testing.T) {
 	var candidateOutput bytes.Buffer
 	candidateRuntime := New(Config{
 		RepositoryRoot: fixture.candidate.root,
-		Environment:    fixture.environment(),
+		Inputs:         fixtureCommandInputs(fixture.environment()),
 		Installer:      fixture.installer,
 		Stdout:         &candidateOutput,
 		Stderr:         &bytes.Buffer{},
@@ -150,7 +150,7 @@ func TestV0111RecoveryUsesRealPublicTransitionAcrossProcesses(t *testing.T) {
 	prepared, err := candidateRuntime.PrepareTransition(
 		context.Background(),
 		[]string{"--offline", "--version", "0.11.2", "--runtime-root", fixture.runtimeRoot},
-		fixture.configHome, "recovery-yard", nil,
+		fixture.configHome, "recovery-yard",
 	)
 	if err != nil {
 		t.Fatalf("prepare standalone candidate recovery: %v", err)

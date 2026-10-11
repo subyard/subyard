@@ -103,6 +103,7 @@ type CLI struct {
 	options                      Options
 	env                          map[string]string
 	baseEnv                      map[string]string
+	commandInputs                releaseruntime.CommandInputs
 	manifest                     command.Manifest
 	resources                    resource.Registry
 	inventoryRoutes              map[string]config.Loaded
@@ -284,13 +285,13 @@ func (cli *CLI) inspectMutationGate(
 		return nil, err
 	}
 	runtime := releaseruntime.New(releaseruntime.Config{
-		Environment: cli.env,
-		Stderr:      cli.options.Stderr,
+		Inputs:  cli.commandInputs,
+		Context: releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), DataHome: options.DataHome, ConfigHome: options.ConfigHome, RuntimeRoot: options.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]},
+		Stderr:  cli.options.Stderr,
 	})
 	defer runtime.Close()
 	v2, err := runtime.InspectMutationGate(
 		ctx, options.RuntimeRoot, options.ConfigHome, "default",
-		cli.releaseTransitionInheritedSettingIDs(),
 	)
 	if err != nil {
 		return nil, err
@@ -389,7 +390,8 @@ func New(options Options) (*CLI, error) {
 	}
 	cli := &CLI{
 		catalog: settings, options: options, env: activeEnvironment, baseEnv: baseEnvironment,
-		manifest: manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
+		commandInputs: releaseruntime.CaptureCommandInputs(options.Environment, func(name string) bool { _, ok := settings.LookupSetting(name); return ok }),
+		manifest:      manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
 		discoveredOwners: make(map[string]ownerinventory.Connection), coreActions: coreActions,
 	}
 	cli.promptInputTerminal = func() bool { return terminalStream(options.Stdin) }
