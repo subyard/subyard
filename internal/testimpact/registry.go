@@ -63,7 +63,7 @@ func BuiltInRegistry() (Registry, error) {
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
 		"domain", "migration", "operatoraccess", "ownerapi", "ownerinventory", "ports", "previewroute", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
-		"adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
+		"adapters/codexdesktop", "adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
 		"adapters/releaseruntime", "adapters/remotecontrol", "adapters/securityruntime",
 		"adapters/shelladapter", "adapters/statusruntime", "adapters/testvmsruntime",

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,17 +295,132 @@ func TestRouteConsumersActivationRejectsExcludedDeviceConflicts(t *testing.T) {
 			}
 			if _, err := PrepareRouteConsumersActivation(ctx, options); err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("excluded route-device preparation: %v", err)
+			} else {
+				assertRouteConflictDiagnostic(t, err, "demo", "subyard-demo/yard-demo", "subyard-e2e-routes")
 			}
 			if err := VerifyRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("excluded route-device verification: %v", err)
+			} else {
+				assertRouteConflictDiagnostic(t, err, "demo", "subyard-demo/yard-demo", "subyard-e2e-routes")
 			}
 			if err := CommitRouteConsumersActivation(ctx, options, before); err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("excluded route-device commit: %v", err)
+			} else {
+				assertRouteConflictDiagnostic(t, err, "demo", "subyard-demo/yard-demo", "subyard-e2e-routes")
 			}
 			if strings.Contains(read(t, state.calls), "config device") {
 				t.Fatal("conflicting device reached mutation")
 			}
 		})
+	}
+}
+
+func assertRouteConflictDiagnostic(t *testing.T, err error, expected ...string) {
+	t.Helper()
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	var conflict interface{ ActivationConflict() bool }
+	if !errors.As(err, &diagnostic) || !errors.As(err, &conflict) || !conflict.ActivationConflict() {
+		t.Fatalf("route conflict lost its public contract: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	for _, fragment := range expected {
+		if !strings.Contains(message, fragment) {
+			t.Fatalf("public conflict omitted %q: %q", fragment, message)
+		}
+	}
+	if !strings.HasPrefix(retry, "incus ") || strings.Contains(message+retry, "\n") || strings.ContainsAny(retry, ";&|$") ||
+		strings.Contains(message+retry, `"source":"/foreign"`) || strings.Contains(message+retry, "private-sentinel") {
+		t.Fatalf("unsafe route diagnostic: message=%q retry=%q", message, retry)
+	}
+}
+
+func TestRouteConsumerActivationReportsOwnerTopologyConflicts(t *testing.T) {
+	owner := `{"name":"yard-test-yard","project":"subyard-test-yard","status":"RUNNING","config":{"user.subyard.managed":"true","user.subyard.name":"test-yard"}}`
+	for _, test := range []struct {
+		name, projects, instances, reason string
+	}{
+		{"legacy-project", `[{"name":"subyard-test-yard"},{"name":"subyard-e2e-yard"}]`, `[]`, "both legacy subyard-e2e-yard and current subyard-test-yard"},
+		{"foreign-owner", `[{"name":"subyard-test-yard"}]`, `[` + strings.ReplaceAll(owner, "yard-test-yard", "foreign-owner") + `]`, "conflicting or foreign identity"},
+		{"duplicate-owner", `[{"name":"subyard-test-yard"}]`, `[` + owner + `,` + owner + `]`, "duplicated or incomplete"},
+		{"unsafe-owner-name", `[{"name":"subyard-test-yard"}]`, `[` + strings.ReplaceAll(owner, "yard-test-yard", `private-sentinel\nunsafe`) + `]`, "conflicting or foreign identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options, state := routeConsumerFixture(t, StateCurrent, true)
+			testkit.WriteFile(t, options.Incus, []byte(fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$ROUTE_INCUS_CALLS"
+case "$*" in
+  'project list --format=json') printf '%%s\n' '%s' ;;
+  'project get subyard-test-yard features.images') printf 'false\n' ;;
+  'list --all-projects --format=json') printf '%%s\n' '%s' ;;
+  *) exit 2 ;;
+esac
+`, test.projects, test.instances)), 0o700)
+			_, err := PrepareRouteConsumerActivation(context.Background(), options)
+			assertRouteConflictDiagnostic(t, err, "test-yard", test.reason)
+			if strings.Contains(read(t, state.calls), "config device") {
+				t.Fatal("owner conflict reached mutation")
+			}
+		})
+	}
+}
+
+func TestRouteConsumerActivationReportsSafePreparationFailures(t *testing.T) {
+	for _, yard := range []string{CurrentYard, "demo"} {
+		t.Run(yard, func(t *testing.T) {
+			options, state := routeConsumerFixture(t, StateCurrent, true)
+			write(t, state.extra, "1\n")
+			if err := os.MkdirAll(filepath.Join(options.ConfigHome, "yards", yard), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(options.ConfigHome, "yards", yard, "config.env"),
+				[]byte("YARD_TEMPLATE='private-sentinel\n"), 0o600)
+			var err error
+			if yard == CurrentYard {
+				_, err = PrepareRouteConsumerActivation(context.Background(), options)
+			} else {
+				_, err = PrepareRouteConsumersActivation(context.Background(), options)
+			}
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) {
+				t.Fatalf("preparation lost its public diagnostic: %v", err)
+			}
+			message, retry := diagnostic.ActivationDiagnostic()
+			if !strings.Contains(message, "yard "+yard) || len(message) > 512 || strings.Contains(message+retry, "private-sentinel") ||
+				retry != "run yard -Y "+yard+" config status" {
+				t.Fatalf("unsafe preparation diagnostic: message=%q retry=%q", message, retry)
+			}
+		})
+	}
+}
+
+func TestRouteConsumerActivationReportsUnavailableInventory(t *testing.T) {
+	options, _ := routeConsumerFixture(t, StateCurrent, true)
+	testkit.WriteFile(t, options.Incus, []byte("#!/bin/sh\nprintf 'private-sentinel'\nexit 1\n"), 0o700)
+	_, err := PrepareRouteConsumerActivation(context.Background(), options)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("inventory failure lost its public diagnostic: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "owner project inventory inspection failed") ||
+		strings.Contains(message+retry, "private-sentinel") || retry != "incus project list --format=json" {
+		t.Fatalf("unsafe inventory diagnostic: message=%q retry=%q", message, retry)
+	}
+}
+
+func TestRouteConsumerActivationReportsPublishedRouteFailure(t *testing.T) {
+	options, _ := routeConsumerFixture(t, StateCurrent, true)
+	testkit.WriteFile(t, filepath.Join(options.DataHome, "e2e", "routes", CurrentYard, ".route-test", "route.tsv"),
+		[]byte("private-sentinel\n"), 0o600)
+	_, err := PrepareRouteConsumersActivation(context.Background(), options)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("published route failure lost its public diagnostic: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if !strings.Contains(message, "published E2E route inspection failed") ||
+		strings.Contains(message+retry, "private-sentinel") || retry != "run yard -Y test-yard test-vms status" {
+		t.Fatalf("unsafe published route diagnostic: message=%q retry=%q", message, retry)
 	}
 }
 

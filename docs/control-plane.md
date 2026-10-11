@@ -429,6 +429,9 @@ Ordinary observations continue to return expected drift as a state; post-apply f
 return the observed component reason through `ActivationDiagnostic`. The test VM broker
 uses bounded, source-owned readiness reasons for its host sink, backend and guest checks.
 Initial observation failures also retain these reasons; repairable drift stays a state.
+Route-consumer ownership conflicts identify the affected yard, validated native instance
+and route device, with a read-only Incus inspection command. Configuration inspection
+failures retain safe source context and direct operators to the affected yard's config status.
 Materialized-config observation failures identify the yard and inspection phase, with a
 read-only config or integration status command. Known integration ownership conflicts retain
 their validated path and inspection command across the release boundary; they must not send
@@ -765,6 +768,21 @@ needed: ordinary reconciliation owns these generated artifacts. Saved VS Code re
 using `ssh-remote+<alias>.code` must be reopened through `yard code` after convergence.
 Owner-inventory project resolution retains a matching explicitly selected remote alias.
 Desktop session targets also use the ordinary alias and carry no preview port or forward.
+
+Controller-side desktop exports use the `@client-projects` prepared command family.
+`internal/clientprojects` carries the canonical identity, ordinary L1 SSH alias and
+authoritative project paths for exactly one yard. Preparation fetches fresh selected-owner
+inventory through the existing pinned RPC client without cache publication, registration
+recovery or identity adoption; the read-only SSH trust gate refuses unknown keys throughout
+the proxy chain. The bounded L1 probe checks the configured user/port, instance hostname and
+workspace root before client assessment. Execution rechecks the inventory and route before
+the client's captured file plan applies. No project directory discovery or per-project RPC
+is involved. Client serialization, protected JSON publication and URL launch belong to
+`internal/adapters/codexdesktop`, composed at `internal/cli/client_integrations.go`; they
+require no server profile. `client.projects-export` is a bounded local action without a
+confirmation prompt. `--check` displays the assessment without writes, desktop publication
+locks or GUI launch, while retaining normal configuration read coherence. Desktop actions
+are refused at the generic RPC planning boundary and run only on the native controller.
 
 Core provisioning atomically installs `subyard-preview` as root-owned mode `0755`. Running-yard
 convergence checks its bytes and metadata; stopped yards use the installed source-hash marker.

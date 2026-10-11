@@ -28,6 +28,7 @@ type cliOwnerSource struct {
 	cli      *CLI
 	loaded   config.Loaded
 	readOnly bool
+	selected *domain.Context
 }
 
 func canonicalYardIdentity(loaded config.Loaded) (string, error) {
@@ -75,6 +76,9 @@ func (source cliOwnerSource) HostID(context.Context) (string, error) {
 }
 
 func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
+	if source.selected != nil {
+		return []domain.Context{*source.selected}, nil
+	}
 	names, err := config.YardNames(
 		source.loaded.Context.Paths.ConfigDir, source.loaded.Context.Paths.ConfigHome,
 	)

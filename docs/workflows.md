@@ -58,6 +58,7 @@ normal removal deletes the yard workspace; `--soft` keeps that copy after removi
 | `yard list` | List registered projects across the selected inventory scope. |
 | `yard shell [project]` | Open a development shell, optionally in a project directory. |
 | `yard code [project]` | Open a project with VS Code Remote-SSH. |
+| `yard codex export` / `yard codex open` | [Export every project of one selected yard to Codex Desktop](codex-desktop.md), optionally requesting import. |
 | `yard export [project]` | Create a patch from a synced yard copy. |
 | `yard remove [project]` | Detach or remove a project. |
 | `yard provision [profile]` | Enable a profile, reconcile its yard prerequisites and install its toolchain. |

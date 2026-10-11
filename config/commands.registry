@@ -26,6 +26,7 @@ bind||@project||deny|mutate|dynamic|public|projects|project-target|bind [path]|e
 clone||@project||local|mutate|dynamic|public|projects|clone|clone <url> [name]|clone a repository directly into the yard|--name --target --yes --help|
 list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --help|
 code||@project||local|mutate|never|public|projects|project|code [project]|open a project with VS Code Remote-SSH|--yes --help|
+codex||@client-projects|codex|local|mutate|never|public|projects|integration|codex <command>|export all projects of the selected yard to Codex Desktop on this Linux controller|--check --config --yes --help|export open
 export||@project||local|mutate|dynamic|public|projects|path|export [path]|copy changes from a synced yard project back to the host|--yes --help|
 remove||@project||local|mutate|dynamic|public|projects|remove|remove [project]|remove a project from the yard|--soft --yes --help|
 up||@project-env||forward|mutate|dynamic|public|project_env|project-env-up|up [project]|build or start the optional project environment|--rebuild --yes --help|

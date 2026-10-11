@@ -114,6 +114,37 @@ func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *tes
 			e2eIDs:      []string{},
 		},
 		{
+			name: "agent role metadata has no checks or production domain",
+			changes: []Change{
+				addedChange(".agents/skills/subyard-dev-flow/agents/subyard_developer.toml"),
+				addedChange(".agents/skills/subyard-dev-flow/agents/subyard_reviewer.toml"),
+				addedChange(".agents/skills/subyard-dev-flow/agents/subyard_observer.toml"),
+			},
+			checkSets:   []string{},
+			riskDomains: []string{},
+			hostFreeIDs: []string{},
+			e2eIDs:      []string{},
+		},
+		{
+			name: "client project export selects adapter and CLI consumers",
+			changes: []Change{
+				modifiedChange("internal/clientprojects/export.go"),
+				modifiedChange("internal/adapters/codexdesktop/config.go"),
+			},
+			checkSets:   []string{"go:adapters/codexdesktop", "go:cli"},
+			riskDomains: []string{"config-state"},
+			hostFreeIDs: []string{"go:adapters/codexdesktop", "go:cli"},
+			e2eIDs:      []string{},
+		},
+		{
+			name:        "desktop adapter tests select owning evidence without a production domain",
+			changes:     []Change{modifiedChange("internal/adapters/codexdesktop/config_test.go")},
+			checkSets:   []string{"go:adapters/codexdesktop", "go:cli"},
+			riskDomains: []string{},
+			hostFreeIDs: []string{"go:adapters/codexdesktop", "go:cli"},
+			e2eIDs:      []string{},
+		},
+		{
 			name:         "leaf package selects its owner",
 			changes:      []Change{modifiedChange("internal/configsync/sync.go")},
 			checkSets:    []string{"go:configsync", "host-free:core"},

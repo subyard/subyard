@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
 
@@ -319,6 +320,7 @@ func TestApplyRejectsExistingCurrentYardBeforeLifecycle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("collision error = %v", err)
 	}
+	assertOwnerStateDiagnostic(t, err, root, "config-home-relative", "yards/e2e-yard/config.env", "yards/test-yard/config.env")
 	if _, err := os.Stat(log); !os.IsNotExist(err) {
 		t.Fatal("collision reached lifecycle commands")
 	}
@@ -900,6 +902,43 @@ func TestPrepareRejectsCurrentRegistrationWithManagedControllerLeftover(t *testi
 	})
 	if err == nil || !strings.Contains(err.Error(), "legacy owner state remains") {
 		t.Fatalf("canonical registration accepted a legacy controller: %v", err)
+	}
+	assertOwnerStateDiagnostic(t, err, root, "data-home-relative", "e2e/controllers/e2e-yard")
+}
+
+func TestInspectRegistrationReportsDuplicateRegistrationShapes(t *testing.T) {
+	for _, yard := range []string{LegacyYard, CurrentYard} {
+		t.Run(yard, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			configHome := filepath.Join(root, "config")
+			if err := os.MkdirAll(filepath.Join(configHome, "yards", yard), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, relative := range []string{"yards/" + yard + "/config.env", "yards/" + yard + ".env"} {
+				testkit.WriteFile(t, filepath.Join(configHome, filepath.FromSlash(relative)), []byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+			}
+			_, err := inspectRegistration(Options{ConfigHome: configHome})
+			assertOwnerStateDiagnostic(t, err, root, "config-home-relative", "yards/"+yard+"/config.env", "yards/"+yard+".env")
+		})
+	}
+}
+
+func assertOwnerStateDiagnostic(t *testing.T, err error, privateRoot string, expected ...string) {
+	t.Helper()
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	var conflict interface{ ActivationConflict() bool }
+	if !errors.As(err, &diagnostic) || !errors.As(err, &conflict) || !conflict.ActivationConflict() {
+		t.Fatalf("owner state conflict lost its public contract: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	for _, fragment := range expected {
+		if !strings.Contains(message, fragment) {
+			t.Fatalf("public owner conflict omitted %q: %q", fragment, message)
+		}
+	}
+	if strings.Contains(message+retry, privateRoot) || len(message) > 512 ||
+		retry != "inspect and repair the conflicting owner registration or controller state, then run yard update" {
+		t.Fatalf("unsafe owner state diagnostic: message=%q retry=%q", message, retry)
 	}
 }
 

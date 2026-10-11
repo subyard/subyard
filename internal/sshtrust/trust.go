@@ -30,15 +30,17 @@ type Proposal struct {
 
 type Manager struct {
 	Environment []string
-	Confirm     func(context.Context, []Proposal) error
-	Pin         func(string) (*ownerinventory.SSHHostTrust, error)
-	Witness     func(context.Context, string, string, ssh.PublicKey) error
-	mu          sync.Mutex
-	temporary   []string
-	gateMu      sync.Mutex
-	accepted    map[string][]string
-	drafts      map[string][]string
-	pending     []candidate
+	// ReadOnly refuses unknown keys without assessment, confirmation or publication.
+	ReadOnly  bool
+	Confirm   func(context.Context, []Proposal) error
+	Pin       func(string) (*ownerinventory.SSHHostTrust, error)
+	Witness   func(context.Context, string, string, ssh.PublicKey) error
+	mu        sync.Mutex
+	temporary []string
+	gateMu    sync.Mutex
+	accepted  map[string][]string
+	drafts    map[string][]string
+	pending   []candidate
 }
 
 type candidate struct {
@@ -228,6 +230,9 @@ func (manager *Manager) options(ctx context.Context, program, target string, cha
 	}
 	if known {
 		return options, nil
+	}
+	if manager.ReadOnly {
+		return nil, fmt.Errorf("SSH target %s has no existing trusted key; prepare the connection separately", target)
 	}
 	if len(files) == 0 || !filepath.IsAbs(files[0]) || files[0] == "/dev/null" {
 		return nil, errors.New("unknown SSH key has no writable persistent trust store")
