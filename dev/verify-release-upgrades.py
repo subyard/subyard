@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import runpy
 import select
 import signal
 import shutil
@@ -53,6 +54,43 @@ def require(condition, message):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_observation_incus(shims, control, unexpected):
+    source = Path(__file__).resolve().parent.parent
+    probes = {}
+    for fixture in sorted(source.glob("config/agents/*/tests/release-observation.py")):
+        commands = runpy.run_path(str(fixture))["read_only_commands"](fixture.parent.parent)
+        for arguments, response in commands:
+            key = tuple(arguments)
+            require(key not in probes, "integration observation fixture has duplicate commands")
+            probes[key] = response
+    incus = shims / "incus"
+    # Exact canned observations only; no command or guest script is executed.
+    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
+                     "arguments = sys.argv[1:]\n"
+                     f"probes = {probes!r}\n"
+                     "if arguments == ['query', '/1.0/instances/yard?project=subyard']:\n"
+                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
+                     "    print(json.dumps(observation['instances'][0]['info']))\n"
+                     "    sys.exit(0)\n"
+                     "if tuple(arguments) in probes:\n"
+                     "    sys.stdout.write(probes[tuple(arguments)])\n"
+                     "    sys.exit(0)\n"
+                     "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
+                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
+                     "    print(observation['instances'][0]['info']['status'].upper())\n"
+                     "    sys.exit(0)\n"
+                     "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
+                     "    sys.exit(3)\n"
+                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
+                     "    command = arguments[arguments.index('--') + 1:]\n"
+                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
+                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
+                     "        sys.exit(0)\n"
+                     f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
+                     "sys.exit(99)\n")
+    incus.chmod(0o700)
 
 
 def sealed_checkpoint_reader(release_root):
@@ -639,25 +677,7 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
                     f"pathlib.Path({str(unexpected)!r}).write_text('sudo operation rejected')\n"
                     "sys.exit(99)\n")
     sudo.chmod(0o700)
-    incus = shims / "incus"
-    # Profile observation may inspect instance state and inactive guest services.
-    # Only exact read-only probes are synthetic; every mutation remains rejected.
-    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
-                     "arguments = sys.argv[1:]\n"
-                     "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
-                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
-                     "    print(observation['instances'][0]['info']['status'].upper())\n"
-                     "    sys.exit(0)\n"
-                     "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
-                     "    sys.exit(3)\n"
-                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
-                     "    command = arguments[arguments.index('--') + 1:]\n"
-                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
-                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
-                     "        sys.exit(0)\n"
-                     f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
-                     "sys.exit(99)\n")
-    incus.chmod(0o700)
+    write_observation_incus(shims, control, unexpected)
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     observed_config = run_process([str(fixture.old_launcher), "config", "status"], fixture.env, timeout=30)
     require(observed_config.returncode == 1 and "drift" in observed_config.stdout + observed_config.stderr,
@@ -821,23 +841,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
                         f"pathlib.Path({str(unexpected)!r}).write_text('host mutation rejected')\n"
                         "sys.exit(99)\n")
         shim.chmod(0o700)
-    incus = shims / "incus"
-    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
-                     "arguments = sys.argv[1:]\n"
-                     "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
-                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
-                     "    print(observation['instances'][0]['info']['status'].upper())\n"
-                     "    sys.exit(0)\n"
-                     "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
-                     "    sys.exit(3)\n"
-                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
-                     "    command = arguments[arguments.index('--') + 1:]\n"
-                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
-                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
-                     "        sys.exit(0)\n"
-                     f"pathlib.Path({str(unexpected)!r}).write_text('incus mutation rejected')\n"
-                     "sys.exit(99)\n")
-    incus.chmod(0o700)
+    write_observation_incus(shims, control, unexpected)
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     interrupted = Path(str(control) + ".held")
     if interrupted.exists():

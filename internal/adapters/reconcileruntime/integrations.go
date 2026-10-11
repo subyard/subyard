@@ -110,7 +110,7 @@ func (runtime Runtime) IntegrationScope() (string, []string, error) {
 	payload, err := json.Marshal(struct {
 		UID       int                   `json:"uid"`
 		Allows    string                `json:"allows"`
-		Sources   string                `json:"sources"`
+		Sources   string                `json:"sources,omitempty"`
 		Artifacts []integrationArtifact `json:"artifacts"`
 	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), Artifacts: entries})
 	if err != nil {

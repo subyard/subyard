@@ -59,6 +59,10 @@ func (runtime Runtime) integrationSourceBinding() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(definitions) == 0 {
+		// Retain the original scope grammar when no package contract is declared.
+		return "", nil
+	}
 	sources := map[string]string{}
 	for _, definition := range definitions {
 		binding, err := runtime.integrationPackageBinding(definition)

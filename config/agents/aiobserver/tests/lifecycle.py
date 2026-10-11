@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,42 @@ class LifecycleTest(unittest.TestCase):
     def apply(self, observed):
         with patch.object(sys, "argv", ["lifecycle.py", "apply", "sample-operation", observed["actual"], observed["desired"]]):
             module.main()
+
+    def test_released_updater_fixture_observes_absence_and_rejects_mutation(self):
+        package = Path(__file__).resolve().parents[1]
+        harness = runpy.run_path(str(package.parents[2] / "dev/verify-release-upgrades.py"))
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            control, rejected = root / "control.json", root / "rejected"
+            snapshot = {"name": "yard", "status": "Running", "type": "container",
+                        "config": {}, "devices": {}, "expanded_config": {}, "expanded_devices": {}}
+            control.write_text(json.dumps({"instances": [{"info": snapshot}]}))
+            harness["write_observation_incus"](root, control, rejected)
+            environment = {"PATH": str(root) + ":/usr/bin:/bin", "INCUS_PROJECT": "subyard",
+                           "YARD_INSTANCE_NAME": "yard", "SUBYARD_INTEGRATION_SELECTED": "0",
+                           "SUBYARD_INTEGRATION_SOURCE_BINDING": "a" * 64}
+            result = subprocess.run(["python3", str(package / "lifecycle.py"), "observe"],
+                                    env=environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"state": "absent", "actual": "", "desired": ""})
+            self.assertFalse(rejected.exists())
+            query = subprocess.run([str(root / "incus"), "query", "/1.0/instances/yard?project=subyard"],
+                                   capture_output=True, text=True, timeout=10)
+            self.assertEqual(json.loads(query.stdout), snapshot)
+            guest = ["exec", "yard", "--project", "subyard", "--"]
+            for arguments in (["config", "set", "yard", "key", "value"],
+                              guest + ["timeout", "20", "docker", "stop", "container"],
+                              guest + ["sh", "-eu", "-c", "true"],
+                              guest + ["sh", "-eu", "-c", module.CONTROL_ASSESSMENT + "\n"],
+                              guest + ["bash", "-c", "true"],
+                              ["query", "/1.0/instances/foreign?project=subyard"],
+                              ["query", "/1.0/instances/yard?project=foreign"], ["unknown"]):
+                with self.subTest(arguments=arguments[:2]):
+                    result = subprocess.run([str(root / "incus"), *arguments],
+                                            capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 99)
+                    self.assertEqual(rejected.read_text(), "incus operation rejected")
+                    rejected.unlink()
 
     def test_exact_context_and_owned_retirement(self):
         _, context, _, _ = module.observe()

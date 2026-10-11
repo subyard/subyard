@@ -314,22 +314,27 @@ func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) 
 }
 
 func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for path, content := range map[string]string{
 		"config/projects-changed.sh": "#!/bin/sh\nexit 0\n",
 		"instructions.md":            "first\n",
 	} {
-		full := filepath.Join(root, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, filepath.Join(root, path), []byte(content), 0o644)
 	}
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{DevUser: "dev", DevUID: 1001}, Environment: []string{
 		"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "instructions.md"),
 	}}
+	legacy := runtime
+	legacy.Environment = nil
+	legacyScope, _, err := legacy.IntegrationScope()
+	// Frozen uid/allows/artifacts payload, including the two project hook files.
+	const originalScope = "57ae86528a85305364bd90fb2bfa5a4e8021d96e906b5ff83e6103e9f2a020b8"
+	if err != nil || legacyScope != originalScope {
+		t.Fatalf("undeclared packages changed the original scope: %s, %v", legacyScope, err)
+	}
 	first, paths, err := runtime.IntegrationScope()
 	if err != nil {
 		t.Fatal(err)
@@ -342,15 +347,30 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if len(first) != 64 {
 		t.Fatalf("invalid desired scope fingerprint %q", first)
 	}
-	if err := os.WriteFile(filepath.Join(root, "instructions.md"), []byte("second\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(root, "instructions.md"), []byte("second\n"), 0o644)
 	second, secondPaths, err := runtime.IntegrationScope()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second == first || !slices.Equal(paths, secondPaths) {
 		t.Fatalf("desired source change was not bound: first=%s second=%s paths=%#v secondPaths=%#v", first, second, paths, secondPaths)
+	}
+	// A declared package is bound even when it is not selected in this yard.
+	packageRoot := filepath.Join(root, "package")
+	if err := os.Mkdir(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	declaration := filepath.Join(packageRoot, "integration.json")
+	testkit.WriteFile(t, declaration, []byte(`{"schema_version":1}`), 0o644)
+	runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: packageRoot}}
+	declared, declaredPaths, err := runtime.IntegrationScope()
+	if err != nil || declared == second || !slices.Equal(paths, declaredPaths) {
+		t.Fatalf("unselected declaration was not bound: %s, %v", declared, err)
+	}
+	testkit.WriteFile(t, declaration, []byte("{\"schema_version\":1}\n"), 0o644)
+	changed, changedPaths, err := runtime.IntegrationScope()
+	if err != nil || changed == declared || !slices.Equal(paths, changedPaths) {
+		t.Fatalf("unselected source drift was not bound: %s, %v", changed, err)
 	}
 }
 
