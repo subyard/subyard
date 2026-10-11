@@ -735,6 +735,49 @@ class GuestRuntimeTest(unittest.TestCase):
             self.assertFalse((state / 'client.conf').exists())
             self.assertFalse((state / 'awg0.conf').exists())
 
+    def test_up_waits_for_environment_readiness_after_unit_restart(self):
+        with self.environment(), mock.patch.object(runtime, 'run', return_value=result()) as run, \
+                mock.patch.object(runtime, 'observe', side_effect=[
+                    dict(ready=False, management_ready=False, vpn_installed=False, vpn_running=False),
+                    dict(ready=True, management_ready=True, vpn_installed=False, vpn_running=False)]) as observe, \
+                mock.patch.object(runtime.time, 'monotonic', return_value=0), \
+                mock.patch.object(runtime.time, 'sleep') as sleep:
+            runtime.up('10.20.30.40', 51820)
+            self.assertTrue(runtime.settings()['enabled'])
+        run.assert_called_once_with('systemctl', 'restart', runtime.UNIT)
+        self.assertEqual(observe.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_up_readiness_timeout_uses_bounded_monotonic_wait(self):
+        clock = [0]
+        def sleep(seconds):
+            self.assertGreater(seconds, 0)
+            self.assertLessEqual(seconds, 1)
+            clock[0] += seconds
+        with self.environment(), mock.patch.object(runtime, 'run', return_value=result()) as run, \
+                mock.patch.object(runtime, 'observe', return_value=dict(ready=False)) as observe, \
+                mock.patch.object(runtime.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(runtime.time, 'sleep', side_effect=sleep):
+            with self.assertRaisesRegex(RuntimeError, '^VPN environment readiness timed out$'):
+                runtime.up('10.20.30.40', 51820)
+        self.assertEqual(clock[0], 60)
+        self.assertGreater(observe.call_count, 1)
+        run.assert_called_once_with('systemctl', 'restart', runtime.UNIT)
+
+    def test_up_does_not_retry_observation_errors(self):
+        for error in (RuntimeError('environment command failed: nft'), OSError('observation unavailable'),
+                      ValueError('invalid state'), KeyError('ready')):
+            with self.subTest(error=type(error).__name__), self.environment(), \
+                    mock.patch.object(runtime, 'run', return_value=result()), \
+                    mock.patch.object(runtime, 'observe', side_effect=[dict(ready=False), error]) as observe, \
+                    mock.patch.object(runtime.time, 'monotonic', return_value=0), \
+                    mock.patch.object(runtime.time, 'sleep') as sleep:
+                with self.assertRaises(type(error)) as failure:
+                    runtime.up('10.20.30.40', 51820)
+                self.assertIs(failure.exception, error)
+            self.assertEqual(observe.call_count, 2)
+            sleep.assert_called_once_with(1)
+
     def test_firewall_boundary_closes_exact_port_and_denies_management_networks(self):
         with self.environment() as state, mock.patch.object(runtime, 'uplink', return_value='eth0'):
             runtime.atomic(state / 'settings.json', json.dumps(dict(enabled=True, endpoint='10.20.30.40', port=51999)))

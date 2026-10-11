@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent
 STATE = Path('/srv/amnezia')
@@ -538,8 +539,13 @@ def up(endpoint, port):
         raise RuntimeError('VPN port must be in 1024..65535')
     atomic(STATE / 'settings.json', json.dumps(dict(enabled=True, endpoint=address, port=port)) + '\n')
     run('systemctl', 'restart', UNIT)
-    if not observe()['ready']:
-        raise RuntimeError('VPN environment is not ready')
+    # The boundary unit finishes before Docker during guest boot.
+    deadline = time.monotonic() + 60
+    while not observe()['ready']:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('VPN environment readiness timed out')
+        time.sleep(min(1, remaining))
 
 
 def down():
