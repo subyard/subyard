@@ -1,0 +1,21 @@
+[package]
+name = "subyard-veranda"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Subyard native GTK desktop"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10.3", optional = true }
+async-channel = "2.5"
+subyard-veranda-client = { path = "../client" }
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gtk"]
+
+[[bin]]
+name = "veranda"
+path = "src/main.rs"
+required-features = ["desktop"]

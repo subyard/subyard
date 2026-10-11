@@ -762,10 +762,12 @@ Veranda retains a native Rust client for local and pinned SSH fleet views, conne
 management and typed owner operations over versioned Yard RPC. Tauri/WebKitGTK is excluded:
 roughly 500–600 MiB idle RSS is unacceptable, and its temporary 640 MiB exception is revoked.
 Historical [memory measurements](../veranda/webview-memory-reference.md) remain for comparison.
-Slint is the Linux migration finalist after the [matched native comparison](../veranda/native-framework-comparison.md)
-on 2026-10-10: 62.48 MiB summed desktop RSS, GTK4 76.72 MiB and Qt Widgets 86.93 MiB,
-with the real Rust/Go backend and 10 yards/100 projects in total. Slint's measured prototype
-includes four pinned correctness forks; stock Slint is unqualified. Full UI, startup, resource,
+GTK4 through **gtk4-rs** was selected on 2026-10-11; framework research and comparative
+measurements are complete. The [historical matched comparison](../veranda/native-framework-comparison.md)
+recorded 62.48 MiB summed desktop RSS for Slint, 76.72 MiB for GTK4 and 86.93 MiB for Qt Widgets,
+with the real Rust/Go backend and 10 yards/100 projects. GTK used a C frontend and Rust bridge;
+the shipped gtk4-rs UI needs its own application acceptance. Slint required four pinned correctness
+forks, while the measured GTK/Qt libraries were unpatched. Full UI, startup, resource,
 keyboard, accessibility and session acceptance precedes delivery. Replacing the UI does not
 require a Go/RPC rewrite. Platform, reliability and resource acceptance remain pending;
 Windows/macOS are intended to reach Linux owners remotely. Minimize resources according to

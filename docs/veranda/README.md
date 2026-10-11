@@ -1,9 +1,11 @@
 # Veranda UX design
 
 Veranda is the graphical Subyard client for users who prefer not to use the terminal for routine
-configuration, navigation, monitoring, and diagnostics. Slint is the Linux migration finalist
-after a [matched native comparison](native-framework-comparison.md) over the real Rust/Go backend.
-Full native UI qualification remains pending. Tauri/WebKitGTK is excluded; its historical
+configuration, navigation, monitoring, and diagnostics. Its native UI uses **GTK4 through gtk4-rs**,
+retaining the existing Rust client and Go engine. Framework research and comparative measurements
+are complete; the [native comparison](native-framework-comparison.md) is retained as history.
+The measured GTK prototype used C plus a Rust bridge, not gtk4-rs. Full application qualification
+remains pending. Tauri/WebKitGTK is excluded; its historical
 [memory measurements](webview-memory-reference.md) remain for reference.
 
 This directory records the initial UX contract. It is a planning artifact, not a promise that every

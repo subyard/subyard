@@ -1,7 +1,7 @@
 ---
 title: Architecture of the CLI, control plane and Subyard Veranda
 status: architecture and design constraints
-updated: 2026-10-10
+updated: 2026-10-11
 note: >
   Current architectural boundaries and accepted design constraints. The implementation guide
   describes shipped interfaces; Veranda requirements do not claim that future GUI features are shipped.
@@ -12,8 +12,8 @@ note: >
 This reference explains current system boundaries and the decisions that constrain further work.
 [Control-plane implementation](../control-plane.md) describes the current components and implemented
 interfaces. The production CLI/control plane is a Go engine with narrow Bash physical adapters.
-Veranda's native client provides local/SSH RPC, trust storage and session contracts. Slint is the
-Linux migration finalist after a matched native comparison; the GUI and cross-platform delivery remain
+Veranda's native client provides local/SSH RPC, trust storage and session contracts. GTK4 through
+gtk4-rs is the selected UI; the GUI and cross-platform delivery remain
 accepted design constraints, not claims of a shipped desktop application.
 
 The runtime layers `L0 host → L1 yard → optional L2 project-env → nested test runtime` and profiles as
@@ -28,8 +28,8 @@ across L1 and/or L2; it is not another runtime layer. See [Workflows](../workflo
   **Veranda - Nice view into every yard.**
 - Go owns the Linux owner-side engine, CLI/control plane and official Incus client. Bash owns
   bounded platform integration and safety guards for host/Incus/network/storage/systemd and profile
-  hooks. Rust supplies Veranda's native client and presentation boundary. Slint is the Linux UI
-  migration finalist; Tauri/WebKitGTK is excluded because of its unacceptable idle memory footprint.
+  hooks. Rust supplies Veranda's native client and GTK4 presentation through gtk4-rs.
+  Tauri/WebKitGTK is excluded because of its unacceptable idle memory footprint.
 - Veranda uses versioned Yard RPC. It duplicates neither owner domain logic nor Incus access.
 - Each operation has exactly one production implementation path. A compatibility shim may redirect
   a call but owns no business logic.
@@ -124,7 +124,7 @@ OwnerHost (L0)
 | CLI/control plane | Go | command registry, config/context, state/transactions, cross-yard routing, operation identity/audit, Incus operations/events, credential metadata/revision/trust/assignment/sync decisions, RPC | host-specific implementation details, profile process identity and secret payload |
 | System/safety adapters | Bash | fresh-host bootstrap, bounded host `check/plan/apply/verify` mechanics, Incus/storage/network/UFW, mounts/idmap, systemd, destructive guards/rollback, pinned credential tools, protected crypto/materialization, profile/consumer hooks | command registry, cross-yard/credential business policy, RPC |
 | Veranda native client | Rust | app lifecycle, capabilities, local/SSH transport, app-local connection/trust store and consent, credential references, typed presentation boundary | Incus, owner state/plans/mutations, ledger payload |
-| Veranda native UI | Slint, Linux migration finalist | presentation, navigation, client state machine, progress/diagnostics | domain validation and authoritative operation result |
+| Veranda native UI | Rust/gtk4-rs | presentation, navigation, client state machine, progress/diagnostics | domain validation and authoritative operation result |
 | In-yard desired state | Go-owned reconcile + Bash/component hooks | packages/users/files/services in an already created L1 | host/Incus/control plane |
 
 In-yard provisioning uses Go-owned reconciliation with Bash/component hooks, rather than an
@@ -315,7 +315,7 @@ See [Veranda](../veranda/README.md) for the implemented scope and verification l
 public Subyard monorepo
   ├─ cmd/yard + internal/             Go engine/CLI and RPC contracts
   └─ veranda/
-       ├─ planned Slint UI (implementation and qualification pending)
+       ├─ GTK4 UI through gtk4-rs (implementation and qualification in progress)
        └─ typed presentation calls → native Rust client
             ├─ local child: yard rpc --stdio
             └─ SSH session: yard rpc --stdio on owner-host
@@ -375,8 +375,9 @@ remain available for comparison, without further WebView acceptance or optimizat
 
 The 2026-10-10 [matched native comparison](../veranda/native-framework-comparison.md) recorded
 62.48 MiB desktop RSS for the patched Slint prototype, 76.72 MiB for GTK4 and 86.93 MiB for
-Qt Widgets. Its 10-yard/100-project workload selects a migration finalist; it does not replace
-the full application workloads and release limits below.
+Qt Widgets. Framework research is complete; GTK4 through gtk4-rs was selected on 2026-10-11.
+The measured GTK frontend used C and a Rust bridge, so its 10-yard/100-project result is historical
+selection evidence, not a gtk4-rs measurement or a substitute for the final application limits below.
 
 | Metric | Target | Limit |
 | --- | --- | --- |

@@ -1,8 +1,12 @@
 # Native framework comparison
 
-Slint is the Linux migration finalist after a matched comparison with Qt Widgets and GTK4.
-Its tested prototype used the least memory, including the real local Go engine. The result
-qualifies a pinned, patched prototype for the next implementation stage. Full application,
+**Decision (2026-10-11): Veranda uses GTK4 through gtk4-rs.** Framework research and comparative
+measurements are complete. This reference preserves the matched Qt Widgets, GTK4 and Slint
+results, their scope and maintenance tradeoffs.
+
+Slint used the least measured memory; GTK used the least idle CPU and unpatched system libraries.
+The measured GTK frontend was written in C with a Rust bridge, not gtk4-rs. These results guide
+implementation but do not establish the final Rust GTK application's footprint. Full application,
 platform and delivery acceptance remains outstanding.
 
 ## Results
@@ -81,10 +85,11 @@ They change AT-SPI signal argument encoding, disabled accessibility states, aggr
 modifier handling across core/Winit, and complete repainting of scheduled software frames.
 The pristine upstream sources were compared against the pinned sources. Stock Slint behavior
 and footprint remain unqualified; no memory benefit from these patches has been established.
-Migration must account for maintaining, reducing or upstreaming them and for dependency notices.
+Any future reuse of that Slint prototype must account for maintaining, reducing or upstreaming
+them and for dependency notices. They are not dependencies of the selected GTK implementation.
 Qt/GTK system libraries were unpatched in this comparison.
 
-The next stage is a public native shell with the full [UX contract](README.md), session/trust,
+The next stage is a public gtk4-rs shell with the full [UX contract](README.md), session/trust,
 accessibility/IME and packaging coverage. The original [resource and reliability
 requirements](../reference/control-plane-architecture.md#veranda-resource-budgets) remain:
 ordinary 20-yard/200-project and stress 5-owner/100-yard/1000-project workloads, event bursts,

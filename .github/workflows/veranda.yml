@@ -39,3 +39,24 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.88.0
         run: python dev/check-veranda.py
+
+  gtk-desktop:
+    name: Linux GTK desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/veranda-desktop/target
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system GTK SDK
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-4-dev
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - name: Test GTK desktop models
+        run: cargo test --manifest-path veranda/desktop/Cargo.toml --locked
+      - name: Build GTK desktop
+        run: cargo build --manifest-path veranda/desktop/Cargo.toml --locked

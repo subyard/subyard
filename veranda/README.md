@@ -3,9 +3,13 @@
 Veranda is Subyard's graphical client. The Go engine owns domain rules and operations;
 the [native Rust client](client/) handles RPC, local/SSH connections and pinned host keys.
 
-The desktop shell is being replaced. Slint is the Linux finalist; see the
-[native framework comparison](../docs/veranda/native-framework-comparison.md).
-The native UI and desktop packages are still pending.
+The desktop shell uses GTK4 through gtk4-rs, with the existing Rust client in the GUI process.
+Framework research and comparative measurements are complete; the
+[native framework comparison](../docs/veranda/native-framework-comparison.md) preserves the alternatives.
+Native UI implementation and desktop packages are in progress. The historical GTK measurement
+used a C frontend with a Rust bridge; it does not establish the final gtk4-rs footprint.
+The initial [GTK desktop shell](desktop/) provides read-only fleet navigation and Refresh;
+its build instructions describe the implemented scope and remaining checks.
 
 ## Native client checks
 
