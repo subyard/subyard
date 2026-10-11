@@ -944,7 +944,8 @@ lease_keeper() {
     wait "$keeper_job_pid" 2>/dev/null || exit 0
     keeper_job_pid=''
     lease_keeper_owner_alive || exit 0
-    (set +m; facade_request "$(lease_command renew)" || exit "$?") > "$response_file" &
+    # SSH toggles inherited stdio flags; renewal must not make payload output nonblocking.
+    (set +m; facade_request "$(lease_command renew)" || exit "$?") > "$response_file" 2>/dev/null &
     keeper_job_pid=$!
     lease_keeper_wait || exit 0
     renew_rc=0

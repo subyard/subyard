@@ -214,6 +214,8 @@ done
 ) || fail 'keeper accepts a reused owner/requester PID'
 
 # Fake only waits: two successful renewals each require the complete 300-second cadence.
+install -m 0600 /dev/null "$keeper_probe_dir/cadence-nonblock-active"
+install -m 0600 /dev/null "$keeper_probe_dir/cadence-nonblock-release"
 keeper_cadence_rc=0
 keeper_cadence_output="$(timeout 5 bash -c '
   set -euo pipefail
@@ -226,14 +228,36 @@ keeper_cadence_output="$(timeout 5 bash -c '
     fi
     exec /bin/sleep 0.01
   }
-  facade_request() { printf "renew\n" >> "$probe/cadence-renewals"; printf '\''{"status":"ok"}\n'\''; }
+  facade_request() {
+    # Keep the first renewal nonblocking until the parent checks its payload pipe.
+    python3 -c '\''import os,sys,time
+blocking=os.get_blocking(2)
+os.set_blocking(2,False)
+try:
+    deadline=time.monotonic()+3
+    with open(sys.argv[1],"w") as stream: stream.write("active\n")
+    while os.stat(sys.argv[2]).st_size == 0:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("payload pipe check did not release renewal")
+        time.sleep(.01)
+finally: os.set_blocking(2,blocking)'\'' "$probe/cadence-nonblock-active" "$probe/cadence-nonblock-release" || return "$?"
+    printf '\''{"status":"ok"}\n'\'' || return "$?"
+    printf "renew\n" >> "$probe/cadence-renewals"
+  }
   start_lease_keeper
   trap '\''kill "$LEASE_KEEPER_PID" 2>/dev/null || true; wait "$LEASE_KEEPER_PID" 2>/dev/null || true'\'' EXIT
+  checked=0
   for ((attempt=0; attempt<200; attempt++)); do
-    [ ! -f "$probe/cadence-renewals" ] || \
-      [ "$(wc -l < "$probe/cadence-renewals")" -lt 2 ] || break
+    if [ "$checked" = 0 ] && [ -s "$probe/cadence-nonblock-active" ]; then
+      python3 -c '\''import os; assert os.get_blocking(1), "renewal made payload output nonblocking"'\''
+      printf "release\n" > "$probe/cadence-nonblock-release"
+      checked=1
+    fi
+    [ "$(awk '\''$2 == "ok" { count++ } END { print count+0 }'\'' "$LEASE_KEEPER_LOG")" -lt 2 ] || break
     /bin/sleep 0.01
   done
+  [ "$checked" = 1 ]
+  [ "$(awk '\''$2 == "ok" { count++ } END { print count+0 }'\'' "$LEASE_KEEPER_LOG")" -ge 2 ]
   [ "$(head -n2 "$probe/cadence")" = $'\''300\n300'\'' ]
   [ "$(head -n2 "$probe/cadence-renewals")" = $'\''renew\nrenew'\'' ]
 ' _ "$ROOT" "$keeper_probe_dir" 2>&1)" || keeper_cadence_rc=$?
