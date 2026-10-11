@@ -585,8 +585,16 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
                     "sys.exit(99)\n")
     sudo.chmod(0o700)
     incus = shims / "incus"
-    incus.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+    # Profile observation may inspect instance state and inactive guest services.
+    # Only exact read-only probes are synthetic; every mutation remains rejected.
+    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
                      "arguments = sys.argv[1:]\n"
+                     "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
+                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
+                     "    print(observation['instances'][0]['info']['status'].upper())\n"
+                     "    sys.exit(0)\n"
+                     "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
+                     "    sys.exit(3)\n"
                      "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
                      "    command = arguments[arguments.index('--') + 1:]\n"
                      "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
@@ -739,8 +747,14 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
                         "sys.exit(99)\n")
         shim.chmod(0o700)
     incus = shims / "incus"
-    incus.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
                      "arguments = sys.argv[1:]\n"
+                     "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
+                     f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
+                     "    print(observation['instances'][0]['info']['status'].upper())\n"
+                     "    sys.exit(0)\n"
+                     "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
+                     "    sys.exit(3)\n"
                      "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
                      "    command = arguments[arguments.index('--') + 1:]\n"
                      "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
