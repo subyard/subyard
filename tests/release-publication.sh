@@ -163,6 +163,28 @@ class FakeGitHub:
             raise ValueError("fixture lost response " + point)
 
 
+class Downloads(unittest.TestCase):
+    def test_download_media_types(self):
+        with tempfile.TemporaryDirectory(prefix="subyard-download-", dir="/tmp") as directory:
+            destination = Path(directory) / "download"
+            for path, accept in (("actions/artifacts/123/zip", "application/json"),
+                                 ("releases/assets/456", "application/octet-stream")):
+                with self.subTest(path=path), patch.object(m.subprocess, "run",
+                        return_value=subprocess.CompletedProcess([], 0, stderr=b"")) as run:
+                    m.GitHub().download(path, destination)
+                    self.assertEqual(run.call_args.args[0], ["gh", "api", m.GitHub().prefix + path,
+                                                            "-H", "Accept: " + accept])
+
+    def test_download_failure_reports_only_http_status(self):
+        with tempfile.TemporaryDirectory(prefix="subyard-download-", dir="/tmp") as directory:
+            with patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 1, stderr=b"private response detail (HTTP 415)")):
+                with self.assertRaises(ValueError) as caught:
+                    m.GitHub().download("actions/artifacts/123/zip", Path(directory) / "download")
+            self.assertEqual(str(caught.exception),
+                             "GitHub download failed HTTP 415; retry with retained candidate")
+
+
 class Contracts(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="subyard-publication-", dir="/tmp")
