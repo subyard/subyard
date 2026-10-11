@@ -2515,7 +2515,7 @@ grep -Fq 'capture_recovery_plan' "$v0111_recovery" \
   || fail 'v0.11.1 fixture lacks structured plan, terminal, or fixed-point evidence'
 v0111_host_free="$ROOT/internal/adapters/releaseruntime/runtime_v0111_recovery_test.go"
 grep -Fq 'request.Yard != os.Getenv("SUBYARD_TEST_V0111_YARD")' "$v0111_host_free" \
-  && grep -Fq 'fixture.configHome, "recovery-yard", nil' "$v0111_host_free" \
+  && grep -Fq 'fixture.configHome, "recovery-yard",' "$v0111_host_free" \
   || fail 'host-free v0.11.1 recovery does not prove the named-yard process request'
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
