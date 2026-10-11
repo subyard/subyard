@@ -21,7 +21,7 @@ set -euo pipefail
 state="$1" run="$2"
 [ "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2" ]
 root="$(cat "$state/source-root")"
-case "$root" in /tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
+case "$root" in /var/tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
 [ ! -e "$root/config/profiles/codex-fixture" ] && [ ! -L "$root/config/profiles/codex-fixture" ]
 install -d -m 0755 "$root/config/profiles/codex-fixture"
 printf 'PROFILE_NAME=codex-fixture\n' > "$root/config/profiles/codex-fixture/profile.conf"

@@ -1113,7 +1113,7 @@ cleanup_guest() {
   local vm="$1" directory="${GUEST_DIRS[$1]:-}" rc=0
   [ -n "$directory" ] || return 0
   phase_start guest-cleanup "$vm"
-  case "$directory" in /tmp/subyard-worktree.*) ;; *) phase_end 1; return 1 ;; esac
+  case "$directory" in /var/tmp/subyard-worktree.*) ;; *) phase_end 1; return 1 ;; esac
   if [ "${2:-}" = quiet ]; then
     guest "$vm" sudo -n find "$directory" -depth -delete </dev/null >/dev/null 2>&1 || rc=$?
   else
@@ -1218,11 +1218,20 @@ write_guest_command() {
 }
 
 prepare_guest() {
-  local vm="$1" bundle="$2" expected_hash="$3" directory actual_hash
-  directory="$(guest "$vm" mktemp -d /tmp/subyard-worktree.XXXXXX </dev/null)" \
+  local vm="$1" bundle="$2" expected_hash="$3" directory actual_hash fstype
+  # Release assets and native build outputs must not consume the guest's RAM reserve.
+  fstype="$(guest "$vm" findmnt -n -o FSTYPE -T /var/tmp </dev/null)" \
+    || { printf 'agent-e2e: VM%s could not inspect guest staging storage\n' "$vm" >&2; return 2; }
+  case "$fstype" in
+    ''|tmpfs|ramfs)
+      printf 'agent-e2e: VM%s guest staging requires persistent storage\n' "$vm" >&2
+      return 2
+      ;;
+  esac
+  directory="$(guest "$vm" mktemp -d /var/tmp/subyard-worktree.XXXXXX </dev/null)" \
     || { printf 'agent-e2e: VM%s did not create a run directory\n' "$vm" >&2; return 2; }
   case "$directory" in
-    /tmp/subyard-worktree.*) ;;
+    /var/tmp/subyard-worktree.*) ;;
     *) printf 'agent-e2e: VM%s returned an unsafe run directory\n' "$vm" >&2; return 2 ;;
   esac
   GUEST_DIRS[$vm]="$directory"

@@ -344,7 +344,7 @@ func (runtime *Runtime) provisionPair(ctx context.Context) (err error) {
 		_ = runtime.restrictAgentAccess("allocation-failed")
 		_ = runtime.collectFailureDiagnostics(ctx, err)
 		fmt.Fprintln(runtime.Stderr,
-			"test-vms: failed slot provisioning was quarantined for operator recovery")
+			"test-vms: failed slot provisioning is handled by guarded broker recovery")
 	}()
 	if err = runtime.ensureProject(ctx); err != nil {
 		return err
@@ -867,12 +867,26 @@ func (runtime *Runtime) waitFor(
 	nextReport := started.Add(10 * time.Second)
 	fmt.Fprintf(runtime.Stdout, "  [ .. ] %s\n", label)
 	for {
-		if err := probe(); err == nil {
+		probeErr := probe()
+		if probeErr == nil {
 			return nil
+		}
+		// Probe argv and output can contain credentials; retain only typed metadata.
+		lastFailure := "error_kind=probe_error"
+		var commandError *CommandError
+		switch {
+		case errors.As(probeErr, &commandError) && commandError != nil:
+			lastFailure = fmt.Sprintf("error_kind=command_error exit_code=%d duration=%s",
+				commandError.ExitCode, commandError.Duration)
+		case errors.Is(probeErr, context.DeadlineExceeded):
+			lastFailure = "error_kind=context_deadline_exceeded"
+		case errors.Is(probeErr, context.Canceled):
+			lastFailure = "error_kind=context_canceled"
 		}
 		now := runtime.Now()
 		if !now.Before(deadline) {
-			return fmt.Errorf("%s did not become ready within %s", label, runtime.Config.BootTimeout)
+			return fmt.Errorf("%s did not become ready within %s; last readiness probe: %s",
+				label, runtime.Config.BootTimeout, lastFailure)
 		}
 		if !now.Before(nextReport) {
 			fmt.Fprintf(runtime.Stdout, "  [ .. ] %s (%ds elapsed)\n",

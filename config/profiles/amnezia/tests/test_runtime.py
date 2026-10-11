@@ -1399,6 +1399,73 @@ class ProfileProvisionTest(unittest.TestCase):
 
 
 class FirstBootObserverTest(unittest.TestCase):
+    def test_console_waits_for_native_exit_and_monitor_cleanup(self):
+        for unavailable in (False, True):
+            with self.subTest(console_unavailable=unavailable), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                directory.chmod(0o700)
+                sampled = directory / 'state-read'
+                native = [sys.executable, '-c', '''import sys, time
+from pathlib import Path
+deadline = time.monotonic() + 5
+while not Path(sys.argv[1]).exists():
+    if time.monotonic() > deadline: sys.exit(99)
+    time.sleep(0.01)
+sys.exit(17)
+''', str(sampled)]
+                event = {'type': 'lifecycle', 'project': boot_observer.PROJECT, 'metadata': {
+                    'action': 'instance-started', 'source': f'/1.0/instances/{boot_observer.INSTANCE}'}}
+                monitor = [sys.executable, '-c', '''import signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(sys.argv[1], flush=True)
+time.sleep(60)
+''', json.dumps(event)]
+                processes = {}
+                popen = subprocess.Popen
+
+                def launch(command, **kwargs):
+                    process = popen(command, **kwargs)
+                    processes['native' if command == native else 'monitor'] = process
+                    return process
+
+                def probe(*arguments):
+                    if arguments[0] == 'query':
+                        self.assertIsNone(processes['native'].poll())
+                        sampled.write_text('sampled')
+                        sampled.chmod(0o600)
+                        return json.dumps({'status': 'Running', 'pid': 123,
+                                           'memory': {'usage': 456}}).encode()
+                    self.assertEqual(arguments, ('console', boot_observer.INSTANCE,
+                                                 '--project', boot_observer.PROJECT, '--show-log'))
+                    self.assertEqual(processes['native'].returncode, 17,
+                                     'console retrieval competed with the active lifecycle')
+                    self.assertIsNotNone(processes['monitor'].returncode)
+                    self.assertTrue(processes['monitor'].stdout.closed)
+                    if unavailable:
+                        raise OSError('synthetic-private-value')
+                    return b'BdsDxe Linux version incus-agent synthetic-private-value'
+
+                with mock.patch.object(boot_observer, 'incus_arguments', return_value=monitor), \
+                        mock.patch.object(boot_observer.subprocess, 'Popen', side_effect=launch), \
+                        mock.patch.object(boot_observer, 'probe', side_effect=probe) as queried, \
+                        io.StringIO() as output, contextlib.redirect_stdout(output):
+                    self.assertEqual(boot_observer.run(native), 17)
+                    retained = output.getvalue()
+                rows = [json.loads(line.split('=', 1)[1]) for line in retained.splitlines()]
+                self.assertEqual(sum(call.args[0] == 'console' for call in queried.call_args_list), 1)
+                self.assertTrue(any(row.get('action') == 'instance-started' for row in rows))
+                self.assertTrue(any(row.get('memory_bytes') == 456 for row in rows))
+                self.assertTrue(any('memavailable_bytes' in row for row in rows))
+                self.assertTrue(any(row.get('observer') == 'stopped' for row in rows))
+                self.assertNotIn('synthetic-private-value', retained)
+                if unavailable:
+                    self.assertTrue(any(row.get('gap') == 'console_unavailable' for row in rows))
+                else:
+                    self.assertEqual([row['boot_hint'] for row in rows if 'boot_hint' in row],
+                                     ['firmware', 'kernel', 'agent'])
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(processes['monitor'].pid, 0)
+
     def test_cancel_preserves_owner_process_group_and_native_signal_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

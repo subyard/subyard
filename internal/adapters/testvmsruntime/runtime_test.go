@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -1979,4 +1981,161 @@ func fileMode(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode().Perm()
+}
+
+func TestWaitForTimeoutReportsOnlyLatestProbeMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "native command",
+			err: fmt.Errorf("private wrapper: %w", &CommandError{
+				Name: "private-command", Args: []string{"private-argument"},
+				ExitCode: 17, Duration: 750 * time.Millisecond, Message: "private-output",
+			}),
+			want: "error_kind=command_error exit_code=17 duration=750ms",
+		},
+		{name: "generic replaces native", err: errors.New("private-output"), want: "error_kind=probe_error"},
+		{name: "deadline", err: context.DeadlineExceeded, want: "error_kind=context_deadline_exceeded"},
+		{name: "canceled probe", err: context.Canceled, want: "error_kind=context_canceled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			started := now
+			var delays []time.Duration
+			runtime := Runtime{
+				Config: Config{BootTimeout: 5 * time.Second}, Stdout: io.Discard,
+				Now: func() time.Time { return now },
+				Sleep: func(_ context.Context, delay time.Duration) error {
+					delays = append(delays, delay)
+					now = now.Add(delay)
+					return nil
+				},
+			}
+			probes := 0
+			err := runtime.waitFor(context.Background(), "fixture readiness", func() error {
+				probes++
+				if probes < 4 {
+					return &CommandError{ExitCode: 99, Duration: 99 * time.Second, Message: "earlier failure"}
+				}
+				return test.err
+			})
+			want := "fixture readiness did not become ready within 5s; last readiness probe: " + test.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("readiness timeout = %v, want %q", err, want)
+			}
+			if probes != 4 || now.Sub(started) != 6*time.Second ||
+				!reflect.DeepEqual(delays, []time.Duration{2 * time.Second, 2 * time.Second, 2 * time.Second}) {
+				t.Fatalf("polling changed: probes=%d elapsed=%s delays=%v", probes, now.Sub(started), delays)
+			}
+			var commandError *CommandError
+			if errors.As(err, &commandError) {
+				t.Fatal("readiness timeout retained the raw command failure")
+			}
+		})
+	}
+}
+
+func TestWaitForSuccessAfterFailureAtDeadline(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	runtime := Runtime{
+		Config: Config{BootTimeout: 2 * time.Second}, Stdout: io.Discard,
+		Now: func() time.Time { return now },
+		Sleep: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+	probes := 0
+	err := runtime.waitFor(context.Background(), "fixture readiness", func() error {
+		probes++
+		if probes == 1 {
+			return &CommandError{ExitCode: 1, Message: "temporary failure"}
+		}
+		return nil
+	})
+	if err != nil || probes != 2 {
+		t.Fatalf("readiness after transient failure: err=%v probes=%d", err, probes)
+	}
+}
+
+func TestWaitForPreservesSleepCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	cause := errors.New("fixture cancellation")
+	probes, sleeps := 0, 0
+	runtime := Runtime{
+		Config: Config{BootTimeout: time.Minute}, Stdout: io.Discard,
+		Now: func() time.Time { return time.Unix(1_800_000_000, 0) },
+		Sleep: func(got context.Context, delay time.Duration) error {
+			sleeps++
+			if got != ctx || delay != 2*time.Second {
+				t.Fatal("readiness sleep changed context or interval")
+			}
+			cancel(cause)
+			return context.Cause(got)
+		},
+	}
+	err := runtime.waitFor(ctx, "fixture readiness", func() error {
+		probes++
+		return &CommandError{ExitCode: 1, Message: "probe failed"}
+	})
+	if err != cause || probes != 1 || sleeps != 1 {
+		t.Fatalf("readiness cancellation: err=%v probes=%d sleeps=%d", err, probes, sleeps)
+	}
+}
+
+func TestWaitForTimeoutPersistsSafeIncident(t *testing.T) {
+	secrets := []string{
+		"private-command", "private-argv", "bearer-fixture-secret", "quoted-fixture-secret",
+		"multiline-fixture-secret", "key-fixture-secret", "AAAAPublicKeyFixture",
+	}
+	probeErr := &CommandError{
+		Name: secrets[0], Args: []string{secrets[1], "Authorization: Bearer " + secrets[2]},
+		ExitCode: 23, Duration: 1250 * time.Millisecond,
+		Message: "Authorization: Bearer " + secrets[2] + "\n" +
+			"token=\"" + secrets[3] + "\n" + secrets[4] + "\"\n" +
+			"-----BEGIN OPENSSH PRIVATE KEY-----\n" + secrets[5] + "\n-----END OPENSSH PRIVATE KEY-----\n" +
+			"ssh-ed25519 " + secrets[6],
+	}
+	var progress bytes.Buffer
+	runtime := Runtime{
+		Stdout: &progress, Now: func() time.Time { return time.Unix(1_800_000_000, 0) },
+		Sleep: func(context.Context, time.Duration) error {
+			t.Fatal("zero timeout unexpectedly slept")
+			return nil
+		},
+	}
+	err := runtime.waitFor(context.Background(), "fixture readiness", func() error { return probeErr })
+	if err == nil {
+		t.Fatal("failed probe became ready")
+	}
+	recorder := EventRecorder{StateDir: testkit.TempDir(t), Source: "test-yard"}
+	incident, saveErr := recorder.SaveIncident(LeaseSlot{
+		SlotID: "slot-001", ResourceGeneration: 1, LeaseEpoch: 1,
+	}, err, nil)
+	if saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	batch, exportErr := recorder.Export()
+	if exportErr != nil {
+		t.Fatal(exportErr)
+	}
+	if len(batch.Incidents) != 1 || batch.Incidents[0].FailureReason != err.Error() || incident.Command != nil {
+		t.Fatal("incident did not retain the safe timeout or retained raw command evidence")
+	}
+	payload, marshalErr := json.Marshal(batch)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if !bytes.Contains(payload, []byte("error_kind=command_error exit_code=23 duration=1.25s")) {
+		t.Fatal("incident lost safe native probe metadata")
+	}
+	for _, secret := range secrets {
+		if strings.Contains(err.Error()+progress.String()+string(payload), secret) {
+			t.Fatal("readiness diagnostics disclosed synthetic probe credentials, keys, argv or output")
+		}
+	}
 }

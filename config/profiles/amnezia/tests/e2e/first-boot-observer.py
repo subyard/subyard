@@ -108,7 +108,7 @@ def run(command, duration=900):
     reason = 'unavailable'
     subscribed = False
     start_seen = False
-    hints = set()
+    state_seen = False
     gaps = set()
     next_sample = 0
 
@@ -200,6 +200,7 @@ def run(command, duration=900):
             next_sample = time.monotonic() + 5
             raw = probe('query', f'/1.0/instances/{INSTANCE}/state?project={PROJECT}')
             if raw:
+                state_seen = True
                 state = json.loads(raw)
                 status = state.get('status')
                 values = {'state': status if status in STATES else 'unknown'}
@@ -210,16 +211,6 @@ def run(command, duration=900):
                 if status == 'Running' and not start_seen:
                     values['first_start_gap'] = 1
                 emit(**values)
-                console = probe('console', INSTANCE, '--project', PROJECT, '--show-log')
-                if console:
-                    for hint, marker in (('firmware', b'BdsDxe'), ('kernel', b'Linux version'),
-                                         ('panic', b'Kernel panic'), ('oom', b'Out of memory'),
-                                         ('agent', b'incus-agent')):
-                        if marker in console and hint not in hints:
-                            hints.add(hint)
-                            emit(boot_hint=hint)
-                elif console is None:
-                    emit(gap='console_unavailable')
             else:
                 emit(gap='instance_state_unavailable')
             memory = {}
@@ -248,6 +239,21 @@ def run(command, duration=900):
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     previous[sig] = signal.signal(sig, forward)
             code = child.wait()
+            # Incus console retrieval owns an instance operation lock. Only read
+            # it once the lifecycle child is reaped, never during its mutations.
+            if state_seen:
+                try:
+                    console = probe('console', INSTANCE, '--project', PROJECT, '--show-log')
+                    if console:
+                        for hint, marker in (('firmware', b'BdsDxe'), ('kernel', b'Linux version'),
+                                             ('panic', b'Kernel panic'), ('oom', b'Out of memory'),
+                                             ('agent', b'incus-agent')):
+                            if marker in console:
+                                emit(boot_hint=hint)
+                    elif console is None:
+                        emit(gap='console_unavailable')
+                except (OSError, ValueError, TypeError, AttributeError):
+                    emit(gap='console_unavailable')
             return code if code >= 0 else 128 - code
         finally:
             if child is not None and child.poll() is None:

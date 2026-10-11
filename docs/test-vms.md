@@ -319,8 +319,10 @@ dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose real-host-check --vm 1 --
 ```
 
 The runner filters private and ignored files, verifies the worktree bundle and removes its guest
-worktree. Every lease-taking invocation prints `yard + project + run + purpose`, environment type,
-VM count and base fingerprint. Human status includes the environment type and per-VM resources.
+worktree. Guest archives, extracted sources and native build outputs use private directories under
+`/var/tmp` on persistent storage; the runner rejects tmpfs and ramfs staging so release assets do not
+consume the guest's RAM reserve. Every lease-taking invocation prints `yard + project + run + purpose`,
+environment type, VM count and base fingerprint. Human status includes the environment type and per-VM resources.
 `--type android-test` selects one guest; omit `--vm` to run on all actual guests. Explicit `--vm 2`,
 `--vm both`, `--ssh 2` and pair boundary checks fail before acquiring an Android lease. The default
 `--type subyard-pair` preserves existing pair callers.

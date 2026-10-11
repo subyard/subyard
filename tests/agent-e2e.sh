@@ -311,6 +311,23 @@ late_cleanup_path="$TMP/late-cleanup-path"
 command_transfer_state="$TMP/command-transfer-state"
 cleanup_retry_state="$TMP/cleanup-retry-state"
 : > "$staging_bundle"
+for staging_fs in tmpfs ramfs ''; do
+  : > "$TMP/staging-fs-calls"
+  (
+    GUEST_DIRS=()
+    guest() {
+      shift
+      printf '%s\n' "$1" >> "$TMP/staging-fs-calls"
+      [ "$1" = findmnt ] || return 97
+      printf '%s\n' "$staging_fs"
+    }
+    helper_rc=0
+    prepare_guest 1 "$staging_bundle" ignored || helper_rc=$?
+    [ "$helper_rc" = 2 ] && [ -z "${GUEST_DIRS[1]:-}" ] \
+      && [ "$(cat "$TMP/staging-fs-calls")" = findmnt ]
+  ) >"$TMP/staging-fs.log" 2>&1 \
+    || fail "guest staging accepted memory-backed or unknown storage: $staging_fs"
+done
 set +e
 (
   GUEST_DIRS=()
@@ -323,11 +340,12 @@ set +e
 unreachable_rc=$?
 (
   GUEST_DIRS=()
-  staged=/tmp/subyard-worktree.staging-failure
+  staged=/var/tmp/subyard-worktree.staging-failure
   guest() {
     local vm="$1"
     shift
     case "${1:-}" in
+      findmnt) printf 'ext4\n' ;;
       mktemp) printf '%s\n' "$staged" ;;
       dd) return 23 ;;
       sudo)
@@ -346,11 +364,12 @@ unreachable_rc=$?
 late_staging_rc=$?
 (
   GUEST_DIRS=()
-  staged=/tmp/subyard-worktree.command-transfer
+  staged=/var/tmp/subyard-worktree.command-transfer
   guest() {
     local vm="$1"
     shift
     case "${1:-}" in
+      findmnt) printf 'ext4\n' ;;
       mktemp) printf '%s\n' "$staged" ;;
       dd)
         case "$*" in
@@ -378,13 +397,13 @@ late_staging_rc=$?
 ) >"$TMP/command-transfer.log" 2>&1
 command_transfer_rc=$?
 (
-  GUEST_DIRS=([2]=/tmp/subyard-worktree.cleanup-retry)
+  GUEST_DIRS=([2]=/var/tmp/subyard-worktree.cleanup-retry)
   cleanup_attempts=0
   guest() {
     local vm="$1"
     shift
     [ "$vm" = 2 ] \
-      && [ "$*" = "sudo -n find /tmp/subyard-worktree.cleanup-retry -depth -delete" ] \
+      && [ "$*" = "sudo -n find /var/tmp/subyard-worktree.cleanup-retry -depth -delete" ] \
       || return 97
     cleanup_attempts=$((cleanup_attempts + 1))
     [ "$cleanup_attempts" -gt 1 ] || return 255
@@ -402,14 +421,14 @@ set -e
 [ "$unreachable_rc" = 0 ] \
   && [ "$(cat "$unreachable_sentinel" 2>/dev/null || true)" = $'cleanup\nrelease' ] \
   && [ "$late_staging_rc" = 0 ] \
-  && [ "$(cat "$late_staging_path" 2>/dev/null || true)" = /tmp/subyard-worktree.staging-failure ] \
-  && [ "$(cat "$late_cleanup_path" 2>/dev/null || true)" = /tmp/subyard-worktree.staging-failure ] \
+  && [ "$(cat "$late_staging_path" 2>/dev/null || true)" = /var/tmp/subyard-worktree.staging-failure ] \
+  && [ "$(cat "$late_cleanup_path" 2>/dev/null || true)" = /var/tmp/subyard-worktree.staging-failure ] \
   && [ "$command_transfer_rc" = 0 ] \
   && [ "$(cat "$command_transfer_state" 2>/dev/null || true)" = \
-    '2|/tmp/subyard-worktree.command-transfer|' ] \
+    '2|/var/tmp/subyard-worktree.command-transfer|' ] \
   && [ "$cleanup_retry_rc" = 0 ] \
   && [ "$(cat "$cleanup_retry_state" 2>/dev/null || true)" = \
-    $'255|/tmp/subyard-worktree.cleanup-retry\n0|\nattempts=2' ] \
+    $'255|/var/tmp/subyard-worktree.cleanup-retry\n0|\nattempts=2' ] \
   || fail "guest staging failure aborts caller-owned cleanup or loses its staged path"
 assert_phase_markers "$(cat "$TMP/unreachable-staging.log")" \
   $'transport:start:0:2\ntransport:end:2:2'
@@ -2791,13 +2810,14 @@ case "$command" in
       phase-interrupt) kill -TERM "$PPID"; exit 0 ;;
       phase-*)
         case "$command" in
-          mktemp\ *) printf '/tmp/subyard-worktree.phase-fixture\n' ;;
+          findmnt\ *) printf 'ext4\n' ;;
+          mktemp\ *) printf '/var/tmp/subyard-worktree.phase-fixture\n' ;;
           dd\ *)
             cat >/dev/null
             [ "$FAKE_SCENARIO" != phase-transfer-failure ] || exit 23
             ;;
           sha256sum\ *) printf '%s  bundle\n' "$FAKE_BUNDLE_HASH" ;;
-          /tmp/subyard-worktree.*/run.sh)
+          /var/tmp/subyard-worktree.*/run.sh)
             [ "$FAKE_SCENARIO" != phase-guest-failure ] || exit 23
             ;;
         esac
@@ -3155,11 +3175,32 @@ done
 
 # Model direct guest SSH and cleanup locally.
 guest() {
+  local argument directory
+  local -a command=()
   shift
   if [ "${1:-}" = sudo ] && [ "${2:-}" = -n ]; then shift 2; fi
   case "${1:-}" in
-    /tmp/subyard-worktree.*/run.sh)
+    findmnt)
+      [ "$*" = 'findmnt -n -o FSTYPE -T /var/tmp' ] || return 97
+      printf 'ext4\n'
+      return
+      ;;
+    mktemp)
+      [ "$*" = 'mktemp -d /var/tmp/subyard-worktree.XXXXXX' ] || return 97
+      directory="$(mktemp -d "$TMP/subyard-worktree.XXXXXX")"
+      printf '/var/tmp/%s\n' "${directory##*/}"
+      return
+      ;;
+  esac
+  # Simulate the guest filesystem without creating controller fixtures in /var/tmp.
+  for argument in "$@"; do
+    command+=("${argument//\/var\/tmp\/subyard-worktree./$TMP/subyard-worktree.}")
+  done
+  set -- "${command[@]}"
+  case "${1:-}" in
+    "$TMP"/subyard-worktree.*/run.sh)
       sed \
+        -e "s#/var/tmp/subyard-worktree[.]#$TMP/subyard-worktree.#g" \
         -e '/^chown -R dev:dev /d' \
         -e 's#^exec /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev #exec #' \
         "$1" | bash
@@ -3193,17 +3234,20 @@ for guest_exit in 0 23; do
   [ "$(cat "$TMP/guest-output")" = $'\n== e2e-vm-1 ==\nstdout final\nstderr final' ] \
     || fail 'guest streams bypassed terminal-progress normalization'
   guest_directory="${GUEST_DIRS[1]:-}"
-  case "$guest_directory" in /tmp/subyard-worktree.*) ;; *) fail "guest run directory was not retained for cleanup" ;; esac
-  [ -d "$guest_directory" ] || fail "mock guest run directory is missing"
+  case "$guest_directory" in /var/tmp/subyard-worktree.*) ;; *) fail "guest run directory was not retained for cleanup" ;; esac
+  local_guest_directory="$TMP/${guest_directory##*/}"
+  [ -d "$local_guest_directory" ] || fail "mock guest run directory is missing"
+  [ "$(stat -c '%a' "$local_guest_directory")" = 700 ] \
+    || fail 'guest run directory is not private'
   cleanup_guest 1 || fail "guest run directory cleanup failed"
-  [ ! -e "$guest_directory" ] || fail "guest run directory survived cleanup"
+  [ ! -e "$local_guest_directory" ] || fail "guest run directory survived cleanup"
 done
 
 set +e
 bash -c '
   set -euo pipefail
   . "$1/dev/agent-e2e.sh"
-  GUEST_DIRS[1]=/tmp/subyard-worktree.fixture
+  GUEST_DIRS[1]=/var/tmp/subyard-worktree.fixture
   cleanup_guest() { return 1; }
   cleanup_on_exit
 ' _ "$ROOT" >/dev/null 2>&1

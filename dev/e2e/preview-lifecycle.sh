@@ -611,7 +611,7 @@ set -euo pipefail
 state="$1" run="$2"
 test "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2"
 root="$(cat "$state/source-root")"
-case "$root" in /tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
+case "$root" in /var/tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
 ssh-keygen -q -t ed25519 -N '' -f "$state/owner-host-key"
 python3 - "$state" "$root" <<'PY'
 import pathlib, shlex, sys
@@ -722,7 +722,7 @@ set -euo pipefail
 state="$1" run="$2" name="$3"
 [ "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2" ]
 root="$(cat "$state/source-root")"
-case "$root" in /tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
+case "$root" in /var/tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
 preset="$root/config/yards/profiles/canonical-no-projects.env"
 [ ! -e "$preset" ] && [ ! -L "$preset" ]
 install -d -m 0755 "${preset%/*}"

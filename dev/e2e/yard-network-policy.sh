@@ -78,7 +78,7 @@ controller_main() {
       existing_directory="${GUEST_DIRS[$target_vm]:-}"
       if [ -n "$existing_directory" ]; then
         case "$existing_directory" in
-          /tmp/subyard-worktree.*)
+          /var/tmp/subyard-worktree.*)
             if guest "$target_vm" test -f \
               "$existing_directory/src/dev/e2e/yard-network-policy.sh" \
               >/dev/null 2>&1 \

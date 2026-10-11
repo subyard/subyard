@@ -831,7 +831,7 @@ assert_no_worktrees() {
   local vm leftover
   for ((vm=1; vm<=VM_COUNT; vm++)); do
     leftover="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
-      find /tmp -maxdepth 1 -type d -name 'subyard-worktree.*' -print -quit)"
+      find /var/tmp -maxdepth 1 -type d -name 'subyard-worktree.*' -print -quit)"
     [ -z "$leftover" ] || die "VM$vm retained an agent worktree"
   done
 }
