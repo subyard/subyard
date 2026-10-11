@@ -1334,8 +1334,11 @@ Optional `runtime.projects_changed_hooks` declares installed hooks owned by that
 Entries must be unique, clean absolute paths directly inside
 `/usr/local/libexec/subyard/projects-changed.d`, without carriage returns, line feeds or NUL. Core captures the
 bounded installed hook inventory, source fingerprints and project-root scope before consent,
-then rejects expansion or changed captured inputs before invoking a hook. An observation's
-optional `hook_binding` is a lowercase SHA-256 digest of safe native registration metadata.
+then rejects expansion or changed captured inputs before invoking a hook.
+Core captures canonical workspace roots and their direct metadata without traversing source
+trees. Native hooks own discovery and bind their known nested-root inputs through `hook_binding`.
+An observation's optional `hook_binding` is a lowercase SHA-256 digest of safe native
+registration metadata and known-root filesystem identities.
 Core retains it privately and supplies `SUBYARD_PROJECT_HOOK_BINDING` to the corresponding
 declared hook for its native compare-and-swap check before effects. It is not a public plan fact
 and must not fingerprint credentials, protected contents or secret values. Genuinely unavailable

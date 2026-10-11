@@ -742,12 +742,30 @@ service_enabled() {
   yexec systemctl is-enabled --quiet "$ORCA_UNIT" >/dev/null 2>&1
 }
 
+# Run captured sources in memory when installed helpers still need repair.
+render_registration_observer() {
+  local name
+  printf '%s\n' 'import sys,types'
+  for name in discovery inventory state transport reconcile main; do
+    printf 'module=types.ModuleType("%s");sys.modules["%s"]=module\nexec(compile(' "$name" "$name"
+    jq -Rs . "$RESOURCE_DIR/registration/$name.py" || return 1
+    printf ',"%s.py","exec"),module.__dict__)\n' "$name"
+  done
+  printf '%s\n' 'sys.argv=["main.py","status","--host-name",sys.argv[1]]' \
+    'raise SystemExit(sys.modules["main"].main())'
+}
+
 # Read-only discovery, kind and group checks use the same component as the project hook.
 project_registration_report() {
   local report host_name
   host_name="$(registration_host_name)" || return 1
-  report="$(yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
-    "$ORCA_REGISTRATION/main.py" status --host-name "$host_name")" || true
+  if [ "${1:-}" = source ]; then
+    report="$(render_registration_observer | yexec runuser -u "${DEV_USER:-dev}" -- \
+      /usr/bin/python3 -I -B - "$host_name")" || true
+  else
+    report="$(yexec runuser -u "${DEV_USER:-dev}" -- /usr/bin/python3 -B \
+      "$ORCA_REGISTRATION/main.py" status --host-name "$host_name")" || true
+  fi
   jq -e '(.ready | type == "boolean") and
     (.registered | type == "number") and (.total | type == "number") and
     .registered >= 0 and .registered <= .total and
@@ -1290,10 +1308,9 @@ if [ "$sub" = _runtime-contract ]; then
       [ "$#" -eq 1 ] || die "usage: _runtime-contract observe"
       observation="$(observe_registration_contract)"
       hook_binding=""
-      if [ "$(jq -r .state <<<"$observation")" = current ] &&
-        [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&
+      if [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&
         yexec systemctl is-active --quiet "$ORCA_UNIT";then
-        hook_binding="$(project_registration_report | jq -r '.catalogDigest // empty')"
+        hook_binding="$(project_registration_report source | jq -r '.catalogDigest // empty')"
         [[ "$hook_binding" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native hook catalog fingerprint unavailable'
       fi
       jq --arg binding "$hook_binding" '. + {hook_binding:$binding}' <<<"$observation"

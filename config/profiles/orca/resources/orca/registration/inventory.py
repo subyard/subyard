@@ -92,6 +92,27 @@ class Inventory:
         self.apply = apply
         self.db = None
         self.lock = None
+        self.observed = None
+
+    def _snapshot(self):
+        if os.path.realpath(self.directory) != str(self.directory.absolute()):
+            raise InventoryError("Discovery state directory changed")
+        observed = []
+        for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            try:
+                info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                observed.append(None)
+                continue
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.getuid() or info.st_mode & 0o022):
+                raise InventoryError("Discovery database or journal is unsafe")
+            observed.append((info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns))
+        for path in (self.directory, self.directory / "subyard-discovery.lock"):
+            info = path.stat(follow_symlinks=False)
+            observed.append((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid))
+        return observed
 
     def __enter__(self):
         try:
@@ -124,12 +145,40 @@ class Inventory:
                     raise InventoryError("Discovery database is unsafe")
                 if self.apply:
                     os.fchmod(fd, 0o600)
-                elif info.st_size == 0:
-                    # A concurrently starting worker has not installed its schema yet.
-                    return self
             finally:
                 os.close(fd)
             uri = self.path.absolute().as_uri() + ("?mode=rw" if self.apply else "?mode=ro")
+            if not self.apply:
+                # The existing writer lock covers commits and SQLite close/checkpoint.
+                self.lock = os.open(self.directory / "subyard-discovery.lock",
+                                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                lock_info = os.fstat(self.lock)
+                if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid()
+                        or lock_info.st_mode & 0o022):
+                    raise InventoryError("Discovery lock is unsafe")
+                deadline = time.monotonic() + 10
+                while True:
+                    try:
+                        fcntl.flock(self.lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise InventoryError("Another discovery portion is running") from None
+                        time.sleep(0.05)
+                self.observed = self._snapshot()
+                if self.observed[0] is None:
+                    raise InventoryError("Discovery database disappeared during observation")
+                if (self.observed[0][:2] != (info.st_dev, info.st_ino)
+                        or self.observed[-1][:2] != (lock_info.st_dev, lock_info.st_ino)):
+                    raise InventoryError("Discovery database or lock was replaced during observation")
+                if self.observed[0][3] == 0:
+                    # A starting worker has not installed its schema yet.
+                    return self
+                if self.observed[1] is None:
+                    # No live WAL is ignored; the shared lock keeps the checkpoint fixed.
+                    uri += "&immutable=1"
+                elif self.observed[2] is None:
+                    raise InventoryError("Discovery journal has no readable shared-memory index")
             self.db = sqlite3.connect(uri, uri=True, timeout=0.1)
             if self.apply:
                 self.db.executescript("""
@@ -146,12 +195,18 @@ class Inventory:
             raise InventoryError("Discovery state is unavailable, unsafe or invalid") from None
 
     def __exit__(self, *_):
-        if self.db is not None:
-            self.db.close()
-            self.db = None
-        if self.lock is not None:
-            os.close(self.lock)
-            self.lock = None
+        try:
+            if self.db is not None:
+                self.db.close()
+                self.db = None
+            if self.observed is not None and self._snapshot() != self.observed:
+                raise InventoryError("Discovery database or journal changed during observation")
+        except (OSError, sqlite3.Error):
+            raise InventoryError("Discovery state changed or became unavailable during observation") from None
+        finally:
+            if self.lock is not None:
+                os.close(self.lock)
+                self.lock = None
 
     def paths(self):
         return [row[0] for row in self.db.execute("SELECT path FROM roots")] if self.db else []

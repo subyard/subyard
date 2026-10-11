@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest import mock
 
-from support import Catalog, init_git, project
+from support import Catalog, git, init_git, project
 
 
 class ReconcileTests(unittest.TestCase):
@@ -64,6 +64,65 @@ class ReconcileTests(unittest.TestCase):
         self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
                              for method, _ in self.rpc.calls))
 
+    def test_known_nested_root_binding_rejects_drift_without_recursive_discovery(self):
+        for change in ("missing root", "missing Git metadata", "catalog membership",
+                       "replaced repository", "Git config changed", "linked Git marker changed",
+                       "Git config symlink changed", "symlinked Git config changed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(dir="/tmp") as directory:
+                workspaces = Path(directory) / "workspaces"
+                state = Path(directory) / "state"
+                nested = project(workspaces) / ".build" / "nested"
+                rpc = Catalog()
+                if change == "linked Git marker changed":
+                    upstream = Path(directory) / "upstream"
+                    init_git(upstream, commit=True)
+                    git(upstream, "worktree", "add", "-q", "--detach", str(nested))
+                else:
+                    init_git(nested)
+                config = nested / ".git" / "config"
+                if change == "Git config symlink changed":
+                    config.rename(config.with_name("original-config"))
+                    config.with_name("other-config").write_text(config.with_name("original-config").read_text())
+                    config.symlink_to("original-config")
+                elif change == "symlinked Git config changed":
+                    metadata = Path(directory) / "Git-metadata"
+                    (nested / ".git").rename(metadata)
+                    (nested / ".git").symlink_to(metadata, target_is_directory=True)
+                self.assertTrue(self.reconcile(self.discover(workspaces), rpc, state)["ready"])
+
+                def known_sync(apply):
+                    return self.reconcile(self.discover(workspaces, recursive=False),
+                                          rpc, state, apply=apply,
+                                          host_name=self.host_name, known_paths=[str(nested)])
+
+                approved = known_sync(False)["catalogDigest"]
+                if change == "missing root":
+                    shutil.rmtree(nested)
+                elif change == "missing Git metadata":
+                    shutil.rmtree(nested / ".git")
+                elif change == "replaced repository":
+                    nested.rename(Path(directory) / "original-repository")
+                    init_git(nested)
+                elif change in ("Git config changed", "symlinked Git config changed"):
+                    with config.open("a") as output:
+                        output.write("\n# changed fixture metadata\n")
+                elif change == "Git config symlink changed":
+                    config.unlink()
+                    config.symlink_to("other-config")
+                elif change == "linked Git marker changed":
+                    marker = nested / ".git"
+                    marker.chmod(marker.stat().st_mode ^ 0o040)
+                else:
+                    repo = next(repo for repo in rpc.repos if repo["path"] == str(nested))
+                    repo["projectGroupId"] = None
+                rpc.calls.clear()
+                with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": approved}):
+                    report = known_sync(True)
+                self.assertFalse(report["ready"])
+                self.assertIn("plan_stale", " ".join(report["errors"]))
+                self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
+                                     for method, _ in rpc.calls))
+
     def test_exact_scope_does_not_prune_record_appearing_after_first_write(self):
         self.assertTrue(self.run_sync()["ready"])
         self.host_name = "renamed-host"
@@ -81,6 +140,15 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn(new_record, self.rpc.repos)
         self.assertFalse(any(method == "repo.rm" and params["repo"] == "id:newly-appeared"
                              for method, params in self.rpc.calls))
+
+    def test_known_root_disappearing_during_binding_observation_fails_before_writes(self):
+        scan = self.discover(self.workspaces, recursive=False)
+        self.root.rmdir()
+        report = self.reconcile(scan, self.rpc, self.state)
+        self.assertFalse(report["ready"])
+        self.assertIn("root disappeared during observation", " ".join(report["errors"]))
+        self.assertFalse(any(method not in ("repo.list", "projectGroup.list", "folderWorkspace.list")
+                             for method, _ in self.rpc.calls))
 
     def fill_catalog(self, total):
         # Catalog-only rows: admission regressions create no mass Git fixtures.
@@ -222,8 +290,10 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(self.run_sync()["ready"])
         self.fill_catalog(1000)
         scan = self.discover(self.workspaces)
-        scan.projects[0].roots.extend(Root(str(self.root / ("new-" + str(index))), "New", "git")
-                                     for index in range(10))
+        for index in range(10):
+            path = self.root / ("new-" + str(index))
+            init_git(path)
+            scan.projects[0].roots.append(Root(str(path), "New", "git"))
         self.rpc.calls.clear()
         with mock.patch("reconcile.verify_root", wraps=verify_root) as verify:
             report = self.reconcile(scan, self.rpc, self.state, host_name=self.host_name)

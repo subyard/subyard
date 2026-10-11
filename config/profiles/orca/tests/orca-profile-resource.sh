@@ -112,7 +112,7 @@ case "${1:-}" in
     if [ -e "$state_root/drain-exec-stdin" ]; then
       # Native Incus forwards stdin even when the guest command does not read it.
       # Explicit script execution keeps its intended script input.
-      case " $* " in *' bash -s'*) ;; *) cat >/dev/null ;; esac
+      case " $* " in *' bash -s'*|*' /usr/bin/python3 -I -B - '*) ;; *) cat >/dev/null ;; esac
     fi
     case " $* " in
       *' bash -se -- '*'orca-registration.sha256'*)
@@ -282,6 +282,17 @@ case "${1:-}" in
         done
         "${command[@]}"
         ;;
+      *' /usr/bin/python3 -I -B - owner-host ')
+        source="$(cat)"
+        if [ -n "${ORCA_TEST_NATIVE_WORKSPACES:-}" ]; then
+          source="${source//\/srv\/workspaces/$ORCA_TEST_NATIVE_WORKSPACES}"
+          source="${source//\/srv\/agents\/orca/$ORCA_TEST_NATIVE_STATE}"
+          printf '%s\n' "$source" | /usr/bin/python3 -I -B - owner-host
+          exit $?
+        fi
+        [ ! -e "$state_root/project-counts-fail" ] || exit 1
+        printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
+        ;;
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status --host-name owner-host ')
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
@@ -437,6 +448,22 @@ jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/nu
   || fail 'absent yard did not produce an up assessment'
 [ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
 rm -f "$TMP/missing-yard"
+if [ "${1:-}" = --source-observer-fixture ]; then
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/up-output"
+  observer="$ROOT/config/profiles/orca/resources/orca/handler.sh"
+  touch "$TMP/drain-exec-stdin"
+  "$observer" _runtime-contract observe >"$2/current.json"
+  printf '# old helper\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/reconcile.py"
+  pushes="$(cat "$ORCA_TEST_PUSH_COUNTER")"
+  stages="$(count_log 'mktemp -d /tmp/subyard-orca.')"
+  "$observer" _runtime-contract observe >"$2/stale.json"
+  [ "$pushes" = "$(cat "$ORCA_TEST_PUSH_COUNTER")" ] || fail 'source observation pushed guest files'
+  [ "$stages" = "$(count_log 'mktemp -d /tmp/subyard-orca.')" ] || fail 'source observation staged guest files'
+  "$observer" _runtime-contract apply source-observer-repair \
+    "$(jq -r .actual "$2/stale.json")" "$(jq -r .desired "$2/stale.json")" >"$TMP/applied.json"
+  "$observer" _runtime-contract observe >"$2/repaired.json"
+  exit 0
+fi
 if [ "${1:-}" = --startup-binding-fixture ]; then
   cp "$TMP/bootstrap-plan.json" "$2/cold.json"
   touch "$TMP/drain-exec-stdin"
@@ -552,6 +579,12 @@ grep -Fq -- "sync --host-name 'owner-host'" \
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "current" and (.actual | test("^[0-9a-f]{64}$")) and .actual == .desired' \
   <<<"$observation" >/dev/null || fail 'installed runtime contract was not observed as current'
+touch "$TMP/project-counts-fail"
+if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe \
+  >"$TMP/unavailable-binding.out" 2>&1; then
+  fail 'running native observation errors were downgraded to conditional scope'
+fi
+rm -f "$TMP/project-counts-fail"
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \

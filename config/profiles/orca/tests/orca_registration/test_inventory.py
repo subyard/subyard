@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -56,6 +57,61 @@ class InventoryTests(unittest.TestCase):
             stream.close()
         self.assertEqual(302, len(first) + len(remaining))
         self.assertFalse(set(item[0] for item in first) & set(remaining))
+
+    def test_checkpointed_read_creates_no_journal_or_other_files(self):
+        self.advance()
+        before = {path.name: (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns)
+                  for path in self.state.iterdir()}
+        with Inventory(self.state) as inventory:
+            inventory.paths()
+            inventory.progress()
+        after = {path.name: (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns)
+                 for path in self.state.iterdir()}
+        self.assertEqual(before, after)
+
+    def test_existing_committed_WAL_roots_remain_visible_without_creating_files(self):
+        self.advance()
+        connection = sqlite3.connect(self.state / "subyard-discovery.sqlite3")
+        self.addCleanup(connection.close)
+        connection.execute("INSERT INTO roots VALUES (?)", (str(self.root / "committed"),))
+        connection.commit()
+        before = {path.name for path in self.state.iterdir()}
+        with Inventory(self.state) as inventory:
+            self.assertIn(str(self.root / "committed"), inventory.paths())
+        self.assertEqual(before, {path.name for path in self.state.iterdir()})
+
+    def test_readers_reject_busy_writer_lock_with_bounded_wait(self):
+        with Inventory(self.state, apply=True):
+            with mock.patch("inventory.time.monotonic", side_effect=[0, 11]):
+                with self.assertRaises(InventoryError):
+                    with Inventory(self.state):
+                        self.fail("Reader bypassed the writer lock")
+
+    def test_readers_reject_missing_inventory_lock(self):
+        self.advance()
+        (self.state / "subyard-discovery.lock").unlink()
+        with self.assertRaises(InventoryError):
+            with Inventory(self.state):
+                self.fail("Reader invented an unlocked snapshot")
+
+    def test_readers_reject_changed_missing_or_replaced_database(self):
+        for change in ("changed", "missing", "replaced"):
+            with self.subTest(change=change):
+                state = self.state / change
+                with Inventory(state, apply=True):
+                    pass
+                path = state / "subyard-discovery.sqlite3"
+                with self.assertRaises(InventoryError):
+                    with Inventory(state) as inventory:
+                        inventory.paths()
+                        if change == "changed":
+                            os.utime(path, ns=(0, 0))
+                        elif change == "missing":
+                            path.unlink()
+                        else:
+                            replacement = state / "replacement"
+                            shutil.copyfile(path, replacement)
+                            replacement.replace(path)
 
     def test_restart_fairness_and_billion_entry_lazy_directory_do_not_block_readiness(self):
         build = self.root / ".build"

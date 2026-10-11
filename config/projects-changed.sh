@@ -6,12 +6,12 @@ observe_scope() {
 import hashlib,json,os,stat
 from pathlib import Path
 limit=4096
-# Traversal and hashing share one path budget; observing a path never skips hashing.
+# Bound canonical workspace metadata and hook sources, not working-tree discovery.
 observed_paths=set()
-def observe_path(p,discovery=False):
+def observe_path(p):
  observed_paths.add(p)
  if len(observed_paths)>limit:
-  raise RuntimeError('project discovery exceeds observation limit' if discovery else 'project hook scope exceeds observation limit')
+  raise RuntimeError('project hook scope exceeds observation limit')
 def digest(paths,read=False):
  h=hashlib.sha256()
  for p in sorted(set(paths),key=str):
@@ -27,25 +27,16 @@ def digest(paths,read=False):
 root=Path('/srv/workspaces')
 projects=[]
 roots=[]
+# Native hooks bind their known nested roots; discovery belongs to the hook.
 if root.exists():
  for workspace in root.iterdir():
+  observe_path(workspace)
   projects.append(workspace)
   roots.append(str(workspace))
   if workspace.is_dir():
    for p in workspace.iterdir():
+    observe_path(p)
     projects.append(p)
-    if p.name=='src' and p.is_dir():
-     # Hook discovery inputs include nested repository roots, not working-tree contents.
-     for base,dirs,files in os.walk(p,followlinks=False):
-      observe_path(Path(base),discovery=True)
-      if '.git' in dirs:
-       projects.append(Path(base))
-       projects.append(Path(base)/'.git')
-       config=Path(base)/'.git/config'
-       if config.exists(): projects.append(config)
-       dirs.remove('.git')
-      if '.git' in files: projects.append(Path(base)/'.git')
-      if len(projects)>limit: raise RuntimeError('project hook scope exceeds observation limit')
 wiring=[]
 hookpaths=[]
 resolved={}

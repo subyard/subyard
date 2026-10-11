@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import time
 
 from discovery import include_known, verify_missing, verify_root
@@ -20,6 +21,32 @@ REPOSITORY_LIMIT = 1000
 
 class AdmissionLimit(RpcError):
     pass
+
+
+def _root_metadata(path, deadline):
+    """Bind known-root identities without reading or discovering tree contents."""
+    paths = [path, os.path.join(path, ".git")]
+    metadata = []
+    for index, candidate in enumerate(paths):
+        if time.monotonic() >= deadline:
+            raise RpcError("Orca registration time budget exhausted")
+        try:
+            observed = os.lstat(candidate)
+            identity = [observed.st_mode, observed.st_uid, observed.st_gid,
+                        observed.st_dev, observed.st_ino, observed.st_size,
+                        observed.st_mtime_ns, observed.st_ctime_ns]
+            target = os.readlink(candidate) if stat.S_ISLNK(observed.st_mode) else None
+            metadata.append([identity, target])
+            if index == 1 and (stat.S_ISDIR(observed.st_mode)
+                               or stat.S_ISLNK(observed.st_mode) and os.path.isdir(candidate)):
+                paths.append(os.path.join(candidate, "config"))
+        except FileNotFoundError:
+            if index == 0:
+                raise RpcError("Known repository root disappeared during observation: " + path) from None
+            metadata.append(None)
+        except OSError:
+            raise RpcError("Known repository metadata could not be observed: " + path) from None
+    return metadata
 
 
 def _admission_full(state, rpc, repos):
@@ -588,8 +615,8 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
             scope_digest = hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True,
                                            separators=(",", ":")).encode()).hexdigest()
             report["scopeDigest"] = scope_digest
-            # Only registration metadata is fingerprinted; saved tab contents and
-            # credentials never enter a public fact or digest.
+            # Only registration metadata and known-root filesystem identities are
+            # fingerprinted; saved tabs and credentials never enter a fact or digest.
             keys = ("id", "path", "displayName", "kind", "projectGroupId", "parentPath",
                     "name", "createdFrom", "connectionId", "executionHostId", "parentGroupId",
                     "externalWorktreeVisibility")
@@ -599,7 +626,10 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                 [{key: record[key] for key in keys if key in record} for record in records],
                 key=lambda record: record["id"])
             catalog = {"scope": scope, "repos": safe_records(repos),
-                       "groups": safe_records(groups), "registration": state.data}
+                       "groups": safe_records(groups), "registration": state.data,
+                       "rootMetadata": [{"path": root.path, "metadata": _root_metadata(root.path, deadline)}
+                                        for project in sorted(scan.projects, key=lambda project: project.project_id)
+                                        for root in sorted(project.roots, key=lambda root: root.path)]}
             catalog_digest = hashlib.sha256(json.dumps(catalog, ensure_ascii=False, sort_keys=True,
                                              separators=(",", ":")).encode()).hexdigest()
             report["catalogDigest"] = catalog_digest

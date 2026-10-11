@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,18 +282,20 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 	}
 }
 
-func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
-	// Bulk metadata fixtures must stay outside the workspace even with a local TMPDIR.
+func TestProjectHookObservationBoundsCapturedInputs(t *testing.T) {
+	// Working-tree contents stay outside the core scope, regardless of tree size.
 	t.Setenv("TMPDIR", "/tmp")
 	for _, scenario := range []struct {
-		name                  string
-		gitRoots, directories int
-		limitError            string
+		name                         string
+		directories, metadata, hooks int
+		largeHook                    bool
+		limitError                   string
 	}{
-		{"thousand roots and retained directories", 1000, 120, ""},
-		{"directory overflow", 0, 4097, "project discovery exceeds observation limit"},
-		{"metadata overflow", 1400, 0, "project hook scope exceeds observation limit"},
-		{"mixed union overflow", 500, 1500, "project hook scope exceeds observation limit"},
+		{"large cache tree", 4097, 0, 1, false, ""},
+		{"metadata overflow", 0, 4097, 1, false, "project hook scope exceeds observation limit"},
+		{"hook overflow", 0, 0, 4097, false, "project hook scope exceeds observation limit"},
+		{"shared metadata and hook bound", 0, 4088, 8, false, "project hook scope exceeds observation limit"},
+		{"hook content overflow", 0, 0, 1, true, "project hook input exceeds observation limit"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -304,44 +305,31 @@ func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
 			}
 			source = []byte(strings.NewReplacer("/srv/workspaces", filepath.Join(root, "workspaces"), "/usr/local/libexec/subyard", filepath.Join(root, "libexec"), "/etc/subyard", filepath.Join(root, "etc")).Replace(string(source)))
 			dispatcher := filepath.Join(root, "libexec", "projects-changed")
-			hook := dispatcher + ".d/owned"
-			workspace := filepath.Join(root, "workspaces", "project", "src")
-			for _, path := range []string{filepath.Dir(hook), filepath.Join(root, "etc"), workspace} {
+			workspace := filepath.Join(root, "workspaces", "project")
+			cache := filepath.Join(workspace, "src", ".build", "cache")
+			for _, path := range []string{dispatcher + ".d", filepath.Join(root, "etc"), cache} {
 				if err := os.MkdirAll(path, 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			for index := range scenario.gitRoots {
-				checkout := filepath.Join(workspace, ".build", "capacity", fmt.Sprint(index), ".git")
-				if err := os.MkdirAll(checkout, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				// Observation hashes metadata paths; it never invokes Git.
-				testkit.WriteFile(t, filepath.Join(checkout, "config"), []byte("[core]\n\tbare = false\n"), 0o600)
-			}
 			for index := range scenario.directories {
-				if err := os.MkdirAll(filepath.Join(workspace, "retained", fmt.Sprint(index), "nested"), 0o700); err != nil {
+				if err := os.Mkdir(filepath.Join(cache, fmt.Sprint(index)), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			// Normalize fixture modes independently of the caller's umask.
-			if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				mode := os.FileMode(0o600)
-				if entry.IsDir() {
-					mode = 0o700
-				}
-				return os.Chmod(path, mode)
-			}); err != nil {
-				t.Fatal(err)
+			for index := range scenario.metadata {
+				testkit.WriteFile(t, filepath.Join(workspace, fmt.Sprint(index)), nil, 0o600)
 			}
 			testkit.WriteFile(t, dispatcher, source, 0o700)
 			testkit.WriteFile(t, filepath.Join(root, "etc", "agent-project-hooks"), []byte("\n"), 0o600)
 			log := filepath.Join(root, "effects")
-			body := "#!/bin/sh\nprintf invoked > '" + log + "'\nchmod 0600 '" + log + "'\n"
-			testkit.WriteFile(t, hook, []byte(body), 0o700)
+			body := []byte("#!/bin/sh\nprintf invoked > '" + log + "'\n")
+			if scenario.largeHook {
+				body = append(body, make([]byte, 1<<20)...)
+			}
+			for index := range scenario.hooks {
+				testkit.WriteFile(t, filepath.Join(dispatcher+".d", fmt.Sprint(index)), body, 0o700)
+			}
 			observe := func() ([]byte, error) { return exec.Command("bash", dispatcher, "--observe").Output() }
 			payload, err := observe()
 			if scenario.limitError != "" {
@@ -352,19 +340,21 @@ func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
 				return
 			}
 			if err != nil || len(payload) > 64<<10 {
-				t.Fatalf("native thousand-root observation: err=%v bytes=%d", err, len(payload))
+				t.Fatalf("native cache-tree observation: err=%v bytes=%d", err, len(payload))
 			}
 			var observation hookObservation
 			if err := json.Unmarshal(payload, &observation); err != nil {
 				t.Fatal(err)
 			}
-			approved, err := json.Marshal(observation)
-			if err != nil {
-				t.Fatal(err)
+			// Cache writes must neither require another discovery nor stale the plan.
+			testkit.WriteFile(t, filepath.Join(cache, "new-cache-file"), []byte("cache"), 0o600)
+			current, err := observe()
+			if err != nil || string(payload) != string(current) {
+				t.Fatalf("cache churn changed captured scope: %v", err)
 			}
 			run := func() error {
 				command := exec.Command("bash", dispatcher)
-				command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+string(approved))
+				command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+string(payload))
 				return command.Run()
 			}
 			if err := run(); err != nil {
@@ -376,32 +366,14 @@ func TestProjectHookObservationBoundsUniquePaths(t *testing.T) {
 			if err := os.Remove(log); err != nil {
 				t.Fatal(err)
 			}
-			gitConfig := filepath.Join(workspace, ".build", "capacity", "0", ".git", "config")
-			content, err := os.ReadFile(gitConfig)
-			if err != nil {
+			if err := os.Chmod(filepath.Join(workspace, "src"), 0o750); err != nil {
 				t.Fatal(err)
 			}
-			testkit.WriteFile(t, gitConfig, append(content, []byte("\n# fixture metadata changed\n")...), 0o600)
 			if err := run(); err == nil {
-				t.Fatal("traversal suppressed Git metadata hashing")
+				t.Fatal("canonical project-root metadata drift was approved")
 			}
 			if _, err := os.Stat(log); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("metadata drift reached a hook")
-			}
-			payload, err = observe()
-			if err != nil || json.Unmarshal(payload, &observation) != nil {
-				t.Fatal("cannot capture refreshed fixture scope")
-			}
-			approved, err = json.Marshal(observation)
-			if err != nil {
-				t.Fatal(err)
-			}
-			testkit.WriteFile(t, hook, []byte(body+"# source changed\n"), 0o700)
-			if err := run(); err == nil {
-				t.Fatal("same-path hook source change was approved")
-			}
-			if _, err := os.Stat(log); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("hook source drift reached a hook")
+				t.Fatal("project-root drift reached a hook")
 			}
 		})
 	}

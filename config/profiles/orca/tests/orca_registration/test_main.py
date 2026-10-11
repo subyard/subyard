@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from support import Catalog, COMPONENT, init_git, project
 
@@ -82,6 +83,73 @@ class MainTests(unittest.TestCase):
         self.assertEqual(1, report["total"])
         self.assertTrue(report["errors"])
         self.assertFalse(self.state.exists())
+
+    def assert_source_observer_binding_survives_helper_repair(self, change, shadow=None):
+        nested = self.root / ".build" / "nested"
+        init_git(nested)
+        self.start_server()
+        self.assertEqual(0, self.run_cli("discover")[0])
+
+        def metadata():
+            return {str(path): (path.stat().st_ino, path.stat().st_mode, path.stat().st_size,
+                                path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+                    for base in (self.workspaces, self.state)
+                    for path in (base, *base.rglob("*"))}
+
+        before = metadata()
+        output = Path(self.tmp.name) / "observations"
+        output.mkdir()
+        environment = dict(os.environ, ORCA_TEST_NATIVE_WORKSPACES=str(self.workspaces),
+                           ORCA_TEST_NATIVE_STATE=str(self.state))
+        cwd = None
+        marker = Path(self.tmp.name) / "shadow-imported"
+        if shadow:
+            imports = Path(self.tmp.name) / "shadow-imports"
+            imports.mkdir()
+            module = "dataclasses" if shadow == "cwd" else "ctypes"
+            (imports / (module + ".py")).write_text(
+                f"with open({str(marker)!r}, 'w') as marker:\n    marker.write('executed')\n"
+                "raise RuntimeError('untrusted fixture import executed')\n")
+            if shadow == "cwd":
+                cwd = imports
+            else:
+                environment["PYTHONPATH"] = str(imports)
+        fixture = COMPONENT.parents[2] / "tests" / "orca-profile-resource.sh"
+        result = subprocess.run(["bash", str(fixture), "--source-observer-fixture", str(output)],
+                                env=environment, cwd=cwd, capture_output=True, text=True, timeout=20)
+        self.assertFalse(marker.exists(), "source observer executed an untrusted import")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        observations = [json.loads((output / (name + ".json")).read_text())
+                        for name in ("current", "stale", "repaired")]
+        self.assertEqual(["current", "stale", "current"], [item["state"] for item in observations])
+        binding = observations[0]["hook_binding"]
+        self.assertEqual(64, len(binding))
+        self.assertTrue(all(item["hook_binding"] == binding for item in observations))
+        self.assertEqual(before, metadata(), "read-only source observation changed native files")
+        if change == "replace":
+            nested.rename(Path(self.tmp.name) / "original-repository")
+            init_git(nested)
+        else:
+            with (nested / ".git" / "config").open("a") as config:
+                config.write("\n# changed fixture metadata\n")
+        self.rpc.calls.clear()
+        with mock.patch.dict(os.environ, {"SUBYARD_ORCA_REGISTRATION_SCOPE": binding}):
+            code, report = self.run_cli("sync")
+        self.assertNotEqual(0, code)
+        self.assertIn("plan_stale", " ".join(report["errors"]))
+        self.assertTrue(all(method.endswith(".list") for method, _ in self.rpc.calls))
+
+    def test_stale_helper_source_binding_rejects_repository_replacement_after_repair(self):
+        self.assert_source_observer_binding_survives_helper_repair("replace")
+
+    def test_stale_helper_source_binding_rejects_Git_config_drift_after_repair(self):
+        self.assert_source_observer_binding_survives_helper_repair("config")
+
+    def test_source_observer_ignores_cwd_stdlib_shadow(self):
+        self.assert_source_observer_binding_survives_helper_repair("replace", shadow="cwd")
+
+    def test_source_observer_ignores_PYTHONPATH_stdlib_shadow(self):
+        self.assert_source_observer_binding_survives_helper_repair("config", shadow="path")
 
     def test_full_cli_wire_sync_status_and_manual_membership_repair(self):
         init_git(self.root / "nested")
