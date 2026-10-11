@@ -74,11 +74,14 @@ class GitHub:
         raise ValueError("GitHub inventory exceeded pagination limit")
 
     def download(self, path, destination):
+        accept = "application/json" if re.fullmatch(r"actions/artifacts/[0-9]+/zip", path) else "application/octet-stream"
         with destination.open("wb") as stream:
-            result = subprocess.run(["gh", "api", self.prefix + path, "-H", "Accept: application/octet-stream"],
+            result = subprocess.run(["gh", "api", self.prefix + path, "-H", "Accept: " + accept],
                                     stdout=stream, stderr=subprocess.PIPE)
         if result.returncode:
-            raise ValueError("GitHub download failed; retry with retained candidate")
+            status = re.search(rb"HTTP ([0-9]{3})", result.stderr)
+            diagnostic = " HTTP " + status[1].decode() if status else ""
+            raise ValueError("GitHub download failed" + diagnostic + "; retry with retained candidate")
 
     def upload(self, release_id, path):
         # gh api supports streaming the exact file body to the uploads endpoint.

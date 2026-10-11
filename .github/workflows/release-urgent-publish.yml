@@ -7,6 +7,9 @@ on:
       - 'release/urgent-publication/**'
     paths:
       - '.github/urgent-publication.json'
+      - '.github/workflows/release-urgent-publish.yml'
+      - 'dev/release-urgent-publication.py'
+      - 'dev/release-publication.py'
 
 # Share the ordinary publisher's serialization across versions and operator machines.
 concurrency:
