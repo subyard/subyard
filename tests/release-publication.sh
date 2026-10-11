@@ -198,6 +198,100 @@ class Contracts(unittest.TestCase):
         self.assertEqual(self.github.assets, before)
         self.assertFalse(any(method == "DELETE" for _, method in self.github.calls))
 
+    def deferred(self):
+        receipt = json.loads((self.output / "receipt.json").read_text())
+        receipt["external_obligations"]["sample:fixture-external"].update({"status": "not-run"})
+        del receipt["external_obligations"]["sample:fixture-external"]["evidence_sha256"]
+        m.a.save(self.output, receipt)
+        with self.assertRaisesRegex(ValueError, "actual evidence SHA-256 or authorized deferral"):
+            m.attestation(self.output, self.identity)
+        m.a.defer_external(self.output, ["sample:fixture-external"],
+            "External account unavailable for this release", "operator-authorization-1")
+        self.document = m.attestation(self.output, self.identity)
+        return json.loads((self.output / "receipt.json").read_text())
+
+    def test_authorized_deferral_publishes_without_claiming_external_pass(self):
+        receipt = self.deferred()
+        self.assertEqual(receipt["reproducible_result"], "passed")
+        self.assertEqual(receipt["result"], "incomplete")
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]):
+            self.assertEqual(m.a.run_checks(self.output, [], [], False), 1)
+        self.document = m.attestation(self.output, self.identity)
+        self.assertEqual(self.document["receipt_sha256"], m.a.digest(self.output / "receipt.json"))
+        external = self.document["external_obligations"]["sample:fixture-external"]
+        self.assertEqual(external["status"], "not-run")
+        self.assertEqual(external["deferral"]["candidate_sha256"], m.identity_hash(self.identity))
+        self.assertEqual(external["deferral"]["authorization_reference"], "operator-authorization-1")
+        self.assertNotIn("evidence_sha256", external)
+        self.assertTrue(self.publish()["immutable"])
+
+    def test_deferral_attestation_rejects_missing_authorization_unknown_ids_and_wrong_candidate(self):
+        self.deferred()
+        for change in ("no-deferral", "missing-reason", "missing-authorization", "blank-authorization",
+                       "unknown", "failed", "passed", "false-evidence", "candidate", "extra"):
+            with self.subTest(change=change):
+                document = copy.deepcopy(self.document)
+                external = document["external_obligations"]["sample:fixture-external"]
+                if change == "no-deferral":
+                    del external["deferral"]
+                elif change == "missing-reason":
+                    del external["deferral"]["reason"]
+                elif change == "missing-authorization":
+                    del external["deferral"]["authorization_reference"]
+                elif change == "blank-authorization":
+                    external["deferral"]["authorization_reference"] = " "
+                elif change == "unknown":
+                    document["external_obligations"]["unknown"] = external.copy()
+                elif change in ("failed", "passed"):
+                    external["status"] = change
+                elif change == "false-evidence":
+                    external["evidence_sha256"] = "c" * 64
+                elif change == "candidate":
+                    external["deferral"]["candidate_sha256"] = "d" * 64
+                else:
+                    external["deferral"]["override"] = True
+                with self.assertRaises(ValueError):
+                    m.publish_remote(self.github, self.prepared, document, self.frozen)
+                self.assertIsNone(self.github.ref)
+        other = copy.deepcopy(self.identity)
+        other["candidate_id"] = "r124-a1"
+        document = copy.deepcopy(self.document)
+        document.update(candidate_id=other["candidate_id"], identity_sha256=m.identity_hash(other))
+        with self.assertRaisesRegex(ValueError, "candidate binding"):
+            m.validate_attestation(document, other, self.frozen)
+
+    def test_deferral_cannot_waive_local_physical_or_superseded_acceptance(self):
+        original = self.deferred()
+        for name in ("verify", "p0-release-smoke", "profile:sample"):
+            for status in ("pending", "failed"):
+                with self.subTest(check=name, status=status):
+                    receipt = copy.deepcopy(original)
+                    receipt["checks"][name]["status"] = status
+                    m.a.save(self.output, receipt)
+                    with self.assertRaisesRegex(ValueError, "complete passing"):
+                        m.attestation(self.output, self.identity)
+                    document = copy.deepcopy(self.document)
+                    document["checks"][name]["status"] = status
+                    with self.assertRaises(ValueError):
+                        m.publish_remote(self.github, self.prepared, document, self.frozen)
+                    self.assertIsNone(self.github.ref)
+        receipt = copy.deepcopy(original)
+        receipt["superseded"] = True
+        m.a.save(self.output, receipt)
+        with self.assertRaisesRegex(ValueError, "complete passing"):
+            m.attestation(self.output, self.identity)
+        for name in ("verify", "p0-release-smoke"):
+            receipt = copy.deepcopy(original)
+            receipt["checks"][name]["command"] = ["true"]
+            m.a.save(self.output, receipt)
+            with self.assertRaisesRegex(ValueError, "command provenance changed"):
+                m.attestation(self.output, self.identity)
+        m.a.save(self.output, original)
+        asset = self.frozen / ".subyard-acceptance/release" / original["runtime_file"]
+        asset.write_text("changed release bytes")
+        with self.assertRaisesRegex(ValueError, "release assets changed"):
+            m.attestation(self.output, self.identity)
+
     def test_lost_responses_resume_ref_draft_partial_upload_and_published(self):
         for point in ("ref", "draft", "upload", "published"):
             with self.subTest(point=point):

@@ -206,6 +206,45 @@ def external_inventory(root):
     return result
 
 
+def deferral_candidate_sha256(receipt):
+    identity = receipt.get("preparation") or {key: receipt[key] for key in
+        ("version", "source_fingerprint", "release_files", "candidate_bundle_sha256")}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_external_deferral(result, candidate_sha256):
+    declaration = result.get("deferral")
+    if (result.get("status") != "not-run" or "evidence_sha256" in result
+        or not isinstance(declaration, dict)
+        or set(declaration) != {"reason", "authorization_reference", "candidate_sha256"}
+        or declaration["candidate_sha256"] != candidate_sha256
+        or any(not isinstance(declaration[key], str) or not declaration[key].strip()
+               or len(declaration[key]) > limit or any(ord(c) < 32 for c in declaration[key])
+               for key, limit in (("reason", 1024), ("authorization_reference", 256)))):
+        raise ValueError("invalid external deferral or candidate binding")
+
+
+def defer_external(output, obligations, reason, authorization_reference):
+    _, receipt = load_bound(output)
+    if receipt.get("superseded"):
+        raise ValueError("candidate was explicitly superseded; prepare a new candidate")
+    if not obligations or len(set(obligations)) != len(obligations) or set(obligations) - set(receipt["external_obligations"]):
+        raise ValueError("unknown or duplicate external obligation")
+    declaration = {"reason": reason, "authorization_reference": authorization_reference,
+                   "candidate_sha256": deferral_candidate_sha256(receipt)}
+    for name in obligations:
+        result = receipt["external_obligations"][name]
+        validate_external_deferral({**result, "deferral": declaration}, declaration["candidate_sha256"])
+        if "deferral" in result and result["deferral"] != declaration:
+            raise ValueError("external deferral already recorded; preserve its authorization")
+    for name in obligations:
+        receipt["external_obligations"][name]["deferral"] = declaration.copy()
+    save(output, receipt)
+    event(output, "external-deferred", obligations=obligations, **declaration)
+    print(f"DEFERRED external={','.join(obligations)} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
+    return 0
+
+
 def commands(root, version, inventory):
     release = root / ".subyard-acceptance/release"
     result = {
@@ -464,6 +503,9 @@ def load_bound(output):
         any(receipt["external_obligations"][name].get(key) != value
             for key, value in item.items() if key != "status") for name, item in external.items()):
         raise ValueError("external obligations changed")
+    for result in receipt["external_obligations"].values():
+        if "deferral" in result:
+            validate_external_deferral(result, deferral_candidate_sha256(receipt))
     if set(receipt["checks"]) != set(commands(root, receipt["version"], receipt["profiles"])) | {"package"}:
         raise ValueError("required check inventory is incomplete")
     if digest(output / "candidate-bundle.tar.gz") != receipt["candidate_bundle_sha256"]:
@@ -944,6 +986,11 @@ def main():
     imp.add_argument("--allow-other-profile-tests", action="store_true", help="allow only changes to other shipped profiles' test files")
     superseded = sub.add_parser("supersede", help="retain original evidence and explicitly retire this candidate")
     superseded.add_argument("--output", type=Path, required=True)
+    deferred = sub.add_parser("defer-external", help="record authorized external deferrals; execution stays not-run")
+    deferred.add_argument("--output", type=Path, required=True)
+    deferred.add_argument("--obligation", action="append", required=True, help="exact declared external obligation ID")
+    deferred.add_argument("--reason", required=True, help="public reason for deferring these external checks")
+    deferred.add_argument("--authorization-reference", required=True, help="public reference to explicit operator authorization")
     args = parser.parse_args()
     if args.action == "preflight":
         report = preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
@@ -963,6 +1010,9 @@ def main():
     if args.action == "supersede":
         with acceptance_lock(output):
             return supersede(output)
+    if args.action == "defer-external":
+        with acceptance_lock(output):
+            return defer_external(output, args.obligation, args.reason, args.authorization_reference)
     if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
         parser.error("slots must be unique integers from 1 to 999")
     with acceptance_lock(output):

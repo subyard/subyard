@@ -141,6 +141,52 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             m.update_result(receipt)
             self.assertEqual(receipt["result"], expected)
 
+    def test_explicit_external_deferral_preserves_execution_and_candidate_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            manifest = checkout / "config/profiles/sample/tests/e2e/external-obligations.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "obligations": [
+                {"id": "account", "description": "Authorized account acceptance", "required_inputs": ["account"]}]}))
+            output = directory / "acceptance"
+            _, receipt = prepare_fixture(checkout, output)
+            for obligations, reason, authorization in (
+                (["unknown"], "Unavailable external account", "operator-authorization-1"),
+                (["verify"], "Unavailable external account", "operator-authorization-1"),
+                (["sample:account", "sample:account"], "Unavailable external account", "operator-authorization-1"),
+                (["sample:account"], " ", "operator-authorization-1"),
+                (["sample:account"], "Unavailable external account", ""),
+                (["sample:account"], "Unavailable\naccount", "operator-authorization-1"),
+            ):
+                before = (output / "receipt.json").read_bytes()
+                with self.assertRaises(ValueError):
+                    m.defer_external(output, obligations, reason, authorization)
+                self.assertEqual((output / "receipt.json").read_bytes(), before)
+            self.assertEqual(m.defer_external(output, ["sample:account"],
+                "Unavailable external account", "operator-authorization-1"), 0)
+            _, receipt = m.load_bound(output)
+            external = receipt["external_obligations"]["sample:account"]
+            self.assertEqual(external["status"], "not-run")
+            self.assertNotIn("evidence_sha256", external)
+            self.assertEqual(external["deferral"]["candidate_sha256"], m.deferral_candidate_sha256(receipt))
+            self.assertEqual(receipt["checks"]["verify"]["status"], "pending")
+            self.assertEqual(receipt["result"], "incomplete")
+            with self.assertRaisesRegex(ValueError, "already recorded"):
+                m.defer_external(output, ["sample:account"], "Another reason", "operator-authorization-1")
+            external["deferral"]["candidate_sha256"] = "f" * 64
+            m.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, "candidate binding"):
+                m.load_bound(output)
+            external["deferral"]["candidate_sha256"] = m.deferral_candidate_sha256(receipt)
+            external["status"] = "failed"
+            m.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, "deferral"):
+                m.load_bound(output)
+            del external["deferral"]
+            m.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, "deferral"):
+                m.defer_external(output, ["sample:account"], "Unavailable external account", "operator-authorization-1")
+
     def test_transport_override_is_scoped_to_physical_controllers(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)

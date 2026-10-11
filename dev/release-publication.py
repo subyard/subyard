@@ -204,7 +204,7 @@ def export_candidate(output, version, commit, candidate, repository):
 def attestation(output, identity):
     root, receipt = a.load_bound(output)
     a.update_result(receipt)
-    if (receipt["result"] != "passed" or receipt.get("preparation") != identity
+    if (receipt["reproducible_result"] != "passed" or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
@@ -223,9 +223,13 @@ def attestation(output, identity):
             checks[name]["environments"] = result.get("environments", [])
     external = {}
     for name, result in receipt["external_obligations"].items():
-        if not re.fullmatch(r"[0-9a-f]{64}", result.get("evidence_sha256", "")):
-            raise ValueError("external obligation lacks actual evidence SHA-256")
-        external[name] = {"status": result["status"], "evidence_sha256": result["evidence_sha256"]}
+        if "deferral" in result:
+            a.validate_external_deferral(result, identity_hash(identity))
+            external[name] = {"status": "not-run", "deferral": result["deferral"]}
+        else:
+            if result["status"] != "passed" or not re.fullmatch(r"[0-9a-f]{64}", result.get("evidence_sha256", "")):
+                raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
+            external[name] = {"status": "passed", "evidence_sha256": result["evidence_sha256"]}
     return {"schema_version": 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
             "receipt_sha256": a.digest(output / "receipt.json"), "environment": receipt["environment"],
             "checks": checks, "external_obligations": external}
@@ -270,6 +274,11 @@ def validate_attestation(document, identity, root):
     if set(document["external_obligations"]) != set(a.external_inventory(root)):
         raise ValueError("external obligation attestation inventory mismatch")
     for result in document["external_obligations"].values():
+        if "deferral" in result:
+            if set(result) != {"status", "deferral"}:
+                raise ValueError("invalid external deferral attestation")
+            a.validate_external_deferral(result, identity_hash(identity))
+            continue
         if (set(result) != {"status", "evidence_sha256"} or result["status"] != "passed"
             or not re.fullmatch(r"[0-9a-f]{64}", result["evidence_sha256"])):
             raise ValueError("external obligation evidence missing")
@@ -292,6 +301,9 @@ def publish_remote(github, prepared, document, root):
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
+    deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
+    if deferred:
+        print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
     marker = "Subyard candidate " + identity["candidate_id"] + " identity " + identity_hash(identity)
     tag = "v" + identity["version"]
     releases = [item for item in github.pages("releases") if item["tag_name"] == tag]
@@ -526,6 +538,9 @@ def main():
             document = attestation(output, identity)
             validate_attestation(document, identity, output / "source")
             write_json(directory / "attestation.json", document)
+        deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
+        if deferred:
+            print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
         path = directory / "publication.json"
         state = json.loads(path.read_text()) if path.exists() else {
             "request": str(uuid.uuid4()), "workflow_ref": args.workflow_ref, "attestation_sha256": identity_hash(document)}

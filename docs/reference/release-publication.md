@@ -61,14 +61,41 @@ actual external evidence; synthetic VM credentials do not establish external acc
 Keep credentials and private payloads out of receipts. An all-green reproducible subset
 with external results missing remains incomplete and cannot publish.
 
+When the operator explicitly authorizes deferring named external obligations for this release,
+record each exact declared ID against the already-frozen candidate:
+
+```sh
+python3 dev/release-acceptance.py defer-external \
+  --output .build/release-publication/ID/acceptance \
+  --obligation PROFILE:ID \
+  --reason 'Public reason for postponing this external check' \
+  --authorization-reference 'Public reference to the operator authorization'
+```
+
+Repeat `--obligation` for checks covered by the same reason and authorization. Keep both strings
+public and free of credentials or private details. The declaration is bound to the exact preparation
+identity (including candidate ID, pinned commit, source and all asset hashes). Its receipt entry stays
+`status: not-run`, with a separate `deferral` containing the reason, authorization reference and
+candidate identity hash. No actual evidence hash or PASS is invented. The complete `result` remains
+`incomplete`; the collector and `accept` keep their nonzero exit status. A valid deferral permits
+`publish` only when `reproducible_result` is `passed` and every other external obligation has actual
+passing evidence or its own valid authorization. Publication prints the deferred IDs and `execution=not-run`.
+
+There are no default deferrals. Unknown IDs, missing/blank reason or authorization, failed actual
+checks, changed declarations and candidate bindings reject this path. Local, physical, core and
+shipped-profile checks remain required with unchanged evidence. Existing candidates prepared before
+this tooling change cannot use the exception: publication checks out the pinned candidate code,
+so commit the change and prepare a new candidate before using it. Never edit an older frozen source.
+
 ## Acceptance handoff and cross-machine serialization
 
 `publish` loads and verifies the frozen collector receipt, source, transport, asset
 inventory, hashes and passing logs before dispatching Release publication. It requires
-all declared checks and external obligations, matching command provenance and local
+all declared checks and external obligations (actual passes or authorized deferrals), matching command provenance and local
 execution environments. It sends only a sanitized attestation: candidate and identity
 hash, receipt hash, complete expected check IDs/statuses/log hashes, public execution and
-VM base identities, and external evidence hashes. No raw acceptance receipt, controller
+VM base identities, and external evidence hashes or the bound public deferral declarations.
+The receipt hash includes those declarations. No raw acceptance receipt, controller
 logs, credentials or VM payloads are uploaded to GitHub.
 
 This attestation is a statement by the authenticated, trusted release operator. GitHub

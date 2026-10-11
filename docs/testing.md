@@ -320,12 +320,23 @@ evidence leaves the overall result incomplete even when `reproducible_result` is
 actual external check evidence and its SHA-256 in the corresponding receipt entry only after that
 check passes on the same candidate. Do not put credentials or private payloads in receipts.
 
+An explicitly authorized external deferral can be recorded with `defer-external --output DIR
+--obligation PROFILE:ID --reason PUBLIC_REASON --authorization-reference PUBLIC_REFERENCE`.
+Repeat `--obligation` for each declared external check authorized for that reason. The collector
+binds the declaration to the frozen candidate and retains execution `status: not-run`; it never
+creates passing evidence. `result` stays `incomplete` and `run`/release `accept` still exit nonzero,
+even when `reproducible_result` is `passed`. Unknown IDs, missing reason or authorization,
+failed checks and changed bindings reject the declaration. This cannot defer local or VM gates.
+The [publication contract](reference/release-publication.md) describes the explicit exception
+for these bound external deferrals; publication defaults to actual passing external evidence.
+
 Acceptance receipts and logs stay in the local output directory and are not committed to the
 repository. For actual publication, use the
 [release preparation and publication commands](reference/release-publication.md): their `accept`
 entrypoint imports exact CI assets without repackaging and retains the same collector gates.
 Release publication requires the trusted operator's complete sanitized acceptance attestation,
-including physical VM and external-service results. Cross-compiled assets retain their separate
+including physical VM results and actual external results or explicitly authorized external
+deferrals. Cross-compiled assets retain their separate
 build checks.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
