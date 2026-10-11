@@ -169,6 +169,79 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def process_identity(pid):
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        return dict(pid=pid, start=fields[19], parent=int(fields[1]), group=int(fields[2]), state=fields[0])
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+
+
+def live_identity(identity):
+    current = process_identity(identity['pid'])
+    return current is not None and current['start'] == identity['start'] and current['state'] != 'Z'
+
+
+def process_arguments(pid):
+    try:
+        return Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return []
+
+
+def process_executable(pid):
+    try:
+        return Path(f'/proc/{pid}/exe').resolve(strict=True)
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+
+
+def signal_owned(identity, number):
+    if not live_identity(identity):
+        return
+    with contextlib.suppress(ProcessLookupError):
+        # A pidfd plus a second identity check fences PID reuse during failure cleanup.
+        fd = os.pidfd_open(identity['pid'])
+        try:
+            if live_identity(identity):
+                signal.pidfd_send_signal(fd, number)
+        finally:
+            os.close(fd)
+
+
+def observe_descendants(owned, capture=None, executables=()):
+    # Capture identities while ancestry still proves fixture ownership, including
+    # children which start their own session and may later be reparented.
+    parents = {pid for pid, identity in owned.items() if live_identity(identity)}
+    pending = {}
+    for entry in Path('/proc').iterdir():
+        if entry.name.isdigit() and (identity := process_identity(int(entry.name))) is not None:
+            pending[identity['pid']] = identity
+    if capture is not None:
+        marker = b'SUBYARD_E2E_VIEWER_CAPTURE=' + os.fsencode(capture)
+        for pid, identity in pending.items():
+            if process_executable(pid) not in executables:
+                continue
+            try:
+                with Path(f'/proc/{pid}/environ').open('rb') as environment:
+                    captured = marker in environment.read(262144).split(b'\0')
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            # Detached native children may lose their parent before any scan.
+            # Their exact fixture executable and inherited capture marker retain
+            # ownership; verify the start identity again before adopting them.
+            if captured and live_identity(identity):
+                owned[pid] = identity
+                parents.add(pid)
+    while True:
+        children = {pid: identity for pid, identity in pending.items()
+                    if pid not in owned and identity['parent'] in parents}
+        if not children:
+            return
+        owned.update(children)
+        parents.update(children)
+
+
 def main():
     def interrupted(number, frame):
         raise SystemExit(128 + number)
@@ -225,11 +298,29 @@ def main():
     window = Path(__file__).parent.parent / 'helpers/scrcpy-view-window.py'
     environment = dict(os.environ, PATH=f'{viewer_bin}:{tools / "platform-tools"}:' + os.environ['PATH'],
                        ADB=str(tools / 'platform-tools/adb'), SDL_RENDER_DRIVER='software',
+                       SUBYARD_HOST_ID='android-e2e-controller',
                        PYTHONDONTWRITEBYTECODE='1')
 
-    def view(arguments, phase, seconds=30, cancel=False, observe=None, capacity_refusal=False):
+    registration = subprocess.run([yard_bin, 'host', 'add', 'android-e2e-owner', '--yes'],
+                                  env=environment, stdin=subprocess.DEVNULL,
+                                  capture_output=True, timeout=60)
+    require(registration.returncode == 0, 'canonical owner registration failed')
+    hosts = subprocess.run([yard_bin, 'host', 'list'], env=environment,
+                           capture_output=True, timeout=30)
+    require(hosts.returncode == 0, 'canonical host listing failed')
+    registered = [line.split()[0] for line in hosts.stdout.decode().splitlines()[1:]
+                  if line.split()[1:] == ['android-e2e-owner']]
+    require(len(registered) == 1, 'canonical owner identity was not unique')
+    selector = registered[0] + '/' + owner_yard
+
+    def view(arguments, phase, seconds=30, cancel=False, observe=None, capacity_refusal=False,
+             cancel_when=None):
+        capture = work / f'viewer-{phase}.capture'
+        executables = {(tools / path).resolve() for path in
+                       ('subyard-e2e-scrcpy/scrcpy', 'platform-tools/adb')}
         # Resource sessions filter ambient variables; embed the observation window.
-        wrapper.write_text('#!/usr/bin/python3\nimport importlib.util, sys\n'
+        wrapper.write_text('#!/usr/bin/python3\nimport importlib.util, os, sys\n'
+                           f'os.environ["SUBYARD_E2E_VIEWER_CAPTURE"] = {str(capture)!r}\n'
                            f'spec = importlib.util.spec_from_file_location("window", {str(window)!r})\n'
                            'window = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(window)\n'
                            f'raise SystemExit(window.run([{str(tools / "subyard-e2e-scrcpy/scrcpy")!r}, *sys.argv[1:]], '
@@ -239,44 +330,52 @@ def main():
         print(f'E2E_PHASE phase=fixture/viewer-remote-{phase} state=start duration_seconds=0 exit_code=0', flush=True)
         log = work / f'viewer-{phase}.log'
         process = None
+        owned = {}
+        viewer_identity = None
+        scrcpy_seen = adb_seen = False
         try:
             with log.open('wb') as output:
                 process = subprocess.Popen(
                     ['xvfb-run', '-a', '-s', '-screen 0 1280x800x24 -nolisten tcp', yard_bin,
-                     '-Y', 'remote', 'emu', 'view', *arguments, '--',
+                     '-Y', selector, 'emu', 'view', *arguments, '--',
                      '--max-size=640', '--no-audio', '--verbosity=debug'],
                     env=environment,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                     start_new_session=True)
+                identity = process_identity(process.pid)
+                require(identity is not None, 'fixture session identity is unavailable')
+                owned[process.pid] = identity
                 deadline = started + 1440
                 cancelled = False
                 completed = None
+                next_observation = started
                 while time.monotonic() < deadline:
+                    observe_descendants(owned, capture, executables)
+                    for pid, identity in owned.items():
+                        if not live_identity(identity):
+                            continue
+                        argv = process_arguments(pid)
+                        if argv[:5] == [yard_bin.encode(), b'-Y', selector.encode(), b'emu', b'view']:
+                            viewer_identity = identity
+                        scrcpy_seen |= str(tools / 'subyard-e2e-scrcpy/scrcpy').encode() in argv
+                        adb_seen |= process_executable(pid) == (tools / 'platform-tools/adb').resolve()
                     completed = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                     if completed is not None:
                         break
-                    if observe:
+                    if observe and time.monotonic() >= next_observation:
                         observe()
-                    if cancel and not cancelled and re.search(rb'^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$',
-                                                              log.read_bytes()[:262144], re.MULTILINE):
+                        next_observation = time.monotonic() + 1
+                    if (cancel and not cancelled and (cancel_when is None or cancel_when())
+                            and re.search(rb'^INFO: Texture: [0-9]{1,4}x[0-9]{1,4}$',
+                                          log.read_bytes()[:262144], re.MULTILINE)):
                         # Cancel the public CLI; it owns its local SSH and viewer children.
-                        # xvfb-run is a shell wrapper, so find its exact candidate child.
-                        children = []
-                        for entry in Path('/proc').iterdir():
-                            if not entry.name.isdigit():
-                                continue
-                            try:
-                                argv = (entry / 'cmdline').read_bytes().split(b'\0')
-                                if argv[:7] == [yard_bin.encode(), b'-Y', b'remote', b'emu', b'view',
-                                                b'--lease-file', lease.encode()]:
-                                    children.append(int(entry.name))
-                            except (FileNotFoundError, PermissionError, ProcessLookupError):
-                                pass
-                        require(len(children) == 1, 'could not identify the public viewer for cancellation')
-                        os.kill(children[0], signal.SIGTERM)
+                        require(viewer_identity is not None and live_identity(viewer_identity),
+                                'could not identify the public viewer for cancellation')
+                        signal_owned(viewer_identity, signal.SIGTERM)
                         cancelled = True
-                        deadline = min(deadline, time.monotonic() + 30)
-                    time.sleep(1)
+                        # Product session cleanup allows 60s, then bounded pipe drainage.
+                        deadline = min(deadline, time.monotonic() + 70)
+                    time.sleep(0.1)
                 require(completed is not None, 'public remote viewer timed out')
                 code = completed.si_status if completed.si_code == os.CLD_EXITED else 128 + completed.si_status
             summary = evidence.capture_summary(log.read_bytes()[:262145], code)
@@ -287,21 +386,37 @@ def main():
                 require(evidence.safe_memory_refusal(summary), 'second viewer did not safely refuse memory capacity')
             else:
                 require(summary['rendered'] is True, 'public remote viewer did not render a frame')
+                require(scrcpy_seen, 'fixture did not observe its local scrcpy identity')
+                if cancel_when is not None:
+                    require(cancelled, 'remote standalone viewer did not acquire and renew its own lease')
                 require(cancelled and code != 0 if cancel else code == 0 and summary['result'] == 'passed',
                         'public remote viewer returned an unexpected exit')
             no_wires()
+            observe_descendants(owned, capture, executables)
+            # xvfb-run owns the display until its leader is reaped in finally;
+            # public CLI descendants must already be gone before fixture cleanup.
+            leftovers = [identity for identity in owned.values()
+                         if identity['pid'] != process.pid and live_identity(identity)]
+            require(not leftovers, 'remote viewer left a fixture-owned local descendant')
+            print('android-pool-remote local-processes=absent scrcpy=observed adb=' +
+                  ('observed' if adb_seen else 'unobserved') + ' selector=canonical', flush=True)
             print(f'E2E_PHASE phase=fixture/viewer-remote-{phase} state=end duration_seconds={int(time.monotonic() - started)} exit_code=0', flush=True)
         finally:
             if process is not None:
+                observe_descendants(owned, capture, executables)
                 # Fence cleanup to our dedicated session before reaping its leader.
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    process.wait(timeout=10)
+                    process.wait(timeout=70 if cancel else 10)
                 except subprocess.TimeoutExpired:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
+                observe_descendants(owned, capture, executables)
+                for identity in owned.values():
+                    if identity['pid'] != process.pid:
+                        signal_owned(identity, signal.SIGKILL)
 
     def report_capacity(observation):
         try:
@@ -325,7 +440,8 @@ def main():
                     if slot['expires_at'] > prior['expires_at']:
                         observed['renewed'] = True
         view(['--device', 'phone', '--api', '36', '--purpose', 'remote-viewer-acceptance'],
-             'standalone', seconds=heartbeat + 30, observe=observe)
+             'standalone', seconds=heartbeat + 30, observe=observe, cancel=True,
+             cancel_when=lambda: observed.get('renewed', False))
         slots = guest('status')
         require(observed.get('renewed') and any(slot['generation'] > idle[slot['slot_id']]['generation']
                                                for slot in slots),
@@ -333,6 +449,7 @@ def main():
         require(all(slot['state'] == 'available' for slot in slots) and guest('runtimes')['units'] == 0,
                 'remote standalone viewer leaked a lease or runtime')
         print('android-pool-remote standalone-view=PASS lease=renewed-released slots=available', flush=True)
+        print('android-pool-remote standalone-cancellation=PASS slots=available runtimes=0', flush=True)
         return
 
     guest('renew')

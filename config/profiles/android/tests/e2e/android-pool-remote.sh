@@ -163,7 +163,9 @@ try:
     assert len(outer) == 3 and outer[:2] == ["bash", "-lc"]
     inner = shlex.split(outer[2])
     operation = None
-    if inner == ["yard", "-Y", yard, "emu", "--session-wire", "view"]:
+    if inner == ["exec", "yard", "rpc", "--stdio"]:
+        arguments = None
+    elif inner == ["yard", "-Y", yard, "emu", "--session-wire", "view"]:
         arguments = ["--session-wire", "view"]
     else:
         assert len(inner) >= 6 and inner[1:5] == ["yard", "-Y", yard, "emu"]
@@ -182,7 +184,8 @@ env.update(SUBYARD_OPERATOR_HOME=home, SUBYARD_CONFIG_HOME=state + "/config",
            STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1")
 if operation is not None:
     env["SUBYARD_OPERATION_ID"] = operation
-os.execve(yard_bin, [yard_bin, "-Y", yard, "emu", *arguments], env)
+command = [yard_bin, "rpc", "--stdio"] if arguments is None else [yard_bin, "-Y", yard, "emu", *arguments]
+os.execve(yard_bin, command, env)
 '''.replace('VALUES', repr((root, state, yard, home, storage, payload, yard_bin)), 1)
 pathlib.Path(path).write_text(source)
 PY

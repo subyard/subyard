@@ -563,8 +563,8 @@ func (runner *resourceApplyRunner) Run(
 		command.Stdout = runner.cli.options.Stdout
 		command.Stderr = runner.cli.options.Stderr
 		var runErr error
-		if restoreForeground != nil {
-			runErr = runResourceTerminalSession(command)
+		if runner.effect == domain.ActionSession {
+			runErr = runResourceSession(command, time.Minute)
 		} else {
 			runErr = command.Run()
 		}

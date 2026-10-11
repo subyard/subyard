@@ -20,10 +20,92 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
 
 const resourceTTYHelper = "SUBYARD_RESOURCE_TTY_TEST_HELPER"
+
+func TestResourceSessionGracefulCancellationAndEscalation(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, cooperative := range []bool{true, false} {
+			t.Run(fmt.Sprintf("tty=%t/cooperative=%t", terminal, cooperative), func(t *testing.T) {
+				if terminal && os.Getenv(resourceTTYHelper) != t.Name() {
+					runResourceTTYHelper(t, t.Name())
+					return
+				}
+				root := testkit.TempDir(t)
+				trap := "trap '' TERM"
+				if cooperative {
+					trap = `trap 'sleep 0.1; touch "$1/cleaned"; exit 0' TERM`
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				command := exec.CommandContext(ctx, "sh", "-c", trap+`
+sh -c 'trap "" TERM; echo "$$" >"$1/child"; exec sleep 300' sh "$1" &
+while [ ! -s "$1/child" ]; do sleep 0.01; done
+touch "$1/ready"
+while :; do wait; done
+`, "sh", root)
+				configureResourceProcess(command)
+				var foreground int
+				var restore func() error
+				if terminal {
+					tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer tty.Close()
+					foreground, err = testForegroundProcessGroup(int(tty.Fd()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					command.Stdin = tty
+					restore, err = configureResourceSessionForeground(command, tty)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() {
+						if err := restore(); err != nil {
+							t.Error(err)
+						}
+						if got, err := testForegroundProcessGroup(int(tty.Fd())); err != nil || got != foreground {
+							t.Errorf("restored foreground=%d want=%d err=%v", got, foreground, err)
+						}
+					}()
+				}
+				done := make(chan error, 1)
+				go func() { done <- runResourceSession(command, 500*time.Millisecond) }()
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, err := os.Stat(filepath.Join(root, "ready")); err == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				child := resourceTestChildProcess(t, filepath.Join(root, "child"))
+				started := time.Now()
+				cancel()
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatal("cancelled session returned success")
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("session escalation did not finish")
+				}
+				_, cleanupErr := os.Stat(filepath.Join(root, "cleaned"))
+				if cooperative && cleanupErr != nil {
+					t.Fatalf("graceful cleanup did not run: %v", cleanupErr)
+				}
+				if !cooperative && time.Since(started) < 500*time.Millisecond {
+					t.Fatal("stubborn handler skipped TERM grace")
+				}
+				assertNoLiveProcesses(t, []string{strconv.Itoa(command.Process.Pid), strconv.Itoa(child.Pid)})
+			})
+		}
+	}
+}
 
 func TestResourceMutationDoesNotReadFromOperatorTerminal(t *testing.T) {
 	if os.Getenv(resourceTTYHelper) != "1" {
@@ -527,7 +609,7 @@ esac
 	assertResourceProcessAlive(t, detached)
 }
 
-func TestResourceNonterminalActionsPreserveBackgroundProcess(t *testing.T) {
+func TestResourceNonterminalActionsOwnOnlySessionProcessGroup(t *testing.T) {
 	for _, verb := range []string{"view", "run"} {
 		t.Run(verb, func(t *testing.T) {
 			root, environment, _ := resourceCommandFixture(t)
@@ -555,7 +637,11 @@ esac
 			if code != 0 {
 				t.Fatalf("nonterminal session code=%d stderr=%q", code, stderr.String())
 			}
-			assertResourceProcessAlive(t, child)
+			if verb == "view" {
+				assertNoLiveProcesses(t, []string{strconv.Itoa(child.Pid)})
+			} else {
+				assertResourceProcessAlive(t, child)
+			}
 		})
 	}
 }
@@ -573,7 +659,7 @@ func TestResourceSessionUnwaitableChildDoesNotSignalGroup(t *testing.T) {
 	command := exec.CommandContext(context.Background(), "sh", "-c",
 		`sleep 300 >/dev/null 2>&1 & printf '%s\n' "$!" >"$1"`, "sh", pidPath)
 	configureResourceProcess(command)
-	err := runResourceTerminalSession(command)
+	err := runResourceSession(command, time.Minute)
 	child := resourceTestChildProcess(t, pidPath)
 	if !errors.Is(err, unix.ECHILD) {
 		t.Fatalf("unwaitable session error=%v, want ECHILD", err)

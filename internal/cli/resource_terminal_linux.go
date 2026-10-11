@@ -7,16 +7,45 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
-// A terminal session owns its process group for the lifetime of its handler.
+// A session owns its process group for the lifetime of its handler.
 // Ctrl-C reaches that foreground group instead of the caller's cancellation
 // context, and background shell children may ignore it. Observe handler exit
 // without reaping it, so its PID cannot be reused before group cleanup.
-func runResourceTerminalSession(command *exec.Cmd) error {
+func runResourceSession(command *exec.Cmd, grace time.Duration) error {
+	exited := make(chan struct{})
+	var fence sync.Mutex
+	signalGroup := func(signal unix.Signal) error {
+		fence.Lock()
+		defer fence.Unlock()
+		select {
+		case <-exited:
+			return nil
+		default:
+			return unix.Kill(-command.Process.Pid, signal)
+		}
+	}
+	command.Cancel = func() error {
+		if err := signalGroup(unix.SIGTERM); err != nil {
+			return err
+		}
+		// Keep the handler's identity waitable until cleanup completes. A
+		// cooperative handler can release owned resources before escalation.
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-exited:
+			return nil
+		case <-timer.C:
+			return signalGroup(unix.SIGKILL)
+		}
+	}
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -28,6 +57,10 @@ func runResourceTerminalSession(command *exec.Cmd) error {
 			break
 		}
 	}
+	// Finish any cancellation signal before allowing Wait to reap the leader.
+	fence.Lock()
+	close(exited)
+	fence.Unlock()
 	var cleanupErr error
 	if observeErr == nil {
 		cleanupErr = unix.Kill(-command.Process.Pid, unix.SIGKILL)

@@ -4,8 +4,11 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -30,6 +33,113 @@ viewer = load('android-pool-viewer')
 monitor = load('android-pool-monitor')
 lifecycle = load('android-pool-lifecycle')
 remote_viewer = load('android-pool-remote-viewer')
+
+# Canonical registration uses the fixture's actual owner inventory RPC route.
+# Keep the forced command allowlist closed to unrelated host operations.
+remote_source = (E2E / 'android-pool-remote.sh').read_text()
+dispatch = '#!/usr/bin/python3\n' + remote_source.split("source = '''#!/usr/bin/python3\n", 1)[1].split("'''.replace('VALUES'", 1)[0]
+dispatch = dispatch.replace('VALUES', repr(('/fixture/source', '/fixture/state', 'owner-yard',
+                                          '/fixture/home', '/fixture/storage', '', '/candidate/yard')), 1)
+for request, expected in (
+        (['exec', 'yard', 'rpc', '--stdio'], ['/candidate/yard', 'rpc', '--stdio']),
+        (['yard', '-Y', 'owner-yard', 'emu', '--session-wire', 'view'],
+         ['/candidate/yard', '-Y', 'owner-yard', 'emu', '--session-wire', 'view']),
+        (['exec', 'yard', 'stop'], None),
+        (['yard', '-Y', 'other-yard', 'emu', '--session-wire', 'view'], None)):
+    calls = []
+    def dispatched(program, arguments, environment):
+        calls.append((program, arguments, environment))
+    with patch.dict(os.environ, SSH_ORIGINAL_COMMAND=shlex.join(['--', 'bash', '-lc', shlex.join(request)])), \
+            patch.object(os, 'execve', side_effect=dispatched):
+        try:
+            exec(compile(dispatch, '<remote-owner-dispatch>', 'exec'), {})
+        except SystemExit:
+            assert expected is None
+        else:
+            assert expected is not None and calls[0][1] == expected
+            assert calls[0][2]['SUBYARD_CONFIG_HOME'] == '/fixture/state/config'
+    assert bool(calls) is (expected is not None)
+
+# Local viewer cleanup retains detached descendant identities and preserves an
+# unrelated process, even after the descendant is reparented away from its owner.
+with tempfile.TemporaryDirectory(prefix='android-viewer-identities-') as temporary:
+    marker = Path(temporary, 'child')
+    parent = subprocess.Popen([sys.executable, '-c',
+        'import pathlib,subprocess,sys; child=subprocess.Popen(["sleep","30"],start_new_session=True); '
+        'pathlib.Path(sys.argv[1]).write_text(str(child.pid)); sys.stdin.read()', str(marker)],
+        stdin=subprocess.PIPE)
+    unrelated = subprocess.Popen(['sleep', '30'])
+    owned = {parent.pid: remote_viewer.process_identity(parent.pid)}
+    child = None
+    try:
+        deadline = remote_viewer.time.monotonic() + 5
+        while not marker.exists() and remote_viewer.time.monotonic() < deadline:
+            remote_viewer.time.sleep(0.01)
+        child = int(marker.read_text())
+        remote_viewer.observe_descendants(owned)
+        assert child in owned and unrelated.pid not in owned
+        identity = owned[child]
+        assert identity['group'] == child and remote_viewer.live_identity(identity)
+        parent.communicate(timeout=5)
+        assert remote_viewer.live_identity(identity)
+        remote_viewer.signal_owned(identity, remote_viewer.signal.SIGTERM)
+        deadline = remote_viewer.time.monotonic() + 5
+        while remote_viewer.live_identity(identity) and remote_viewer.time.monotonic() < deadline:
+            remote_viewer.time.sleep(0.01)
+        assert not remote_viewer.live_identity(identity) and unrelated.poll() is None
+        with patch.object(remote_viewer, 'process_identity', return_value=dict(identity, start='reused')):
+            assert not remote_viewer.live_identity(identity)
+    finally:
+        if child in owned:
+            remote_viewer.signal_owned(owned[child], remote_viewer.signal.SIGKILL)
+        parent.kill()
+        parent.wait(timeout=5)
+        unrelated.kill()
+        unrelated.wait(timeout=5)
+
+# A native viewer/ADB child can reparent before the first observation. Its
+# fixture capture marker and exact executable must still establish ownership.
+with tempfile.TemporaryDirectory(prefix='android-viewer-orphan-') as temporary:
+    marker = Path(temporary, 'child')
+    executable = Path(temporary, 'scrcpy')
+    shutil.copy2(shutil.which('sleep'), executable)
+    capture_id = str(Path(temporary, 'capture'))
+    environment = dict(os.environ, SUBYARD_E2E_VIEWER_CAPTURE=capture_id)
+    parent = subprocess.Popen([sys.executable, '-c',
+        'import pathlib,subprocess,sys; child=subprocess.Popen([sys.argv[1],"30"],start_new_session=True); '
+        'pathlib.Path(sys.argv[2]).write_text(str(child.pid))', str(executable), str(marker)],
+        env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    parent_identity = remote_viewer.process_identity(parent.pid)
+    unrelated = subprocess.Popen([str(executable), '30'],
+        env=dict(environment, SUBYARD_E2E_VIEWER_CAPTURE=capture_id + '-foreign'))
+    foreign_executable = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                         env=environment)
+    child_identity = None
+    try:
+        parent.wait(timeout=5)
+        child = int(marker.read_text())
+        child_identity = remote_viewer.process_identity(child)
+        assert child_identity is not None and child_identity['parent'] != parent.pid
+        owned = {parent.pid: parent_identity}
+        remote_viewer.observe_descendants(owned, capture_id, {executable.resolve()})
+        assert child in owned and unrelated.pid not in owned and foreign_executable.pid not in owned
+        leftovers = [identity for identity in owned.values() if remote_viewer.live_identity(identity)]
+        assert leftovers == [child_identity], 'reparented native child must fail process absence'
+        remote_viewer.signal_owned(owned[child], remote_viewer.signal.SIGTERM)
+        deadline = remote_viewer.time.monotonic() + 5
+        while remote_viewer.live_identity(owned[child]) and remote_viewer.time.monotonic() < deadline:
+            remote_viewer.time.sleep(0.01)
+        assert not remote_viewer.live_identity(owned[child])
+        assert unrelated.poll() is None and foreign_executable.poll() is None
+    finally:
+        if child_identity is not None:
+            remote_viewer.signal_owned(child_identity, remote_viewer.signal.SIGKILL)
+        parent.kill()
+        parent.wait(timeout=5)
+        unrelated.kill()
+        unrelated.wait(timeout=5)
+        foreign_executable.kill()
+        foreign_executable.wait(timeout=5)
 
 # The full recovery verifier checks the live unit in the yard's systemd namespace.
 recovery_check = (E2E / 'android-pool-recovery.sh').read_text().split(
@@ -63,12 +173,16 @@ for heartbeat, renew in ((300, True), (300, False), (True, True), (0, True), (12
     with tempfile.TemporaryDirectory(prefix='android-remote-renewal-') as temporary:
         clock, process_state = [0], {}
         def remote_run(arguments, **kwargs):
+            if arguments[1:3] == ['host', 'add']:
+                return SimpleNamespace(returncode=0, stdout=b'')
+            if arguments[1:3] == ['host', 'list']:
+                return SimpleNamespace(returncode=0, stdout=b'HOST ID OWNER ENDPOINT\nfixture-owner android-e2e-owner\n')
             mode = arguments[-2]
             if mode == 'heartbeat':
                 result = heartbeat
             elif mode == 'status':
-                active = process_state and clock[0] < process_state['window']
-                slot = dict(slot_id=1, generation=2 if process_state else 1,
+                active = process_state and clock[0] < process_state['ends']
+                slot = dict(slot_id=1, generation=1 + process_state.get('runs', 0),
                             state='held' if active else 'available')
                 if active:
                     slot['expires_at'] = '2026-10-09T00:%02d:00Z' % (30 if renew and clock[0] >= heartbeat else 25)
@@ -79,19 +193,45 @@ for heartbeat, renew in ((300, True), (300, False), (True, True), (0, True), (12
             return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
         def remote_process(arguments, **kwargs):
             wrapper = Path(temporary, 'viewer-bin/scrcpy').read_text()
-            process_state['window'] = int(re.search(r'seconds=([0-9]+)', wrapper)[1])
+            assert arguments[6] == 'fixture-owner/owner'
+            process_state['runs'] = process_state.get('runs', 0) + 1
+            process_state['ends'] = clock[0] + int(re.search(r'seconds=([0-9]+)', wrapper)[1])
+            process_state['cancelled'] = False
             kwargs['stdout'].write(b'INFO: Texture: 640x360\n')
+            kwargs['stdout'].flush()
             return SimpleNamespace(pid=12345, wait=lambda timeout: 0)
         def remote_wait(*arguments):
-            if clock[0] >= process_state['window']:
-                return SimpleNamespace(si_code=remote_viewer.os.CLD_EXITED, si_status=0)
+            if clock[0] >= process_state['ends']:
+                return SimpleNamespace(si_code=remote_viewer.os.CLD_EXITED,
+                                       si_status=143 if process_state['cancelled'] else 0)
             return None
+        def remote_identity(pid):
+            return dict(pid=pid, start='123', parent=12345 if pid != 12345 else 1, group=pid,
+                        state='Z' if clock[0] >= process_state.get('ends', 0) else 'S')
+        def remote_descendants(owned, *capture):
+            owned.update({pid: remote_identity(pid) for pid in (12346, 12347, 12348)})
+        def remote_arguments(pid):
+            return {12346: [b'/candidate/yard', b'-Y', b'fixture-owner/owner', b'emu', b'view'],
+                    12347: [b'/controller/tools/subyard-e2e-scrcpy/scrcpy'],
+                    12348: [b'/controller/tools/platform-tools/adb']}.get(pid, [])
+        def remote_signal(identity, number):
+            if number == remote_viewer.signal.SIGTERM:
+                assert identity['pid'] == 12346
+                assert process_state['runs'] == 1 and clock[0] >= heartbeat
+                process_state['cancelled'] = True
+                process_state['ends'] = clock[0]
         with patch.object(sys, 'argv', ['remote-viewer', '/candidate/yard', temporary,
                                        '/controller/tools', 'owner', 'project', 'instance', '']), \
                 patch.object(remote_viewer.subprocess, 'run', side_effect=remote_run), \
                 patch.object(remote_viewer.subprocess, 'Popen', side_effect=remote_process), \
                 patch.object(remote_viewer.os, 'waitid', side_effect=remote_wait), \
                 patch.object(remote_viewer.os, 'killpg'), \
+                patch.object(remote_viewer, 'process_identity', side_effect=remote_identity), \
+                patch.object(remote_viewer, 'observe_descendants', side_effect=remote_descendants), \
+                patch.object(remote_viewer, 'process_arguments', side_effect=remote_arguments), \
+                patch.object(remote_viewer, 'process_executable', side_effect=lambda pid:
+                             Path('/controller/tools/platform-tools/adb') if pid == 12348 else None), \
+                patch.object(remote_viewer, 'signal_owned', side_effect=remote_signal), \
                 patch.object(remote_viewer.signal, 'signal'), \
                 patch.object(remote_viewer.time, 'monotonic', side_effect=lambda: clock[0]), \
                 patch.object(remote_viewer.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
@@ -104,6 +244,9 @@ for heartbeat, renew in ((300, True), (300, False), (True, True), (0, True), (12
                             if type(heartbeat) is int and 1 <= heartbeat <= 1200 else 'invalid public heartbeat interval')
                 assert str(exc) == expected and (not renew or type(heartbeat) is not int or not 1 <= heartbeat <= 1200)
         assert ('standalone-view=PASS lease=renewed-released' in output.getvalue()) is (heartbeat == 300 and renew)
+        assert ('standalone-cancellation=PASS' in output.getvalue()) is (heartbeat == 300 and renew)
+        if heartbeat == 300 and renew:
+            assert process_state['runs'] == 1, 'renewal and cancellation must share one emulator boot'
 
 # One emulator has a primary and an egress unit; idle cleanup requires neither.
 for units, expected in (

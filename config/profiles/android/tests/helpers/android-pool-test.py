@@ -1054,16 +1054,18 @@ os.write(1, result.stdout)
         try:
             # A relay must reject a forward belonging to another device, port, or
             # arbitrary device socket before it has selected a cached target.
-            for kind in ('foreign', 'port', 'service'):
+            for kind in ('foreign', 'port', 'service', 'ambiguous'):
                 rejected_relay = client.start_viewer_relay(endpoint, 'emulator-5554')
                 rejected_port = rejected_relay.server_address[1]
                 if kind == 'foreign':
-                    row = 'foreign tcp:' + str(rejected_port) + ' localabstract:scrcpy_1234abcd'
+                    row = 'emulator-5556 tcp:' + str(rejected_port) + ' localabstract:scrcpy_1234abcd'
                 elif kind == 'port':
                     row = 'emulator-5554 tcp:1 localabstract:scrcpy_1234abcd'
-                else:
+                elif kind == 'service':
                     row = 'emulator-5554 tcp:' + str(rejected_port) + ' localabstract:not-scrcpy'
-                mapping['rows'] = [row]
+                else:
+                    row = 'emulator-5554 tcp:' + str(rejected_port) + ' localabstract:scrcpy_1234abcd'
+                mapping['rows'] = [row] * (2 if kind == 'ambiguous' else 1)
                 rejected = socket.create_connection(('127.0.0.1', rejected_port), timeout=3)
                 rejected.settimeout(3)
                 self.assertEqual(rejected.recv(1), b'')
@@ -1073,7 +1075,7 @@ os.write(1, result.stdout)
                 rejected_relay.shutdown()
                 rejected_relay.server_close()
 
-            self.assertEqual(records.count('host:list-forward'), 3)
+            self.assertEqual(records.count('host:list-forward'), 4)
             self.assertNotIn('host:transport:emulator-5554', records)
 
             with lock:
@@ -1083,7 +1085,7 @@ os.write(1, result.stdout)
             with self.assertRaises(OSError):
                 client.ViewerRelay(relay.server_address, client.ViewerHandler)
             mapping['rows'] = [
-                'foreign tcp:' + str(port) + ' localabstract:scrcpy_1234abcd',
+                'emulator-5556 tcp:' + str(port) + ' localabstract:scrcpy_ffffffff',
                 'emulator-5554 tcp:1 localabstract:scrcpy_1234abcd',
                 'emulator-5554 tcp:' + str(port) + ' localabstract:not-scrcpy',
                 'emulator-5554 tcp:' + str(port) + ' localabstract:scrcpy_1234abcd',
@@ -1100,6 +1102,8 @@ os.write(1, result.stdout)
             self.assertEqual(records.count('host:list-forward'), 1)
             self.assertEqual(records.count('host:transport:emulator-5554'), 3)
             self.assertEqual(records.count('localabstract:scrcpy_1234abcd'), 3)
+            self.assertNotIn('host:transport:emulator-5556', records)
+            self.assertNotIn('localabstract:scrcpy_ffffffff', records)
 
             # Force control's handler to run before audio's. Guest connections must
             # still open in TCP accept order, while established video keeps flowing.
@@ -1505,7 +1509,7 @@ os.write(1, result.stdout)
             admin_server.shutdown()
             admin_server.server_close()
 
-    def test_signal_releases_lease_and_stops_command_group(self):
+    def test_signal_releases_owned_lease_and_stops_viewer_command_group(self):
         address = str(self.root / 'control.sock')
         server = poolmod.Server(address, poolmod.Handler)
         server.pool = self.pool
@@ -1513,27 +1517,55 @@ os.write(1, result.stdout)
         marker = self.root / 'descendant'
         payload = ('import subprocess,time,pathlib; p=subprocess.Popen(["sleep","60"]); '
                    f'pathlib.Path({str(marker)!r}).write_text(str(p.pid)); time.sleep(60)')
-        environment = dict(os.environ, ANDROID_PUBLIC_ROOT=str(self.root))
-        command = subprocess.Popen([sys.executable, str(ROOT / 'config/profiles/android/client.py'),
-                                    'run', '--', sys.executable, '-c', payload], env=environment,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        tools = self.root / 'tools'
+        tools.mkdir()
+        (tools / 'adb').write_text('#!/bin/sh\nexit 0\n')
+        (tools / 'scrcpy').write_text('#!' + sys.executable + '\n' + payload + '\n')
+        for tool in tools.iterdir():
+            tool.chmod(0o700)
+        environment = dict(os.environ, ANDROID_PUBLIC_ROOT=str(self.root),
+                           PATH=str(tools) + ':' + os.environ['PATH'])
         try:
-            deadline = time.monotonic() + 5
-            while not marker.exists() and command.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            self.assertTrue(marker.exists())
-            pid = int(marker.read_text())
-            command.send_signal(signal.SIGTERM)
-            _, stderr = command.communicate(timeout=8)
-            self.assertEqual(command.returncode, 143, stderr.decode())
-            self.assertFalse(self.runtime.running)
-            process = Path(f'/proc/{pid}/stat')
-            if process.exists():
-                self.assertEqual(process.read_text().split(') ', 1)[1].split()[0], 'Z')
+            for mode in ('run', 'standalone-view', 'attached-view'):
+                with self.subTest(mode=mode):
+                    marker.unlink(missing_ok=True)
+                    if mode == 'run':
+                        arguments = ['run', '--', sys.executable, '-c', payload]
+                    elif mode == 'standalone-view':
+                        arguments = ['view']
+                    else:
+                        token, allocation = self.acquire()
+                        lease_path = self.root / 'attached-cancel.json'
+                        client.save_lease(lease_path, dict(token=token))
+                        arguments = ['view', '--lease-file', str(lease_path)]
+                        before = self.pool.allocation(token)
+                        lease_before = lease_path.read_bytes()
+                    command = subprocess.Popen([sys.executable, str(ROOT / 'config/profiles/android/client.py'),
+                                                *arguments], env=environment,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not marker.exists() and command.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(marker.exists())
+                        pid = int(marker.read_text())
+                        command.send_signal(signal.SIGTERM)
+                        _, stderr = command.communicate(timeout=8)
+                        self.assertEqual(command.returncode, 143, stderr.decode())
+                        if mode == 'attached-view':
+                            self.assertEqual(self.pool.allocation(token), before)
+                            self.assertEqual(lease_path.read_bytes(), lease_before)
+                            self.pool.release(token)
+                        self.assertFalse(self.runtime.running)
+                        self.assertTrue(all(slot['state'] == 'available' for slot in self.pool.status()['slots']))
+                        process = Path(f'/proc/{pid}/stat')
+                        if process.exists():
+                            self.assertEqual(process.read_text().split(') ', 1)[1].split()[0], 'Z')
+                    finally:
+                        if command.poll() is None:
+                            command.kill()
+                            command.communicate()
         finally:
-            if command.poll() is None:
-                command.kill()
-                command.communicate()
             server.shutdown()
             server.server_close()
 

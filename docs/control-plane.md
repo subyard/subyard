@@ -988,8 +988,10 @@ CONTROLLER_SESSION="view"         # optional session verbs run on the controller
 bind each operation to the shared typed confirmation policy. The engine owns confirmation input.
 Non-session handlers run with standard input connected to the null device. Session actions
 inherit operator input; terminal sessions take foreground control and return it on exit or
-cancellation. When a terminal session ends, the engine also terminates remaining members of its
-process group. Handlers can still supply their own pipes or here-documents to child processes.
+cancellation. Session cancellation sends TERM to the handler's process group and allows up to
+one minute for owned-resource cleanup before KILL. When any session ends, the engine also
+terminates remaining members of its process group, retaining the handler's identity until
+cleanup completes. Handlers can still supply their own pipes or here-documents to child processes.
 Each resource process group remains cancellable as a unit. Declared read-only verbs remain
 available during an unfinished release transition; verbs with any non-read action remain gated.
 At least one action is required, and the `BRINGUP` and `SHUTDOWN` verbs must be declared by actions.
