@@ -53,9 +53,12 @@ jobs:
       - name: Build and run native engine
         run: |
           dev/build-engine.sh
+          dev/build-profiles.sh
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 ./cmd/... ./internal/...
+      - name: Native AI Observer producer contract
+        run: bash config/agents/aiobserver/tests/run.sh
 
   paseo-headless:
     name: paseo-headless-${{ matrix.arch }}

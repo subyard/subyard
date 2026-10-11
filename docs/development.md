@@ -3,6 +3,13 @@
 Subyard's control-plane engine is a native Linux Go binary. Shell remains the system-adapter and
 safety layer, so contributors need both the Go and shell toolchains.
 
+`make build` also builds package-owned native executables declared by profiles
+and coding integrations. Outputs remain separate under `.build/profiles/` and
+`.build/agents/`; runtime packaging includes both for the selected architecture.
+Plain source copies need no Git metadata. Native integration helper bytes bind
+assessments: rebuild before planning and obtain a fresh plan after rebuilding.
+Observation does not build a missing helper.
+
 ## Toolchain
 
 `go.mod` is authoritative: the module's minimum language baseline is Go 1.25.6 and its `toolchain`
@@ -123,6 +130,11 @@ group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-ba
 `--published-baseline-dir PATH` and `--source-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
 installer). For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
 the complete check after building the release assets.
+
+For producer/delivery changes, `--only-runtime-recovery` runs actual v0.18.6
+caller continuation and eligible rollback plus exact sealed v0.17.3
+activation-only owner recovery. It retains the same published pins and does not
+replace the complete publication compatibility gate.
 
 The actual v0.18.6 cases retain completed history and authentically interrupted activation-only
 history, reproduce the released alias writer defect, stage verified repair tooling, require fresh source

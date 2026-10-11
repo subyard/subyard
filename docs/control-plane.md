@@ -418,6 +418,13 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+
+The AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
+uses one package-owned Go producer for native projection and semantic hashes.
+Mount records form an unordered multiset; other arrays preserve order. Native
+helper executable bytes bind the package. Its optional closed failure transport
+retains the integration, yard and inspect/apply/verify phase without changing
+public observation, process, journal or grant schemas.
 Recoverable reconcile failures retain validated public diagnostics after reobservation;
 ambiguous state and protected transition guards retain their own recovery instructions.
 The original public failure also remains visible when recovery observation adds a blocker

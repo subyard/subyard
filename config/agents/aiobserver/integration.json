@@ -11,6 +11,7 @@
   "command": "ai-observer",
   "check": "ai-observer-installed",
   "health": "ai-observer-health",
+  "native": [{"package": "cmd/observation", "path": "bin/observation"}],
   "lifecycle": {
     "handler": "lifecycle.py",
     "source_files": ["proxy.sh"],

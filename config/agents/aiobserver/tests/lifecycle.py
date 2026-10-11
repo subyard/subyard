@@ -20,6 +20,13 @@ spec.loader.exec_module(module)
 
 
 class LifecycleTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = Path(__file__).resolve().parents[4]
+        cls.native_root = cls.source / ".build/aiobserver-tests/native"
+        cls.native_root.joinpath("bin").mkdir(parents=True, exist_ok=True)
+        subprocess.run(["go", "build", "-buildvcs=false", "-o", str(cls.native_root / "bin/observation"), "./config/agents/aiobserver/cmd/observation"], cwd=cls.source, check=True, timeout=180)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(temporary.cleanup)
@@ -27,6 +34,7 @@ class LifecycleTest(unittest.TestCase):
         (module.ROOT / "provision.sh").write_text("package-v1")
         module.SELECTED = True
         module.ENV = {"DEV_USER": "dev", "DEV_UID": "1000", "CODING_TOOL_INTEGRATIONS": "codex aiobserver", "AI_OBSERVER_HOST_PORT": "22222", "SUBYARD_INTEGRATION_SOURCE_BINDING": "a" * 64, "YARD_KIND": "container"}
+        module.ENV["SUBYARD_INTEGRATION_NATIVE_ROOT"] = str(self.native_root)
         self.snapshot = {"config": {module.PROXY: "v1:22222"}, "devices": {"ai-observer": {"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:22222", "connect": "tcp:127.0.0.1:8080"}}}
         self.service = "owned-hash\nactive\nenabled\n"
         self.container = {"Name": "/subyard-ai-observer", "Id": "container-1", "Image": "sha256:image", "Config": {"Image": "owned-image", "Labels": {"org.subyard.managed": "ai-observer-v1"}, "Cmd": ["watch", "all", "--backfill"], "Env": ["AI_OBSERVER_API_PORT=8080"]}, "HostConfig": {"Binds": ["/data:/app/data:rw"], "PortBindings": {}}, "Mounts": [], "State": {"Running": True, "Status": "running", "Health": {"Status": "starting"}}}
@@ -77,7 +85,8 @@ class LifecycleTest(unittest.TestCase):
             harness["write_observation_incus"](root, control, rejected)
             environment = {"PATH": str(root) + ":/usr/bin:/bin", "INCUS_PROJECT": "subyard",
                            "YARD_INSTANCE_NAME": "yard", "SUBYARD_INTEGRATION_SELECTED": "0",
-                           "SUBYARD_INTEGRATION_SOURCE_BINDING": "a" * 64}
+                           "SUBYARD_INTEGRATION_SOURCE_BINDING": "a" * 64,
+                           "SUBYARD_INTEGRATION_NATIVE_ROOT": str(self.native_root)}
             result = subprocess.run(["python3", str(package / "lifecycle.py"), "observe"],
                                     env=environment, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -163,7 +172,7 @@ class LifecycleTest(unittest.TestCase):
                 observed = module.observe()[0]
                 self.assertEqual(observed["desired"], approved["desired"])
                 self.assertNotEqual(observed["actual"], approved["actual"])
-                with self.assertRaisesRegex(RuntimeError, "changed before apply"):
+                with self.assertRaisesRegex(RuntimeError, "observation-changed"):
                     self.apply(approved)
                 self.assertEqual(self.effects, [])
 
@@ -178,13 +187,13 @@ class LifecycleTest(unittest.TestCase):
                 changed = module.observe()[0]
                 self.assertEqual(observed["desired"], changed["desired"])
                 self.assertNotEqual(observed["actual"], changed["actual"])
-                with self.assertRaisesRegex(RuntimeError, "changed before apply"):
+                with self.assertRaisesRegex(RuntimeError, "observation-changed"):
                     self.apply(observed)
                 self.assertEqual(self.effects, [])
         self.container = original
         before = module.observe()[0]
         self.container["Id"] = "replacement-container"
-        with self.assertRaisesRegex(RuntimeError, "changed before apply"):
+        with self.assertRaisesRegex(RuntimeError, "observation-changed"):
             self.apply(before)
         self.assertEqual(self.effects, [])
         self.container["Id"] = "container-1"
@@ -211,6 +220,30 @@ class LifecycleTest(unittest.TestCase):
                         self.apply(observed)
                     self.assertEqual(self.effects, [])
 
+    def test_mount_permutation_and_unknown_field_drift_before_effects(self):
+        self.installed = False
+        mounts = [{"Type": "bind", "Source": "/one", "Destination": "/data", "RW": True, "Future": {"count": 9007199254740993}},
+                  {"Type": "bind", "Source": "/two", "Destination": "/logs", "RW": False}]
+        for selected in (True, False):
+            module.SELECTED = selected
+            self.container["Mounts"] = copy.deepcopy(mounts)
+            before = module.observe()[0]
+            self.container["Mounts"].reverse()
+            self.assertEqual(module.observe()[0], before)
+            for changed in (copy.deepcopy(mounts) + [copy.deepcopy(mounts[0])],
+                            [dict(mounts[0], Added=True), mounts[1]]):
+                self.container["Mounts"] = changed
+                with self.assertRaisesRegex(RuntimeError, "observation-changed"):
+                    self.apply(before)
+                self.assertEqual(self.effects, [])
+            self.container["Mounts"] = copy.deepcopy(mounts)
+            self.container["HostConfig"]["Future"] = 9007199254740993
+            before = module.observe()[0]
+            self.container["HostConfig"]["Future"] = 9007199254740992
+            with self.assertRaisesRegex(RuntimeError, "observation-changed"):
+                self.apply(before)
+            self.assertEqual(self.effects, [])
+
     def test_inherited_provision_receipt_fails_before_any_effect(self):
         self.installed = False
         for selected in (True, False):
@@ -222,9 +255,9 @@ class LifecycleTest(unittest.TestCase):
                 # Effective bytes stay identical, but local receipt ownership
                 # disappeared after approval. It must not be claimed or unset.
                 del self.snapshot["config"][module.PROVISION]
-                with self.assertRaisesRegex(RuntimeError, "inherited provision"):
+                with self.assertRaisesRegex(RuntimeError, "ambiguous-ownership"):
                     module.observe()
-                with self.assertRaisesRegex(RuntimeError, "inherited provision"):
+                with self.assertRaisesRegex(RuntimeError, "ambiguous-ownership"):
                     self.apply(observed)
                 self.assertEqual(self.effects, [])
 

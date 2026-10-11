@@ -13,6 +13,16 @@ plane](../control-plane.md), and owning profile guides describe operational beha
 work is identified explicitly; accepted direction does not imply completed implementation or
 acceptance. Superseded alternatives and execution reports belong in Git history.
 
+## Typed observation pilot
+
+The AI Observer integration uses one package-owned Go native producer and the
+generic immutable snapshot canonicalizer. Mounts has explicit multiset semantics;
+other native arrays retain their existing order. Actual helper bytes bind the
+package, while exact sealed owners retain historical fingerprints and recovery
+authority. Source-owned phase/reason diagnostics cross the existing activation
+interface without raw native output. The [bounded contract](typed-semantic-observations.md)
+defines encoding, additive native fields, validation and focused acceptance.
+
 <a id="subyard-model"></a>
 
 ## Product model and trust boundary

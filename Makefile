@@ -9,6 +9,7 @@ build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/build-profiles.sh
 
 test:
+	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/build-profiles.sh
 	TMPDIR=/tmp $(GO) test -count=1 ./cmd/... ./internal/...
 	bash dev/test-profiles.sh
 

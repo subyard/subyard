@@ -1080,8 +1080,10 @@ def main():
                         help="run only the published activation-only recovery regression")
     parser.add_argument("--only-checkpoint-source", action="store_true",
                         help="run only released-caller checkpoint source and future rollback compatibility")
+    parser.add_argument("--only-runtime-recovery", action="store_true",
+                        help="run published runtime continuation/rollback and exact sealed activation-owner recovery")
     args = parser.parse_args()
-    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair)) <= 1,
+    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery)) <= 1,
             "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
@@ -1109,6 +1111,14 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
+                if args.only_runtime_recovery:
+                    baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
+                                               SOURCE_BASELINE_SHA256, arch)
+                    verify(release, args.version, baseline, arch, root, SOURCE_BASELINE)
+                    activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
+                                                 ACTIVATION_BASELINE_SHA256, arch)
+                    verify_activation_only_recovery(release, args.version, activation, arch, root)
+                    return
                 if args.only_source_repair:
                     source_baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
                                                       SOURCE_BASELINE_SHA256, arch)

@@ -53,6 +53,8 @@ type IntegrationPlan struct {
 	Scope               string   `json:"-"`
 	facts               []integrationFact
 	sources             string
+	// Attribution only; the existing aggregate source binding remains the guard.
+	packageSources map[string]string
 }
 
 type integrationFact struct {
@@ -86,7 +88,10 @@ type integrationObservation struct {
 // IntegrationScope binds the selected artifact destinations and desired
 // identities without probing inventory, services, or package readiness.
 func (runtime Runtime) IntegrationScope() (string, []string, error) {
-	entries, err := runtime.integrationArtifacts()
+	return runtime.integrationScopePhase("inspect")
+}
+func (runtime Runtime) integrationScopePhase(phase string) (string, []string, error) {
+	entries, err := runtime.integrationArtifactsPhase(phase)
 	if err != nil {
 		return "", nil, err
 	}
@@ -99,7 +104,7 @@ func (runtime Runtime) IntegrationScope() (string, []string, error) {
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
-	sourceBinding, err := runtime.integrationSourceBinding()
+	sourceBinding, err := runtime.integrationSourceBindingPhase(phase)
 	if err != nil {
 		return "", nil, err
 	}
@@ -159,6 +164,9 @@ func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.Insta
 }
 
 func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
+	return runtime.integrationArtifactsPhase("inspect")
+}
+func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArtifact, error) {
 	files, err := runtime.guestConfigFiles()
 	if err != nil {
 		return nil, err
@@ -216,7 +224,7 @@ func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
 			if definition.Name == id {
 				binding, err := runtime.integrationPackageBinding(definition)
 				if err != nil {
-					return nil, err
+					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 				}
 				inputs = append(inputs, binding)
 			}
@@ -341,11 +349,14 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 }
 
 func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan, integrationObservation, error) {
+	return runtime.observeIntegrationsPhase(ctx, "inspect")
+}
+func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase string) (IntegrationPlan, integrationObservation, error) {
 	instance, err := runtime.integrationPrecondition(ctx)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
-	entries, err := runtime.integrationArtifacts()
+	entries, err := runtime.integrationArtifactsPhase(phase)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
@@ -354,12 +365,12 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		return IntegrationPlan{}, observed, err
 	}
 	plan := IntegrationPlan{Changed: observed.Changed}
-	plan.sources, err = runtime.integrationSourceBinding()
+	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsPhase(phase)
 	if err != nil {
 		return plan, observed, err
 	}
 	plan.facts = slices.Clone(observed.Facts)
-	scope, _, err := runtime.IntegrationScope()
+	scope, _, err := runtime.integrationScopePhase(phase)
 	if err != nil {
 		return plan, observed, err
 	}
@@ -396,7 +407,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		if definition.Lifecycle == nil {
 			continue
 		}
-		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+		observation, err := runtime.observeIntegrationLifecyclePhase(ctx, definition, phase)
 		if err != nil {
 			return plan, observed, err
 		}
@@ -641,12 +652,12 @@ func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, er
 }
 
 func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPlan) error {
-	fresh, observed, err := runtime.observeIntegrations(ctx)
+	fresh, observed, err := runtime.observeIntegrationsPhase(ctx, "apply")
 	if err != nil {
 		return err
 	}
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
-		return err
+		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
 		return err
@@ -664,7 +675,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 			}
 		}
 	}
-	entries, err := runtime.integrationArtifacts()
+	entries, err := runtime.integrationArtifactsPhase("apply")
 	if err != nil {
 		return err
 	}
@@ -705,7 +716,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
 		return err
 	}
-	verified, err := runtime.IntegrationPlan(ctx)
+	verified, _, err := runtime.observeIntegrationsPhase(ctx, "verify")
 	if err != nil {
 		return err
 	}

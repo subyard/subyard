@@ -15,6 +15,13 @@ metadata, lifecycle sources and dashboard metadata. Immutable input values canno
 be replaced by persistent settings, command overrides or ambient environment.
 Their bytes and values bind package identity and operation scope.
 
+An optional `native` array reuses the shipped profile package/path declaration
+for package-owned Go executables. Development uses `.build/agents/<id>/`;
+runtime bundles contain them in their owning integration directory. Actual
+executable bytes enter the source binding. Plain source copies need no Git
+metadata; missing helpers never cause an implicit build or source-hash fallback.
+See the [typed observation pilot](typed-semantic-observations.md).
+
 Settings reuse the shipped profile setting contract. A port may declare
 `default_from` with a source port setting and integer offset. References must
 exist, have port type and be acyclic. For bounds `minimum..maximum`, the default
@@ -49,6 +56,12 @@ successful apply report alone does not establish convergence. Generic legacy
 `PROVISION`/`CHECK` hooks continue to work; a lifecycle package owns its complete
 provision/retire sequence. `HEALTH` remains advisory and cannot enter activation
 fingerprints or prevent activation while a service is starting.
+
+Failing handlers may emit the optional closed lifecycle diagnostic record
+documented in the typed observation contract. Core renders fixed validated
+yard/component/phase context through ActivationDiagnostic; arbitrary handler
+stderr remains private. Historical handlers retain a fixed generic failure.
+Success observation JSON remains unchanged.
 
 Observation shares the existing 30-second, 64-KiB shipped-hook boundary. Integration
 apply has a fixed 22-minute limit covering the package's 600-second image pull,

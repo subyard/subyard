@@ -111,7 +111,7 @@ runtime_extras=(
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
   case "$relative" in
-    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum) continue ;;
+    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go) continue ;;
   esac
   case "$relative" in
     scripts/*|config/*|completions/*) ;;

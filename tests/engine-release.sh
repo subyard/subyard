@@ -118,6 +118,13 @@ printf '%s\n' 'runtime fixture' > "$fixture_profile/asset.txt"
 chmod 0600 "$fixture_profile/asset.txt"
 printf '%s\n' 'nested runtime manifest fixture' > "$fixture_profile/runtime-files.sha256"
 printf '%s\n' '# Test-only fixture' > "$fixture_profile/tests/run.sh"
+fixture_integration="$ROOT/config/agents/package-fixture"
+mkdir -p "$fixture_integration/cmd/worker" "$fixture_integration/tests"
+printf '%s\n' '{"schema_version":1,"native":[{"package":"cmd/worker","path":"bin/worker"}]}' \
+  > "$fixture_integration/integration.json"
+printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("integration native fixture") }' \
+  > "$fixture_integration/cmd/worker/main.go"
+printf '%s\n' '# Test-only fixture' > "$fixture_integration/tests/run.sh"
 legacy_installer="$ROOT/tests/fixtures/migrations/v0.1.0-install-runtime-release.sh"
 [ "$(sha256sum "$legacy_installer" | cut -d' ' -f1)" = \
   168dbaa00dfe3d86471358993e63d6b50c02d5af4bb136a6da3c4e39229780dd ] \
@@ -155,6 +162,10 @@ bundle_list="$TMP/runtime-bundle.list"
 tar -tzf "$bundle_one" > "$bundle_list"
 ! grep -Eq '^\./config/profiles/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
   || fail 'runtime bundle contains profile-owned tests or Go source'
+! grep -Eq '^\./config/agents/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
+  || fail 'runtime bundle contains integration-owned tests or Go source'
+grep -Fxq './config/agents/package-fixture/bin/worker' "$bundle_list" \
+  || fail 'runtime bundle omitted an untracked integration native executable'
 grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
   && grep -Fxq './config/profiles/package-fixture/bin/worker' "$bundle_list" \
   || fail 'runtime bundle omitted untracked profile assets or native executable'
@@ -212,6 +223,9 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
   || fail 'packaging changed source permissions'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
   || fail 'packaged native profile executable does not run'
+[ "$("$bundle_extract/config/agents/package-fixture/bin/worker")" = "integration native fixture" ] \
+  && [ "$(stat -c '%a' "$bundle_extract/config/agents/package-fixture/bin/worker")" = 755 ] \
+  || fail 'packaged native integration executable does not run or has an invalid mode'
 (
   cd "$bundle_extract"
   sha256sum -c runtime-files.sha256 >/dev/null
@@ -383,6 +397,10 @@ tar -xOf "$release/subyard-1.0.0-test-linux-arm64.tar.gz" \
   ./config/profiles/package-fixture/bin/worker > "$TMP/profile-arm64"
 [ "$(od -An -tu2 -j18 -N2 "$TMP/profile-arm64" | tr -d ' ')" = 183 ] \
   || fail 'native profile executable was not cross-compiled for arm64'
+tar -xOf "$release/subyard-1.0.0-test-linux-arm64.tar.gz" \
+  ./config/agents/package-fixture/bin/worker > "$TMP/integration-arm64"
+[ "$(od -An -tu2 -j18 -N2 "$TMP/integration-arm64" | tr -d ' ')" = 183 ] \
+  || fail 'native integration executable was not cross-compiled for arm64'
 for paseo_arch in amd64 arm64; do
   paseo_asset="$release/paseo-headless-0.2.1-linux-$paseo_arch.tar.gz"
   printf 'paseo test fixture for %s\n' "$paseo_arch" > "$paseo_asset"

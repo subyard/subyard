@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,5 +113,42 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 	program.printUpdateResult(&releaseExecution{prepared: releaseruntime.Prepared{Action: "update.activate"}, outcome: &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Message: message, Retry: retry}}, false)
 	if !strings.Contains(stdout.String(), "utility preserved") || strings.Contains(stdout.String(), "private") || strings.Contains(stdout.String(), "cannot inspect") {
 		t.Fatalf("native public diagnostic was lost or unsafe: %q", stdout.String())
+	}
+}
+
+func TestMaterializedConfigObservationPreservesEarlyNativeDiagnostic(t *testing.T) {
+	for _, mode := range []os.FileMode{0, 0644} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			configHome := filepath.Join(root, "state")
+			packageRoot := filepath.Join(root, "config/agents/sample")
+			if err := os.MkdirAll(filepath.Join(packageRoot, "bin"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(packageRoot, "integration.json"), []byte(`{"schema_version":1,"command":"sample","native":[{"package":"cmd/producer","path":"bin/producer"}]}`), 0644)
+			if mode != 0 {
+				testkit.WriteFile(t, filepath.Join(packageRoot, "bin/producer"), []byte("private helper"), mode)
+			}
+			writeConfigCommandFile(t, filepath.Join(configHome, "config.env"), "CODING_TOOL_INTEGRATIONS='sample'\n")
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, Executor: incus, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
+			observed, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			var diagnostic interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &diagnostic) || observed.Converged {
+				t.Fatalf("early native failure lost: %v", err)
+			}
+			message, retry := diagnostic.ActivationDiagnostic()
+			if !strings.Contains(message, "integration sample inspect in yard default") || !strings.Contains(message, "native dependency or observation unavailable") || retry != "yard -Y default integration status sample --json" || strings.Contains(message, root) || strings.Contains(message, "private helper") {
+				t.Fatalf("early release diagnostic = %q / %q", message, retry)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 || len(incus.ExecCalls) != 0 || len(incus.ConfigUpdates) != 0 || len(incus.PowerUpdates) != 0 {
+				t.Fatal("early release failure printed private details or performed effects")
+			}
+		})
 	}
 }

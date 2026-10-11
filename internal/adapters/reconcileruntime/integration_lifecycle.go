@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -55,24 +56,31 @@ func (runtime Runtime) integrationPackageBinding(definition profile.IntegrationD
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 func (runtime Runtime) integrationSourceBinding() (string, error) {
+	return runtime.integrationSourceBindingPhase("inspect")
+}
+func (runtime Runtime) integrationSourceBindingPhase(phase string) (string, error) {
+	binding, _, err := runtime.integrationSourceBindingsPhase(phase)
+	return binding, err
+}
+func (runtime Runtime) integrationSourceBindingsPhase(phase string) (string, map[string]string, error) {
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(definitions) == 0 {
 		// Retain the original scope grammar when no package contract is declared.
-		return "", nil
+		return "", nil, nil
 	}
 	sources := map[string]string{}
 	for _, definition := range definitions {
 		binding, err := runtime.integrationPackageBinding(definition)
 		if err != nil {
-			return "", err
+			return "", nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 		}
 		sources[definition.Name] = binding
 	}
 	payload, _ := json.Marshal(sources)
-	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
+	return fmt.Sprintf("%x", sha256.Sum256(payload)), sources, nil
 }
 func (runtime Runtime) integrationLifecycleEnvironment(definition profile.IntegrationDefinition) ([]string, error) {
 	binding, err := runtime.integrationPackageBinding(definition)
@@ -81,6 +89,25 @@ func (runtime Runtime) integrationLifecycleEnvironment(definition profile.Integr
 	}
 	environment := slices.Clone(runtime.Environment)
 	overrides := map[string]string{"SUBYARD_INTEGRATION_SOURCE_BINDING": binding, "SUBYARD_INTEGRATION_SELECTED": "0", "INCUS_PROJECT": runtime.Yard.IncusProject, "YARD_INSTANCE_NAME": runtime.Yard.YardInstanceName, "YARD_KIND": string(runtime.Yard.YardKind), "DEV_USER": runtime.devUser(), "DEV_UID": runtime.environmentDefault("DEV_UID", "1000"), "SUBYARD_REPOSITORY_ROOT": runtime.RepositoryRoot}
+	// Supply the validated exact native directory. The handler cannot choose a
+	// different sidecar after package binding was assessed.
+	if len(definition.Native) != 0 {
+		path, err := definition.NativeExecutablePath(definition.Native[0].Path)
+		if err != nil {
+			return nil, err
+		}
+		root := path
+		for range strings.Split(definition.Native[0].Path, string(filepath.Separator)) {
+			root = filepath.Dir(root)
+		}
+		for _, native := range definition.Native {
+			resolved, err := definition.NativeExecutablePath(native.Path)
+			if err != nil || resolved != filepath.Join(root, native.Path) {
+				return nil, errors.New("integration native artifacts have inconsistent roots")
+			}
+		}
+		overrides["SUBYARD_INTEGRATION_NATIVE_ROOT"] = root
+	}
 	if slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name) {
 		overrides["SUBYARD_INTEGRATION_SELECTED"] = "1"
 	}
@@ -94,20 +121,24 @@ func (runtime Runtime) integrationLifecycleEnvironment(definition profile.Integr
 	return environment, nil
 }
 func (runtime Runtime) observeIntegrationLifecycle(ctx context.Context, definition profile.IntegrationDefinition) (ports.RuntimeObservation, error) {
+	return runtime.observeIntegrationLifecyclePhase(ctx, definition, "inspect")
+}
+func (runtime Runtime) observeIntegrationLifecyclePhase(ctx context.Context, definition profile.IntegrationDefinition, phase string) (ports.RuntimeObservation, error) {
 	environment, err := runtime.integrationLifecycleEnvironment(definition)
 	if err != nil {
-		return ports.RuntimeObservation{}, err
+		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 	}
-	stdout, _, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, profileRuntimeObserveLimit, "observe")
+	stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, profileRuntimeObserveLimit, "observe")
 	if err != nil {
-		return ports.RuntimeObservation{}, fmt.Errorf("observe integration %s lifecycle: %w", definition.Name, err)
+		_, reason := lifecycleFailure(stderr, "inspect")
+		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, reason)
 	}
 	observation, err := decodeProfileRuntimeObservation(stdout)
 	selected := slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name)
 	if err == nil && (observation.State == ports.RuntimeStateDeferred || observation.State == ports.RuntimeStateAbsent && selected || observation.HookBinding != "" || observation.State == ports.RuntimeStateStale && (observation.Actual == "" || observation.Actual == observation.Desired)) {
 		err = errors.New("invalid integration lifecycle state")
 	}
-	return observation, err
+	return observation, runtime.integrationDiagnostic(err, definition, phase, "invalid-schema")
 }
 func (runtime Runtime) integrationLifecycleFact(definition profile.IntegrationDefinition, observation ports.RuntimeObservation) integrationFact {
 	fact := integrationFact{Key: "lifecycle:" + definition.Name, Observed: observation.Actual, Desired: observation.Desired, AtDesired: observation.State == ports.RuntimeStateCurrent || observation.State == ports.RuntimeStateAbsent}
@@ -118,12 +149,12 @@ func (runtime Runtime) integrationLifecycleFact(definition profile.IntegrationDe
 	return fact
 }
 func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan IntegrationPlan) error {
-	sources, err := runtime.integrationSourceBinding()
+	sources, packageSources, err := runtime.integrationSourceBindingsPhase("apply")
 	if err != nil {
 		return err
 	}
 	if sources != plan.sources {
-		return fmt.Errorf("%w: integration package sources changed", domain.ErrPlanStale)
+		return runtime.integrationPlanDiagnostic(domain.ErrPlanStale, plan, IntegrationPlan{packageSources: packageSources, facts: plan.facts})
 	}
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
@@ -133,7 +164,7 @@ func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan Inte
 		if definition.Lifecycle == nil {
 			continue
 		}
-		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+		observation, err := runtime.observeIntegrationLifecyclePhase(ctx, definition, "apply")
 		if err != nil {
 			return err
 		}
@@ -148,37 +179,35 @@ func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan Inte
 			}
 		}
 		if !approved {
-			return fmt.Errorf("%w: integration lifecycle changed", domain.ErrPlanStale)
+			return runtime.integrationDiagnostic(domain.ErrPlanStale, definition, "apply", "observation-changed")
 		}
 		environment, err := runtime.integrationLifecycleEnvironment(definition)
 		if err != nil {
-			return err
+			return runtime.integrationDiagnostic(err, definition, "apply", "native-unavailable")
 		}
 		operationID := runtime.environmentValue("SUBYARD_OPERATION_ID")
 		if !domain.SafeID(operationID) {
 			return errors.New("integration lifecycle requires a valid operation ID")
 		}
 		stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, integrationLifecycleApplyLimit, "apply", operationID, observation.Actual, observation.Desired)
-		if runtime.Stderr != nil && len(stderr) != 0 {
-			_, _ = runtime.Stderr.Write(stderr)
-		}
 		if err != nil {
-			return err
+			phase, reason := lifecycleFailure(stderr, "apply")
+			return runtime.integrationDiagnostic(err, definition, phase, reason)
 		}
 		applied, err := decodeProfileRuntimeObservation(stdout)
 		if err != nil {
-			return err
+			return runtime.integrationDiagnostic(err, definition, "verify", "invalid-schema")
 		}
 		selected := slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name)
 		if !(applied.State == ports.RuntimeStateAbsent && !selected) && (applied.State != ports.RuntimeStateCurrent || applied.Actual != observation.Desired || applied.Desired != observation.Desired) {
-			return errors.New("integration lifecycle apply did not converge")
+			return runtime.integrationDiagnostic(errors.New("integration lifecycle apply did not converge"), definition, "verify", "convergence-failed")
 		}
-		verified, err := runtime.observeIntegrationLifecycle(ctx, definition)
+		verified, err := runtime.observeIntegrationLifecyclePhase(ctx, definition, "verify")
 		if err != nil {
 			return err
 		}
 		if verified != applied {
-			return errors.New("integration lifecycle independent verification failed")
+			return runtime.integrationDiagnostic(errors.New("integration lifecycle independent verification failed"), definition, "verify", "convergence-failed")
 		}
 	}
 	return nil

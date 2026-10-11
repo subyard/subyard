@@ -240,6 +240,12 @@ jq -e --arg claude '/mnt/host/agent-sessions/claude/projects:/sessions/claude:ro
 guest systemctl is-enabled --quiet subyard-ai-observer.service \
   || die 'observer service is not enabled'
 container_id="$(guest docker inspect -f '{{.Id}}' subyard-ai-observer)"
+guest docker container inspect subyard-ai-observer > "$STATE/native-container.json"
+incus query "/1.0/instances/$INSTANCE?project=$PROJECT" > "$STATE/native-instance.json"
+python3 "$ROOT/config/agents/aiobserver/tests/e2e/observation.py" \
+  "$YARD_RUNTIME_ROOT/current/config/agents/aiobserver/bin/observation" \
+  "$STATE/native-instance.json" "$STATE/native-container.json"
+ok 'installed semantic producer protects complete native mount records'
 update_runtime() {
   info 'activating the verified local runtime update'
   local old_release_target

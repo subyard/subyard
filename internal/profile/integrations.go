@@ -56,6 +56,7 @@ type IntegrationDefinition struct {
 	Persist       string                `json:"persist,omitempty"`
 	Lifecycle     *IntegrationLifecycle `json:"lifecycle,omitempty"`
 	Dashboard     *IntegrationDashboard `json:"dashboard,omitempty"`
+	Native        []Native              `json:"native,omitempty"`
 
 	validationInputs []string
 }
@@ -137,11 +138,53 @@ func (definition IntegrationDefinition) SourceBinding() (string, error) {
 		}
 		sources[path] = data
 	}
+	// Native producer bytes are part of the approved package, including source
+	// development. Never substitute source hashes for a missing executable.
+	for _, native := range definition.Native {
+		path, err := definition.NativeExecutablePath(native.Path)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Size() > 16<<20 {
+			return "", errors.New("integration native artifact is unbounded")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		sources[native.Path] = data
+	}
 	data, _ := json.Marshal(struct {
 		Definition IntegrationDefinition
 		Sources    map[string][]byte
 	}{definition, sources})
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+// NativeExecutablePath prefers package-contained assets in installed/sealed
+// runtimes. Plain source copies may use the development build namespace; Git
+// metadata is neither required nor inspected. A present invalid package asset
+// must never be hidden by a development fallback.
+func (definition IntegrationDefinition) NativeExecutablePath(path string) (string, error) {
+	declared := false
+	for _, native := range definition.Native {
+		declared = declared || native.Path == path
+	}
+	if !declared {
+		return "", errors.New("undeclared integration native artifact")
+	}
+	if _, err := os.Lstat(filepath.Join(definition.Root, path)); !os.IsNotExist(err) {
+		return definition.ExecutablePath(path)
+	}
+	root := filepath.Clean(filepath.Join(definition.Root, "..", "..", ".."))
+	// Installed runtimes do not include the source module. Validate it through
+	// the same symlink-free source-path guard before allowing .build resolution.
+	development := Definition{Root: root}
+	if _, err := development.sourcePath("go.mod", false); err != nil {
+		return "", errors.New("integration native artifact is missing")
+	}
+	return development.ExecutablePath(filepath.Join(".build", "agents", definition.Name, path))
 }
 
 // ValidationInputs returns the package files actually inspected by LoadIntegrations.
@@ -156,6 +199,13 @@ func (definition *IntegrationDefinition) validate() error {
 	packaged := definition.packageDefinition()
 	if err := packaged.validateExtensions(); err != nil {
 		return err
+	}
+	nativePaths := map[string]bool{}
+	for _, native := range definition.Native {
+		if !relative(native.Package) || !relative(native.Path) || nativePaths[native.Path] {
+			return errors.New("invalid or duplicate integration native artifact path")
+		}
+		nativePaths[native.Path] = true
 	}
 	seen := map[string]bool{}
 	for _, input := range definition.Inputs {
