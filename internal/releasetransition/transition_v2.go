@@ -451,7 +451,7 @@ func (transition *V2Transition) preflightConverge(
 		}
 		current = &parsed
 	}
-	goal, found := transition.resolveConvergeGoal(ctx, execution, current)
+	goal, found, blocker, warnings := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
 		if linksErr != nil {
@@ -460,6 +460,10 @@ func (transition *V2Transition) preflightConverge(
 		outcome := v2OperatorOutcome(links, transition.options.Releases.Target, nil,
 			CodePlanStale, "the release transition plan was not inspected by this engine",
 			"run yard update --check")
+		if blocker != nil {
+			outcome.Code, outcome.Message, outcome.Retry = blocker.Code, blocker.Message, blocker.Retry
+		}
+		outcome = withActivationWarnings(outcome, warnings)
 		return "", &outcome, nil
 	}
 	observation, err := transition.observe(ctx, goal)
@@ -549,24 +553,24 @@ func (transition *V2Transition) resolveConvergeGoal(
 	ctx context.Context,
 	execution Execution,
 	current *JournalRecord,
-) (Goal, bool) {
+) (Goal, bool, *Blocker, []string) {
 	goal, found := transition.cachedGoal(execution.Plan)
 	if current != nil && execution.Plan == current.ResumePlan &&
 		current.Goal.Target == transition.options.Releases.Target &&
 		current.Goal.Direction == transition.options.Direction {
-		return current.Goal, true
+		return current.Goal, true, nil, nil
 	}
 	if current != nil && current.Checkpoint == JournalComplete &&
 		execution.Plan == current.AuthorizationPlan && transition.options.MigrationCheckpoint {
 		observation, err := transition.observe(ctx, current.Goal)
 		if err == nil && observation.checkpointConversion && observation.checkpointConsent &&
 			transition.fixedPoint(observation) {
-			return current.Goal, true
+			return current.Goal, true, nil, nil
 		}
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
 		transition.options.Replacement == nil) {
-		return goal, found
+		return goal, found, nil, nil
 	}
 	candidate := Goal{
 		Target:    transition.options.Releases.Target,
@@ -574,13 +578,30 @@ func (transition *V2Transition) resolveConvergeGoal(
 	}
 	observation, err := transition.observe(ctx, candidate)
 	if err != nil {
-		return Goal{}, false
+		message, retry := publicActivationDiagnostic(err,
+			"the release transition facts could not be reobserved safely", "run yard update --check")
+		return Goal{}, false, &Blocker{Code: CodePlanStale, Message: message, Retry: retry}, nil
+	}
+	if len(observation.blockers) != 0 {
+		// A fresh process has no inspection cache. Preserve the validated
+		// observation failure instead of hashing it into a misleading stale
+		// token result; an unresolved goal still cannot authorize any work.
+		blocker := observation.blockers[0]
+		if err := blocker.Validate(); err == nil {
+			return Goal{}, false, &blocker, observation.activationWarnings
+		}
+		return Goal{}, false, nil, observation.activationWarnings
 	}
 	plan, err := BindPlan(transition.planFacts(observation))
-	if err != nil || plan != execution.Plan {
-		return Goal{}, false
+	if err != nil {
+		return Goal{}, false, &Blocker{Code: CodePlanStale,
+			Message: "the reobserved release transition plan is invalid", Retry: "run yard update --check"}, observation.activationWarnings
 	}
-	return candidate, true
+	if plan != execution.Plan {
+		return Goal{}, false, &Blocker{Code: CodePlanStale,
+			Message: "the inspected release transition changed before convergence", Retry: "run yard update --check"}, observation.activationWarnings
+	}
+	return candidate, true, nil, nil
 }
 
 // A caller may have inspected recovery just before another caller completed it.
@@ -655,15 +676,20 @@ func (transition *V2Transition) Converge(
 			recoverableJournal = current
 		}
 	}
-	goal, found := transition.resolveConvergeGoal(ctx, execution, current)
+	goal, found, blocker, warnings := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
 		if linksErr != nil {
 			return Outcome{}, linksErr
 		}
-		return v2OperatorOutcome(links, transition.options.Releases.Target, nil,
+		outcome := v2OperatorOutcome(links, transition.options.Releases.Target, nil,
 			CodePlanStale, "the release transition plan was not inspected by this engine",
-			"run yard update --check"), nil
+			"run yard update --check")
+		if blocker != nil {
+			outcome.Code, outcome.Message, outcome.Retry = blocker.Code, blocker.Message, blocker.Retry
+		}
+		outcome = withActivationWarnings(outcome, warnings)
+		return outcome, nil
 	}
 	observation, err := transition.observe(ctx, goal)
 	if err != nil {

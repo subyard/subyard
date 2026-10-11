@@ -4,9 +4,110 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestActivationDiagnosticsPreserveFreshProcessPreflightBlocker(t *testing.T) {
+	for _, public := range []bool{false, true} {
+		t.Run(fmt.Sprintf("public=%t", public), func(t *testing.T) {
+			transition, _, _ := v2TransitionFixture(t, nil)
+			transition.options.Reconcilers = []V2ActivationReconciler{
+				&v2TestReconciler{id: "test-runtime"},
+				&v2TestReconciler{id: "warning-runtime", converged: true, warnings: []string{"historical warning"}},
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cause := error(errors.New("synthetic-private-observation-detail"))
+			if public {
+				cause = fmt.Errorf("synthetic-private-wrapper: %w", v2PublicActivationError{"yard named: config observation failed", "run yard -Y named config status"})
+			}
+			options := transition.options
+			warnings := &v2TestReconciler{id: "warning-runtime", converged: true,
+				warnings: []string{"z current warning", "a current warning", "z current warning"}}
+			options.Reconcilers = []V2ActivationReconciler{
+				v2ObservationErrorReconciler{id: "test-runtime", err: cause}, warnings,
+			}
+			options.VerifyAuthorization = func(PlanToken, Authorization) bool {
+				t.Fatal("observation blocker reached authorization")
+				return false
+			}
+			options.ActivateLinks = func(context.Context, ReleasePair) (ReleaseLinks, error) {
+				t.Fatal("observation blocker activated links")
+				return ReleaseLinks{}, nil
+			}
+			fresh, err := NewV2Transition(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := fresh.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Code != CodeDependencyUnavailable || strings.Contains(outcome.Message, "synthetic-private") {
+				t.Fatalf("fresh process discarded observation blocker: %#v, err=%v", outcome, err)
+			}
+			if public && (outcome.Message != "yard named: config observation failed" || outcome.Retry != "run yard -Y named config status") {
+				t.Fatalf("fresh process discarded public diagnostic: %#v", outcome)
+			}
+			if !slices.Equal(outcome.Warnings, []string{"a current warning", "z current warning"}) || warnings.reconciles != 0 {
+				t.Fatalf("blocked preflight lost current warnings or reconciled: %#v, reconciles=%d", outcome, warnings.reconciles)
+			}
+			if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+				t.Fatal(err)
+			}
+			journal, err := fresh.store.ReadCurrentJournal()
+			if err != nil || journal.Exists {
+				t.Fatalf("blocked preflight wrote a journal: %#v, err=%v", journal, err)
+			}
+		})
+	}
+}
+
+func TestActivationDiagnosticsPreserveFreshProcessChangedPlanWarnings(t *testing.T) {
+	transition, _, _ := v2TransitionFixture(t, nil)
+	transition.options.Reconcilers = []V2ActivationReconciler{
+		&v2TestReconciler{id: "test-runtime"},
+		&v2TestReconciler{id: "warning-runtime", converged: true, warnings: []string{"historical warning"}},
+	}
+	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := &v2TestReconciler{id: "test-runtime", desired: digestC}
+	warnings := &v2TestReconciler{id: "warning-runtime", converged: true,
+		warnings: []string{"z current warning", "a current warning", "z current warning"}}
+	options := transition.options
+	options.Reconcilers = []V2ActivationReconciler{changed, warnings}
+	options.VerifyAuthorization = func(PlanToken, Authorization) bool {
+		t.Fatal("changed plan reached authorization")
+		return false
+	}
+	options.ActivateLinks = func(context.Context, ReleasePair) (ReleaseLinks, error) {
+		t.Fatal("changed plan activated links")
+		return ReleaseLinks{}, nil
+	}
+	fresh, err := NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := fresh.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+	if err != nil || outcome.Status != StatusOperatorActionRequired || outcome.Code != CodePlanStale || outcome.Message != "the inspected release transition changed before convergence" {
+		t.Fatalf("fresh process accepted a changed plan: %#v, err=%v", outcome, err)
+	}
+	if !slices.Equal(outcome.Warnings, []string{"a current warning", "z current warning"}) || changed.reconciles != 0 || warnings.reconciles != 0 {
+		t.Fatalf("changed plan lost current warnings or reconciled: %#v", outcome)
+	}
+	if err := ValidateProcessConvergence(goal, inspection, outcome); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := fresh.store.ReadCurrentJournal()
+	if err != nil || journal.Exists {
+		t.Fatalf("changed plan wrote a journal: %#v, err=%v", journal, err)
+	}
+}
 
 type activationDiagnosticPostApplyFixture struct {
 	*v2TestReconciler
