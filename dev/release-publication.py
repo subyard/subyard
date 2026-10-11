@@ -307,6 +307,11 @@ def publish_remote(github, prepared, document, root):
     deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
     if deferred:
         print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
+    return execute_publication(github, prepared, identity)
+
+
+def execute_publication(github, prepared, identity):
+    """Execute publication after the caller has validated its explicit policy."""
     marker = "Subyard candidate " + identity["candidate_id"] + " identity " + identity_hash(identity)
     tag = "v" + identity["version"]
     releases = [item for item in github.pages("releases") if item["tag_name"] == tag]

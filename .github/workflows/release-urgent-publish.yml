@@ -1,0 +1,37 @@
+name: Urgent release publication
+run-name: Urgent publication ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - 'release/urgent-publication/**'
+    paths:
+      - '.github/urgent-publication.json'
+      - '.github/workflows/release-urgent-publish.yml'
+      - 'dev/release-urgent-publication.py'
+      - 'dev/release-publication.py'
+
+# Share the ordinary publisher's serialization across versions and operator machines.
+concurrency:
+  group: subyard-release-publication-stable
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install source fingerprint tool
+        run: sudo apt-get update -qq && sudo apt-get install -y ripgrep
+      - name: Publish the exact prepared candidate with explicit unfinished-check authorization
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B dev/release-urgent-publication.py run --request .github/urgent-publication.json
