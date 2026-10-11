@@ -4,7 +4,17 @@ set -euo pipefail
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -eq 0 ]; then
+    rm -rf -- "$tmp"
+  else
+    printf 'test-runner: failed fixture retained at %s\n' "$tmp" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 fixture="$tmp/source with spaces"
 mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
@@ -53,6 +63,15 @@ printf '#!/usr/bin/env bash\n' > "$root/.build/yard"
 chmod +x "$root/.build/yard"
 SH
 chmod +x "$fixture/dev/build-engine.sh"
+cat > "$fixture/dev/build-profiles.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${RUNNER_FAIL_NATIVE:-0}" -ne 0 ]; then
+  printf 'fixture native bootstrap failed\n' >&2
+  exit "$RUNNER_FAIL_NATIVE"
+fi
+SH
+chmod +x "$fixture/dev/build-profiles.sh"
 for suite in unit contract integration; do
   printf '%s.sh\n' "$suite" > "$fixture/tests/suites/$suite.list"
   printf '#!/usr/bin/env bash\nprintf "hidden successful output\\n"\n' > "$fixture/tests/$suite.sh"
@@ -83,9 +102,11 @@ summary="$(summary_path success)"
 awk -F '\t' '
   NR == 1 { if ($0 != "kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog") exit 1; next }
   $4 != "passed" || $5 != 0 || $6 !~ /^[0-9]+$/ { exit 1 }
+  $1 == "check" && $3 == "build-native" { native=NR }
+  $1 == "check" && $3 == "go-race" { if (!native || native >= NR) exit 1; race++ }
   $1 == "check" && $3 ~ /^tests\// { suites[$2]++ }
   $1 == "run" { completed++ }
-  END { if (suites["unit"] != 1 || suites["contract"] != 2 || suites["integration"] != 1 || completed != 1) exit 1 }
+  END { if (!native || race != 1 || suites["unit"] != 1 || suites["contract"] != 2 || suites["integration"] != 1 || completed != 1) exit 1 }
 ' "$summary" || fail 'successful result is incomplete or malformed'
 ! grep -q 'hidden successful output' "$tmp/success.out" || fail 'successful output leaked to console'
 while IFS=$'\t' read -r kind _ _ _ _ _ log; do
@@ -95,6 +116,17 @@ unit_log="$(awk -F '\t' '$3 == "tests/unit.sh" { print $7 }' "$summary")"
 grep -q 'hidden successful output' "$(dirname "$summary")/$unit_log" || fail 'successful log was lost'
 run_fixture second
 [ "$(summary_path second)" != "$summary" ] && [ -f "$summary" ] || fail 'second run overwrote first run'
+
+# Native prerequisites must fail before any Go race checks, preserving their exit.
+rc=0
+RUNNER_FAIL_NATIVE=27 run_fixture native-failure || rc=$?
+[ "$rc" -eq 27 ] || fail 'native bootstrap failure lost its original exit'
+summary="$(summary_path native-failure)"
+awk -F '\t' '$1 == "check" && $3 == "build-native" && $4 == "failed" && $5 == 27 { found=1 }
+  END { exit !found }' "$summary" || fail 'native bootstrap failure missing from summary'
+tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t27\t' || fail 'native bootstrap run reported incorrectly'
+grep -q 'fixture native bootstrap failed' "$tmp/native-failure.out" || fail 'native bootstrap failure detail was suppressed'
+! grep -Fxq 'RUN go-race' "$tmp/native-failure.out" || fail 'runner tested Go after native bootstrap failure'
 
 # Child commands must not consume the manifest supplying the runner's loop.
 printf '#!/usr/bin/env bash\ncat >/dev/null\n' > "$fixture/tests/unit.sh"
@@ -114,7 +146,7 @@ grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/umask-failure.out" \
   && grep -Fq 'fixture_test.go:1: expected failure detail' "$tmp/umask-failure.out" \
   || fail 'early Go failure was hidden by trailing package output'
 ! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
-! grep -q 'RUN build' "$tmp/umask-failure.out" || fail 'runner built after a failed Go run'
+! grep -Fxq 'RUN build' "$tmp/umask-failure.out" || fail 'runner built the engine after a failed Go run'
 
 rc=0
 RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
@@ -122,7 +154,7 @@ RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
 [ "$(wc -l < "$tmp/focused-failure.go")" -eq 2 ] || fail 'focused failure did not stop before umask 0077'
 grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/focused-failure.out" \
   || fail 'focused Go failure detail was suppressed'
-! grep -q 'RUN build' "$tmp/focused-failure.out" || fail 'runner built after a focused Go failure'
+! grep -Fxq 'RUN build' "$tmp/focused-failure.out" || fail 'runner built the engine after a focused Go failure'
 
 rc=0
 RUNNER_MISSING_TEST=TestProjectStoreConformance run_fixture missing-selection || rc=$?
@@ -212,7 +244,8 @@ def interrupted_case(name, sig, expected_status):
         raise AssertionError(f'{name}: interrupted check summary is wrong: {checks!r}')
     if len(runs) != 1 or (runs[0]['status'], runs[0]['exit_code']) != ('failed', summary_code):
         raise AssertionError(f'{name}: run summary is wrong: {runs!r}')
-    if any(line.startswith(('RUN go-fuzz', 'RUN build', 'RUN tests/')) for line in output.splitlines()):
+    if any(line in ('RUN go-fuzz', 'RUN observation-fuzz', 'RUN build', 'RUN build-layout', 'RUN manifests')
+           or line.startswith('RUN tests/') for line in output.splitlines()):
         raise AssertionError(f'{name}: runner continued after the interrupted check')
 
 
