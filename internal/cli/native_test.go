@@ -2534,7 +2534,7 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 			arguments []string
 		}{
 			{name: "global version", arguments: []string{"--version"}},
-			{name: "read command", arguments: []string{"status"}},
+			{name: "status", arguments: []string{"status"}},
 			{name: "project list", arguments: []string{"list"}},
 			{name: "yard list", arguments: []string{"yards"}},
 			{name: "command help", arguments: []string{"update", "--help"}},
@@ -2565,8 +2565,14 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if code := program.Run(context.Background()); code != 0 {
-					t.Fatalf("read-only invocation failed: code=%d stderr=%q", code, stderr.String())
+				wantCode := 0
+				if recovery.name == "owner inventory" && invocation.name == "status" {
+					// Status owns recoverable controller metadata refreshes. A
+					// malformed journal must fail closed without changing it.
+					wantCode = 1
+				}
+				if code := program.Run(context.Background()); code != wantCode {
+					t.Fatalf("observation invocation: code=%d want=%d stderr=%q", code, wantCode, stderr.String())
 				}
 				got, err := os.ReadFile(journalPath)
 				if err != nil {

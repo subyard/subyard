@@ -1206,10 +1206,14 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 	}
 	if !all {
 		if selector := cli.env["SUBYARD_INVENTORY_SELECTOR"]; selector != "" {
-			results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
+			results := cli.allOwnerInventoriesForStatus(ctx, loaded)
 			selected, _, err := selectOwnerYards(results, selector)
 			if err != nil {
 				cli.errorf("status: %v", err)
+				return 1
+			}
+			if errors.Is(selected[0].err, ownerinventory.ErrIntegrity) {
+				cli.errorf("status: %v", selected[0].err)
 				return 1
 			}
 			hostID := selected[0].inventory.HostID
@@ -1253,7 +1257,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 		}
 		return cli.printYardStatus(ctx, loaded)
 	}
-	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
+	results := cli.allOwnerInventoriesForStatus(ctx, loaded)
 	code := 0
 	first := true
 	for _, result := range results {
