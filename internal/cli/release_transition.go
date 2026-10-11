@@ -564,7 +564,7 @@ func (cli *CLI) releaseTransitionTestYardOptions(
 		RepositoryRoot: cli.options.RepositoryRoot,
 		Incus:          "incus",
 		ConfigHome:     request.ConfigHome, DataHome: dataHome,
-		Environment: environmentList(cli.env, nil),
+		Environment: environmentList(environment, nil),
 		Stdout:      cli.options.Stderr, Stderr: cli.options.Stderr,
 		RunYard: cli.runReleaseTransitionYardCommand,
 	}, nil

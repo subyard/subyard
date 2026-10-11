@@ -1611,6 +1611,64 @@ func TestReleaseTransitionMigrationUsesPinnedCandidateEngine(t *testing.T) {
 	}
 }
 
+func TestReleaseTransitionRouteConsumersReloadIsolatedYardContext(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeCLIFile(t, filepath.Join(root, "config/subyard.env"), strings.Join([]string{
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "DEV_USER=dev", "SSH_PORT=2222",
+		"STORAGE_PATH=" + filepath.Join(root, "data/storage"),
+		"HOST_BASE=" + filepath.Join(root, "host"),
+		"RESTRICTED_DISK_PATHS=" + filepath.Join(root, "host"),
+		"HOST_MOUNTS=host-shared:/srv/shared:ro:0755",
+	}, "\n")+"\n", 0o600)
+	writeReleaseTransitionTestFile(t, filepath.Join(root, "config/yards/profiles/isolated.env"),
+		[]byte("ALLOWS_HOST_ACCESS=false\nHOST_MOUNTS=\nHOST_LINKS=\nHOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n"), 0o600)
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "yards/test-yard/config.env"),
+		[]byte("YARD_TEMPLATE=test-vms\n"), 0o600)
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "yards/isolated/config.env"),
+		[]byte("YARD_TEMPLATE=isolated\nSSH_PORT=2233\n"), 0o600)
+	source, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := source.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Environment["HOST_MOUNTS"] == "" {
+		t.Fatal("fixture must forward the invoking yard's host mounts")
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root,
+		Environment: environmentList(loaded.Environment, nil), Stdout: &stdout, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options, err := program.releaseTransitionTestYardOptions(releasetransition.ProcessRequest{ConfigHome: configHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Incus = filepath.Join(root, "incus")
+	writeCLIFile(t, options.Incus, `#!/bin/sh
+set -eu
+[ "$*" = 'list --all-projects --format=json' ] || exit 2
+printf '%s\n' '[{"name":"yard-isolated","project":"subyard-isolated","status":"STOPPED","config":{"user.subyard.managed":"true","user.subyard.name":"isolated"},"devices":{},"expanded_devices":{}}]'
+`, 0o700)
+	before, err := testyardmigration.PrepareRouteConsumersActivation(context.Background(), options)
+	if err != nil {
+		t.Fatalf("route consumer observation inherited another yard's host mounts: %v", err)
+	}
+	if strings.Contains(before, `"yard":"isolated"`) {
+		t.Fatalf("host-isolated yard entered the consumer set: %s", before)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("route consumer observation produced output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if program.baseEnv["HOST_MOUNTS"] == "" {
+		t.Fatal("route observation mutated the caller's environment")
+	}
+}
+
 func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
