@@ -33,8 +33,13 @@ const (
 )
 
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9._~+\-/=]+$`)
+var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
 
-// Config identifies the one GitHub App installation an owner-host broker serves.
+var errRepositoryUnavailable = errors.New("GitHub App is not installed on the repository or the repository is unavailable")
+var errInstallationLookup = errors.New("GitHub App installation lookup failed")
+var errTokenRejected = errors.New("GitHub installation token request was rejected; check installation access and permissions")
+
+// Config identifies the GitHub App and its default installation.
 // PrivateKeyFile is read only by the owner-side issuer and is never returned.
 type Config struct {
 	AppID                 string `json:"app_id"`
@@ -169,8 +174,25 @@ func newIssuerWithKey(cfg Config, key *rsa.PrivateKey) *Issuer {
 }
 
 func (issuer *Issuer) Issue(ctx context.Context) (Token, error) {
+	return issuer.IssueRepository(ctx, "")
+}
+
+func validRepository(repository string) bool {
+	if !repositoryPattern.MatchString(repository) {
+		return false
+	}
+	_, name, _ := strings.Cut(repository, "/")
+	return name != "." && name != ".."
+}
+
+// IssueRepository selects the repository's installation using owner-side App
+// authentication. An empty repository retains the configured default installation.
+func (issuer *Issuer) IssueRepository(ctx context.Context, repository string) (Token, error) {
 	if issuer == nil || issuer.key == nil || issuer.client == nil || issuer.base == "" {
 		return Token{}, errors.New("github broker is not configured")
+	}
+	if repository != "" && !validRepository(repository) {
+		return Token{}, errors.New("invalid GitHub repository; use owner/repo")
 	}
 	now := issuer.now().UTC()
 	claims := map[string]any{"iat": now.Add(-60 * time.Second).Unix(), "exp": now.Add(9 * time.Minute).Unix(), "iss": issuer.cfg.AppID}
@@ -190,28 +212,30 @@ func (issuer *Issuer) Issue(ctx context.Context) (Token, error) {
 		return Token{}, errors.New("sign github app assertion")
 	}
 	assertion := unsigned + "." + base64.RawURLEncoding.EncodeToString(signature)
-	body := bytes.NewReader([]byte(`{}`))
-	url := issuer.base + "/app/installations/" + strconv.FormatInt(issuer.cfg.InstallationID, 10) + "/access_tokens"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	installationID := issuer.cfg.InstallationID
+	if repository != "" {
+		data, status, lookupErr := issuer.appRequest(ctx, assertion, http.MethodGet, "/repos/"+repository+"/installation", nil)
+		if status == http.StatusNotFound {
+			return Token{}, errRepositoryUnavailable
+		}
+		if lookupErr != nil || status != http.StatusOK {
+			return Token{}, errInstallationLookup
+		}
+		var installation struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(data, &installation) != nil || installation.ID <= 0 {
+			return Token{}, errInstallationLookup
+		}
+		installationID = installation.ID
+	}
+	data, status, err := issuer.appRequest(ctx, assertion, http.MethodPost,
+		"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
-		return Token{}, errors.New("create github token request")
+		return Token{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+assertion)
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	request.Header.Set("User-Agent", "subyard-github-broker")
-	response, err := issuer.client.Do(request)
-	if err != nil {
-		return Token{}, errors.New("github token request failed")
-	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponse+1))
-	if err != nil || len(data) > maxResponse {
-		return Token{}, errors.New("github token response is too large")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Token{}, errors.New("github token request was rejected")
+	if status < 200 || status >= 300 {
+		return Token{}, errTokenRejected
 	}
 	var result struct {
 		Token     string    `json:"token"`
@@ -226,7 +250,29 @@ func (issuer *Issuer) Issue(ctx context.Context) (Token, error) {
 	return Token{Value: result.Token, ExpiresAt: result.ExpiresAt}, nil
 }
 
-// Handler exposes only the empty POST /token operation and secret-free GET /status.
+func (issuer *Issuer) appRequest(ctx context.Context, assertion, method, path string, body io.Reader) ([]byte, int, error) {
+	request, err := http.NewRequestWithContext(ctx, method, issuer.base+path, body)
+	if err != nil {
+		return nil, 0, errors.New("create github app request")
+	}
+	request.Header.Set("Authorization", "Bearer "+assertion)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	request.Header.Set("User-Agent", "subyard-github-broker")
+	response, err := issuer.client.Do(request)
+	if err != nil {
+		return nil, 0, errors.New("github app request failed")
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponse+1))
+	if err != nil || len(data) > maxResponse {
+		return nil, response.StatusCode, errors.New("github app response is too large")
+	}
+	return data, response.StatusCode, nil
+}
+
+// Handler exposes installation token issuance and secret-free GET /status.
 type Handler struct{ Issuer *Issuer }
 
 func NewHandler(issuer *Issuer) http.Handler { return Handler{Issuer: issuer} }
@@ -259,12 +305,35 @@ func (handler Handler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(request.Body, requestLimit+1))
-		if err != nil || len(body) != 0 {
-			http.Error(writer, "request body must be empty", http.StatusBadRequest)
+		if len(body) > requestLimit {
+			http.Error(writer, "request body is too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		token, err := handler.Issuer.Issue(request.Context())
+		var selection struct {
+			Repository string `json:"repository"`
+		}
+		if len(body) != 0 {
+			decoder := json.NewDecoder(bytes.NewReader(body))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&selection) != nil || decoder.Decode(new(any)) != io.EOF || !validRepository(selection.Repository) {
+				http.Error(writer, "invalid GitHub repository request", http.StatusBadRequest)
+				return
+			}
+		}
 		if err != nil {
+			http.Error(writer, "invalid GitHub repository request", http.StatusBadRequest)
+			return
+		}
+		token, err := handler.Issuer.IssueRepository(request.Context(), selection.Repository)
+		if err != nil {
+			if errors.Is(err, errRepositoryUnavailable) {
+				http.Error(writer, errRepositoryUnavailable.Error(), http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, errInstallationLookup) || errors.Is(err, errTokenRejected) {
+				http.Error(writer, err.Error(), http.StatusBadGateway)
+				return
+			}
 			http.Error(writer, "github token issuance failed", http.StatusBadGateway)
 			return
 		}

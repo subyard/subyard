@@ -53,8 +53,8 @@ selected profiles. Profile commands run on the owner host, where the protected d
 
 1. Create a GitHub App, choose its repository permissions, install it on the intended repositories,
    and download its RSA private key. Follow [GitHub’s App setup](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
-2. Enter the numeric **App ID** from the App settings (not the client ID), then the positive
-   **installation ID** from the installation URL, for example the numeric suffix of
+2. Enter the numeric **App ID** from the App settings (not the client ID), then a positive
+   default **installation ID** from an installation URL, for example the numeric suffix of
    `https://github.com/settings/installations/12345678`.
 3. Enter the downloaded PEM's path on that owner host. `~/` is supported. If the encrypted ledger
    already has the complete connection, setup restores it without asking for identifiers or another
@@ -129,7 +129,9 @@ after verifying the consumer.
 The whole connection uses existing encrypted ledger synchronization: enroll an owner peer with
 `yard keys trust @peer`, then run `yard keys sync @peer --now`, or let the enrolled automatic route
 sync it. The peer materializes the same App ID, installation ID and key without manual setup.
-Different broker instances using the same GitHub App installation use the same identifiers.
+The installation ID selects the default for commands without a repository target. The same App
+may be installed on personal accounts and multiple organizations; targeted commands discover the
+matching installation with the owner-side App key, without another connection or key import.
 Default and Hermes yards on one owner share the connection. Use `--local-only` on import to keep
 the whole connection out of peer sync. Plaintext connection files and the ledger identity stay
 outside guest delivery, config sync, host mounts and backups that enter a yard. The App key never
@@ -169,19 +171,46 @@ Use the client wrapper for GitHub CLI commands against a repository available to
 ```sh
 subyard-github status
 subyard-github run -- gh repo view owner/repo
+subyard-github run -- gh run list -R organization/repo
+subyard-github run -- gh api repos/organization/repo/actions/runs
+subyard-github run --repo organization/repo -- sh -c 'gh run list'
 ```
 
 `subyard-github status` reports `{"configured":false}` until protected App settings are installed. No token is minted by this check.
 
+Direct `gh` commands select from `-R`/`--repo`, the repository argument of `gh repo view` or
+`gh repo clone`, or a literal `repos/owner/repo/...` API endpoint (also as an
+`https://api.github.com/repos/...` URL). Native `repos/{owner}/{repo}/...` placeholders use
+the selected `GH_REPO`. Otherwise commands use `GH_REPO`,
+then the current checkout's `origin`. SSH origins are used only to identify a repository;
+their transport is preserved. Conflicting explicit repository selectors are rejected.
+For other programs, aliases, shell scripts or ambiguous targets, pass the wrapper's
+`run --repo owner/repo -- COMMAND`. This also sets `GH_REPO` in the child, so nested `gh`
+commands use the selected repository. With no target, commands use the configured default
+installation. A token serves one installation; run separate wrappers for `gh` commands against
+repositories in different installations.
+
 For Git HTTPS, use `subyard-github run -- git clone https://github.com/owner/repo.git` (or
 wrap `git fetch` / `git push`). The wrapper supplies an ephemeral credential helper through the
-child process environment. Ordinary unwrapped commands keep their existing authentication;
+child process environment. Each GitHub credential URL selects its own installation, including
+when a command accesses multiple remotes. Direct Git commands obtain tokens only through that
+helper; they do not mint an initial `GH_TOKEN`. Pass `run --repo owner/repo` if a Git hook also
+needs GitHub CLI authorization. Ordinary unwrapped commands keep their existing authentication;
 the profile does not modify Git configuration or the GitHub CLI auth store. Token requests have no per-call approval or
-repository/operation scope: GitHub App installation permissions determine the accessible
-repositories and actions. Each invocation requests a new token, including when a previous one is
+permission overrides: GitHub App installation permissions determine the accessible
+repositories and actions. Repository selection uses
+[GitHub's App-authenticated installation lookup](https://docs.github.com/en/rest/apps/apps#get-a-repository-installation-for-the-authenticated-app),
+so every repository granted to this App can select its personal or organization installation.
+A missing installation or unavailable repository fails without falling back to the default.
+Installation lookup and token rejection have separate diagnostics; a successful mint does not
+prove an operation's permission. Each token request creates a new token, including when a previous one is
 still valid. GitHub installation tokens expire after one hour; rerun the wrapper to refresh authorization
 for a later command. See [GitHub’s installation-token contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app). The read-only status surface reports a configured boolean; it does not
 expose token material or per-request authorization details.
+
+Use matching owner and guest profile versions for repository routing. A new client fails closed
+against an older broker that accepts only empty token requests; it never retries against the
+default installation. Existing empty requests retain their default-installation behavior.
 
 `yard -Y <yard> profile disable github` removes the profile wiring and service. Tokens already
 issued remain valid until GitHub expiry or [explicit GitHub revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token). The owner service loads the
