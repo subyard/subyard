@@ -85,9 +85,11 @@ def native_container():
     labels = config.get("Labels")
     if not isinstance(labels, dict) or labels.get("org.subyard.managed") != "ai-observer-v1":
         raise RuntimeError("AI Observer same-name container is foreign; container preserved")
+    # Docker reports its mount-point map in an unspecified enumeration order.
+    mounts = sorted(container["Mounts"], key=lambda mount: json.dumps(mount, sort_keys=True))
     return {"id": container.get("Id"), "image": container.get("Image"),
             "config": {key: config.get(key) for key in ("Image", "User", "Cmd", "Env", "Labels", "Entrypoint", "WorkingDir", "Volumes", "ExposedPorts")},
-            "host_config": host_config, "mounts": container.get("Mounts"),
+            "host_config": host_config, "mounts": mounts,
             "running": state["Running"], "status": state.get("Status")}
 
 

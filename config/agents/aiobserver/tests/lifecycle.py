@@ -2,6 +2,7 @@
 """Exact package-native assessments protect provisioning and retirement."""
 import copy
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -136,6 +137,35 @@ class LifecycleTest(unittest.TestCase):
             module.observe()  # An orphan owned container is not absence.
         self.container = None
         self.assertEqual(module.observe()[0]["state"], "absent")
+
+    def test_native_mount_order_preserves_approval_and_exact_mount_guards(self):
+        mounts = [
+            {"Type": "bind", "Source": "/fixtures/claude", "Destination": "/sessions/claude", "Mode": "ro", "RW": False, "Propagation": "rprivate"},
+            {"Type": "bind", "Source": "/fixtures/codex", "Destination": "/sessions/codex", "Mode": "ro", "RW": False, "Propagation": "rprivate"},
+            {"Type": "bind", "Source": "/fixtures/data", "Destination": "/app/data", "Mode": "rw", "RW": True, "Propagation": "rprivate"},
+        ]
+        self.container["Mounts"] = copy.deepcopy(mounts)
+        approved = module.observe()[0]
+        self.assertEqual(approved["state"], "stale")
+        for permutation in itertools.permutations(mounts):
+            with self.subTest(permutation=permutation):
+                self.container["Mounts"] = list(permutation)
+                self.assertEqual(module.observe()[0], approved)
+        changes = [mounts[1:], mounts + [dict(mounts[0], Destination="/other")], mounts + [mounts[0]]]
+        for key, value in (("Type", "volume"), ("Source", "/other"), ("Destination", "/other"),
+                           ("Mode", "rw"), ("RW", True), ("Propagation", "shared"), ("Driver", "foreign")):
+            changed = copy.deepcopy(mounts)
+            changed[0][key] = value
+            changes.append(changed)
+        for changed in changes:
+            with self.subTest(mounts=changed):
+                self.container["Mounts"] = changed
+                observed = module.observe()[0]
+                self.assertEqual(observed["desired"], approved["desired"])
+                self.assertNotEqual(observed["actual"], approved["actual"])
+                with self.assertRaisesRegex(RuntimeError, "changed before apply"):
+                    self.apply(approved)
+                self.assertEqual(self.effects, [])
 
     def test_owned_native_drift_invalidates_approval_before_any_effect(self):
         self.installed = False
