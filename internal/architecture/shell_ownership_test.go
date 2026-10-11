@@ -235,7 +235,7 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
 		"ssh-listener.sh":          true,
 		"teardown-session.sh":      true,
-		"ai-observer-proxy.sh":     true,
+		"owner-address.sh":         true,
 		"preview-proxy.sh":         true,
 		"lib-vm-page-reporting.sh": true, "lib-vm-storage.sh": true,
 	}
@@ -346,9 +346,10 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
 	goPrepared := "internal/cli/prepared_command.go"
 	contracts := map[string]shellContract{
-		"scripts/lib/ai-observer-proxy.sh":      {"library", "scripts/reconcile-integrations.sh", `lib/ai-observer-proxy.sh`},
+		"scripts/lib/owner-address.sh":          {"library", "scripts/lib/preview-proxy.sh", `owner-address.sh`},
+		"config/agents/aiobserver/proxy.sh":     {"library", "config/agents/aiobserver/lifecycle.py", `proxy.sh`},
 		"scripts/lib/preview-proxy.sh":          {"library", "scripts/prepare-preview-route.sh", `lib/preview-proxy.sh`},
-		"config/agents/aiobserver/provision.sh": {"profile", "config/agents.env", `agents/aiobserver/provision.sh`},
+		"config/agents/aiobserver/provision.sh": {"profile", "config/agents/aiobserver/integration.json", `provision.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},
 		"config/agents/opencode/provision.sh":   {"profile", "config/agents.env", `agents/opencode/provision.sh`},
@@ -516,6 +517,9 @@ func shellFiles(t *testing.T, root string) []string {
 
 func profileTestPath(path string) bool {
 	_, relative, found := strings.Cut(filepath.ToSlash(path), "/config/profiles/")
+	if !found {
+		_, relative, found = strings.Cut(filepath.ToSlash(path), "/config/agents/")
+	}
 	if !found {
 		return false
 	}

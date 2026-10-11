@@ -13,11 +13,14 @@ type SharedResourceStatus struct {
 }
 
 type AgentStatus struct {
-	Name          string `json:"name"`
-	State         string `json:"state"`
-	Hint          string `json:"hint,omitempty"`
-	URL           string `json:"url,omitempty"`
-	DashboardPort int    `json:"dashboardPort,omitempty"`
+	Name               string `json:"name"`
+	State              string `json:"state"`
+	Hint               string `json:"hint,omitempty"`
+	URL                string `json:"url,omitempty"`
+	DashboardPort      int    `json:"dashboardPort,omitempty"`
+	DashboardGuestPort int    `json:"-"`
+	DashboardScheme    string `json:"-"`
+	DashboardPath      string `json:"-"`
 }
 
 type StatusFacts struct {

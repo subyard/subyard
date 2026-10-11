@@ -1,5 +1,5 @@
-// Package observerroute defines the owned AI Observer container dashboard route.
-package observerroute
+// Package ownerroute provides owned loopback/Tailscale dashboard route primitives.
+package ownerroute
 
 import (
 	"context"
@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-const Key = "user.subyard.ai_observer_proxy"
 
 func TailscaleAddress(host string) bool {
 	address, err := netip.ParseAddr(host)
@@ -43,13 +41,13 @@ func Host(ctx context.Context) string {
 	return "127.0.0.1"
 }
 
-func Device(host, port string) map[string]string {
+func Device(host, port string, guestPort int) map[string]string {
 	return map[string]string{"type": "proxy", "bind": "host",
-		"listen": "tcp:" + host + ":" + port, "connect": "tcp:127.0.0.1:8080"}
+		"listen": "tcp:" + host + ":" + port, "connect": "tcp:127.0.0.1:" + strconv.Itoa(guestPort)}
 }
 
 // Owned accepts pending receipts for recovery, but never divergent or foreign devices.
-func Owned(marker string, device map[string]string) (host, port string, ready bool) {
+func Owned(marker string, device map[string]string, guestPort int) (host, port string, ready bool) {
 	version, value, ok := strings.Cut(marker, ":")
 	if !ok {
 		return "", "", false
@@ -68,7 +66,7 @@ func Owned(marker string, device map[string]string) (host, port string, ready bo
 	}
 	number, err := strconv.Atoi(port)
 	if err != nil || number < 1024 || number > 65535 || strconv.Itoa(number) != port ||
-		!maps.Equal(device, Device(host, port)) {
+		!maps.Equal(device, Device(host, port, guestPort)) {
 		return "", "", false
 	}
 	return host, port, !pending

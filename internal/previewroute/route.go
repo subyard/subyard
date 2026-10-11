@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Subyard/Subyard/internal/observerroute"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 )
 
 const Key = "user.subyard.preview_proxy"
@@ -33,12 +33,12 @@ func Device(host, port string, guest ...string) map[string]string {
 func Address(host string) bool {
 	address, err := netip.ParseAddr(host)
 	return err == nil && address.Is4() && address.String() == host &&
-		(address.IsPrivate() || observerroute.TailscaleAddress(host))
+		(address.IsPrivate() || ownerroute.TailscaleAddress(host))
 }
 
 // Host prefers active Tailscale, then the private source of the owner's default route.
 func Host(ctx context.Context) string {
-	if host := observerroute.Host(ctx); host != "127.0.0.1" {
+	if host := ownerroute.Host(ctx); host != "127.0.0.1" {
 		return host
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)

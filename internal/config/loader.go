@@ -151,18 +151,40 @@ func load(
 	values["SUBYARD_HOME"] = filepath.Clean(dataHome)
 	setConfigurationRolePaths(values, configHome, "default")
 
+	// Immutable inputs never inherit operator or ambient values.
+	integrationDefaultSources := map[string]string{}
+	for _, owner := range tracker.catalog.Integrations() {
+		integrationDefaultSources["integration:"+owner.Name] = filepath.Join(owner.Root, "integration.json")
+		for _, input := range owner.Inputs {
+			delete(values, input.Name)
+			delete(commandEnvironment, input.Name)
+		}
+		metadata := map[string]string{"PROVISION": owner.Provision, "COMMAND": owner.Command, "CHECK": owner.Check, "HEALTH": owner.Health, "CLEANUP": owner.Cleanup, "DEPENDS": strings.Join(owner.Depends, " "), "PERSIST": owner.Persist}
+		for suffix, value := range metadata {
+			if value == "" {
+				continue
+			}
+			if suffix == "PROVISION" || suffix == "CLEANUP" {
+				value = filepath.Join(owner.Root, value)
+			}
+			name := "AGENT_" + owner.Name + "_" + suffix
+			if values[name] == "" {
+				values[name] = value
+			}
+		}
+	}
 	// Immutable shipped defaults are the lowest-precedence layer.
 	defaultLayer := tracker.addLayer(
 		"default", "shipped defaults", configDir, pathPresent(configDir), settingAny,
 	)
 	for _, definition := range tracker.catalog.SettingCatalog() {
-		if !definition.HasDefault {
+		if !definition.HasDefault && (definition.DefaultFrom == nil || integrationDefaultSources[definition.Owner] == "") {
 			continue
 		}
 		if values[definition.Name] == "" {
 			values[definition.Name] = definition.Default
 		}
-		tracker.record(defaultLayer, definition.Name, values[definition.Name], "", 0, "profile default")
+		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
@@ -339,6 +361,14 @@ func load(
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
 	values["SUBYARD_CONFIG_DIR"] = configDir
+	// Config-directory env files are compatibility defaults, not authority for
+	// immutable package inputs. Report the same canonical value hooks receive.
+	for _, owner := range tracker.catalog.Integrations() {
+		for _, input := range owner.Inputs {
+			values[input.Name] = input.Value
+			tracker.record(defaultLayer, input.Name, input.Value, filepath.Join(owner.Root, "integration.json"), 0, "immutable shipped input")
+		}
+	}
 	values["SUBYARD_CONFIG_HOME"] = configHome
 	setConfigurationRolePaths(values, configHome, yardName)
 	if yardName != "default" {
@@ -362,7 +392,7 @@ func load(
 		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
 	}
 	if err == nil {
-		err = normalizeAIObserverPort(values, tracker, ctx.SSHPort)
+		err = normalizeDerivedPorts(values, tracker)
 	}
 	if err == nil {
 		err = normalizeWebPreviewPort(values, tracker, ctx.SSHPort)
@@ -385,6 +415,9 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 		if !definition.HostListener || definition.Name == name {
 			continue
 		}
+		if owner, integration := strings.CutPrefix(definition.Owner, "integration:"); integration && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), owner) {
+			continue
+		}
 		if owner, profile := strings.CutPrefix(definition.Owner, "profile:"); profile && !slices.Contains(profiles, owner) {
 			continue
 		}
@@ -392,36 +425,76 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 			return fmt.Errorf("%s collides with %s; choose another port", name, definition.Name)
 		}
 	}
-	if slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), "aiobserver") {
-		if observerPort, err := strconv.Atoi(values["AI_OBSERVER_HOST_PORT"]); err == nil && observerPort == port {
-			return fmt.Errorf("%s collides with AI_OBSERVER_HOST_PORT; choose another port", name)
-		}
-	}
+
 	return nil
 }
 
-// A yard already needs a distinct SSH port on its owner. Offset that port into
-// the unprivileged range so default-enabled observers do not all claim one port.
-// An explicit override handles collisions with unrelated host services.
-func normalizeAIObserverPort(values environment, tracker *settingTracker, sshPort int) error {
-	if values["AI_OBSERVER_HOST_PORT"] == "" {
-		values["AI_OBSERVER_HOST_PORT"] = strconv.Itoa(1024 + (sshPort+20000-1024)%64512)
-		tracker.normalize("AI_OBSERVER_HOST_PORT", values["AI_OBSERVER_HOST_PORT"], "derived from SSH_PORT")
+func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
+	var derive func(string) error
+	derive = func(name string) error {
+		definition, ok := tracker.catalog.LookupSetting(name)
+		if !ok || definition.DefaultFrom == nil || values[name] != "" {
+			return nil
+		}
+		if err := derive(definition.DefaultFrom.Setting); err != nil {
+			return err
+		}
+		source, err := strconv.Atoi(values[definition.DefaultFrom.Setting])
+		if err != nil {
+			return fmt.Errorf("derived port %s has invalid source", name)
+		}
+		width := definition.Maximum - definition.Minimum + 1
+		value := (source + definition.DefaultFrom.Offset - definition.Minimum) % width
+		if value < 0 {
+			value += width
+		}
+		values[name] = strconv.Itoa(definition.Minimum + value)
+		tracker.normalize(name, values[name], "derived from "+definition.DefaultFrom.Setting)
+		return nil
 	}
-	selected := false
-	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
-		selected = selected || agent == "aiobserver"
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		if err := derive(definition.Name); err != nil {
+			return err
+		}
 	}
-	if selected {
-		for _, definition := range tracker.catalog.SettingCatalog() {
-			if !definition.HostListener {
+	// Integration listeners preserve reservations against configured peer listeners,
+	// including packages whose service is stopped or not yet initialized.
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		owner, integration := strings.CutPrefix(definition.Owner, "integration:")
+		if !integration || !definition.HostListener || !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), owner) {
+			continue
+		}
+		for _, peer := range tracker.catalog.SettingCatalog() {
+			if !peer.HostListener || peer.Name == definition.Name || values[definition.Name] == "" {
 				continue
 			}
-			name := definition.Name
-			if values[name] == values["AI_OBSERVER_HOST_PORT"] {
-				return fmt.Errorf("AI_OBSERVER_HOST_PORT collides with %s; choose another port", name)
+			if other, ok := strings.CutPrefix(peer.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), other) {
+				continue
+			}
+			if values[peer.Name] == values[definition.Name] {
+				return fmt.Errorf("%s collides with %s; choose another port", definition.Name, peer.Name)
 			}
 		}
+	}
+	ports := map[string]string{}
+	for _, definition := range tracker.catalog.SettingCatalog() {
+		if !definition.HostListener {
+			continue
+		}
+		if owner, ok := strings.CutPrefix(definition.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), owner) {
+			continue
+		}
+		if owner, ok := strings.CutPrefix(definition.Owner, "profile:"); ok && !slices.Contains(strings.Fields(values["ENVIRONMENT_PROFILES"]), owner) {
+			continue
+		}
+		value := values[definition.Name]
+		if value == "" {
+			continue
+		}
+		if previous := ports[value]; previous != "" {
+			return fmt.Errorf("%s collides with %s; choose another port", definition.Name, previous)
+		}
+		ports[value] = definition.Name
 	}
 	return nil
 }

@@ -1,7 +1,6 @@
 package reconcileruntime
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -56,7 +55,6 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 		wantText []string
 	}{
 		{"paseo", []string{"integration paseo is not selected in CODING_TOOL_INTEGRATIONS", "/etc/systemd/system/paseo.service", "/var/lib/subyard/paseo-ownership", "service preserved", "releases before 0.15"}},
-		{"aiobserver", []string{"integration aiobserver is not selected in CODING_TOOL_INTEGRATIONS", "/etc/subyard/ai-observer/managed", "/etc/systemd/system/subyard-ai-observer.service", "service preserved"}},
 		{"ccusage", []string{"ALLOWS_CODING_TOOLS=false", "/usr/local/bin/ccusage", "/var/lib/subyard/ccusage-ownership", "utility preserved"}},
 	} {
 		for _, declared := range []bool{false, true} {
@@ -69,7 +67,7 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 					ExitCode: 1,
 					Stdout:   []byte("synthetic-private-stdout"),
 					Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:" + conflict.id + "\n"),
-				}}}}
+				}, Err: errors.New("guest command exited with status 1: synthetic-private-cause")}}}
 				runtime := Runtime{Executor: incus, Yard: domain.Context{YardName: "example"}}
 				if declared {
 					runtime.Environment = []string{"AGENT_" + conflict.id + "_CLEANUP=config/agents/" + conflict.id + "/cleanup.sh"}
@@ -78,12 +76,27 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 				if err == nil || changed || fingerprint != "" {
 					t.Fatalf("conflict did not fail closed: fingerprint=%q changed=%v error=%v", fingerprint, changed, err)
 				}
-				message := err.Error()
+				var diagnostic interface{ ActivationDiagnostic() (string, string) }
+				if !errors.As(err, &diagnostic) {
+					t.Fatalf("known native conflict lost its public diagnostic: %v", err)
+				}
+				message, retry := diagnostic.ActivationDiagnostic()
+				wantRetry := "run " + shellquote.Command([]string{"yard", "-Y", "example", "integration", "status"})
+				if declared && conflict.id != "ccusage" {
+					wantRetry = shellquote.Command([]string{"yard", "-Y", "example", "integration", "cleanup", conflict.id, "--check"})
+				}
+				if retry != wantRetry {
+					t.Fatalf("unsafe conflict retry: %q", retry)
+				}
 				for _, want := range conflict.wantText {
 					if !strings.Contains(message, want) {
 						t.Fatalf("diagnostic omitted %q: %s", want, message)
 					}
 				}
+				if len(message) > 512 || strings.ContainsAny(message+retry, "\r\n") {
+					t.Fatalf("release diagnostic is not bounded/control-free: %q / %q", message, retry)
+				}
+				message = err.Error()
 				wantHint := declared && conflict.id != "ccusage"
 				if gotHint := strings.Contains(message, "'integration' 'cleanup'"); gotHint != wantHint {
 					t.Fatalf("cleanup hint=%v, want %v: %s", gotHint, wantHint, message)
@@ -115,62 +128,9 @@ func TestIntegrationServiceUnknownErrorsStaySanitized(t *testing.T) {
 		if err == nil || err.Error() != "integration service or utility ownership is unknown or changed" {
 			t.Fatalf("unknown failure was not sanitized: %v", err)
 		}
-	}
-}
-
-// All guest paths are mapped into the fixture before executing the actual leaf.
-type integrationServiceProbeExecutor struct{ root string }
-
-func (fixture integrationServiceProbeExecutor) Exec(ctx context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-	command := append([]string(nil), request.Command...)
-	command[3] = strings.NewReplacer(
-		"/etc/", fixture.root+"/etc/",
-		"/var/", fixture.root+"/var/",
-		"/usr/", fixture.root+"/usr/",
-	).Replace(command[3])
-	process := exec.CommandContext(ctx, command[0], command[1:]...)
-	process.Env = append(os.Environ(), "PATH="+fixture.root+"/bin:"+os.Getenv("PATH"))
-	var stdout, stderr bytes.Buffer
-	process.Stdout, process.Stderr = &stdout, &stderr
-	err := process.Run()
-	result := ports.InstanceExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
-	if err != nil {
-		result.ExitCode = 1
-	}
-	return result, err
-}
-
-func TestIntegrationServiceProbePreservesUnownedPaseoUnit(t *testing.T) {
-	root := t.TempDir()
-	unit := filepath.Join(root, "etc/systemd/system/paseo.service")
-	for _, directory := range []string{filepath.Dir(unit), root + "/bin"} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if errors.As(err, &diagnostic) {
+			t.Fatal("unknown native output was promoted to a public diagnostic")
 		}
-	}
-	const content = "[Service]\nExecStart=/synthetic-private-command\n"
-	if err := os.WriteFile(unit, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(root+"/bin/systemctl", []byte("#!/bin/sh\nprintf unexpected >'"+root+"/service-call'\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtime := Runtime{Executor: integrationServiceProbeExecutor{root}}
-	for _, mode := range []string{"observe", "apply"} {
-		_, _, err := runtime.integrationServices(context.Background(), mode)
-		if err == nil || !strings.Contains(err.Error(), "integration paseo is not selected") {
-			t.Fatalf("unowned unit was not diagnosed in %s: %v", mode, err)
-		}
-		data, readErr := os.ReadFile(unit)
-		if readErr != nil || string(data) != content {
-			t.Fatalf("unowned unit changed: %v", readErr)
-		}
-	}
-	runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=paseo"}
-	if _, changed, err := runtime.integrationServices(context.Background(), "observe"); err != nil || changed {
-		t.Fatalf("selected integration was not skipped: changed=%v error=%v", changed, err)
-	}
-	if _, err := os.Stat(root + "/service-call"); !os.IsNotExist(err) {
-		t.Fatal("unowned or selected integration touched a service")
 	}
 }

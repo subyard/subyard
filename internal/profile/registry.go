@@ -81,45 +81,17 @@ func (definition Definition) Selected(yard string, environment map[string]string
 // Load uses only immutable shipped packages. No external registry or operator
 // code is loaded, and absence of a descriptor preserves existing profile hooks.
 func Load(root string) ([]Definition, error) {
-	root, err := filepath.Abs(root)
+	packages, err := loadDeclarations(root, "profiles", "profile.json")
 	if err != nil {
 		return nil, err
 	}
-	// Installed releases may be selected through runtime/current. Bind ordinary
-	// repository aliases once, while retaining the updater's descriptor authority.
-	if !pinnedRepositoryRoot.MatchString(root) {
-		resolved, resolveErr := filepath.EvalSymlinks(root)
-		if resolveErr == nil {
-			root = resolved
-		} else if !errors.Is(resolveErr, os.ErrNotExist) {
-			return nil, resolveErr
-		}
-	}
-	paths, err := filepath.Glob(filepath.Join(root, "config", "profiles", "*", "profile.json"))
-	if err != nil {
-		return nil, err
-	}
-	result := make([]Definition, 0, len(paths))
+	result := make([]Definition, 0, len(packages))
 	consumers := map[string]bool{}
 	setupPaths := map[string]bool{}
 	settingNames := map[string]bool{}
 	activationIDs := map[string]bool{}
-	for _, path := range paths {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, err
-		}
-		parent, err := os.Lstat(filepath.Dir(path))
-		if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("profile package must be a real directory")
-		}
-		if !info.Mode().IsRegular() || info.Size() > 64<<10 {
-			return nil, errors.New("profile declaration must be a bounded regular file")
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
+	for _, shipped := range packages {
+		path, data := shipped.path, shipped.data
 		var definition Definition
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()

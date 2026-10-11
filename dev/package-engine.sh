@@ -85,7 +85,7 @@ install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   scripts/e2e-lab/base.sh
-  scripts/lib/ai-observer-proxy.sh
+  scripts/lib/owner-address.sh
   scripts/lib/preview-proxy.sh
   scripts/prepare-preview-route.sh
   scripts/lib/engine-context.sh

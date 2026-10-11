@@ -9,8 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 subyard_require_engine_context
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
-# shellcheck source=scripts/lib/ai-observer-proxy.sh
-. "$SCRIPT_DIR/lib/ai-observer-proxy.sh"
 PROJ=(--project "$INCUS_PROJECT")
 [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" --format json | jq -r '.[0].status')" = Running ] \
   || die "integration reconcile requires a running yard"
@@ -46,25 +44,16 @@ fi
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
 echo "Agent CLIs:"
-_aiobserver_selected=0
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
-  [ "$_agent" != aiobserver ] || _aiobserver_selected=1
+  case " ${SUBYARD_INTEGRATION_LIFECYCLES:-} " in *" $_agent "*) continue ;; esac
   _provision_var="AGENT_${_agent}_PROVISION"
   _provision="${!_provision_var:-}"
   [ -n "$_provision" ] || continue
   [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
-  if [ "$_agent" = aiobserver ]; then
-    [[ "${AI_OBSERVER_CONTEXT:-}" =~ ^[0-9a-f]{64}$ ]] \
-      || die "prepared AI Observer context is required"
-    incus config set "$YARD_INSTANCE_NAME" user.subyard.ai_observer_provision pending "${PROJ[@]}" \
-      || die "could not invalidate AI Observer convergence"
-  fi
   info "provisioning $_agent CLI in $YARD_INSTANCE_NAME"
   _agent_env=(
     --env DEV_USER="$DEV_USER"
     --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
-    --env AI_OBSERVER_CONTEXT="${AI_OBSERVER_CONTEXT:-}"
-    --env AI_OBSERVER_FRONTEND_URL="${AI_OBSERVER_FRONTEND_URL:-}"
     --env YARD_VERSION="${YARD_VERSION:-}"
   )
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \
@@ -85,17 +74,3 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   fi
 done
 unset _agent _agent_env _check_var _check _health_var _provision_var _provision
-
-# Stop a previously managed observer when it is removed from the exact agent list.
-if [ "$_aiobserver_selected" = 0 ]; then
-  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
-    if [ -f /etc/subyard/ai-observer/managed ]; then
-      /usr/local/bin/ai-observer disable
-    fi
-  ' || die "could not disable the deselected AI Observer"
-fi
-subyard_ai_observer_proxy "$_aiobserver_selected" || die "AI Observer dashboard route did not converge"
-subyard_ai_observer_provision_marker \
-  "$_aiobserver_selected" "${AI_OBSERVER_CONTEXT:-}" \
-  || die "could not update AI Observer convergence marker"
-unset _aiobserver_selected

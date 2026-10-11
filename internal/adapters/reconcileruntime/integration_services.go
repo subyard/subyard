@@ -3,7 +3,6 @@ package reconcileruntime
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,16 +41,6 @@ case "$selected" in *' paseo '*) ;; *)
     fi
   fi
 ;; esac
-case "$selected" in *' aiobserver '*) ;; *)
-  if [ -e /etc/subyard/ai-observer/managed ] || [ -e /etc/systemd/system/subyard-ai-observer.service ]; then
-    /usr/local/bin/ai-observer assess-disable >/dev/null || conflict aiobserver
-    sha256sum /etc/subyard/ai-observer/managed /etc/systemd/system/subyard-ai-observer.service
-    if systemctl is-active --quiet subyard-ai-observer.service || systemctl is-enabled --quiet subyard-ai-observer.service; then
-      changed=1
-      [ "$mode" != apply ] || /usr/local/bin/ai-observer disable
-    fi
-  fi
-;; esac
 if [ "$allowed" = false ] && { [ -e /usr/local/bin/ccusage ] || [ -L /usr/local/bin/ccusage ]; }; then
   receipt=/var/lib/subyard/ccusage-ownership
   if ! { [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
@@ -70,14 +59,21 @@ fi
 printf 'changed=%s\n' "$changed"
 `, "subyard", mode, runtime.environmentValue("CODING_TOOL_INTEGRATIONS"), runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}})
 	if err != nil || result.ExitCode != 0 {
+		yard := runtime.Yard.YardName
+		if yard == "" {
+			yard = "default"
+		}
+		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 		for _, line := range strings.Split(string(result.Stderr), "\n") {
 			switch line {
 			case "subyard-integration-conflict:paseo":
-				return "", false, fmt.Errorf("integration paseo is not selected in CODING_TOOL_INTEGRATIONS, but /etc/systemd/system/paseo.service remains and ownership cannot be verified using /var/lib/subyard/paseo-ownership; service preserved (releases before 0.15 did not create this receipt)%s", runtime.integrationCleanupHint("paseo"))
-			case "subyard-integration-conflict:aiobserver":
-				return "", false, fmt.Errorf("integration aiobserver is not selected in CODING_TOOL_INTEGRATIONS, but its managed marker or systemd service remains and ownership cannot be verified; service preserved. Inspect /etc/subyard/ai-observer/managed and /etc/systemd/system/subyard-ai-observer.service in the yard before explicitly retiring the unwanted service%s", runtime.integrationCleanupHint("aiobserver"))
+				detail, cleanupRetry := runtime.integrationCleanupDiagnostic("paseo")
+				if cleanupRetry != "" {
+					retry = cleanupRetry
+				}
+				return "", false, integrationOwnershipError{message: "integration paseo is not selected in CODING_TOOL_INTEGRATIONS, but /etc/systemd/system/paseo.service remains and ownership cannot be verified using /var/lib/subyard/paseo-ownership; service preserved (releases before 0.15 did not create this receipt)", retry: retry, detail: detail}
 			case "subyard-integration-conflict:ccusage":
-				return "", false, errors.New("this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility")
+				return "", false, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry}
 			}
 		}
 		return "", false, errors.New("integration service or utility ownership is unknown or changed")
@@ -85,9 +81,9 @@ printf 'changed=%s\n' "$changed"
 	return string(result.Stdout), strings.Contains(string(result.Stdout), "changed=1"), nil
 }
 
-func (runtime Runtime) integrationCleanupHint(id string) string {
+func (runtime Runtime) integrationCleanupDiagnostic(id string) (string, string) {
 	if runtime.environmentValue("AGENT_"+id+"_CLEANUP") == "" {
-		return ""
+		return "", ""
 	}
 	yard := runtime.Yard.YardName
 	if yard == "" {
@@ -104,9 +100,15 @@ func (runtime Runtime) integrationCleanupHint(id string) string {
 		}
 	}
 	command := []string{executable, "-Y", yard, "integration", "cleanup", id}
+	check := shellquote.Command(append(slices.Clone(command), "--check"))
 	return ". If this integration is no longer needed, inspect its profile-owned cleanup plan on the owner host:\n" +
-		shellquote.Command(append(slices.Clone(command), "--check")) + "\nThen run with confirmation:\n" + shellquote.Command(command)
+		check + "\nThen run with confirmation:\n" + shellquote.Command(command), check
 }
+func (runtime Runtime) integrationCleanupHint(id string) string {
+	hint, _ := runtime.integrationCleanupDiagnostic(id)
+	return hint
+}
+
 func (runtime Runtime) retireIntegrationServices(ctx context.Context) error {
 	_, _, err := runtime.integrationServices(ctx, "apply")
 	return err

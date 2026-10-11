@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish preview on an active Tailscale or private primary owner IPv4.
-# shellcheck source=scripts/lib/ai-observer-proxy.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ai-observer-proxy.sh"
+# shellcheck source=scripts/lib/owner-address.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/owner-address.sh"
 
 subyard_preview_private_address() {
   local address="$1" first second third fourth octet
@@ -16,7 +16,7 @@ subyard_preview_private_address() {
 }
 
 subyard_preview_address() {
-  subyard_ai_observer_tail_address "$1" || subyard_preview_private_address "$1"
+  subyard_owner_tail_address "$1" || subyard_preview_private_address "$1"
 }
 
 subyard_preview_route() {

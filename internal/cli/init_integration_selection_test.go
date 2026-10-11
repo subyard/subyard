@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -146,6 +147,63 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	want := "yard default: take matching legacy path under integration management: /home/dev/.codex/AGENTS.md"
 	if !strings.Contains(output.String(), want) || !strings.Contains(strings.Join(execution.consequences(), "\n"), want) {
 		t.Fatal("ownership adoption was omitted from the preview or consent consequences")
+	}
+	definition, _ := program.manifest.Lookup("init")
+	planExecution := *execution
+	planExecution.hostID = "fixture-host"
+	planExecution.bootstrap = &initBootstrap{profile: "fixture", targetPath: path}
+	for _, stage := range application.InitStages(proposed.Context) {
+		planExecution.plan.Steps = append(planExecution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
+	}
+	prepared := &preparedCommand{CLI: program, Loaded: proposed, Definition: definition,
+		steps: planExecution.operationSteps, stepsComplete: true,
+		assess: func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() },
+		execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+			t.Fatal("read-only planning executed init")
+			return domain.AdapterResult{}, nil
+		}}
+	prepared.policy = commandPolicy(definition, proposed.Context, nil, nil)
+	if err := prepared.preparePlan(ctx); err != nil {
+		t.Fatal(err)
+	}
+	registrationIndex, hostIDIndex, provisionIndex := -1, -1, -1
+	for index, step := range prepared.Plan.Steps {
+		switch step.ID {
+		case "init.registration":
+			registrationIndex = index
+		case "init.host-id":
+			hostIDIndex = index
+		case "init.stage.provision":
+			provisionIndex = index
+		}
+	}
+	if registrationIndex < 0 || hostIDIndex <= registrationIndex || provisionIndex <= hostIDIndex {
+		t.Fatal("fixture must capture registration, HostID and native provisioning in execution order")
+	}
+	previous := "init.stage.provision"
+	for _, path := range adoption.Adoption {
+		found := false
+		for index, step := range prepared.Plan.Steps {
+			if step.Target == path && step.Decision == domain.StepApply {
+				if index <= provisionIndex || len(step.DependsOn) != 1 || step.DependsOn[0] != previous {
+					t.Fatalf("adoption path %s did not follow approved provisioning: %#v", path, step)
+				}
+				previous = step.ID
+				found = true
+			}
+		}
+		if !found || !strings.Contains(strings.Join(prepared.Plan.Assessment.Consequences, "\n"), path) {
+			t.Fatalf("typed init plan or confirmation omitted captured adoption path %s", path)
+		}
+	}
+	for _, mode := range []initMode{initConfigs, initReset} {
+		other := planExecution
+		other.mode = mode
+		for _, step := range other.operationSteps() {
+			if strings.HasPrefix(step.ID, "init.integration-adoption.") {
+				t.Fatalf("mode %v acquired ordinary init adoption work", mode)
+			}
+		}
 	}
 	before, err := readConfigAuthoringTarget(path)
 	if err != nil {
@@ -670,5 +728,49 @@ func TestInitRejectsIntegrationInputsChangedAfterPlan(t *testing.T) {
 				t.Fatalf("stale init mutated runtime: %#v", platform)
 			}
 		})
+	}
+}
+
+func TestInitIntegrationBaselineBindsInstalledPackageDefaultsAndAssets(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	packageRoot := filepath.Join(root, "config/agents/sample")
+	if err := os.MkdirAll(packageRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	declaration := `{"schema_version":1,"inputs":[{"name":"SAMPLE_VERSION","type":"version","value":"1.2.3"}],"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","yard"],"application":"yard-init","minimum":1024,"maximum":65535,"default":"18080"},{"name":"SAMPLE_DERIVED_PORT","type":"port","scopes":["shipped","yard"],"application":"yard-init","minimum":1024,"maximum":65535,"default_from":{"setting":"SSH_PORT","offset":20000}}],"provision":"provision.sh","lifecycle":{"handler":"lifecycle.sh","source_files":["proxy.sh"]}}`
+	manifest := filepath.Join(packageRoot, "integration.json")
+	testkit.WriteFile(t, manifest, []byte(declaration), 0644)
+	for _, name := range []string{"provision.sh", "lifecycle.sh", "proxy.sh"} {
+		testkit.WriteFile(t, filepath.Join(packageRoot, name), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := captureInitIntegrationBaseline(loaded)
+	if err != nil {
+		t.Fatalf("installed package defaults prevented init assessment: %v", err)
+	}
+	if !baseline.Sources[manifest].Exists || baseline.Sources[filepath.Join(root, "config")].Exists {
+		t.Fatal("defaults did not bind the package manifest as a regular file")
+	}
+	for _, name := range []string{"SAMPLE_VERSION", "SAMPLE_PORT", "SAMPLE_DERIVED_PORT"} {
+		for _, resolution := range loaded.Settings[name].Resolutions {
+			if resolution.Scope == "default" && resolution.Path != manifest {
+				t.Fatalf("%s has incorrect default source %q", name, resolution.Path)
+			}
+		}
+	}
+	execution := &initExecution{loaded: loaded, integrationBaseline: baseline}
+	if err := execution.checkIntegrationBaseline(program); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(packageRoot, "proxy.sh"), []byte("#!/bin/sh\nexit 1\n"), 0755)
+	if err := execution.checkIntegrationBaseline(program); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("installed package asset drift was not rejected: %v", err)
 	}
 }

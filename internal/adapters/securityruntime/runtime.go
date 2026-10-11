@@ -20,9 +20,10 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/observerroute"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -37,6 +38,7 @@ type Runtime struct {
 	Stderr               io.Writer
 	State                func(context.Context, Runtime) (ports.ReconcileState, bool, error)
 	ProxyContracts       []resource.ProxyContract
+	Integrations         []profile.IntegrationDefinition
 	ResolveOwnerAddress  func(context.Context, string) (string, error)
 	OwnerIPv4OnInterface func(string, string) bool
 }
@@ -266,8 +268,8 @@ func (runtime Runtime) liveFindings(ctx context.Context, state ports.ReconcileSt
 			if err := runtime.checkPreviewProxy(ctx, device, instance.LocalDevices[name], instance.LocalConfig, instance.Devices["eth0"]); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
-		} else if name == "ai-observer" && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
-			if err := runtime.checkObserverProxy(ctx, device, instance.LocalConfig); err != nil {
+		} else if runtime.integrationProxy(name) != nil && deviceType == "proxy" && !loopbackProxy(device["listen"]) {
+			if err := runtime.checkIntegrationProxy(ctx, *runtime.integrationProxy(name), device, instance.LocalConfig); err != nil {
 				result = append(result, finding{"fail", err.Error()})
 			}
 		} else if runtime.proxyContract(name) != nil {
@@ -316,12 +318,23 @@ func (runtime Runtime) checkPreviewProxy(ctx context.Context, device, localDevic
 	return nil
 }
 
-func (runtime Runtime) checkObserverProxy(ctx context.Context, device, instanceConfig map[string]string) error {
-	host, port, ready := observerroute.Owned(instanceConfig[observerroute.Key], device)
-	if !ready || !observerroute.TailscaleAddress(host) || port != runtime.Environment["AI_OBSERVER_HOST_PORT"] ||
-		!slices.Contains(strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"]), "aiobserver") ||
-		runtime.Yard.YardKind == domain.YardVM {
-		return errors.New("AI Observer proxy does not match its selected, owned Tailscale route")
+func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinition {
+	definitions := runtime.Integrations
+	if definitions == nil {
+		definitions, _ = profile.LoadIntegrations(runtime.RepositoryRoot)
+	}
+	for _, definition := range definitions {
+		if definition.Dashboard != nil && definition.Dashboard.ContainerRoute != nil && definition.Dashboard.ContainerRoute.DeviceName == name {
+			return &definition
+		}
+	}
+	return nil
+}
+func (runtime Runtime) checkIntegrationProxy(ctx context.Context, definition profile.IntegrationDefinition, device, instanceConfig map[string]string) error {
+	dashboard := definition.Dashboard
+	host, port, ready := ownerroute.Owned(instanceConfig[dashboard.ContainerRoute.MarkerKey], device, dashboard.GuestPort)
+	if !ready || !ownerroute.TailscaleAddress(host) || port != runtime.Environment[dashboard.PortSetting] || !slices.Contains(strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"]), definition.Name) || runtime.Yard.YardKind == domain.YardVM {
+		return errors.New("integration proxy does not match its selected, owned Tailscale route")
 	}
 	resolver := runtime.ResolveOwnerAddress
 	if resolver == nil {
@@ -329,7 +342,7 @@ func (runtime Runtime) checkObserverProxy(ctx context.Context, device, instanceC
 	}
 	address, err := resolver(ctx, host)
 	if err != nil || address != host {
-		return errors.New("AI Observer proxy is not bound to an active owner Tailscale address")
+		return errors.New("integration proxy is not bound to an active owner Tailscale address")
 	}
 	return nil
 }

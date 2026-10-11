@@ -800,9 +800,9 @@
       "risk_domains": ["profile-resource", "credential-profile", "boot-lifecycle"]
     },
     {
-      "id": "internal-observerroute",
+      "id": "internal-ownerroute",
       "priority": 564,
-      "pattern": "^internal/observerroute/.*$",
+      "pattern": "^internal/ownerroute/.*$",
       "check_sets": ["host-free-core"],
       "risk_domains": ["profile-resource"]
     },

@@ -2192,7 +2192,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 			Profiles: []string{"sample", "another"},
 			Agents: []domain.AgentStatus{
 				{Name: "codex", State: "enabled"},
-				{Name: "aiobserver", State: "up", URL: "http://127.0.0.1:18080/"},
+				{Name: "sample-dashboard", State: "up", URL: "http://127.0.0.1:18080/"},
 			},
 			Shared: []domain.SharedResourceStatus{{
 				Profile: "sample", Name: "service", State: "up", Hint: "yard service down",
@@ -2209,7 +2209,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	for _, expected := range []string{
 		"yard  RUNNING", "desired  running", "ip       10.0.0.2", "host-demo",
 		"services ssh/docker = active/active", "vscode   key=yes server=yes git-id=yes",
-		"projects 1", "profiles sample another", "codex", "enabled", "aiobserver", "up",
+		"projects 1", "profiles sample another", "codex", "enabled", "sample-dashboard", "up",
 		"http://127.0.0.1:18080/", "sample    service", "security static-only", "space    1G",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
@@ -2218,7 +2218,7 @@ func TestNativeStatusUsesTypedPortsAndRendersParityFields(t *testing.T) {
 	}
 }
 
-func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
+func TestIntegrationDashboardStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 	tests := []struct {
 		name          string
 		yard          domain.Context
@@ -2230,7 +2230,7 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 			name: "local container direct route",
 			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
 			agent: domain.AgentStatus{
-				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/",
 				URL: "http://127.0.0.1:18080/",
 			},
 			want: []string{"http://127.0.0.1:18080/"},
@@ -2238,16 +2238,16 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 		{
 			name:  "local vm guest tunnel",
 			yard:  domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
-			agent: domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+			agent: domain.AgentStatus{Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/"},
 			want: []string{
 				"http://127.0.0.1:18080/",
-				"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8080' 'yard-demo'",
+				"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8764' 'yard-demo'",
 			},
 		},
 		{
 			name: "remote container direct Tailscale route",
 			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
-			agent: domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080,
+			agent: domain.AgentStatus{Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/",
 				URL: "http://100.101.102.103:18080/"},
 			ownerEndpoint: "operator@owner.example",
 			want:          []string{"http://100.101.102.103:18080/"},
@@ -2256,7 +2256,7 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 			name: "remote container owner tunnel",
 			yard: domain.Context{YardKind: domain.YardContainer, SSHHost: "yard"},
 			agent: domain.AgentStatus{
-				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/",
 				URL: "http://127.0.0.1:18080/",
 			},
 			ownerEndpoint: "operator@owner.example",
@@ -2268,7 +2268,7 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 		{
 			name:          "remote vm nested tunnel",
 			yard:          domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
-			agent:         domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+			agent:         domain.AgentStatus{Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/"},
 			ownerEndpoint: "operator@owner.example",
 			want: []string{
 				"http://127.0.0.1:18080/",
@@ -2294,19 +2294,111 @@ func TestAIObserverStatusRendersWorkingLocalAndRemoteTunnelHints(t *testing.T) {
 	}
 }
 
-func TestAIObserverRemoteVMTunnelRunsNestedSSHThroughOwner(t *testing.T) {
-	got := aiObserverTunnelArguments(
+func TestIntegrationDashboardRemoteVMTunnelRunsNestedSSHThroughOwner(t *testing.T) {
+	got := integrationTunnelArguments(
 		domain.Context{YardKind: domain.YardVM, SSHHost: "yard-demo"},
-		domain.AgentStatus{Name: "aiobserver", State: "up", DashboardPort: 18080},
+		domain.AgentStatus{Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/"},
 		"operator@owner.example",
 	)
 	want := []string{
 		"ssh", "-T", "-o", "ExitOnForwardFailure=yes",
 		"-L", "18080:127.0.0.1:18080", "operator@owner.example",
-		"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8080' 'yard-demo'",
+		"'ssh' '-N' '-o' 'ExitOnForwardFailure=yes' '-L' '18080:127.0.0.1:8764' 'yard-demo'",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("remote VM tunnel arguments = %#v, want %#v", got, want)
+	}
+}
+
+func TestOlderOwnerDashboardStatusUsesShippedRenderingMetadata(t *testing.T) {
+	root := testkit.TempDir(t)
+	packageRoot := filepath.Join(root, "config/agents/sample-dashboard")
+	if err := os.MkdirAll(packageRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(packageRoot, "integration.json"), []byte(`{"schema_version":1,"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","yard"],"application":"yard-init","minimum":1024,"maximum":65535,"default":"18080"}],"dashboard":{"scheme":"https","path":"/dashboard","port_setting":"SAMPLE_PORT","guest_port":8764}}`), 0644)
+	catalog, err := config.LoadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		kind                  domain.YardKind
+		payload, url, forward string
+	}{
+		{domain.YardContainer, `{"name":"sample-dashboard","state":"up","dashboardPort":19090,"url":"http://127.0.0.1:19090/owner-path?view=1"}`, "http://127.0.0.1:19090/owner-path?view=1", "19090:127.0.0.1:19090"},
+		{domain.YardVM, `{"name":"sample-dashboard","state":"up","dashboardPort":19090}`, "https://127.0.0.1:19090/dashboard", "19090:127.0.0.1:8764"},
+	} {
+		t.Run(string(test.kind), func(t *testing.T) {
+			var agent domain.AgentStatus
+			if err := json.Unmarshal([]byte(test.payload), &agent); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			program := &CLI{catalog: catalog, options: Options{Stdout: &output}}
+			program.printRemoteStatusFacts(domain.YardStatus{Context: domain.Context{YardKind: test.kind, SSHHost: "retained-owner-yard"}, Facts: domain.StatusFacts{Agents: []domain.AgentStatus{agent}}}, "operator@owner.example")
+			for _, expected := range []string{test.url, test.forward, "operator@owner.example"} {
+				if !strings.Contains(output.String(), expected) {
+					t.Fatalf("older owner status omitted %q: %s", expected, output.String())
+				}
+			}
+			if test.kind == domain.YardVM && !strings.Contains(output.String(), "retained-owner-yard") {
+				t.Fatal("older owner SSH context was replaced")
+			}
+		})
+	}
+}
+
+func TestDashboardStatusRetainsPublishedRPCV1AgentSchema(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join(repositoryRoot(t), "api/yard-rpc/v1/core-results.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema any
+	if err := json.Unmarshal(source, &schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"$defs", "status", "properties", "facts", "properties", "agents", "items"} {
+		object, ok := schema.(map[string]any)
+		if !ok {
+			t.Fatalf("schema path %s is not an object", key)
+		}
+		schema = object[key]
+	}
+	agentSchema := schema.(map[string]any)
+	if agentSchema["additionalProperties"] != false {
+		t.Fatal("published agent schema must remain closed")
+	}
+	payload, err := json.Marshal(domain.AgentStatus{Name: "sample-dashboard", State: "up", Hint: "owned", URL: "http://127.0.0.1:18080/", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var emitted map[string]any
+	if err := json.Unmarshal(payload, &emitted); err != nil {
+		t.Fatal(err)
+	}
+	properties := agentSchema["properties"].(map[string]any)
+	for key, value := range emitted {
+		property, allowed := properties[key].(map[string]any)
+		if !allowed {
+			t.Fatalf("emitted field %s violates the closed v1 agent schema", key)
+		}
+		switch property["type"] {
+		case "string":
+			if _, ok := value.(string); !ok {
+				t.Fatalf("%s must be a string", key)
+			}
+		case "integer":
+			if number, ok := value.(float64); !ok || number != float64(int(number)) {
+				t.Fatalf("%s must be an integer", key)
+			}
+		default:
+			t.Fatalf("unsupported schema type for %s", key)
+		}
+	}
+	for _, required := range agentSchema["required"].([]any) {
+		if _, ok := emitted[required.(string)]; !ok {
+			t.Fatalf("required field %s missing", required)
+		}
 	}
 }
 
@@ -2334,7 +2426,7 @@ func TestRemoteStatusFactsPreserveProfilesAgentsAndResources(t *testing.T) {
 		Facts: domain.StatusFacts{
 			Profiles: []string{"sample"},
 			Agents: []domain.AgentStatus{{
-				Name: "aiobserver", State: "up", DashboardPort: 18080,
+				Name: "sample-dashboard", State: "up", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/",
 				URL: "http://127.0.0.1:18080/",
 			}},
 			Shared: []domain.SharedResourceStatus{{
@@ -2345,7 +2437,7 @@ func TestRemoteStatusFactsPreserveProfilesAgentsAndResources(t *testing.T) {
 	}
 	program.printRemoteStatusFacts(status, "operator@owner.example")
 	for _, want := range []string{
-		"profiles sample", "aiobserver", "operator@owner.example", "sample", "dashboard",
+		"profiles sample", "sample-dashboard", "operator@owner.example", "sample", "dashboard",
 		"http://owner.tailnet.ts.net:19119/",
 	} {
 		if !strings.Contains(output.String(), want) {

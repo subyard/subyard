@@ -100,8 +100,18 @@ run_declined() {
   local rc=$?
   set -e
   [ "$rc" -ne 0 ] || die "declined command succeeded: $command"
-  grep -Fq 'operation declined' "$output" \
-    || die "declined command returned the wrong diagnostic: $command"
+  if ! grep -Fq 'operation declined' "$output"; then
+    # Activation hides private adapter errors; the public read-only status
+    # exposes its bounded diagnostic without changing the original failure.
+    if find_candidate_launcher; then
+      operator_env timeout 120 "$CANDIDATE_LAUNCHER" -Y default integration status --json \
+        >"$output.integration-status.log" 2>&1 || true
+    else
+      printf '%s\n' 'Verified candidate unavailable for read-only status diagnostic.' \
+        >"$output.integration-status.log"
+    fi
+    die "declined command returned the wrong diagnostic: $command"
+  fi
 }
 
 assert_adoption_plan() {
@@ -110,7 +120,14 @@ assert_adoption_plan() {
     /home/dev/.claude/settings.json \
     /home/dev/.codex/rules/repo.rules \
     /home/dev/.claude/projects; do
-    grep -Fq "$path" "$output" || die "adoption plan omitted $path"
+    if ! grep -Fq "$path" "$output"; then
+      cat "$output" >&2 || true
+      if find_candidate_launcher; then
+        operator_env timeout 120 "$CANDIDATE_LAUNCHER" -Y default integration status --json \
+          >"$output.integration-status.log" 2>&1 || true
+      fi
+      die "adoption plan omitted $path"
+    fi
   done
 }
 
@@ -125,8 +142,7 @@ find_candidate_launcher() {
     done
     [ "${#matches[@]}" = 1 ] || exit 1
     printf "%s\n" "${matches[0]}"
-  ' _ "$OPERATOR_HOME/.subyard/runtime" "$CANDIDATE_VERSION")" \
-    || die 'could not identify the one verified published candidate launcher'
+  ' _ "$OPERATOR_HOME/.subyard/runtime" "$CANDIDATE_VERSION")"
 }
 
 yard_config_fingerprint() {
@@ -151,7 +167,9 @@ p0_capacity_reset_build_cache
 
 # The shared helper deliberately prepares AGENTS=none for its own fixture. Remove it entirely:
 # v0.14.0 must resolve its ordinary shipped five-tool default.
+# This integration-only fixture explicitly selects no optional environment profiles.
 operator_env bash -c 'cat > "$1" <<EOF
+ENVIRONMENT_PROFILES=
 BASE_IMAGE=subyard-e2e-debian-13-cloud-container
 BASE_IMAGE_FALLBACK=images:debian/13/cloud
 DEV_UID=2000
@@ -223,7 +241,8 @@ run_declined "$STATE_ROOT/update-declined.log" "file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION"
 assert_adoption_plan "$STATE_ROOT/update-declined.log"
 assert_unadopted "$BASELINE_FINGERPRINT"
-find_candidate_launcher
+find_candidate_launcher \
+  || die 'could not identify the one verified published candidate launcher'
 
 info 'declining the explicit candidate init adoption plan'
 run_declined "$STATE_ROOT/init-declined.log" "file://$RELEASE_ROOT" \
@@ -309,17 +328,63 @@ if operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   >"$STATE_ROOT/paseo-update-blocked.log" 2>&1; then
   die 'published updater accepted an unowned unselected Paseo service'
 fi
-assert_unadopted "$BASELINE_FINGERPRINT"
-# Parse the printed command as argv and validate the exact candidate and bounded action.
-# Never evaluate diagnostic text as shell code.
-python3 - "$STATE_ROOT/paseo-update-blocked.log" "${CANDIDATE_LAUNCHER%/yard}/yard-engine" \
-  >"$STATE_ROOT/cleanup-command" <<'PYHINT'
+assert_paseo_preserved() {
+  assert_unadopted "$BASELINE_FINGERPRINT"
+  [ "$(guest sha256sum /etc/systemd/system/paseo.service /srv/agents/paseo/data/cleanup-sentinel)" = "$paseo_before" ] \
+    || die 'read-only inspection changed preserved Paseo artifacts'
+  guest sh -eu -c '
+    systemctl is-active --quiet paseo.service
+    systemctl is-enabled --quiet paseo.service
+    [ ! -e /etc/systemd/system/paseo.service.subyard-retired ]
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+  '
+}
+assert_paseo_preserved
+# The frozen release protocol carries one bounded message and one safe retry.
+# Require its read-only cleanup retry, then use candidate-owned public status for
+# the full cleanup preview/confirmation hint; neither read may change ownership.
+if ! operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --check \
+  >"$STATE_ROOT/paseo-check.json" 2>"$STATE_ROOT/paseo-check.log"; then
+  die 'Paseo check did not produce a readable inspection'
+fi
+paseo_conflict_message='integration paseo is not selected in CODING_TOOL_INTEGRATIONS, but /etc/systemd/system/paseo.service remains and ownership cannot be verified using /var/lib/subyard/paseo-ownership; service preserved (releases before 0.15 did not create this receipt)'
+jq -e --arg message "$paseo_conflict_message" '.outcome.reachedGoal == false and .outcome.message == $message and (.outcome.message == .blockers[0].message) and (.outcome.retry == .blockers[0].retry)' \
+  "$STATE_ROOT/paseo-check.json" >/dev/null || die 'Paseo check omitted its public ownership conflict'
+python3 - "$STATE_ROOT/paseo-check.json" "${CANDIDATE_LAUNCHER%/yard}/yard-engine" <<'PYCHECK'
+import json
 import shlex
 import sys
-lines = open(sys.argv[1]).read().splitlines()
+inspection = json.load(open(sys.argv[1]))
+expected = [sys.argv[2], "-Y", "default", "integration", "cleanup", "paseo", "--check"]
+assert shlex.split(inspection["outcome"]["retry"]) == expected, inspection["outcome"]
+PYCHECK
+assert_paseo_preserved
+operator_env "${CANDIDATE_LAUNCHER%/yard}/yard-engine" -Y default integration status paseo --json \
+  >"$STATE_ROOT/paseo-status.json" || die 'candidate Paseo status could not be observed'
+jq -e '.yard == "default" and .id == "paseo" and .observed == "conflict" and .observed_scope == "yard" and (.selection.effective | index("paseo") | not)' \
+  "$STATE_ROOT/paseo-status.json" >/dev/null || die 'candidate Paseo status reported the wrong scope or state'
+assert_paseo_preserved
+# Parse public commands as argv and validate the exact candidate and bounded action.
+# Never evaluate diagnostic text as shell code or derive unchecked apply argv.
+python3 - "$STATE_ROOT/paseo-status.json" "${CANDIDATE_LAUNCHER%/yard}/yard-engine" "$STATE_ROOT/paseo-check.json" \
+  >"$STATE_ROOT/cleanup-command" <<'PYHINT'
+import json
+import shlex
+import sys
+status = json.load(open(sys.argv[1]))
+inspection = json.load(open(sys.argv[3]))
+lines = status["detail"].splitlines()
 expected = [sys.argv[2], "-Y", "default", "integration", "cleanup", "paseo"]
+message = inspection["outcome"]["message"]
+assert status["detail"].startswith(message), status["detail"]
+assert shlex.split(inspection["outcome"]["retry"]) == expected + ["--check"], inspection["outcome"]
 commands = [shlex.split(line) for line in lines if "'integration' 'cleanup' 'paseo'" in line]
-assert expected in commands and expected + ["--check"] in commands, commands
+try:
+    assert expected in commands and expected + ["--check"] in commands, commands
+except AssertionError:
+    sys.stderr.write("\n".join(lines) + "\n")
+    raise
 sys.stdout.buffer.write(b"\0".join(part.encode() for part in expected) + b"\0")
 PYHINT
 mapfile -d '' -t cleanup_command < "$STATE_ROOT/cleanup-command"
@@ -349,12 +414,34 @@ guest sh -eu -c '
   "$(printf '%s\n' "$paseo_before" | head -n 1 | awk '{print $1}')" ] \
   || die 'candidate cleanup changed the saved unit'
 paseo_retired="$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired /srv/agents/paseo/data/cleanup-sentinel)"
+assert_paseo_retired() {
+  [ "$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired /srv/agents/paseo/data/cleanup-sentinel)" = "$paseo_retired" ] \
+    || die 'candidate cleanup retry changed preserved artifacts'
+  guest sh -eu -c '
+    [ ! -e /etc/systemd/system/paseo.service ]
+    [ ! -L /etc/systemd/system/paseo.service ]
+    [ -f /etc/systemd/system/paseo.service.subyard-retired ]
+    [ ! -L /etc/systemd/system/paseo.service.subyard-retired ]
+    [ ! -e /var/lib/subyard/paseo-ownership ]
+    [ ! -L /var/lib/subyard/paseo-ownership ]
+    [ "$(cat /srv/agents/paseo/data/cleanup-sentinel)" = legacy-paseo-data ]
+    ! systemctl is-active --quiet paseo.service
+    ! systemctl is-enabled --quiet paseo.service
+  '
+  assert_unadopted "$BASELINE_FINGERPRINT"
+}
 operator_env "${cleanup_command[@]}" --yes >"$STATE_ROOT/paseo-cleanup-retry.log"
-grep -Fq 'No cleanup needed.' "$STATE_ROOT/paseo-cleanup-retry.log" \
+# A mutation retry reports its converged typed step; --check owns the prose preview.
+grep -Fxq '  [skip] integration.cleanup: subyard/yard:integration paseo' "$STATE_ROOT/paseo-cleanup-retry.log" \
+  || die 'candidate cleanup retry did not skip its exact target'
+if grep -Fq '[apply] integration.cleanup:' "$STATE_ROOT/paseo-cleanup-retry.log"; then
+  die 'candidate cleanup retry still planned an apply'
+fi
+assert_paseo_retired
+operator_env "${cleanup_command[@]}" --check >"$STATE_ROOT/paseo-cleanup-retry-check.log"
+grep -Fq 'No cleanup needed.' "$STATE_ROOT/paseo-cleanup-retry-check.log" \
   || die 'candidate cleanup retry was not a no-op'
-[ "$(guest sha256sum /etc/systemd/system/paseo.service.subyard-retired /srv/agents/paseo/data/cleanup-sentinel)" = "$paseo_retired" ] \
-  || die 'candidate cleanup retry changed preserved artifacts'
-assert_unadopted "$BASELINE_FINGERPRINT"
+assert_paseo_retired
 
 info 'upgrading through the published updater and adopting the exact legacy state'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \

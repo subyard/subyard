@@ -217,20 +217,24 @@ func (runtime Runtime) runProfileRuntimeHandler(
 	action string,
 	arguments ...string,
 ) ([]byte, []byte, error) {
-	cleanPath, err := definition.ExecutablePath(definition.Runtime.Handler)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve profile runtime handler: %w", err)
-	}
-	root := strings.TrimSuffix(cleanPath, string(filepath.Separator)+definition.Runtime.Handler)
 	timeout := profileRuntimeObserveLimit
 	if action == "apply" {
 		timeout = profileRuntimeApplyLimit
 	}
+	return runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, runtime.Environment, timeout, action, arguments...)
+}
+
+func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile.Definition, handler string, environment []string, timeout time.Duration, action string, arguments ...string) ([]byte, []byte, error) {
+	cleanPath, err := definition.ExecutablePath(handler)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve shipped handler: %w", err)
+	}
+	root := strings.TrimSuffix(cleanPath, string(filepath.Separator)+handler)
 	callContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(callContext, cleanPath, append([]string{action}, arguments...)...)
 	command.Dir = root
-	command.Env = runtime.Environment
+	command.Env = environment
 	if strings.HasPrefix(runtime.RepositoryRoot, "/proc/self/fd/") {
 		// The hook does not inherit the engine's repository descriptor.
 		parentRoot := strings.Replace(runtime.RepositoryRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)

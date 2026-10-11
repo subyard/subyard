@@ -2,8 +2,8 @@
 # Install and reconcile the pinned AI Observer file watcher inside one enabled yard.
 set -euo pipefail
 
-IMAGE='tobilg/ai-observer:0.6.0@sha256:01c84f99157f5a5688bcf7c96cd01fe24d56958c16d711d8f1afc05c43d8993a'
-VERSION=0.6.0
+IMAGE="${AI_OBSERVER_IMAGE:?immutable package image is required}"
+VERSION="${AI_OBSERVER_VERSION:?immutable package version is required}"
 CONTAINER=subyard-ai-observer
 UNIT=subyard-ai-observer.service
 OWNER_LABEL=ai-observer-v1
@@ -61,6 +61,20 @@ for command in cmp curl docker grep jq readlink sha256sum stat systemctl timeout
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 timeout 10 docker info >/dev/null 2>&1 || die 'Docker is unavailable'
+
+container_exists() {
+  local names
+  names="$(timeout 10 docker container ls -a --format '{{.Names}}')" \
+    || die 'Docker container ownership assessment is unavailable'
+  grep -Fxq "$CONTAINER" <<<"$names"
+}
+container_value() { timeout 10 docker inspect -f "$1" "$CONTAINER" 2>/dev/null; }
+container_is_owned() {
+  [ "$(container_value '{{ index .Config.Labels "org.subyard.managed" }}')" = "$OWNER_LABEL" ]
+}
+if container_exists && ! container_is_owned; then
+  die "container '$CONTAINER' is not managed by Subyard; leaving it unchanged"
+fi
 
 safe_bind_path() {
   case "$1" in
@@ -123,11 +137,6 @@ SPEC="$(printf '%s\n' \
   'AI_OBSERVER_API_PORT=8080' "AI_OBSERVER_FRONTEND_URL=$FRONTEND_URL" \
   'watch all --backfill' | sha256sum | cut -d' ' -f1)"
 
-container_exists() { timeout 10 docker container inspect "$CONTAINER" >/dev/null 2>&1; }
-container_value() { timeout 10 docker inspect -f "$1" "$CONTAINER" 2>/dev/null; }
-container_is_owned() {
-  [ "$(container_value '{{ index .Config.Labels "org.subyard.managed" }}')" = "$OWNER_LABEL" ]
-}
 container_is_expected_candidate() {
   container_is_owned &&
     [ "$(container_value '{{ index .Config.Labels "org.subyard.ai-observer.spec" }}')" = "$SPEC" ]
@@ -214,7 +223,12 @@ expected_file_owner=$q_file_owner
 test_mode=$q_test_mode
 die() { printf 'ai-observer: %s\\n' "\$*" >&2; exit 1; }
 container_value() { timeout 10 docker inspect -f "\$1" "\$container" 2>/dev/null; }
-container_exists() { timeout 10 docker container inspect "\$container" >/dev/null 2>&1; }
+container_exists() {
+  local names
+  names="\$(timeout 10 docker container ls -a --format '{{.Names}}')" \
+    || die 'Docker container ownership assessment is unavailable'
+  grep -Fxq "\$container" <<<"\$names"
+}
 container_owned() {
   [ "\$(container_value '{{ index .Config.Labels "org.subyard.managed" }}')" = "\$owner_label" ]
 }
@@ -275,6 +289,9 @@ case "\${1:-}" in
     verify_control_files
     if container_exists; then container_owned || die 'refusing to disable a foreign same-name container'; fi
     timeout 30 systemctl disable --now "\$unit"
+    if container_exists && [ "\$(container_value '{{.State.Running}}')" = true ]; then
+      timeout 20 docker stop --time 10 "\$container" >/dev/null
+    fi
     ;;
   status)
     verify_control_files

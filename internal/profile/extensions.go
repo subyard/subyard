@@ -15,17 +15,18 @@ import (
 // Setting is a profile-owned scalar configuration declaration. It deliberately
 // mirrors the public catalog fields without importing the config package.
 type Setting struct {
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Scopes       []string `json:"scopes"`
-	Application  string   `json:"application"`
-	Optional     bool     `json:"optional,omitempty"`
-	Minimum      int      `json:"minimum,omitempty"`
-	Maximum      int      `json:"maximum,omitempty"`
-	Default      *string  `json:"default,omitempty"`
-	Syncable     bool     `json:"syncable,omitempty"`
-	HostListener bool     `json:"host_listener,omitempty"`
-	Enum         []string `json:"enum,omitempty"`
+	Name         string       `json:"name"`
+	Type         string       `json:"type"`
+	Scopes       []string     `json:"scopes"`
+	Application  string       `json:"application"`
+	Optional     bool         `json:"optional,omitempty"`
+	Minimum      int          `json:"minimum,omitempty"`
+	Maximum      int          `json:"maximum,omitempty"`
+	Default      *string      `json:"default,omitempty"`
+	DefaultFrom  *PortDefault `json:"default_from,omitempty"`
+	Syncable     bool         `json:"syncable,omitempty"`
+	HostListener bool         `json:"host_listener,omitempty"`
+	Enum         []string     `json:"enum,omitempty"`
 }
 
 type RuntimeHook struct {
@@ -64,7 +65,7 @@ func (definition Definition) validateExtensions() error {
 			}
 			scopes[scope] = true
 		}
-		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" {
+		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" && setting.Type != "version" && setting.Type != "image-reference" && setting.Type != "sha256" {
 			return errors.New("unsupported profile setting type")
 		}
 		if len(setting.Enum) != 0 {
@@ -87,6 +88,9 @@ func (definition Definition) validateExtensions() error {
 		}
 		if setting.HostListener && setting.Type != "port" {
 			return errors.New("host listener profile setting must be a port")
+		}
+		if setting.DefaultFrom != nil && (setting.Type != "port" || setting.Default != nil || setting.DefaultFrom.Offset < -65535 || setting.DefaultFrom.Offset > 65535 || !settingNamePattern.MatchString(setting.DefaultFrom.Setting)) {
+			return errors.New("invalid derived port default")
 		}
 		if setting.Default != nil {
 			if err := setting.validateDefault(*setting.Default); err != nil {
@@ -180,6 +184,10 @@ func (definition Definition) validateExecutable(path string) error {
 // ExecutablePath revalidates a profile hook and keeps updater-pinned directory
 // descriptors intact. Ordinary roots and all descendants must remain real paths.
 func (definition Definition) ExecutablePath(path string) (string, error) {
+	return definition.sourcePath(path, true)
+}
+
+func (definition Definition) sourcePath(path string, executable bool) (string, error) {
 	if definition.Root == "" {
 		return "", errors.New("profile root is unavailable")
 	}
@@ -232,7 +240,7 @@ func (definition Definition) ExecutablePath(path string) (string, error) {
 	}
 	info, err := os.Lstat(current)
 	resolved, resolveErr := filepath.EvalSymlinks(current)
-	if err != nil || resolveErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || resolved != filepath.Join(resolvedRoot, path) {
+	if err != nil || resolveErr != nil || !info.Mode().IsRegular() || (executable && info.Mode().Perm()&0o111 == 0) || resolved != filepath.Join(resolvedRoot, path) {
 		return "", errors.New("handler must be an executable regular file within profile root")
 	}
 	return current, nil

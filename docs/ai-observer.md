@@ -1,8 +1,10 @@
 # AI Observer
 
 AI Observer is included in the default `CODING_TOOL_INTEGRATIONS` as `aiobserver`.
-`yard init` installs and starts its dashboard inside the yard. The integration pins
-the upstream `0.6.0` multi-architecture Docker image by SHA-256 digest.
+`yard init` installs and starts its dashboard inside the yard. The shipped
+[integration descriptor](../config/agents/aiobserver/integration.json) is the
+authority for the upstream version, multi-architecture Docker image, and SHA-256
+digest. These immutable inputs are included in convergence checks.
 
 The observer reads Claude Code and Codex session files through read-only mounts.
 It imports existing sessions on the first start and watches for new records. Agent

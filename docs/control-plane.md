@@ -64,6 +64,13 @@ Optional `AGENT_<name>_HEALTH` probes report advisory service health for `yard s
 an unavailable, invalid, or timed-out probe reports `unknown`. Health never enters a release
 plan or its fingerprint. Installation can be converged while a service is still starting.
 
+Optional shipped `config/agents/*/integration.json` declarations extend the same
+package loader and operation-local catalog with immutable inputs, typed settings,
+existing agent metadata, native lifecycle ownership and dashboard metadata. Core
+uses the existing exact integration facts and shared bounded hook executor;
+integration packages own provisioning, retirement and route receipts. See the
+[shipped integration contract](reference/shipped-integration-contract.md).
+
 ## Stable interfaces
 
 ### Commands

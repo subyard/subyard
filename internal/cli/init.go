@@ -346,6 +346,7 @@ func (cli *CLI) initPlatformWithDispatcher(
 	configWriter, _ := incusPort.(ports.InstanceConfigWriter)
 	return reconcileruntime.Runtime{
 		Profiles:          loaded.Catalog.Profiles(),
+		Integrations:      loaded.Catalog.Integrations(),
 		RepositoryRoot:    cli.options.RepositoryRoot,
 		Environment:       environmentList(cli.env, environment),
 		LaunchEnvironment: environmentList(cli.baseEnv, nil),

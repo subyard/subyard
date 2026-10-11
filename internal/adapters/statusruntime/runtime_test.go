@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -479,17 +480,18 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				"subyard/yard": {
 					Name: "yard", Project: "subyard", Status: "Running",
-					Config: map[string]string{"user.subyard.ai_observer_proxy": route.marker},
-					Devices: map[string]map[string]string{"ai-observer": {
+					Config: map[string]string{"user.subyard.sample_dashboard": route.marker},
+					Devices: map[string]map[string]string{"sample-dashboard": {
 						"type": "proxy", "listen": "tcp:" + route.host + ":18080",
-						"connect": "tcp:127.0.0.1:8080", "bind": "host",
+						"connect": "tcp:127.0.0.1:8764", "bind": "host",
 					}},
 				},
 			}}
 			facts, err := (Runtime{
+				Integrations: []profile.IntegrationDefinition{{Name: "sample-dashboard", Dashboard: &profile.IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_DASHBOARD_PORT", GuestPort: 8764, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.sample_dashboard", DeviceName: "sample-dashboard"}}}},
 				Environment: map[string]string{
-					"ENVIRONMENT_PROFILES": "sample-api sample-runtime", "CODING_TOOL_INTEGRATIONS": "codex aiobserver",
-					"AI_OBSERVER_HOST_PORT": "18080",
+					"ENVIRONMENT_PROFILES": "sample-api sample-runtime", "CODING_TOOL_INTEGRATIONS": "codex sample-dashboard",
+					"AGENT_sample-dashboard_CHECK": "/usr/local/bin/sample-dashboard-check", "SAMPLE_DASHBOARD_PORT": "18080",
 				},
 				Executor: executor, Incus: incus,
 			}).ReadStatusFacts(context.Background(), domain.Context{
@@ -505,21 +507,21 @@ func TestRuntimeReportsSelectedProfilesAndAgentsWithVerifiedDashboard(t *testing
 			}
 			wantAgents := []domain.AgentStatus{
 				{Name: "codex", State: "rules-ok", Hint: "installed policy + home matcher: commit/push prompt; session approvals unverified"},
-				{Name: "aiobserver", State: "up", URL: "http://" + route.host + ":18080/", DashboardPort: 18080},
+				{Name: "sample-dashboard", State: "up", URL: "http://" + route.host + ":18080/", DashboardPort: 18080, DashboardGuestPort: 8764, DashboardScheme: "http", DashboardPath: "/"},
 			}
 			if !reflect.DeepEqual(facts.Agents, wantAgents) {
 				t.Fatalf("agents = %#v, want %#v", facts.Agents, wantAgents)
 			}
 			if len(executor.calls) != 2 || !slices.ContainsFunc(executor.calls, func(call ports.InstanceExecRequest) bool {
-				return slices.Equal(call.Command, []string{"/usr/local/bin/ai-observer-check"})
+				return slices.Equal(call.Command, []string{"/usr/local/bin/sample-dashboard-check"})
 			}) {
-				t.Fatalf("AI Observer probes = %#v", executor.calls)
+				t.Fatalf("integration dashboard probes = %#v", executor.calls)
 			}
 		})
 	}
 }
 
-func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
+func TestRuntimeDoesNotPublishUnverifiedIntegrationDashboard(t *testing.T) {
 	tests := []struct {
 		name      string
 		yardKind  domain.YardKind
@@ -539,14 +541,14 @@ func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
 			name: "container route divergent", result: ports.InstanceExecResult{ExitCode: 0},
 			device: map[string]string{
 				"type": "proxy", "listen": "tcp:127.0.0.1:18081",
-				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+				"connect": "tcp:127.0.0.1:8764", "bind": "host",
 			}, wantState: "up",
 		},
 		{
 			name: "container route pending", result: ports.InstanceExecResult{ExitCode: 0},
 			device: map[string]string{
 				"type": "proxy", "listen": "tcp:127.0.0.1:18080",
-				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+				"connect": "tcp:127.0.0.1:8764", "bind": "host",
 			}, marker: "v1:pending:18080", wantState: "up",
 		},
 		{name: "vm needs tunnel", yardKind: domain.YardVM, result: ports.InstanceExecResult{ExitCode: 0}, wantState: "up"},
@@ -554,7 +556,7 @@ func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
 			name: "privileged host port", result: ports.InstanceExecResult{ExitCode: 0}, port: "80",
 			device: map[string]string{
 				"type": "proxy", "listen": "tcp:127.0.0.1:80",
-				"connect": "tcp:127.0.0.1:8080", "bind": "host",
+				"connect": "tcp:127.0.0.1:8764", "bind": "host",
 			}, marker: "v1:80", wantState: "up",
 		},
 	}
@@ -572,12 +574,12 @@ func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
 				"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running", Devices: map[string]map[string]string{}},
 			}}
 			if test.device != nil {
-				incus.Instances["subyard/yard"].Devices["ai-observer"] = test.device
+				incus.Instances["subyard/yard"].Devices["sample-dashboard"] = test.device
 			}
 			if test.marker != "" {
 				instance := incus.Instances["subyard/yard"]
 				instance.Config = map[string]string{
-					"user.subyard.ai_observer_proxy": test.marker,
+					"user.subyard.sample_dashboard": test.marker,
 				}
 				incus.Instances["subyard/yard"] = instance
 			}
@@ -586,8 +588,9 @@ func TestRuntimeDoesNotPublishUnverifiedAIObserverDashboard(t *testing.T) {
 				port = "18080"
 			}
 			facts, err := (Runtime{
+				Integrations: []profile.IntegrationDefinition{{Name: "sample-dashboard", Dashboard: &profile.IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_DASHBOARD_PORT", GuestPort: 8764, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.sample_dashboard", DeviceName: "sample-dashboard"}}}},
 				Environment: map[string]string{
-					"CODING_TOOL_INTEGRATIONS": "aiobserver", "AI_OBSERVER_HOST_PORT": port,
+					"CODING_TOOL_INTEGRATIONS": "sample-dashboard", "AGENT_sample-dashboard_CHECK": "/usr/local/bin/sample-dashboard-check", "SAMPLE_DASHBOARD_PORT": port,
 				},
 				Executor: &spaceExecutorStub{result: test.result, err: test.execErr}, Incus: incus,
 			}).ReadStatusFacts(context.Background(), domain.Context{

@@ -17,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -126,12 +127,13 @@ func TestSecurityRuntimeValidatesPreviewTailscaleRoute(t *testing.T) {
 	}
 }
 
-func TestSecurityRuntimeValidatesObserverTailscaleRoute(t *testing.T) {
+func TestSecurityRuntimeValidatesIntegrationTailscaleRoute(t *testing.T) {
 	for _, failure := range []string{"", "unselected", "foreign", "divergent", "inactive", "pending", "extra option"} {
 		t.Run(failure, func(t *testing.T) {
 			runtime := testRuntime(t)
-			runtime.Environment["CODING_TOOL_INTEGRATIONS"] = "aiobserver"
-			runtime.Environment["AI_OBSERVER_HOST_PORT"] = "22222"
+			runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample-dashboard", Dashboard: &profile.IntegrationDashboard{PortSetting: "SAMPLE_DASHBOARD_PORT", GuestPort: 8080, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.sample_dashboard", DeviceName: "sample-dashboard"}}}}
+			runtime.Environment["CODING_TOOL_INTEGRATIONS"] = "sample-dashboard"
+			runtime.Environment["SAMPLE_DASHBOARD_PORT"] = "22222"
 			runtime.ResolveOwnerAddress = func(context.Context, string) (string, error) {
 				if failure == "inactive" {
 					return "", errors.New("inactive")
@@ -140,17 +142,17 @@ func TestSecurityRuntimeValidatesObserverTailscaleRoute(t *testing.T) {
 			}
 			state := safeState()
 			device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:100.101.102.103:22222", "connect": "tcp:127.0.0.1:8080"}
-			state.Instance.Devices["ai-observer"] = device
-			state.Instance.LocalConfig["user.subyard.ai_observer_proxy"] = "v2:100.101.102.103:22222"
+			state.Instance.Devices["sample-dashboard"] = device
+			state.Instance.LocalConfig["user.subyard.sample_dashboard"] = "v2:100.101.102.103:22222"
 			switch failure {
 			case "unselected":
 				runtime.Environment["CODING_TOOL_INTEGRATIONS"] = "codex"
 			case "foreign":
-				delete(state.Instance.LocalConfig, "user.subyard.ai_observer_proxy")
+				delete(state.Instance.LocalConfig, "user.subyard.sample_dashboard")
 			case "divergent":
 				device["connect"] = "tcp:127.0.0.1:9999"
 			case "pending":
-				state.Instance.LocalConfig["user.subyard.ai_observer_proxy"] = "v2:pending:100.101.102.103:22222"
+				state.Instance.LocalConfig["user.subyard.sample_dashboard"] = "v2:pending:100.101.102.103:22222"
 			case "extra option":
 				device["nat"] = "true"
 			}

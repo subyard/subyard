@@ -1,6 +1,7 @@
-package config
+package aiobserver_test
 
 import (
+	"github.com/Subyard/Subyard/internal/config"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,7 +28,7 @@ func TestAIObserverDefaultAndHostPortSelection(t *testing.T) {
 			if test.agents != "" {
 				env["CODING_TOOL_INTEGRATIONS"] = test.agents
 			}
-			loaded, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, DisablePrivate: true, Environment: env})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: filepath.Join("..", "..", "..", ".."), OperatorHome: home, DisablePrivate: true, Environment: env})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -44,11 +45,18 @@ func TestAIObserverDefaultAndHostPortSelection(t *testing.T) {
 func TestAIObserverRejectsInvalidAndCollidingHostPort(t *testing.T) {
 	for _, port := range []string{"0", "65536", "oops", "2222", "15555"} {
 		t.Run(port, func(t *testing.T) {
-			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: t.TempDir(), DisablePrivate: true,
+			_, err := config.Load(config.LoadOptions{RepositoryRoot: filepath.Join("..", "..", "..", ".."), OperatorHome: t.TempDir(), DisablePrivate: true,
 				Environment: map[string]string{"SSH_PORT": "2222", "AI_OBSERVER_HOST_PORT": port, "CODING_TOOL_INTEGRATIONS": "aiobserver"}})
 			if err == nil {
 				t.Fatal("invalid or colliding dashboard port accepted")
 			}
 		})
+	}
+}
+
+func TestObserverAndPreviewPortCollision(t *testing.T) {
+	_, err := config.Load(config.LoadOptions{RepositoryRoot: filepath.Join("..", "..", "..", ".."), OperatorHome: t.TempDir(), DisablePrivate: true, Environment: map[string]string{"SSH_PORT": "2222", "AI_OBSERVER_HOST_PORT": "32222", "CODING_TOOL_INTEGRATIONS": "aiobserver"}})
+	if err == nil || !strings.Contains(err.Error(), "WEB_PREVIEW_HOST_PORT") {
+		t.Fatalf("dashboard collision = %v", err)
 	}
 }

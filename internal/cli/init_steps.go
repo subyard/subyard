@@ -130,6 +130,16 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 		appendStep("init.stage."+string(native.Stage.ID), scope, desired,
 			"native VerifyStage "+string(native.Stage.ID)+" returns converged", desired, native.Converged, native.Conditional)
+		if execution.mode == initReconcile && native.Stage.ID == ports.ReconcileStageProvision {
+			for index, path := range execution.integrationAdoption.Adoption {
+				appendStep(fmt.Sprintf("init.integration-adoption.%d", index), path, "matching legacy artifact enrolled during approved provisioning",
+					"native integration inventory and structured ownership receipts confirm enrollment performed within provisioning",
+					fmt.Sprintf("yard %s: take matching legacy path under integration management during provisioning: %s", yard.YardName, path), false, false)
+				step := &steps[len(steps)-1]
+				step.Observed = "captured matching legacy artifact awaiting enrollment within provisioning"
+				step.Preconditions = append(step.Preconditions, "captured legacy adoption fingerprint remains unchanged before any write")
+			}
+		}
 	}
 	steps = append(steps, execution.runtimePlan.OperationSteps(target)...)
 	// Hooks and final power may become observable only after approved stages.

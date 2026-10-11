@@ -59,7 +59,8 @@ type Runtime struct {
 	TeardownArtifacts []ports.TeardownArtifact
 	// Profiles is the immutable per-operation profile snapshot when supplied by
 	// the caller. Nil falls back to loading the shipped declarations from disk.
-	Profiles []profile.Definition
+	Profiles     []profile.Definition
+	Integrations []profile.IntegrationDefinition
 	// RuntimePlan retains the individual native contracts approved before init.
 	RuntimePlan *ProfileRuntimePlan
 	HookPlan    *ProjectHookPlan
@@ -1685,9 +1686,6 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	}
 	instance := state.Instance
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
-	if observerReady, err := runtime.aiObserverConverged(ctx, instance); err != nil || !observerReady {
-		return false, err
-	}
 	if !runtime.previewRouteConverged(ctx, instance) {
 		return false, nil
 	}
@@ -1718,6 +1716,21 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	}
 	if runtime.Executor == nil {
 		return false, errors.New("Incus executor is required")
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return false, err
+	}
+	for _, definition := range definitions {
+		if definition.Lifecycle != nil {
+			observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+			if err != nil {
+				return false, err
+			}
+			if observation.State == ports.RuntimeStateStale {
+				return false, nil
+			}
+		}
 	}
 	commands, err := runtime.provisionAgentCommands()
 	if err != nil {

@@ -204,8 +204,8 @@ func TestProfileDefaultsLayersAndListenerCollision(t *testing.T) {
 	}
 	tracker := newSettingTracker()
 	tracker.catalog = settings
-	values := environment{"CODING_TOOL_INTEGRATIONS": "aiobserver", "AI_OBSERVER_HOST_PORT": "2345", "FIXTURE_PORT": "2345"}
-	if err := normalizeAIObserverPort(values, tracker, 2222); err == nil {
+	values := environment{"SSH_PORT": "2345", "ENVIRONMENT_PROFILES": "fixture", "FIXTURE_PORT": "2345"}
+	if err := normalizeDerivedPorts(values, tracker); err == nil {
 		t.Fatal("profile host listener collision was ignored")
 	}
 }

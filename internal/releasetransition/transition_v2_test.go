@@ -3178,6 +3178,7 @@ func TestV2TransitionPreservesExplicitPublicActivationDiagnostic(t *testing.T) {
 		valid          bool
 	}{
 		{"Known legacy file has unexpected contents; file preserved.", "incus exec yard --project subyard -- sha256sum /usr/local/libexec/subyard/projects-changed", true},
+		{"Owned integration conflict; artifacts preserved.", "'/tmp/candidate with quotes/bin/yard-engine' '-Y' 'fixture' 'integration' 'cleanup' 'synthetic' '--check'", true},
 		{"unsafe\nmessage", "yard update --check", false},
 		{strings.Repeat("x", maxDiagnosticText+1), "yard update --check", false},
 		{"known message", "inspect; mutate", false},

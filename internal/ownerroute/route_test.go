@@ -1,4 +1,4 @@
-package observerroute
+package ownerroute
 
 import "testing"
 
@@ -19,13 +19,13 @@ func TestOwnedRouteReceipts(t *testing.T) {
 		{"", "100.101.102.103", "22222", false, false},
 	} {
 		t.Run(test.marker+"/"+test.host, func(t *testing.T) {
-			device := Device(test.host, test.port)
-			host, port, ready := Owned(test.marker, device)
+			device := Device(test.host, test.port, 8764)
+			host, port, ready := Owned(test.marker, device, 8764)
 			if (host != "") != test.owned || ready != test.ready || (test.owned && (host != test.host || port != test.port)) {
 				t.Fatalf("Owned = %q, %q, %v", host, port, ready)
 			}
 			device["nat"] = "true"
-			if host, _, _ := Owned(test.marker, device); host != "" {
+			if host, _, _ := Owned(test.marker, device, 8764); host != "" {
 				t.Fatal("accepted extra device options")
 			}
 		})

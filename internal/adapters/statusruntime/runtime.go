@@ -17,14 +17,16 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/observerroute"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
 type Runtime struct {
 	Environment  map[string]string
 	Resources    []resource.Definition
+	Integrations []profile.IntegrationDefinition
 	Program      string
 	Security     ports.SecurityChecker
 	Incus        ports.Incus
@@ -70,18 +72,26 @@ func (runtime Runtime) agentStatus(
 	result := make([]domain.AgentStatus, 0, len(agents))
 	for _, name := range agents {
 		status := domain.AgentStatus{Name: name, State: "enabled"}
-		if name == "aiobserver" {
-			if port, err := strconv.Atoi(runtime.Environment["AI_OBSERVER_HOST_PORT"]); err == nil &&
-				port >= 1024 && port <= 65535 && strconv.Itoa(port) == runtime.Environment["AI_OBSERVER_HOST_PORT"] {
+		var dashboard *profile.IntegrationDashboard
+		for _, definition := range runtime.Integrations {
+			if definition.Name == name {
+				dashboard = definition.Dashboard
+			}
+		}
+		if dashboard != nil {
+			if port, err := strconv.Atoi(runtime.Environment[dashboard.PortSetting]); err == nil && port >= 1024 && port <= 65535 {
 				status.DashboardPort = port
+				status.DashboardGuestPort = dashboard.GuestPort
+				status.DashboardScheme = dashboard.Scheme
+				status.DashboardPath = dashboard.Path
 			}
 		}
 		if state, present := health[name]; present {
 			switch state {
 			case "ready":
 				status.State = "up"
-				if name == "aiobserver" && yard.YardKind == domain.YardContainer {
-					status.URL = runtime.aiObserverURL(ctx, yard)
+				if dashboard != nil && yard.YardKind == domain.YardContainer {
+					status.URL = runtime.integrationDashboardURL(ctx, yard, dashboard)
 					if status.URL == "" {
 						status.Hint = runtime.program() + " init"
 					}
@@ -96,49 +106,49 @@ func (runtime Runtime) agentStatus(
 			result = append(result, status)
 			continue
 		}
+		if dashboard != nil {
+			status.State = "?"
+			check := runtime.Environment["AGENT_"+name+"_CHECK"]
+			if running && runtime.Executor != nil && check != "" {
+				probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
+				probe, err := runtime.Executor.Exec(probeCtx, yard.IncusProject, yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{check}})
+				timedOut := probeCtx.Err() != nil
+				cancel()
+				if timedOut {
+					status.State = "?"
+				} else if probe.ExitCode != 0 {
+					status.State = "down"
+					status.Hint = runtime.program() + " init"
+				} else if err != nil {
+					status.State = "?"
+				} else {
+					status.State = "up"
+					if yard.YardKind == domain.YardContainer {
+						status.URL = runtime.integrationDashboardURL(ctx, yard, dashboard)
+						if status.URL == "" {
+							status.Hint = runtime.program() + " init"
+						}
+					}
+				}
+			}
+			result = append(result, status)
+			continue
+		}
 		switch name {
 		case "codex":
 			status = runtime.codexRulesStatus(ctx, yard, running)
 		case "claude", "opencode", "pi":
 			status.State, status.Hint = "unverified", "runtime approvals have no supported offline check"
 		}
-		if name != "aiobserver" {
-			result = append(result, status)
-			continue
-		}
-		status.State = "?"
-		if running && runtime.Executor != nil {
-			probeCtx, cancel := context.WithTimeout(ctx, runtime.probeTimeout())
-			probe, err := runtime.Executor.Exec(
-				probeCtx, yard.IncusProject, yard.YardInstanceName,
-				ports.InstanceExecRequest{Command: []string{"/usr/local/bin/ai-observer-check"}},
-			)
-			timedOut := probeCtx.Err() != nil
-			cancel()
-			switch {
-			case timedOut:
-				status.State = "?"
-			case probe.ExitCode != 0:
-				status.State = "down"
-				status.Hint = runtime.program() + " init"
-			case err != nil:
-				status.State = "?"
-			default:
-				status.State = "up"
-				if yard.YardKind == domain.YardContainer {
-					status.URL = runtime.aiObserverURL(ctx, yard)
-					if status.URL == "" {
-						status.Hint = runtime.program() + " init"
-					}
-				}
-			}
-		}
 		result = append(result, status)
 	}
 	return result
 }
 
-func (runtime Runtime) aiObserverURL(ctx context.Context, yard domain.Context) string {
+func (runtime Runtime) integrationDashboardURL(ctx context.Context, yard domain.Context, dashboard *profile.IntegrationDashboard) string {
+	if dashboard.ContainerRoute == nil {
+		return ""
+	}
 	if runtime.Incus == nil {
 		return ""
 	}
@@ -148,11 +158,11 @@ func (runtime Runtime) aiObserverURL(ctx context.Context, yard domain.Context) s
 	if err != nil {
 		return ""
 	}
-	host, port, ready := observerroute.Owned(instance.Config[observerroute.Key], instance.Devices["ai-observer"])
-	if !ready || port != runtime.Environment["AI_OBSERVER_HOST_PORT"] {
+	host, port, ready := ownerroute.Owned(instance.Config[dashboard.ContainerRoute.MarkerKey], instance.Devices[dashboard.ContainerRoute.DeviceName], dashboard.GuestPort)
+	if !ready || port != runtime.Environment[dashboard.PortSetting] {
 		return ""
 	}
-	return "http://" + host + ":" + port + "/"
+	return dashboard.Scheme + "://" + host + ":" + port + dashboard.Path
 }
 
 func (runtime Runtime) probeTimeout() time.Duration {

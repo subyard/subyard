@@ -12,7 +12,7 @@ import (
 
 func cloneIntegrationConfig(config map[string]string) map[string]string {
 	copy := maps.Clone(config)
-	for _, key := range []string{"user.subyard.ai_observer_proxy", "user.subyard.ai_observer_provision", "user.subyard.ccusage_version"} {
+	for _, key := range []string{"user.subyard.ccusage_version"} {
 		delete(copy, key)
 	}
 	return copy

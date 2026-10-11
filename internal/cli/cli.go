@@ -1151,7 +1151,7 @@ func (cli *CLI) statusFacts(loaded config.Loaded) ports.StatusFactsReader {
 	})
 	incusPort, executor := cli.statusPorts()
 	return statusruntime.Runtime{
-		Environment: environment, Resources: definitions, Program: cli.options.Program,
+		Environment: environment, Resources: definitions, Integrations: loaded.Catalog.Integrations(), Program: cli.options.Program,
 		Incus: incusPort, Executor: executor,
 		Security: securityruntime.Runtime{
 			RepositoryRoot: cli.options.RepositoryRoot, Environment: loaded.Environment,
@@ -1364,7 +1364,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	return 0
 }
 
-func aiObserverTunnelArguments(
+func integrationTunnelArguments(
 	yard domain.Context, agent domain.AgentStatus, ownerEndpoint string,
 ) []string {
 	if parsed, err := url.Parse(agent.URL); err == nil && parsed.Hostname() != "" &&
@@ -1376,7 +1376,7 @@ func aiObserverTunnelArguments(
 	if yard.YardKind == domain.YardVM && ownerEndpoint != "" && yard.SSHHost != "" {
 		nested := shellquote.Command(append(
 			[]string{"ssh", "-N"},
-			append(options, "-L", port+":127.0.0.1:8080", yard.SSHHost)...,
+			append(options, "-L", port+":127.0.0.1:"+strconv.Itoa(agent.DashboardGuestPort), yard.SSHHost)...,
 		))
 		outer := append([]string{"ssh", "-T"}, options...)
 		outer = append(outer, "-L", port+":127.0.0.1:"+port, ownerEndpoint, nested)
@@ -1384,7 +1384,7 @@ func aiObserverTunnelArguments(
 	}
 	if yard.YardKind == domain.YardVM && yard.SSHHost != "" {
 		return append([]string{"ssh", "-N"}, append(options,
-			"-L", port+":127.0.0.1:8080", yard.SSHHost)...)
+			"-L", port+":127.0.0.1:"+strconv.Itoa(agent.DashboardGuestPort), yard.SSHHost)...)
 	}
 	if agent.URL != "" && ownerEndpoint != "" {
 		arguments := append([]string{"ssh", "-N"}, options...)
@@ -1396,11 +1396,33 @@ func aiObserverTunnelArguments(
 func (cli *CLI) printAgentStatus(
 	yard domain.Context, agent domain.AgentStatus, ownerEndpoint string,
 ) {
+	// The closed v1 owner response carries the owner port and URL. Rendering
+	// metadata comes from this operation's shipped declaration, including when
+	// the response was produced by an older owner.
+	for _, definition := range cli.catalog.Integrations() {
+		if definition.Name != agent.Name || definition.Dashboard == nil {
+			continue
+		}
+		if agent.DashboardGuestPort == 0 {
+			agent.DashboardGuestPort = definition.Dashboard.GuestPort
+		}
+		if agent.DashboardScheme == "" {
+			agent.DashboardScheme = definition.Dashboard.Scheme
+		}
+		if agent.DashboardPath == "" {
+			agent.DashboardPath = definition.Dashboard.Path
+		}
+		break
+	}
 	detail := agent.Hint
-	if agent.Name == "aiobserver" && agent.State == "up" && agent.DashboardPort != 0 {
+	if agent.State == "up" && agent.DashboardPort != 0 && agent.DashboardGuestPort != 0 {
 		port := strconv.Itoa(agent.DashboardPort)
-		openURL := "http://127.0.0.1:" + port + "/"
-		if arguments := aiObserverTunnelArguments(yard, agent, ownerEndpoint); len(arguments) != 0 {
+		openURL := agent.DashboardScheme + "://127.0.0.1:" + port + agent.DashboardPath
+		if parsed, err := url.Parse(agent.URL); err == nil && parsed.Hostname() != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+			parsed.Host = net.JoinHostPort("127.0.0.1", port)
+			openURL = parsed.String()
+		}
+		if arguments := integrationTunnelArguments(yard, agent, ownerEndpoint); len(arguments) != 0 {
 			detail = "open " + openURL + " after: " + shellquote.Command(arguments)
 		} else if agent.URL != "" {
 			detail = agent.URL

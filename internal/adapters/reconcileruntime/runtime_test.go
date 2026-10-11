@@ -803,7 +803,8 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}},
 	}
 	runtime := Runtime{
-		Incus: incus, Executor: incus,
+		Integrations: []profile.IntegrationDefinition{},
+		Incus:        incus, Executor: incus,
 		RepositoryRoot: "../../..",
 		Yard:           domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 		Environment: []string{

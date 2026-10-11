@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 type SettingKind string
@@ -70,6 +71,7 @@ type SettingDefinition struct {
 	Maximum      int
 	Optional     bool
 	Default      string
+	DefaultFrom  *profile.PortDefault
 	HostListener bool
 	HasDefault   bool
 }
@@ -99,8 +101,6 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped), enum("true", "false")),
 	"ACCESS_KIND": scalar("remote-connection", SettingString, SettingNextCommand, false,
 		scopes(ScopeHost, ScopeYard, ScopeCommand), enum("local", "remote")),
-	"AI_OBSERVER_HOST_PORT": scalar("agent-integration", SettingPort, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535)),
 	"WEB_PREVIEW_HOST_PORT": scalar("web-preview", SettingPort, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), optionalRange(1024, 65535), hostListener()),
 	"CODING_TOOL_INTEGRATIONS": scalar("coding-tool-integration", SettingNameList, SettingYardInit, true,

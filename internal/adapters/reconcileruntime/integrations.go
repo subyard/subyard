@@ -15,7 +15,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/observerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
@@ -28,9 +27,14 @@ var integrationInventoryProgram string
 type integrationOwnershipError struct {
 	message string
 	retry   string
+	// Extra public-safe detail is for direct status, outside the bounded release diagnostic.
+	detail string
 }
 
 func (err integrationOwnershipError) Error() string {
+	if err.detail != "" {
+		return err.message + err.detail
+	}
 	return err.message + " Next, inspect on the owner host: " + err.retry
 }
 
@@ -48,6 +52,7 @@ type IntegrationPlan struct {
 	AdoptionFingerprint string   `json:"adoption_fingerprint,omitempty"`
 	Scope               string   `json:"-"`
 	facts               []integrationFact
+	sources             string
 }
 
 type integrationFact struct {
@@ -94,6 +99,10 @@ func (runtime Runtime) IntegrationScope() (string, []string, error) {
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
+	sourceBinding, err := runtime.integrationSourceBinding()
+	if err != nil {
+		return "", nil, err
+	}
 	uid := runtime.Yard.DevUID
 	if uid <= 0 {
 		uid = 1000
@@ -101,8 +110,9 @@ func (runtime Runtime) IntegrationScope() (string, []string, error) {
 	payload, err := json.Marshal(struct {
 		UID       int                   `json:"uid"`
 		Allows    string                `json:"allows"`
+		Sources   string                `json:"sources"`
 		Artifacts []integrationArtifact `json:"artifacts"`
-	}{UID: uid, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), Artifacts: entries})
+	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), Artifacts: entries})
 	if err != nil {
 		return "", nil, err
 	}
@@ -196,8 +206,21 @@ func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, err
+	}
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
+		for _, definition := range definitions {
+			if definition.Name == id {
+				binding, err := runtime.integrationPackageBinding(definition)
+				if err != nil {
+					return nil, err
+				}
+				inputs = append(inputs, binding)
+			}
+		}
 		provision := runtime.environmentValue("AGENT_" + id + "_PROVISION")
 		if provision != "" {
 			payload, err := os.ReadFile(provision)
@@ -331,6 +354,10 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		return IntegrationPlan{}, observed, err
 	}
 	plan := IntegrationPlan{Changed: observed.Changed}
+	plan.sources, err = runtime.integrationSourceBinding()
+	if err != nil {
+		return plan, observed, err
+	}
 	plan.facts = slices.Clone(observed.Facts)
 	scope, _, err := runtime.IntegrationScope()
 	if err != nil {
@@ -342,25 +369,42 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 	guardInstance.Status = ""
 	guardInstance.Config = cloneIntegrationConfig(guardInstance.Config)
 	guardInstance.LocalConfig = cloneIntegrationConfig(guardInstance.LocalConfig)
-	delete(guardInstance.Devices, "ai-observer")
-	delete(guardInstance.LocalDevices, "ai-observer")
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return plan, observed, err
+	}
+	for _, definition := range definitions {
+		if definition.Lifecycle == nil {
+			continue
+		}
+		for _, key := range definition.Lifecycle.InstanceConfigKeys {
+			delete(guardInstance.Config, key)
+			delete(guardInstance.LocalConfig, key)
+		}
+		for _, name := range definition.Lifecycle.InstanceDevices {
+			delete(guardInstance.Devices, name)
+			delete(guardInstance.LocalDevices, name)
+		}
+	}
 	identity, _ := json.Marshal(struct {
 		Scope    string
 		Instance ports.InstanceInfo
 	}{scope, guardInstance})
 	plan.Scope = fmt.Sprintf("%x", sha256.Sum256(identity))
-	fingerprints := []string{observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}
-	proxy := instance.Devices["ai-observer"]
-	proxyMarker := instance.Config["user.subyard.ai_observer_proxy"]
-	if proxy != nil {
-		host, _, _ := observerroute.Owned(proxyMarker, proxy)
-		if host == "" {
-			return plan, observed, errors.New("AI Observer proxy ownership is unknown or changed")
+	fingerprints := []string{plan.Scope, plan.sources, observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}
+	for _, definition := range definitions {
+		if definition.Lifecycle == nil {
+			continue
 		}
+		observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+		if err != nil {
+			return plan, observed, err
+		}
+		fact := runtime.integrationLifecycleFact(definition, observation)
+		plan.facts = append(plan.facts, fact)
+		plan.Changed = plan.Changed || !fact.AtDesired
+		fingerprints = append(fingerprints, observation.Actual, observation.Desired, fact.Desired)
 	}
-	proxyEvidence, _ := json.Marshal(proxy)
-	fingerprints = append(fingerprints, string(proxyEvidence))
-
 	files, err := runtime.guestConfigFiles()
 	if err != nil {
 		return plan, observed, err
@@ -414,12 +458,6 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 		plan.Changed = plan.Changed || !observation.Converged
 	}
-	ready, err := runtime.aiObserverConverged(ctx, instance)
-	if err != nil {
-		return plan, observed, err
-	}
-	plan.Changed = plan.Changed || !ready
-	plan.facts = append(plan.facts, integrationFact{Key: "observer", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	commands, err := runtime.provisionAgentCommands()
 	if err != nil {
 		return plan, observed, err
@@ -446,7 +484,7 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
 		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
-	ready, err = runtime.projectHooksConverged(ctx)
+	ready, err := runtime.projectHooksConverged(ctx)
 	if err != nil {
 		return plan, observed, err
 	}
@@ -460,7 +498,6 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 	plan.Changed = plan.Changed || servicesChanged
 	fingerprints = append(fingerprints, serviceFingerprint)
 	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
-	fingerprints = append(fingerprints, instance.Config["user.subyard.ai_observer_proxy"], instance.Config["user.subyard.ai_observer_provision"])
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	if plan.Changed {
 		plan.Steps = []string{"reconcile selected integrations: " + strings.Join(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), " ")}
@@ -641,14 +678,20 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if err := runtime.RefreshConfigs(ctx); err != nil {
 		return err
 	}
-	frontendURL := runtime.aiObserverFrontendURL(ctx)
-	identity, err := runtime.aiObserverProvisionIdentity(frontendURL)
+	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return err
 	}
-	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-		"AI_OBSERVER_CONTEXT": identity, "AI_OBSERVER_FRONTEND_URL": frontendURL,
-	}, "reconcile-integrations.sh"); err != nil {
+	skipped := []string{}
+	for _, definition := range definitions {
+		if definition.Lifecycle != nil {
+			skipped = append(skipped, definition.Name)
+		}
+	}
+	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_INTEGRATION_LIFECYCLES": strings.Join(skipped, " ")}, "reconcile-integrations.sh"); err != nil {
+		return err
+	}
+	if err := runtime.applyIntegrationLifecycles(ctx, fresh); err != nil {
 		return err
 	}
 	// Keep the inventory pending until hooks succeed so the same requested

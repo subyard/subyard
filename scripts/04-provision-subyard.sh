@@ -38,7 +38,7 @@ announce_confirm "Subyard Phase 3 — provision the yard ($YARD_INSTANCE_NAME)" 
   "Inside the yard: create user '$DEV_USER' + groups (yard/kvm/docker), lay out /srv, enable ssh & docker." \
   "Inside the yard: install the pinned native ccusage reporter." \
   "Inside the yard: bootstrap enabled agent CLIs when missing." \
-  "On the host: reconcile the selected AI Observer dashboard on its owned container route." \
+  "On the host: reconcile selected integration services and their owned dashboard routes." \
   "On the host: publish static preview on one active Tailscale or private owner IPv4 address." \
   "On the host: set the /dev/kvm device GID to the in-yard 'kvm' group." \
   "On the host: copy instructions for enabled agents into the yard, if present." \

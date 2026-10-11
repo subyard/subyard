@@ -148,7 +148,7 @@ func (cli *CLI) resourceReservedPorts(current config.Loaded, definition resource
 	if err != nil {
 		return nil, err
 	}
-	settings := []string{"AI_OBSERVER_HOST_PORT"}
+	settings := []string{}
 	for _, field := range current.Catalog.SettingCatalog() {
 		if field.HostListener {
 			settings = append(settings, field.Name)

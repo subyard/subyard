@@ -19,6 +19,7 @@ type initIntegrationBaseline struct {
 	Selection config.IntegrationSelection
 	Settings  map[string]config.SettingTrace
 	Sources   map[string]initIntegrationSource
+	Packages  map[string]string
 }
 
 type initIntegrationSource struct {
@@ -30,8 +31,17 @@ type initIntegrationSource struct {
 
 func captureInitIntegrationBaseline(loaded config.Loaded) (*initIntegrationBaseline, error) {
 	baseline := &initIntegrationBaseline{Selection: loaded.Integrations, Settings: map[string]config.SettingTrace{}, Sources: map[string]initIntegrationSource{}}
+	baseline.Packages = map[string]string{}
+	for _, definition := range loaded.Catalog.Integrations() {
+		binding, err := definition.SourceBinding()
+		if err != nil {
+			return nil, err
+		}
+		baseline.Packages[definition.Name] = binding
+	}
 	for name, trace := range loaded.Settings {
-		if !initIntegrationSetting(name) {
+		field, _ := loaded.Catalog.LookupSetting(name)
+		if !initIntegrationSetting(name) && !strings.HasPrefix(field.Owner, "integration:") {
 			continue
 		}
 		// A new settings file can add unset trace entries without changing any
@@ -73,7 +83,7 @@ func initIntegrationSetting(name string) bool {
 	case "CODING_TOOL_INTEGRATIONS", "ALLOWS_CODING_TOOLS", "YARD_TEMPLATE", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD", "HOST_OPENCODE_AGENTS_MD":
 		return true
 	}
-	return strings.HasPrefix(name, "AGENT_") || strings.HasPrefix(name, "CCUSAGE_") || strings.HasPrefix(name, "AI_OBSERVER_")
+	return strings.HasPrefix(name, "AGENT_") || strings.HasPrefix(name, "CCUSAGE_")
 }
 
 func readInitIntegrationSource(path string) (initIntegrationSource, error) {

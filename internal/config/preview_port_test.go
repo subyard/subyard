@@ -36,39 +36,13 @@ func TestWebPreviewHostPortSelection(t *testing.T) {
 }
 
 func TestWebPreviewRejectsInvalidAndCollidingHostPort(t *testing.T) {
-	for _, port := range []string{"0", "80", "1023", "65536", "oops", "032222", "+32222", "2222", "22222"} {
+	for _, port := range []string{"0", "80", "1023", "65536", "oops", "032222", "+32222", "2222"} {
 		t.Run(port, func(t *testing.T) {
-			_, err := Load(LoadOptions{
-				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true,
-				Environment: map[string]string{
-					"SSH_PORT": "2222", "WEB_PREVIEW_HOST_PORT": port, "CODING_TOOL_INTEGRATIONS": "aiobserver",
-				},
-			})
-			if err == nil {
-				t.Fatal("invalid or colliding preview port accepted")
-			}
-			if !strings.Contains(err.Error(), "WEB_PREVIEW_HOST_PORT") {
-				t.Fatalf("preview setting missing from diagnostic: %v", err)
+			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SSH_PORT": "2222", "WEB_PREVIEW_HOST_PORT": port, "CODING_TOOL_INTEGRATIONS": "codex"}})
+			if err == nil || !strings.Contains(err.Error(), "WEB_PREVIEW_HOST_PORT") {
+				t.Fatalf("invalid preview port was accepted: %v", err)
 			}
 		})
-	}
-	_, err := Load(LoadOptions{
-		RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true,
-		Environment: map[string]string{
-			"SSH_PORT": "2222", "AI_OBSERVER_HOST_PORT": "32222", "CODING_TOOL_INTEGRATIONS": "aiobserver",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "WEB_PREVIEW_HOST_PORT collides with AI_OBSERVER_HOST_PORT") {
-		t.Fatalf("derived preview collision error = %v", err)
-	}
-	_, err = Load(LoadOptions{
-		RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true,
-		Environment: map[string]string{
-			"SSH_PORT": "2222", "WEB_PREVIEW_HOST_PORT": "22222", "CODING_TOOL_INTEGRATIONS": "codex",
-		},
-	})
-	if err != nil {
-		t.Fatalf("unused Observer port was reserved: %v", err)
 	}
 }
 

@@ -1,29 +1,7 @@
 #!/usr/bin/env bash
-# One owned Tailscale or loopback route for the selected AI Observer integration. VM guests
-# use the existing SSH access path because Incus cannot proxy their loopback.
-
-# Restrict publication to one active Tailscale IPv4; absence retains loopback access.
-subyard_ai_observer_tail_address() {
-  local address="$1" _first second third fourth
-  [[ "$address" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-  IFS=. read -r _first second third fourth <<<"$address"
-  [ "$second" -ge 64 ] && [ "$second" -le 127 ] &&
-    [ "$third" -le 255 ] && [ "$fourth" -le 255 ] &&
-    [[ "$third" != 0?* && "$fourth" != 0?* ]]
-}
-
-subyard_ai_observer_host() {
-  local address
-  if address="$(timeout 2 tailscale ip -4 2>/dev/null)" &&
-    subyard_ai_observer_tail_address "$address" &&
-    ip -j -4 address show up | jq -e --arg address "$address" \
-      'any(.[].addr_info[]; .local == $address)' >/dev/null; then
-    printf '%s\n' "$address"
-  else
-    printf '127.0.0.1\n'
-  fi
-}
-
+# Owned AI Observer route and pending-recovery receipts.
+# shellcheck source=scripts/lib/owner-address.sh
+. "${SUBYARD_REPOSITORY_ROOT:?}/scripts/lib/owner-address.sh"
 subyard_ai_observer_proxy() {
   local selected="$1" snapshot marker device port current_port current_host desired host value version
   local key=user.subyard.ai_observer_proxy
@@ -45,7 +23,7 @@ subyard_ai_observer_proxy() {
     return 1
   fi
   host=127.0.0.1
-  [ "$selected" != 1 ] || host="$(subyard_ai_observer_host)" || return 1
+  [ "$selected" != 1 ] || host="$(subyard_owner_host)" || return 1
   if [ "$selected" = 1 ] && [ -n "${AI_OBSERVER_FRONTEND_URL:-}" ] &&
     [ "$AI_OBSERVER_FRONTEND_URL" != "http://$host:$port" ]; then
     printf 'AI Observer: prepared dashboard origin changed; retry reconciliation\n' >&2
@@ -65,7 +43,7 @@ subyard_ai_observer_proxy() {
     current_port="${value##*:}"
   fi
   if [ "$device" != null ]; then
-    if ! { [ "$version" = v1 ] || { [ "$version" = v2 ] && subyard_ai_observer_tail_address "$current_host"; }; } ||
+    if ! { [ "$version" = v1 ] || { [ "$version" = v2 ] && subyard_owner_tail_address "$current_host"; }; } ||
       ! [[ "$current_port" =~ ^[1-9][0-9]{3,4}$ ]] ||
       [ "$current_port" -lt 1024 ] || [ "$current_port" -gt 65535 ] ||
       ! jq -e --arg listen "tcp:$current_host:$current_port" '
