@@ -54,12 +54,14 @@ installed_update() {
 }
 
 workflow="$ROOT/.github/workflows/release.yml"
-[ -r "$workflow" ] || fail 'tag release workflow is missing'
-grep -Fq 'contents: write' "$workflow" \
+publish_workflow="$ROOT/.github/workflows/release-publish.yml"
+[ -r "$workflow" ] && [ -r "$publish_workflow" ] || fail 'release workflows are missing'
+grep -Fq 'contents: read' "$workflow" \
   && grep -Fq 'for arch in amd64 arm64' "$workflow" \
-  && grep -Fq 'dev/release-assets.sh --release-dir .build/release' "$workflow" \
-  && grep -Fq 'gh release create "$GITHUB_REF_NAME"' "$workflow" \
-  || fail 'tag workflow does not publish both supported runtime architectures'
+  && grep -Fq 'dev/release-publication.py export-ci' "$workflow" \
+  && grep -Fq 'contents: write' "$publish_workflow" \
+  && grep -Fq 'dev/release-publication.py publish-ci' "$publish_workflow" \
+  || fail 'release preparation/publication must retain both supported runtime architectures'
 
 rpc_negotiate() { # <engine> <engine-version> <protocol-version> <compatible|incompatible> <label>
   local engine="$1" engine_version="$2" protocol="$3" expectation="$4" label="$5"

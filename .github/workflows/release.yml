@@ -1,15 +1,39 @@
-name: Release
+name: Release preparation
+run-name: Subyard ${{ inputs.request }}
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Final stable X.Y.Z (no tag is created)
+        required: true
+        type: string
+      commit:
+        description: Exact full source commit SHA
+        required: true
+        type: string
+      request:
+        description: Durable operator dispatch identity
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate pinned inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
   native-engine-arm64:
+    needs: validate
     permissions:
       contents: read
     runs-on: ubuntu-24.04-arm
@@ -17,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.commit }}
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -33,6 +58,8 @@ jobs:
         run: go test -count=1 ./cmd/... ./internal/...
 
   paseo-headless:
+    name: paseo-headless-${{ matrix.arch }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +73,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
       - name: Install native bundle tools
         run: sudo apt-get update -qq && sudo apt-get install -y binutils build-essential jq xz-utils
       - name: Cache pinned npm downloads
@@ -60,7 +90,7 @@ jobs:
           tests/native/paseo-headless.sh --artifact "$artifact"
       - uses: actions/upload-artifact@v7
         with:
-          name: paseo-headless-${{ matrix.arch }}
+          name: paseo-headless-${{ matrix.arch }}-${{ github.run_attempt }}
           path: .build/paseo/*
           if-no-files-found: error
       - name: Preserve failed Paseo download diagnostics
@@ -72,13 +102,16 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  publish:
+  prepare:
     needs: [native-engine-arm64, paseo-headless]
     runs-on: ubuntu-24.04
     # Include full verification, packaging and released-updater compatibility.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -99,36 +132,39 @@ jobs:
         run: make cli-docs-check
       - uses: actions/download-artifact@v8
         with:
-          pattern: paseo-headless-*
+          pattern: paseo-headless-*-${{ github.run_attempt }}
           path: .build/release
           merge-multiple: true
       - name: Real local crypto and OpenSSH adapter contracts
         run: bash tests/real-host/adapter-contracts.sh
-      - name: Build release assets
+      - name: Build final-version release assets once
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            printf 'release tag must be stable semver: vMAJOR.MINOR.PATCH\n' >&2
-            exit 2
-          }
-          version="${GITHUB_REF_NAME#v}"
           for arch in amd64 arm64; do
-            dev/package-engine.sh --output-dir .build/release --version "$version" --arch "$arch"
+            dev/package-engine.sh --output-dir .build/release --version "$VERSION" --arch "$arch"
           done
       - name: Verify released updater compatibility
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -o pipefail
           mkdir -p .build/ci-logs
-          python3 dev/verify-release-upgrades.py --release-dir .build/release --version "${GITHUB_REF_NAME#v}" 2>&1 | tee .build/ci-logs/verify-release-upgrades.log
-      - name: Publish GitHub Release
+          python3 dev/verify-release-upgrades.py --release-dir .build/release --version "$VERSION" 2>&1 | tee .build/ci-logs/verify-release-upgrades.log
+      - name: Freeze prepared source and exact assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          CANDIDATE: r${{ github.run_id }}-a${{ github.run_attempt }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          asset_list="$(mktemp)"
-          dev/release-assets.sh --release-dir .build/release --version "$version" > "$asset_list"
-          mapfile -t assets < "$asset_list"
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --verify-tag --generate-notes --title "Subyard ${GITHUB_REF_NAME#v}"
+          python3 -B dev/release-publication.py export-ci --output .build/prepared \
+            --version "$VERSION" --commit "$COMMIT" --candidate "$CANDIDATE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-candidate-${{ github.run_attempt }}
+          path: .build/prepared/
+          if-no-files-found: error
+          retention-days: 90
       - name: Preserve failed host-free diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

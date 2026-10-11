@@ -58,13 +58,16 @@ links `~/.local/bin/{yard,sy}` to the verified runtime, and configures login PAT
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
-compatibility manifest and provenance. Follow the
-[dev-flow publication policy](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
-before pushing a `vMAJOR.MINOR.PATCH` tag; GitHub workflows do not have
-access to that pool. The tag starts the independent Release workflow checks: host-free,
-native Paseo, CLI reference freshness, complete profile acceptance inventory, adapter and
-upgrade compatibility on the same Ubuntu 24.04 baseline as CI. The workflow publishes both
-architectures to a tag-backed GitHub Release after they pass. Branch CI does not run for tag pushes. `yard update`
+compatibility manifest and provenance. Use the
+[prepare → accept → publish flow](reference/release-publication.md) for runtime releases.
+`dev/release.sh prepare --version X.Y.Z --commit FULL_SHA` dispatches all release checks
+and builds final-version assets on that exact commit without reserving a stable tag.
+`accept --candidate ID --slots N...` runs the existing physical/profile/external collector
+against those exact CI assets. `publish --candidate ID` hands complete bound acceptance
+to the serialized publication workflow, which creates the stable ref, verifies an owned
+draft's complete uploaded bytes and confirms the actual immutable release. Failed
+preparation leaves the version free; unfinished publication resumes the same candidate.
+Neither workflow runs on tag pushes. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable
 release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
@@ -195,6 +198,7 @@ dedicated release host because it depends on a live container/VM and Incus socke
 
 Before publication, follow [one release candidate](testing.md#one-release-candidate) to freeze and
 verify core plus every shipped profile. Branch CI validates the same complete profile inventory;
-its host-free subset does not claim physical acceptance. Tagged Release gates publication on its
-own checks. Physical and external-service acceptance results stay local and are not committed or
-required by the Release workflow.
+its host-free subset does not claim physical acceptance. Release preparation retains the full
+native CI gates. Publication requires the trusted operator's complete bound acceptance
+attestation; physical and external-service receipts/logs stay local and are not committed.
+See [release publication and recovery](reference/release-publication.md).

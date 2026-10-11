@@ -494,14 +494,14 @@
     {
       "id": "release-packaging-tools",
       "priority": 890,
-      "pattern": "^dev/(package-engine|release-assets)\\.sh$",
+      "pattern": "^dev/((package-engine|release-assets|release)\\.sh|(release-publication|release-acceptance)\\.py)$",
       "check_sets": ["release-tools"],
       "risk_domains": ["dependency-compatibility", "release-runner"]
     },
     {
       "id": "release-workflow",
       "priority": 880,
-      "pattern": "^\\.github/workflows/release\\.yml$",
+      "pattern": "^\\.github/workflows/release(-publish)?\\.yml$",
       "check_sets": ["release-tools"],
       "risk_domains": ["dependency-compatibility", "release-runner"]
     },

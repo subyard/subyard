@@ -228,13 +228,17 @@ actual external check evidence and its SHA-256 in the corresponding receipt entr
 check passes on the same candidate. Do not put credentials or private payloads in receipts.
 
 Acceptance receipts and logs stay in the local output directory and are not committed to the
-repository. The Release workflow gates publication on the checks it runs itself; physical VM and
-external-service acceptance are performed separately. Cross-compiled assets retain their separate
+repository. For actual publication, use the
+[release preparation and publication commands](reference/release-publication.md): their `accept`
+entrypoint imports exact CI assets without repackaging and retains the same collector gates.
+Release publication requires the trusted operator's complete sanitized acceptance attestation,
+including physical VM and external-service results. Cross-compiled assets retain their separate
 build checks.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;
-tag pushes are reserved for the independent Release workflow. Basic native ARM64 engine build,
+release preparation and publication use explicit workflow dispatches, with no tag-triggered
+publication. Basic native ARM64 engine build,
 execution and Go tests run on GitHub's ARM runner in CI and gate Release publication. ARM requires
 no local agent access or workflow authorization. Native Paseo uses the same branch/PR trigger
 boundary, while Release builds its native artifacts independently.

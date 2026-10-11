@@ -85,7 +85,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	shellTests := []string{
-		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance",
+		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance", "release-publication",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
 		"command-registry", "create-subyard-docker-apparmor", "create-subyard-limits", "docker-forwarding-convergence",
 		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",

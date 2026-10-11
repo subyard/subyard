@@ -125,7 +125,7 @@ CLI startup, idle RPC RSS/CPU, snapshot latency and package-size measurements; c
 host-free baseline in `docs/development.md`. Record results outside the public repository without
 host names, credentials or payloads.
 
-Branch CI and tagged Release workflows use one prepared-context entrypoint for the exact pinned
+Branch CI and Release preparation workflows use one prepared-context entrypoint for the exact pinned
 binaries, real crypto and loopback OpenSSH contracts:
 
 ```sh

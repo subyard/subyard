@@ -16,6 +16,7 @@ preview.sh
 preview-proxy.sh
 release-candidate.sh
 release-acceptance.sh
+release-publication.sh
 provision-profile-check.sh
 ssh-agent-environment.sh
 test-impact.sh

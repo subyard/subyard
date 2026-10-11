@@ -366,18 +366,26 @@ def capacity_reason(log):
     return reason
 
 
-def prepare(output, version):
+def prepare(output, version, prepared=None):
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise ValueError("prepare requires an empty output directory")
     output.chmod(0o700)
     event(output, "prepare-start", version=version)
-    original = source_fingerprint(ROOT)
+    identity = json.loads((prepared / "identity.json").read_text()) if prepared else None
+    if identity and identity["version"] != version:
+        raise ValueError("prepared version mismatch")
+    original = identity["source_fingerprint"] if identity else source_fingerprint(ROOT)
     root = output / "source"
     root.mkdir()
     with tempfile.TemporaryDirectory(prefix=".source-", dir=output) as temporary:
         source_archive = Path(temporary) / "source.tar.gz"
-        bundle(ROOT, source_archive)
+        if prepared:
+            if digest(prepared / "source.tar.gz") != identity["source_archive_sha256"]:
+                raise ValueError("prepared source archive mismatch")
+            shutil.copyfile(prepared / "source.tar.gz", source_archive)
+        else:
+            bundle(ROOT, source_archive)
         with tarfile.open(source_archive, "r:gz") as archive:
             for member in archive.getmembers():
                 if member.name.startswith("/") or ".." in Path(member.name).parts or not (member.isfile() or member.isdir()):
@@ -386,7 +394,7 @@ def prepare(output, version):
             for member in archive.getmembers():
                 path = root / member.name
                 path.chmod(0o755 if member.isdir() or member.mode & 0o111 else 0o644)
-    if source_fingerprint(root) != original or source_fingerprint(ROOT) != original:
+    if source_fingerprint(root) != original or (not prepared and source_fingerprint(ROOT) != original):
         raise ValueError("source changed while freezing the candidate")
     inventory = profile_inventory(root)  # Fail before packaging or allocating any VM.
     external = external_inventory(root)
@@ -399,7 +407,23 @@ def prepare(output, version):
         receipt["checks"][name] = {"status": "pending" if command else "not-applicable"}
         if command is None:
             receipt["checks"][name]["reason"] = inventory[name.split(":", 1)[1]]["reason"]
-    receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version], root, output, clean_environment())
+    if prepared:
+        assets = prepared / "assets"
+        actual = {path.name: digest(path) for path in assets.iterdir() if path.is_file() and not path.is_symlink()}
+        if actual != identity["release_files"] or len(list(assets.iterdir())) != len(actual):
+            raise ValueError("prepared release assets mismatch")
+        for path in assets.iterdir():
+            shutil.copyfile(path, release / path.name)
+            binary_names = {f"yard-{version}-linux-amd64", f"yard-{version}-linux-arm64"}
+            (release / path.name).chmod(0o755 if path.name in binary_names or path.name.endswith(".sh") else 0o644)
+        receipt["preparation"] = identity
+        log = output / "package-ci.log"
+        with private_file(log) as stream:
+            stream.write("Imported exact prepared CI assets: " + identity["candidate_id"] + "\n")
+        receipt["checks"]["package"] = {"status": "passed", "exit_code": 0,
+            "log": log.name, "log_sha256": digest(log), "command": ["ci-prepared", identity["candidate_id"]]}
+    else:
+        receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version], root, output, clean_environment())
     receipt["checks"]["package"]["execution_environment"] = receipt["environment"]
     save(output, receipt)
     if receipt["checks"]["package"]["status"] != "passed":
@@ -425,6 +449,12 @@ def load_bound(output):
     root = output / "source"
     if receipt.get("schema_version") != 1 or source_fingerprint(root) != receipt["source_fingerprint"]:
         raise ValueError("frozen source fingerprint mismatch")
+    if "preparation" in receipt:
+        identity = receipt["preparation"]
+        if any(identity.get(key) != receipt.get(key) for key in ("version", "source_fingerprint", "release_files")):
+            raise ValueError("prepared candidate receipt binding changed")
+        if receipt["checks"].get("package", {}).get("command") != ["ci-prepared", identity.get("candidate_id")]:
+            raise ValueError("prepared package provenance changed")
     if not isinstance(receipt.get("environment"), dict) or set(receipt["environment"]) != {"system", "machine", "go"}:
         raise ValueError("candidate execution environment is missing")
     if profile_inventory(root) != receipt["profiles"]:
@@ -891,6 +921,7 @@ def main():
     prep = sub.add_parser("prepare", help="retain an immutable source/artifact candidate")
     prep.add_argument("--version", required=True)
     prep.add_argument("--output", type=Path, required=True)
+    prep.add_argument("--prepared", type=Path, help="import bound CI sources/assets without rebuilding")
     run = sub.add_parser("run", help="run pending checks; each live retry acquires fresh VMs")
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--slots", type=int, nargs="+", default=[])
@@ -924,7 +955,7 @@ def main():
     if args.action == "prepare":
         if not args.version or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-" for c in args.version):
             parser.error("unsafe version")
-        prepare(output, args.version)
+        prepare(output, args.version, args.prepared.resolve() if args.prepared else None)
         return 0
     if args.action == "import":
         with acceptance_lock(output), acceptance_lock(args.source_output.resolve(), shared=True):

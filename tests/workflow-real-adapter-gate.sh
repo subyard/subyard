@@ -98,16 +98,16 @@ line_of() {
 }
 
 release_adapter_line="$(line_of "$RELEASE_WORKFLOW" "run: bash $RUNNER")"
-release_build_line="$(line_of "$RELEASE_WORKFLOW" 'name: Build release assets')"
+release_build_line="$(line_of "$RELEASE_WORKFLOW" 'name: Build final-version release assets once')"
 release_compat_line="$(line_of "$RELEASE_WORKFLOW" 'name: Verify released updater compatibility')"
-release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Publish GitHub Release')"
+release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Freeze prepared source and exact assets')"
 [ "$release_adapter_line" -lt "$release_publish_line" ] \
-  || fail 'Release must pass the real-adapter gate before publishing assets'
+  || fail 'Release must pass the real-adapter gate before retaining candidate assets'
 [ "$release_build_line" -lt "$release_publish_line" ] \
-  || fail 'Release must build assets before publishing'
+  || fail 'Release must build assets before retaining candidate assets'
 [ "$release_build_line" -lt "$release_compat_line" ] \
   && [ "$release_compat_line" -lt "$release_publish_line" ] \
-  || fail 'Release must verify built assets against released updaters before publishing'
+  || fail 'Release must verify built assets against released updaters before retaining candidate assets'
 grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKFLOW" \
   || fail 'Release must preserve failed released-updater compatibility diagnostics'
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
