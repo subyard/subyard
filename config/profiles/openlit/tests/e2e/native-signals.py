@@ -71,7 +71,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = 'http://127.0.0.1:'+str(server.server_port)
-env = {'HOME': str(HOME), 'PATH': '/usr/local/bin:/usr/bin:/bin',
+env = {'HOME': str(HOME), 'PATH': '/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
        'ANTHROPIC_API_KEY': 'synthetic-local-fixture', 'ANTHROPIC_BASE_URL': base,
        'OTEL_METRIC_EXPORT_INTERVAL': '1000', 'OTEL_LOGS_EXPORT_INTERVAL': '1000',
        'DISABLE_AUTOUPDATER': '1'}
