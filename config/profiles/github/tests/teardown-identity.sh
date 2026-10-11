@@ -20,8 +20,9 @@ set -euo pipefail
 [ "$1" = --user ] || exit 2
 printf '%s\n' "$2" >> "$SERVICE_LOG"
 case "$2" in
-  disable)
-    if [ "$REPLACE_ON_DISABLE" = 1 ]; then
+  stop|disable)
+    [ "$#" -eq 3 ] || exit 2
+    if [ "$REPLACE_ON" = "$2" ]; then
       python3 - "$UNIT_FILE" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
@@ -66,19 +67,19 @@ print(json.dumps(artifacts))
 PY
 }
 
-for phase in before-stop during-stop; do
+for phase in before-stop during-stop during-disable; do
   printf '# Managed by Subyard GitHub broker\n' > "$UNIT_FILE"
   chmod 0600 "$UNIT_FILE"
   SUBYARD_TEARDOWN_ARTIFACTS="$(capture)"
   export SUBYARD_TEARDOWN_ARTIFACTS
   : > "$SERVICE_LOG"
-  export REPLACE_ON_DISABLE=0
+  export REPLACE_ON=none
   if [ "$phase" = before-stop ]; then
     # Copying bytes and timestamps hides replacement from the old digest.
-    REPLACE_ON_DISABLE=1 "$TMP/bin/systemctl" --user disable
+    REPLACE_ON=disable "$TMP/bin/systemctl" --user disable subyard-github-fixture.service
     : > "$SERVICE_LOG"
   else
-    export REPLACE_ON_DISABLE=1
+    export REPLACE_ON="${phase#during-}"
   fi
   if bash "$ROOT/config/profiles/github/owner.sh" --remove > "$TMP/output" 2>&1; then
     fail "$phase replacement was accepted"
@@ -87,8 +88,18 @@ for phase in before-stop during-stop; do
   [ -f "$UNIT_FILE" ] || fail "$phase replacement was deleted"
   if [ "$phase" = before-stop ]; then
     [ ! -s "$SERVICE_LOG" ] || fail 'stale unit triggered a service operation'
+  elif [ "$phase" = during-stop ]; then
+    [ "$(cat "$SERVICE_LOG")" = stop ] || fail 'replacement was not checked immediately after stopping'
   else
-    [ "$(cat "$SERVICE_LOG")" = disable ] || fail 'replacement was not checked immediately after disabling'
+    [ "$(cat "$SERVICE_LOG")" = "$(printf 'stop\ndisable')" ] || fail 'replacement was not checked immediately after disabling'
   fi
 done
+SUBYARD_TEARDOWN_ARTIFACTS="$(capture)"
+export SUBYARD_TEARDOWN_ARTIFACTS REPLACE_ON=none
+: > "$SERVICE_LOG"
+bash "$ROOT/config/profiles/github/owner.sh" --remove > "$TMP/output" 2>&1 \
+  || fail 'intact approved unit was not removed'
+[ ! -e "$UNIT_FILE" ] || fail 'intact approved unit remains'
+[ "$(cat "$SERVICE_LOG")" = "$(printf 'stop\ndisable\ndaemon-reload')" ] \
+  || fail 'intact unit was not stopped before disabling and reloading'
 printf 'ok: GitHub teardown preserves replacement unit identities\n'

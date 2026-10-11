@@ -120,7 +120,13 @@ if [ "$enabled" != 1 ]; then
   fi
   if [ -e "$unit_file" ] || [ -L "$unit_file" ]; then
     owned_service || die 'refusing to remove unmanaged GitHub broker service'
-    user_systemctl disable --now "$unit" >/dev/null
+    # Keep the manager's link to an absolute-path unit until it has stopped.
+    user_systemctl stop "$unit"
+    if [ "$mode" = remove ]; then
+      python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-artifact "$unit_file" \
+        || exit 75
+    fi
+    user_systemctl disable "$unit" >/dev/null
     if [ "$mode" = remove ]; then
       python3 "$SCRIPT_DIR/lib/teardown-plan.py" remove-artifact "$unit_file" \
         || exit 75

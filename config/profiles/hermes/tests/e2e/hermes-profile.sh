@@ -353,6 +353,9 @@ install -d -m 0700 "$STATE/fakebin"
 } >"$STATE/fakebin/tailscale"
 chmod 0700 "$STATE/fakebin/tailscale"
 
+# Reconcile the existing preview route after changing the owner address.
+PATH="$STATE/fakebin:$PATH" yard "$YARD" init --yes
+
 yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes
 yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes
 
