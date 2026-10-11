@@ -86,6 +86,26 @@ func TestSelectPreviewPathsRecommendBoundedLifecycle(t *testing.T) {
 	}
 }
 
+func TestSelectSemanticObservationSelectsCanonicalAndConsumerChecks(t *testing.T) {
+	policy, registry := selectorFixture(t)
+	for _, test := range []struct {
+		path    string
+		domains []string
+	}{
+		{"internal/observation/observation.go", []string{"config-state"}},
+		{"internal/observation/observation_test.go", []string{}},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			got := Select(policy, registry, ChangeSet{SchemaVersion: 1, Changes: []Change{modifiedChange(test.path)}})
+			if got.Status != "selected" || len(got.Errors) != 0 || got.FullP0.Required || len(got.E2EChecks) != 0 ||
+				!slices.Equal(recommendationIDs(got.HostFreeChecks), []string{"go:observation", "shell:aiobserver-provision"}) ||
+				!slices.Equal(got.RiskDomains, test.domains) || len(got.Reasons) != 1 || got.Reasons[0].RuleID != "internal-observation" {
+				t.Fatalf("semantic observation selection = %#v", got)
+			}
+		})
+	}
+}
+
 func TestSelectClassifiesDocumentationTestsLeafPackagesAndSpecialProfiles(t *testing.T) {
 	policy, registry := selectorFixture(t)
 	tests := []struct {

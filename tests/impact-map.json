@@ -171,6 +171,7 @@
     "orca-registration-tests": ["profiles:host-free"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
     "real-ssh-rpc-contract": ["e2e:ssh-rpc"],
+    "semantic-observation": ["go:observation", "shell:aiobserver-provision"],
     "selector-self": [
       "go:test-impact-cli",
       "go:testimpact",
@@ -819,6 +820,13 @@
       "pattern": "^internal/resourceendpoint/.*$",
       "check_sets": ["go-resourceendpoint", "go-resource", "orca-profile", "profile-generic"],
       "risk_domains": ["orca-gpu-profile", "profile-resource"]
+    },
+    {
+      "id": "internal-observation",
+      "priority": 558,
+      "pattern": "^internal/observation/.*$",
+      "check_sets": ["semantic-observation"],
+      "risk_domains": ["config-state"]
     },
     {
       "id": "internal-configsync",

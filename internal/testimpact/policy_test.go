@@ -23,7 +23,7 @@ func TestRegistryContainsRequiredChecksAndFixedCommands(t *testing.T) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "ownerapi", "ownerinventory", "ports", "resource", "rpc", "shellquote",
+		"domain", "migration", "observation", "ownerapi", "ownerinventory", "ports", "resource", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "state", "systemdunit", "testyardmigration",
 		"adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/projectruntime", "adapters/reconcileruntime",
