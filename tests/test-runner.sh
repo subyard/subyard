@@ -16,6 +16,7 @@ cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu
 [ "${TMPDIR:-}" = /tmp ] || exit 25
+[ -z "${RUNNER_BASIC_GO_LOG:-}" ] || printf '%s\n' "$*" >> "$RUNNER_BASIC_GO_LOG"
 case " $* " in
   *' test -list '*)
     if [ "${RUNNER_FAIL_LIST:-}" = 1 ]; then
@@ -238,8 +239,10 @@ printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile ch
 TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles.out" 2>&1
 grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not discovered'
 cp "$ROOT/Makefile" "$fixture/Makefile"
-TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" \
+TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_BASIC_GO_LOG="$tmp/make-test.go" \
   make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
+grep -Fxq 'test -count=1 ./cmd/... ./internal/...' "$tmp/make-test.go" \
+  || fail 'make test must rerun core Go checks to detect changed repository inventories'
 grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped profile tests'
 
 # The Go helper is also a supported direct entrypoint, without the profile wrapper.

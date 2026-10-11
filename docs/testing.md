@@ -75,6 +75,11 @@ not itself a guide deviation.
 
 ## Run the core checks
 
+`make test` runs the basic Go tests and profile host-free checks. Core Go tests use
+`-count=1` so repository-inventory checks execute even when their package code is unchanged;
+the Go build cache still applies. To run only the core Go tests, use
+`TMPDIR=/tmp go test -count=1 ./cmd/... ./internal/...`.
+
 `./tests/run.sh` checks the current source files, including uncommitted edits. No Git history,
 clean checkout, base commit or `.git` directory is required. Install the tools listed in
 [the test guide](test-vms.md), including Git and ripgrep: tests of Git behavior create their own
