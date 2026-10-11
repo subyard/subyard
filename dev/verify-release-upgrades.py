@@ -39,6 +39,11 @@ PUBLISHED_BASELINE_SHA256 = {
     "amd64": "a2e4a18ac806079b70b35a5b679ef6c616bc22137453d6f3f0e0e34ef491ef74",
     "arm64": "2172f375871fe280297f69e9ae88a7d1ca1df5678c02d6189551cfa98aa07d9a",
 }
+SOURCE_BASELINE = "0.18.6"
+SOURCE_BASELINE_SHA256 = {
+    "amd64": "458950eccd3831df8d4ed059ccc51a5dece6f8a85aedaae38f863b7252f635f2",
+    "arm64": "a3b52c39edfc4930f0e0ab4c697d60db6b39a00b022d344053bc4f4131fca4fa",
+}
 
 
 def require(condition, message):
@@ -48,6 +53,32 @@ def require(condition, message):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def sealed_checkpoint_reader(release_root):
+    relative = "./config/release-checkpoint.json"
+    capability = release_root / relative
+    entries = [line.split("  ", 1) for line in
+               (release_root / "runtime-files.sha256").read_text().splitlines()
+               if line.endswith("  " + relative)]
+    if not capability.exists():
+        require(not entries and not capability.is_symlink(),
+                "sealed checkpoint-reader contract is missing")
+        return False
+    require(capability.is_file() and not capability.is_symlink() and len(entries) == 1
+            and len(entries[0][0]) == 64 and digest(capability) == entries[0][0],
+            "checkpoint-reader contract is not bound by its installed manifest")
+    payload = capability.read_bytes()
+    require(0 < len(payload) <= 1024, "checkpoint-reader contract exceeds its bound")
+    try:
+        contract = json.loads(payload)
+    except (ValueError, UnicodeDecodeError):
+        raise RuntimeError("checkpoint-reader contract is invalid") from None
+    require(isinstance(contract, dict) and set(contract) == {"schemaVersion", "contract"}
+            and type(contract["schemaVersion"]) is int and contract["schemaVersion"] == 1
+            and contract["contract"] == "migration-history-checkpoint-v1",
+            "checkpoint-reader contract is unsupported")
+    return True
 
 
 def snapshot(root):
@@ -242,6 +273,7 @@ def verify_checkpoint_refusal(fixture):
 def verify_checkpoint_source(release, version, baseline, arch, root, baseline_version=BASELINE):
     fixture = Fixture(root / f"checkpoint-source-{baseline_version}", release, version, baseline, arch,
                       baseline_version)
+    source_reader = sealed_checkpoint_reader(fixture.runtime / fixture.initial)
     fixture.update("--version", version, "--yes")
     fixture.complete()
     bridge = os.readlink(fixture.runtime / "current")
@@ -326,28 +358,48 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
     outcome = inspection["outcome"]
     # The released caller projects the public outcome, not the newer owner's
     # complete blocker inventory. Assert its supported diagnostic contract.
-    require(outcome["status"] == "operator-action-required" and
-            outcome["code"] == "rollback-incompatible" and
-            "verified checkpoint-reader bridge" in outcome["retry"],
-            "released caller omitted the checkpoint-reader bridge prerequisite")
-    require(snapshot(fixture.config) == before and links() == prior_links,
-            "blocked future inspection changed protected state or runtime links")
-    refused = run_process([str(fixture.old_launcher), "update", "--version", future_version, "--yes"],
-                          fixture.env, timeout=180)
-    require(refused.returncode != 0 and
-            "verified checkpoint-reader bridge" in refused.stdout + refused.stderr and
-            snapshot(fixture.config) == before and links() == prior_links,
-            "released caller advanced checkpoint history from an unaware retained source")
+    if source_reader:
+        require(outcome["status"] == "migration-required" and
+                outcome["code"] == "transition-required" and
+                inspection.get("plan", "").startswith("plan-v1-") and
+                inspection.get("resume") is None and outcome.get("transaction") is None and
+                inspection["assessment"]["changed"],
+                "sealed reader did not assess a fresh future-epoch plan: " +
+                json.dumps({key: outcome.get(key) for key in ("status", "code")}))
+        require(snapshot(fixture.config) == before and links() == prior_links,
+                "reader future inspection changed protected state or runtime links")
+        refused = run_process([str(fixture.old_launcher), "update", "--version", future_version],
+                              fixture.env, timeout=180)
+        require(refused.returncode != 0 and
+                "confirmation" in (refused.stdout + refused.stderr).lower() and
+                snapshot(fixture.config) == before and links() == prior_links,
+                "sealed reader advanced future history without fresh consent")
+        expected_previous = fixture.initial
+    else:
+        require(outcome["status"] == "operator-action-required" and
+                outcome["code"] == "rollback-incompatible" and
+                "verified checkpoint-reader bridge" in outcome["retry"],
+                "released caller omitted the checkpoint-reader bridge prerequisite: " +
+                json.dumps({key: outcome.get(key) for key in ("status", "code")}))
+        require(snapshot(fixture.config) == before and links() == prior_links,
+                "blocked future inspection changed protected state or runtime links")
+        refused = run_process([str(fixture.old_launcher), "update", "--version", future_version, "--yes"],
+                              fixture.env, timeout=180)
+        require(refused.returncode != 0 and
+                "verified checkpoint-reader bridge" in refused.stdout + refused.stderr and
+                snapshot(fixture.config) == before and links() == prior_links,
+                "released caller advanced checkpoint history from an unaware retained source")
 
-    # No new intermediate published baseline is invented: the exact supplied
-    # epoch-2 candidate is the reader bridge before checkpoint history advances.
-    fixture.update("--version", version, "--yes")
-    fixture.complete()
-    require(os.readlink(fixture.runtime / "current") == bridge,
-            "released caller did not install the exact assessed reader bridge")
+        # The exact supplied epoch-2 candidate is the reader bridge before
+        # checkpoint history advances from an unaware retained source.
+        fixture.update("--version", version, "--yes")
+        fixture.complete()
+        require(os.readlink(fixture.runtime / "current") == bridge,
+                "released caller did not install the exact assessed reader bridge")
+        expected_previous = bridge
     fixture.update("--version", future_version, "--yes")
     fixture.version = future_version
-    fixture.complete(expected_previous=bridge)
+    fixture.complete(expected_previous=expected_previous)
     require(projection.read_bytes() == retained_projection and
             json.loads(checkpoint.read_text())["domains"]["settings"]["epoch"] == 3,
             "future owner did not preserve projection epoch 2 while advancing compact history to epoch 3")
@@ -373,7 +425,8 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
                     for word in ("rollback", "checkpoint")) and
                 snapshot(fixture.config) == before and links() == prior_links,
                 "caller rolled back or changed protected state using a stale epoch-2 projection")
-    print(f"PASS: released {baseline_version} caller requires the sealed reader bridge before synthetic "
+    capability_path = "uses its sealed reader" if source_reader else "requires the sealed reader bridge"
+    print(f"PASS: released {baseline_version} caller {capability_path} before synthetic "
           "epoch 3; both callers refuse rollback to epoch 2 and preserve the pinned projection", flush=True)
 
 
@@ -463,7 +516,7 @@ def verify_completed_activation_drift(fixture):
                     and retained["outcome"].get("transaction") == transaction,
                     "frozen released updater rejected completed activation drift")
         else:
-            require(fixture.baseline_version == PUBLISHED_BASELINE
+            require(fixture.baseline_version in (PUBLISHED_BASELINE, SOURCE_BASELINE)
                     and retained["outcome"]["status"] == "migration-required"
                     and retained["outcome"]["code"] == "transition-required"
                     and retained["outcome"].get("transaction") is None,
@@ -532,9 +585,11 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
     print(f"PASS: released {baseline_version} updater resumes the candidate's journal after SIGKILL", flush=True)
 
 
-def verify_activation_only_recovery(release, version, baseline, arch, root):
+def verify_activation_only_recovery(release, version, baseline, arch, root,
+                                    baseline_version=ACTIVATION_BASELINE, source_repair=False):
     started = time.monotonic()
-    fixture = Fixture(root / "activation-only", release, version, baseline, arch, ACTIVATION_BASELINE)
+    fixture = Fixture(root / f"activation-only-{baseline_version}", release, version, baseline, arch,
+                      baseline_version)
     host_settings = fixture.config / "config.env"
     host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
     host_settings.chmod(0o600)
@@ -626,6 +681,26 @@ def verify_activation_only_recovery(release, version, baseline, arch, root):
     # A stopped synthetic instance has no live config consumers. Its desired
     # settings and asset inventory remain identical to the running observation.
     observe("Stopped", False)
+    if source_repair:
+        candidate = verify_alias_source_repair(fixture, release, unfinished=True)
+        before = snapshot(fixture.config)
+        fresh = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+        require(fresh["outcome"]["status"] == "recovering" and not fresh.get("blockers"),
+                "original owner did not offer a fresh recovery assessment after source repair")
+        declined = run_process([str(fixture.old_launcher), "migrate"], fixture.env, timeout=60)
+        require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
+                and snapshot(fixture.config) == before,
+                "original-owner recovery reused source-repair consent")
+        fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+        completed = json.loads(fixture.journal.read_text())
+        require(completed["checkpoint"] == "complete" and completed["transaction"] != journal["transaction"],
+                "original owner did not complete its separately authorized replacement")
+        ready = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+        require(ready["outcome"]["status"] == "ready", "original owner could not verify recovery readiness")
+        fixture.update("--version", version, "--yes")
+        fixture.complete(old=False)
+        print(f"PASS: actual {baseline_version} original owner separately authorizes source-repair recovery", flush=True)
+        return
     blocked = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
     require(len(blocked.get("blockers", [])) == 1
             and blocked["blockers"][0]["resource"] == "yard.unrelated"
@@ -887,6 +962,100 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
           "caller inspects and resumes V2 successor, rollback and forward", flush=True)
 
 
+def verify_alias_source_repair(fixture, release, unfinished=False):
+    registration = fixture.config / "yards/hermes/config.env"
+    registration.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    registration.write_text("# Retained local source record.\nYARD_PROFILES=\nSSH_PORT=2237\n")
+    registration.chmod(0o640)
+    if unfinished:
+        # Literal source drift follows authentic journal publication. The old
+        # ordinary writer is correctly blocked by the unfinished mutation gate.
+        with registration.open("a") as source:
+            source.write("ENVIRONMENT_PROFILES=orca-runtime\n")
+    else:
+        # The unmodified released writer reproduces the defect; no journal editing.
+        fixture.run([str(fixture.old_launcher), "-Y", "hermes", "config", "set",
+                     "ENVIRONMENT_PROFILES", "orca-runtime", "--scope", "yard", "--local", "--yes"])
+    require("YARD_PROFILES=" in registration.read_text()
+            and "ENVIRONMENT_PROFILES=" in registration.read_text(), "released writer did not retain alias")
+    blocked = run_process([str(fixture.old_launcher), "-Y", "hermes", "config", "show"],
+                          fixture.env, timeout=30)
+    require(blocked.returncode != 0, "released caller accepted the conflicting source")
+    if not unfinished:
+        # A released completed owner reports its own native blocker, but refuses
+        # a different target before rendering that protected inspection.
+        before = snapshot(fixture.config)
+        links = (os.readlink(fixture.runtime / "current"),
+                 os.readlink(fixture.runtime / "previous") if (fixture.runtime / "previous").is_symlink() else None)
+        same_owner = run_process([str(fixture.old_launcher), "update", "--check", "--json"],
+                                 fixture.env, timeout=60)
+        require(same_owner.returncode == 0, "released same-owner assessment was unavailable")
+        inspection = json.loads(same_owner.stdout)
+        require(inspection.get("outcome", {}).get("status") == "operator-action-required"
+                and any(blocker.get("code") == "dependency-unavailable"
+                        for blocker in inspection.get("blockers", [])),
+                "released same-owner assessment did not retain its native blocker")
+        different_target = run_process([str(fixture.old_launcher), "update", "--check", "--json",
+                                        "--version", fixture.version], fixture.env, timeout=60)
+        require(different_target.returncode == 1
+                and "permits only exact target" in different_target.stderr,
+                f"released different-target guard differed (exit {different_target.returncode})")
+        require(snapshot(fixture.config) == before and
+                (os.readlink(fixture.runtime / "current"),
+                 os.readlink(fixture.runtime / "previous") if (fixture.runtime / "previous").is_symlink() else None) == links,
+                "released blocker inspections changed protected state")
+        print(f"PASS: actual {fixture.baseline_version} same-owner blocker assessment and "
+              "different-target original-owner refusal preserve protected state", flush=True)
+    staged = fixture.run(["bash", str(release / "subyard-install.sh"), "--publish-only",
+                          "--version", fixture.version])
+    stage_line = next((line for line in staged.splitlines() if line.startswith("staged release=")), "")
+    require(stage_line, "staging did not return a candidate identity")
+    candidate = Path(stage_line.split(" candidate=", 1)[1]) / "bin/yard"
+    protected = fixture.config / "release-transition"
+    before = snapshot(protected)
+    links = (os.readlink(fixture.runtime / "current"),
+             os.readlink(fixture.runtime / "previous") if (fixture.runtime / "previous").is_symlink() else None)
+    original = registration.read_bytes()
+    original_mode = registration.stat().st_mode & 0o777
+    command = [str(candidate), "-Y", "hermes", "config", "repair-alias", "ENVIRONMENT_PROFILES", "",
+               "--scope", "yard", "--local"]
+    fixture.run(command + ["--check"])
+    declined = run_process(command, fixture.env, timeout=60)
+    require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower(),
+            "source repair reused an old authorization")
+    require(registration.read_bytes() == original and snapshot(protected) == before,
+            "preview or decline changed source/history")
+    fixture.run(command + ["--yes"])
+    require("YARD_PROFILES=" not in registration.read_text()
+            and "ENVIRONMENT_PROFILES=''" in registration.read_text()
+            and "SSH_PORT=2237" in registration.read_text()
+            and registration.stat().st_mode & 0o777 == original_mode,
+            "explicit source repair changed unrelated records or permissions")
+    require(snapshot(protected) == before, "source repair changed original protected metadata")
+    require((os.readlink(fixture.runtime / "current"),
+             os.readlink(fixture.runtime / "previous") if (fixture.runtime / "previous").is_symlink() else None)
+            == links, "source repair activated staged tooling")
+    fixture.run([str(candidate), "-Y", "hermes", "config", "validate", "--json"])
+    fixture.run(command + ["--yes"])
+    require(snapshot(protected) == before, "source repair no-op changed history")
+    if unfinished:
+        require(json.loads(fixture.journal.read_text())["checkpoint"] == "reconciling",
+                "new tooling executed unfinished original history")
+    print(f"PASS: actual {fixture.baseline_version} {'unfinished' if unfinished else 'completed'} "
+          "owner source repair stages tooling, requires new consent and preserves protected history", flush=True)
+    return candidate
+
+
+def verify_completed_source_repair(release, version, baseline, arch, root):
+    fixture = Fixture(root / "source-repair-completed", release, version, baseline, arch, SOURCE_BASELINE)
+    fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+    require(json.loads(fixture.journal.read_text())["checkpoint"] == "complete",
+            "actual source owner did not produce terminal history")
+    verify_alias_source_repair(fixture, release)
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
@@ -899,17 +1068,21 @@ def main():
                         help="optional directory containing the pinned activation-recovery baseline assets")
     parser.add_argument("--published-baseline-dir", type=Path,
                         help="optional directory containing the pinned published-caller baseline assets")
+    parser.add_argument("--source-baseline-dir", type=Path,
+                        help="optional directory containing the pinned source-repair baseline assets")
+    parser.add_argument("--only-source-repair", action="store_true",
+                        help="run actual released completed and interrupted source-repair contracts")
     parser.add_argument("--only-activation-recovery", action="store_true",
                         help="run only the published activation-only recovery regression")
     parser.add_argument("--only-checkpoint-source", action="store_true",
                         help="run only released-caller checkpoint source and future rollback compatibility")
     args = parser.parse_args()
-    require(not (args.only_activation_recovery and args.only_checkpoint_source),
+    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair)) <= 1,
             "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
     release = args.release_dir.resolve()
-    require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE, PUBLISHED_BASELINE),
+    require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE, PUBLISHED_BASELINE, SOURCE_BASELINE),
             "candidate must differ from the released baselines")
     os.umask(0o077)
     # Protected runtime roots reject writable workspace ancestors. All mutable
@@ -932,6 +1105,13 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
+                if args.only_source_repair:
+                    source_baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
+                                                      SOURCE_BASELINE_SHA256, arch)
+                    verify_completed_source_repair(release, args.version, source_baseline, arch, root)
+                    verify_activation_only_recovery(release, args.version, source_baseline, arch, root,
+                                                   SOURCE_BASELINE, source_repair=True)
+                    return
                 if not args.only_activation_recovery and not args.only_checkpoint_source:
                     legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
                                              LEGACY_BASELINE_SHA256, arch)
@@ -939,13 +1119,18 @@ def main():
                 if not args.only_activation_recovery:
                     for baseline_version, hashes, directory in (
                             (BASELINE, BASELINE_SHA256, args.baseline_dir),
-                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir)):
+                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
+                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
                         baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
                         if not args.only_checkpoint_source:
                             verify(release, args.version, baseline, arch, root, baseline_version)
                         verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
                         if baseline_version == BASELINE and not args.only_checkpoint_source:
                             verify_fresh_activation_recovery(release, args.version, baseline, arch, root)
+                        if baseline_version == SOURCE_BASELINE and not args.only_checkpoint_source:
+                            verify_completed_source_repair(release, args.version, baseline, arch, root)
+                            verify_activation_only_recovery(release, args.version, baseline, arch, root,
+                                                           SOURCE_BASELINE, source_repair=True)
                     if args.only_checkpoint_source:
                         return
                 activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,

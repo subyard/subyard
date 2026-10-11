@@ -419,6 +419,40 @@ Select a non-default yard with `-Y <yard>` before using `--scope yard`. Each wri
 catalog type and scope, rejects secret-looking content and asks before changing the persistent
 configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executable.
 
+Persistent set/unset writers canonicalize every member of the selected legacy alias family,
+including removal of all aliases on unset. They preserve unrelated records, comments and existing
+permissions. Before consent they load the prospective scoped configuration through the normal
+resolver, including every affected local registration for host/shared changes. Relevant source,
+profile and asset dependencies are bound by content and filesystem identity and rechecked before
+publication; changed inputs require a fresh assessment. Transient selection overrides cannot hide
+invalid persistent profile or integration constraints.
+
+`yard config validate [--all-local] [--json]` checks scoped schema without requiring a successful
+initial default-yard load. It is read-only and does not claim materialized configuration or release
+readiness. `config status` reports materialized assets only; use release assessment for release readiness.
+
+A conflicting literal legacy/canonical source can prevent ordinary loading and release assessment.
+Choose the desired value explicitly; verified installed or separately staged tooling exposes a bounded
+source repair before those gates:
+
+```sh
+yard -Y demo config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --check
+yard -Y demo config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --yes
+```
+
+Repair accepts one to four explicit canonical setting/value pairs in one local scope/file, limited to
+`YARD_IMAGE`, `YARD_IMAGE_FALLBACK`, `ENVIRONMENT_PROFILES` and `CODING_TOOL_INTEGRATIONS`.
+An actual change needs a related literal legacy assignment; canonical-only inputs permit exact desired
+repetition. Dynamic assignments, remote/inventory selectors, arbitrary source paths, Git authoring,
+identity/routing/sensitive settings and foreign shipped assets are excluded. A source checkout cannot
+perform this ingress. Preview and diagnostics identify keys and scope without displaying values.
+The repair validates all affected configuration, requires its own consent and preserves protected release
+history and links. Its result is load-valid source, with a separate release assessment still required.
+Supported unfinished activation-only history also requires a schema-2 capability probe of its exact
+sealed original owner. That owner subsequently needs separate fresh consent for changed-input recovery;
+staging newer tooling does not add capabilities to an old caller. Unsupported metadata or unresolved
+intent requires its exact original owner or the reported supported bridge, without editing journals.
+
 The default is local storage; `--local` makes that choice explicit and needs no Git source.
 `--git` saves only the selected assignment or file in the registered source, creates one commit
 with an automatic message that omits the value, and pushes the exact upstream immediately. It

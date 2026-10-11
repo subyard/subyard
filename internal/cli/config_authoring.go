@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
@@ -150,8 +151,7 @@ func (cli *CLI) runConfigAuthoring(
 		return cli.runConfigGitAuthoring(ctx, loaded, request, content)
 	}
 	return cli.runPreparedConfigMutation(ctx, loaded, append([]string{action}, arguments...), request.assumeYes, func(prepared *preparedCommand) error {
-		prepared.attachConfigFileDraft(request, target, snapshot, content)
-		return nil
+		return prepared.attachConfigFileDraft(request, target, snapshot, content)
 	})
 }
 
@@ -306,7 +306,15 @@ func readConfigAuthoringTarget(path string) (config.PersistentFileSnapshot, erro
 	if err != nil {
 		return config.PersistentFileSnapshot{}, err
 	}
-	return config.PersistentFileSnapshot{Exists: true, Content: content}, nil
+	info, err := os.Lstat(path)
+	if err != nil {
+		return config.PersistentFileSnapshot{}, err
+	}
+	identity := config.PersistentFileIdentity{}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		identity = config.PersistentFileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode, UID: stat.Uid, GID: stat.Gid, Links: uint64(stat.Nlink)}
+	}
+	return config.PersistentFileSnapshot{Exists: true, Content: content, Identity: identity}, nil
 }
 
 func readConfigAuthoringFile(path string) ([]byte, error) {
@@ -358,4 +366,12 @@ func (cli *CLI) editConfigAuthoringFile(
 		return nil, fmt.Errorf("editor failed: %w", err)
 	}
 	return readConfigAuthoringFile(draft)
+}
+
+func readConfigPersistentSnapshot(root, path string) (config.PersistentFileSnapshot, error) {
+	snapshot, err := config.ReadPersistentFileSnapshot(root, path)
+	if errors.Is(err, os.ErrNotExist) {
+		return config.PersistentFileSnapshot{}, nil
+	}
+	return snapshot, err
 }

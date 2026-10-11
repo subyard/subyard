@@ -64,6 +64,7 @@ type Definition struct {
 	Settings                   []Setting             `json:"settings,omitempty"`
 	Runtime                    *RuntimeHook          `json:"runtime,omitempty"`
 	GuestEnvironment           *GuestEnvironmentHook `json:"guest_environment,omitempty"`
+	validationInputs           []string
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
@@ -102,6 +103,7 @@ func Load(root string) ([]Definition, error) {
 			return nil, errors.New("profile declaration has trailing data")
 		}
 		definition.Root = filepath.Dir(path)
+		definition.validationInputs = []string{path}
 		definition.Name = filepath.Base(definition.Root)
 		if err := definition.validate(); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", definition.Name, err)
@@ -142,7 +144,7 @@ func relative(path string) bool {
 func textSafe(value string) bool {
 	return len(value) <= 4096 && !strings.ContainsAny(value, "\x00\x1b\r\n")
 }
-func (definition Definition) validate() error {
+func (definition *Definition) validate() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported profile schema or name")
 	}
@@ -169,6 +171,7 @@ func (definition Definition) validate() error {
 		if err != nil || baseErr != nil || resolved != filepath.Join(base, definition.OwnerService) {
 			return errors.New("owner service must not traverse symlinks")
 		}
+		definition.validationInputs = append(definition.validationInputs, resolved)
 	}
 	nativePaths := map[string]bool{}
 	for _, native := range definition.Native {
@@ -267,4 +270,10 @@ func (definition Definition) validate() error {
 		return err
 	}
 	return nil
+}
+
+// ValidationInputs returns the package files actually inspected by Load.
+// Consumers can bind metadata and hook identity without duplicating validation.
+func (definition Definition) ValidationInputs() []string {
+	return slices.Clone(definition.validationInputs)
 }

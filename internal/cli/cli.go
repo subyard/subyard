@@ -289,7 +289,7 @@ func (cli *CLI) inspectMutationGate(
 	})
 	defer runtime.Close()
 	v2, err := runtime.InspectMutationGate(
-		ctx, options.RuntimeRoot, options.ConfigHome, yard,
+		ctx, options.RuntimeRoot, options.ConfigHome, "default",
 		cli.releaseTransitionInheritedSettingIDs(),
 	)
 	if err != nil {
@@ -477,6 +477,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 	cli.env["SUBYARD_YARD"] = yard
 	if core && definition.Handler == "@current-migration" {
 		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
+	}
+	if core && definition.Handler == "@config" {
+		if action, rest := configEarlyInvocation(commandArguments); action == "repair-alias" {
+			return cli.runConfigAliasRepair(ctx, yard, rest, yes)
+		} else if action == "validate" {
+			return cli.runConfigValidate(yard, rest)
+		}
 	}
 	if core && definition.Handler == "@help" {
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
@@ -669,8 +676,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
 		if source, ok := config.SourceDiagnostic(configHome, err); ok {
 			cli.errorf("yard %s, config inspection: %s", yard, source)
-		} else {
+			if retry := config.SourceAliasRepairRetry(configHome, yard, err); retry != "" {
+				cli.errorf("Next: %s", retry)
+			}
+		} else if config.IsRetiredYardTemplate(err) {
+			// This owning diagnostic contains only a fixed retired schema and
+			// its supported replacement, never a supplied setting value.
 			cli.errorf("%v", err)
+		} else if errors.Is(err, ownerinventory.ErrIntegrity) {
+			cli.errorf("owner inventory integrity validation failed: owner HostID mismatch or unverified response; repair the verified owner connection")
+		} else {
+			cli.errorf("yard %s, config inspection: an input is invalid or unavailable; run config validate for scoped schema diagnostics", yard)
 		}
 		return 2
 	}

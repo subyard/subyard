@@ -386,10 +386,29 @@ func TestRouteConsumerActivationReportsSafePreparationFailures(t *testing.T) {
 			}
 			message, retry := diagnostic.ActivationDiagnostic()
 			if !strings.Contains(message, "yard "+yard) || len(message) > 512 || strings.Contains(message+retry, "private-sentinel") ||
-				retry != "run yard -Y "+yard+" config status" {
+				retry != "run yard -Y "+yard+" config validate" {
 				t.Fatalf("unsafe preparation diagnostic: message=%q retry=%q", message, retry)
 			}
 		})
+	}
+}
+
+func TestRouteConsumerAliasDiagnosticOffersReachableLocalRepair(t *testing.T) {
+	options, state := routeConsumerFixture(t, StateCurrent, true)
+	write(t, state.extra, "1\n")
+	path := filepath.Join(options.ConfigHome, "yards", "demo", "config.env")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("YARD_PROFILES='SECRET_MARKER'\nENVIRONMENT_PROFILES=''\n"), 0o600)
+	_, err := PrepareRouteConsumersActivation(context.Background(), options)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("source conflict lost diagnostic: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if strings.Contains(message+retry, "SECRET_MARKER") || !strings.Contains(retry, "yard -Y demo config repair-alias ENVIRONMENT_PROFILES CHOSEN_VALUE --scope yard --local --check") {
+		t.Fatalf("unsafe or inaccessible source retry: %q %q", message, retry)
 	}
 }
 

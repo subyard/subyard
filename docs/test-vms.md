@@ -519,7 +519,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
-| `release-smoke` (internal phase) | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | required in smoke and full; not a standalone lane |
+| `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
@@ -759,6 +759,19 @@ publication before reboot, compares the checkpoint, legacy projection and comple
 the fresh updater resumes, and then checks the exact release links and unchanged history. Publication
 follows journal completion but precedes final updater cleanup. Record this segment's result explicitly;
 a recovery-only pass cannot substitute for it.
+The same singleton fixture retains the v0.17.3 case and then creates a fresh marked v0.18.6
+operator/project fixture. The owning test-yard helper initializes the real canonical test yard with one
+slot and its normal broker route, without acquiring/refreshing slots, building a cold base or creating
+an inner VM. It checks actual local/expanded readonly devices and guest reads of route/known-host files,
+early staged source repair against completed and authentically interrupted original history, separate
+original-owner recovery consent, candidate convergence and repetition. Root-readable persistent agent
+assets are checked in a fresh registration. Host sink files, service/timer state and host power runtime
+are snapshotted/restored; all extra projects and owned images use marked cleanup.
+
+For checkpoint publication before reboot, `dev/e2e/p0-acceptance.sh --lane release-smoke --slot N`
+exposes the existing prepare/reboot/finish phase on one standard VM. This targeted result cannot be
+reported as complete smoke or full P0 acceptance; those lanes retain their existing two-VM contracts.
+
 Namespace capacity, aggregate-byte limits and sequences beyond 512 cancellations are host-free stress
 contracts, not claims of this physical fixture. This targeted evidence does not replace release smoke
 or shipped-profile acceptance.

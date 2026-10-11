@@ -3,11 +3,14 @@ package config
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
@@ -381,5 +384,52 @@ func TestSelectionAuthoringReplacesLegacyAlias(t *testing.T) {
 		if err != nil || len(content) != 0 {
 			t.Fatalf("unset legacy selection = %q, %v", content, err)
 		}
+	}
+}
+
+func TestPersistentAuthoringCanonicalizesEveryAlias(t *testing.T) {
+	for legacy, canonical := range legacySettingNames {
+		for _, mixed := range []bool{false, true} {
+			t.Run(legacy+fmt.Sprint(mixed), func(t *testing.T) {
+				initial := "# retained comment\nexport " + legacy + "='before'\n"
+				if mixed {
+					initial += canonical + "='before'\n"
+				}
+				initial += "DEV_USER='retained'\n"
+				value := "after"
+				content, err := EditPersistentAssignmentContent("fixture.env", []byte(initial), canonical, &value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(content) != "# retained comment\n"+canonical+"='after'\nDEV_USER='retained'\n" {
+					t.Fatalf("set: %s", content)
+				}
+				content, err = EditPersistentAssignmentContent("fixture.env", []byte(initial), canonical, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(content) != "# retained comment\nDEV_USER='retained'\n" {
+					t.Fatalf("unset: %s", content)
+				}
+			})
+		}
+	}
+}
+
+func TestPersistentAuthoringPreservesExistingReadPermissions(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, "config.env")
+	testkit.WriteFile(t, path, []byte("YARD_PROFILES=default\n"), 0o640)
+	value := "sample"
+	before, err := ReadPersistentFileSnapshot(root, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePersistentAssignmentIfUnchanged(root, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode: %v, %v", info, err)
 	}
 }

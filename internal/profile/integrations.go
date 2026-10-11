@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -55,6 +56,8 @@ type IntegrationDefinition struct {
 	Persist       string                `json:"persist,omitempty"`
 	Lifecycle     *IntegrationLifecycle `json:"lifecycle,omitempty"`
 	Dashboard     *IntegrationDashboard `json:"dashboard,omitempty"`
+
+	validationInputs []string
 }
 
 func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
@@ -75,6 +78,7 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 			return nil, errors.New("integration declaration has trailing data")
 		}
 		definition.Root, definition.Name = filepath.Dir(shipped.path), filepath.Base(filepath.Dir(shipped.path))
+		definition.validationInputs = []string{shipped.path}
 		if err := definition.validate(); err != nil {
 			return nil, fmt.Errorf("integration %s: %w", definition.Name, err)
 		}
@@ -139,11 +143,18 @@ func (definition IntegrationDefinition) SourceBinding() (string, error) {
 	}{definition, sources})
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
-func (definition IntegrationDefinition) validate() error {
+
+// ValidationInputs returns the package files actually inspected by LoadIntegrations.
+func (definition IntegrationDefinition) ValidationInputs() []string {
+	return slices.Clone(definition.validationInputs)
+}
+
+func (definition *IntegrationDefinition) validate() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported integration schema or name")
 	}
-	if err := definition.packageDefinition().validateExtensions(); err != nil {
+	packaged := definition.packageDefinition()
+	if err := packaged.validateExtensions(); err != nil {
 		return err
 	}
 	seen := map[string]bool{}
@@ -158,9 +169,11 @@ func (definition IntegrationDefinition) validate() error {
 	}
 	for _, path := range []string{definition.Provision, definition.Cleanup} {
 		if path != "" {
-			if _, err := definition.ExecutablePath(path); err != nil {
+			resolved, err := definition.ExecutablePath(path)
+			if err != nil {
 				return err
 			}
+			definition.validationInputs = append(definition.validationInputs, resolved)
 		}
 	}
 	for _, command := range []string{definition.Command, definition.Check, definition.Health} {
@@ -177,13 +190,16 @@ func (definition IntegrationDefinition) validate() error {
 		seen[dependency] = true
 	}
 	if lifecycle := definition.Lifecycle; lifecycle != nil {
-		if _, err := definition.ExecutablePath(lifecycle.Handler); err != nil {
+		resolved, err := definition.ExecutablePath(lifecycle.Handler)
+		if err != nil {
 			return err
 		}
+		definition.validationInputs = append(definition.validationInputs, resolved)
 		for _, path := range lifecycle.SourceFiles {
 			if _, err := definition.ReadSource(path); err != nil {
 				return err
 			}
+			definition.validationInputs = append(definition.validationInputs, filepath.Join(definition.Root, path))
 		}
 		seen := map[string]bool{}
 		for _, key := range lifecycle.InstanceConfigKeys {

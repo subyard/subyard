@@ -275,8 +275,8 @@ func TestRegistryP0InventoryMatchesAcceptanceLanesInCleanEnvironment(t *testing.
 	if _, exists := registry.Check("p0:full"); exists {
 		t.Fatal("special full inventory row must not be a p0:full T3 check")
 	}
-	if _, exists := registry.Check("p0:release-smoke"); exists {
-		t.Fatal("release-smoke is a full-matrix phase, not an addressable T3 lane")
+	if _, exists := registry.Check("p0:release-smoke"); !exists {
+		t.Fatal("release-smoke must remain an addressable T3 lane")
 	}
 
 	wantFull := "full\tboundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup"

@@ -751,6 +751,9 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 		return diagnostic.ActivationDiagnostic()
 	}
 	if source, ok := config.SourceDiagnostic(err.configHome, err.cause); ok {
+		if choice := config.SourceAliasRepairRetry(err.configHome, err.yard, err.cause); choice != "" {
+			retry = choice
+		}
 		return fmt.Sprintf("yard %s, %s %s: %s", err.yard, err.phase, err.action, source), retry
 	}
 	// Only validated yard names and fixed phase/command text cross this boundary.
@@ -1248,6 +1251,17 @@ func executeReleaseTransitionRequest(
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
+		runtime := releaseruntime.New(releaseruntime.Config{RepositoryRoot: repositoryRoot, Stderr: io.Discard})
+		defer runtime.Close()
+		proof, err := runtime.InspectSourceAdmission(ctx, request.RuntimeRoot, request.ConfigHome)
+		if err != nil {
+			// Unsupported new admission leaves the existing ordinary/historical
+			// compatibility path intact. Its absence cannot satisfy NEW admission.
+			return "", nil
+		}
+		return releasetransition.Fingerprint(proof.Binding), nil
+	}
 	checkpointCapability, capabilityErr := os.ReadFile(filepath.Join(repositoryRoot, "config", "release-checkpoint.json"))
 	if capabilityErr == nil {
 		if err := releasetransition.ValidateMigrationCheckpointCapability(checkpointCapability); err != nil {

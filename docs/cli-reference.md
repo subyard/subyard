@@ -334,10 +334,12 @@ Disable preserves shared credentials. Status reports selection, connection and o
 inspect, author, sync and reconcile Subyard settings.
 
 ```text
-Usage: yard config fields [SETTING] | show [SETTING] | paths | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>
+Usage: yard config fields [SETTING] | show [SETTING] | paths | validate [--all-local] [--json] | repair-alias SETTING VALUE ... --scope <scope> --local [--check] [--yes] | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>
   fields  list the typed public settings contract (read-only)
   show    explain effective Subyard settings and their sources (read-only)
   paths   list configuration sources and storage roles (read-only)
+  validate  check selected or all local configuration schemas without a successful base load (read-only)
+  repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment
   set     save a typed scalar locally (default/--local) or commit/push it (--git)
   unset   remove a local scalar override or a Git assignment (--git)
   import  save a typed file locally or commit/push it (--git)

@@ -53,6 +53,25 @@ func TestSourceDiagnosticDoesNotRenderMalformedInput(t *testing.T) {
 	}
 }
 
+func TestSourceAliasRepairRetryIdentifiesOnlySupportedLocalSource(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, test := range []struct{ path, key, scope string }{
+		{filepath.Join(root, "config.env"), "YARD_IMAGE", "host"},
+		{filepath.Join(root, "overrides", "shared", "config.env"), "ENVIRONMENT_PROFILES", "shared"},
+		{filepath.Join(root, "yards", "demo", "config.env"), "CODING_TOOL_INTEGRATIONS", "yard"},
+	} {
+		cause := &SourceError{Path: test.path, Key: test.key, Reason: "conflicting legacy and canonical settings", cause: errors.New("SECRET_MARKER")}
+		retry := SourceAliasRepairRetry(root, "demo", cause)
+		if !strings.Contains(retry, "config repair-alias "+test.key+" CHOSEN_VALUE --scope "+test.scope+" --local --check") || strings.Contains(retry, "SECRET_MARKER") {
+			t.Fatalf("repair instruction is unsafe or inaccessible: %q", retry)
+		}
+		cause.Key = "SSH_PORT"
+		if SourceAliasRepairRetry(root, "demo", cause) != "" {
+			t.Fatal("unrelated setting gained repair authority")
+		}
+	}
+}
+
 func TestLoadSourceDiagnosticLocalizesValidation(t *testing.T) {
 	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, "config")

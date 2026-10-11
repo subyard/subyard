@@ -149,7 +149,21 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	if action == "unset" && len(candidate) == 0 {
 		desired = config.PersistentFileSnapshot{}
 	}
+	prospective, err := cli.prepareConfigProspective(loaded, request, path, desired)
+	if err != nil {
+		return err
+	}
+	prepared.closeResource = func() error { prospective.close(); return nil }
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)
+	if changed {
+		protected, err := readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+		if err != nil {
+			return err
+		}
+		if protected.Identity != baseline.Identity || !sameConfigAuthoringSnapshot(protected, baseline) {
+			return domain.ErrPlanStale
+		}
+	}
 	if changed {
 		if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
 			return err
@@ -165,7 +179,8 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	prepared.exactState = operationStateDigest(struct {
 		Action, Name, Value, Scope, Path string
 		Before, Desired                  config.PersistentFileSnapshot
-	}{action, request.name, request.value, string(request.scope), path, baseline, desired})
+		Dependencies, Semantics          string
+	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics})
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
@@ -186,10 +201,22 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 			return domain.AdapterResult{}, err
 		}
 		current, err := readConfigAuthoringTarget(path)
+		if changed {
+			current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+		}
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
+		if err := prospective.check(); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		if sameConfigAuthoringSnapshot(current, desired) {
+			if !changed && current.Identity != baseline.Identity {
+				return domain.AdapterResult{}, domain.ErrPlanStale
+			}
+			if err := prospective.verify(); err != nil {
+				return domain.AdapterResult{}, err
+			}
 			fmt.Fprintf(output, "config %s: already current\n", action)
 			return configPreparedResult(prepared), nil
 		}
@@ -204,18 +231,21 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 				return domain.AdapterResult{}, err
 			}
 		}
-		if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline); err != nil {
+		if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, func() error { return prospective.checkLocked(true) }); err != nil {
 			if errors.Is(err, config.ErrPersistentTargetStale) {
 				return domain.AdapterResult{}, fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}
 			return domain.AdapterResult{}, err
 		}
-		current, err = readConfigAuthoringTarget(path)
+		current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
 		if !sameConfigAuthoringSnapshot(current, desired) {
 			return domain.AdapterResult{}, errors.New("persistent configuration verification failed")
+		}
+		if err := prospective.verify(); err != nil {
+			return domain.AdapterResult{}, err
 		}
 		fmt.Fprintf(output, "config %s: updated %s\n", action, path)
 		return configPreparedResult(prepared), nil
@@ -409,10 +439,24 @@ func (cli *CLI) runPreparedConfigMutation(ctx context.Context, loaded config.Loa
 	return cli.runPreparedCommand(ctx, prepared, assumeYes || cli.env["ASSUME_YES"] == "1")
 }
 
-func (prepared *preparedCommand) attachConfigFileDraft(request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, content []byte) {
+func (prepared *preparedCommand) attachConfigFileDraft(request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, content []byte) error {
 	loaded := prepared.Loaded
 	desired := config.PersistentFileSnapshot{Exists: true, Content: slices.Clone(content)}
+	prospective, err := prepared.CLI.prepareConfigProspective(loaded, request, path, desired)
+	if err != nil {
+		return err
+	}
+	prepared.closeResource = func() error { prospective.close(); return nil }
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)
+	if changed {
+		protected, err := readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+		if err != nil {
+			return err
+		}
+		if protected.Identity != baseline.Identity || !sameConfigAuthoringSnapshot(protected, baseline) {
+			return domain.ErrPlanStale
+		}
+	}
 	step := domain.OperationStep{ID: "config." + request.action, Target: string(request.scope) + " file setting " + request.name,
 		Observed: "fingerprint:" + operationStateDigest(baseline), Desired: "fingerprint:" + operationStateDigest(desired), Decision: domain.StepSkip,
 		Preconditions: []string{"the retained owner-local draft is validated", "persistent setting scope, permissions, ownership and captured target remain valid"},
@@ -423,7 +467,8 @@ func (prepared *preparedCommand) attachConfigFileDraft(request configAuthoringRe
 	prepared.exactState = operationStateDigest(struct {
 		Path, Action, Name, Scope string
 		Before, Desired           config.PersistentFileSnapshot
-	}{path, request.action, request.name, string(request.scope), baseline, desired})
+		Dependencies, Semantics   string
+	}{path, request.action, request.name, string(request.scope), baseline, desired, prospective.binding, prospective.semantics})
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + request.action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
@@ -444,30 +489,46 @@ func (prepared *preparedCommand) attachConfigFileDraft(request configAuthoringRe
 			return domain.AdapterResult{}, err
 		}
 		current, err := readConfigAuthoringTarget(path)
+		if changed {
+			current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+		}
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
+		if err := prospective.check(); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		if sameConfigAuthoringSnapshot(current, desired) {
+			if !changed && current.Identity != baseline.Identity {
+				return domain.AdapterResult{}, domain.ErrPlanStale
+			}
+			if err := prospective.verify(); err != nil {
+				return domain.AdapterResult{}, err
+			}
 			fmt.Fprintf(output, "config %s: already current\n", request.action)
 			return configPreparedResult(prepared), nil
 		}
 		if !changed || !sameConfigAuthoringSnapshot(current, baseline) {
 			return domain.AdapterResult{}, fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
 		}
-		if err := config.WritePersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired.Content); err != nil {
+		if err := config.WritePersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired.Content, func() error { return prospective.checkLocked(true) }); err != nil {
 			if errors.Is(err, config.ErrPersistentTargetStale) {
 				return domain.AdapterResult{}, fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}
 			return domain.AdapterResult{}, err
 		}
-		current, err = readConfigAuthoringTarget(path)
+		current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
 		if !sameConfigAuthoringSnapshot(current, desired) {
 			return domain.AdapterResult{}, errors.New("persistent file configuration verification failed")
 		}
+		if err := prospective.verify(); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		fmt.Fprintf(output, "config %s: updated %s\n", request.action, path)
 		return configPreparedResult(prepared), nil
 	}
+	return nil
 }

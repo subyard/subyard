@@ -55,7 +55,10 @@ func routeConfigDiagnostic(cause error, reason, yard, configHome string) error {
 	err := routeDiagnostic(cause, reason, yard, "", "", false)
 	var diagnostic *routeActivationDiagnostic
 	if errors.As(err, &diagnostic) && len(yard) <= 63 && domain.SafeName(yard) {
-		diagnostic.retry = "run yard -Y " + yard + " config status"
+		diagnostic.retry = "run yard -Y " + yard + " config validate"
+		if retry := config.SourceAliasRepairRetry(configHome, yard, cause); retry != "" {
+			diagnostic.retry = retry
+		}
 		if source, ok := config.SourceDiagnostic(configHome, cause); ok {
 			available := 512 - len(diagnostic.message) - 2
 			if len(source) > available {

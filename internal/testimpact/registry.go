@@ -125,7 +125,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	p0Lanes := []string{
 		"smoke", "boundary", "nested-teardown", "transport", "dependencies", "real-incus",
-		"profile-resource", "release", "source-upgrade", "power-systemd", "reboot-verify",
+		"profile-resource", "release", "source-upgrade", "power-systemd", "reboot-verify", "release-smoke",
 		"peer", "peer-cleanup", "cleanup",
 	}
 	for _, lane := range p0Lanes {

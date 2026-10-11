@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -82,11 +84,13 @@ type settingAssignment struct {
 }
 
 type settingTracker struct {
-	catalog      Catalog
-	integrations IntegrationSelection
-	layers       []settingLayer
-	assignments  map[string][]settingAssignment
-	order        int
+	catalog               Catalog
+	fileOverrides         map[string]string
+	assetValidationInputs []string
+	integrations          IntegrationSelection
+	layers                []settingLayer
+	assignments           map[string][]settingAssignment
+	order                 int
 }
 
 func newSettingTracker() *settingTracker {
@@ -301,4 +305,60 @@ func ResolvedSettingDefinition(loaded Loaded, definition SettingDefinition) Sett
 		}
 	}
 	return definition
+}
+
+func (tracker *settingTracker) fileSource(path string) string {
+	if source, ok := tracker.fileOverrides[path]; ok {
+		return source
+	}
+	return path
+}
+
+func (tracker *settingTracker) fileExists(path string) (bool, error) {
+	source := tracker.fileSource(path)
+	if source == "" {
+		return false, nil
+	}
+	return regularFileExists(source)
+}
+
+func (tracker *settingTracker) pathPresent(path string) bool {
+	if path == "" {
+		return false
+	}
+	if pathPresent(path) {
+		return true
+	}
+	for logical, source := range tracker.fileOverrides {
+		if source != "" && strings.HasPrefix(logical, path+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (tracker *settingTracker) findYardFile(candidates []string, name string) (string, error) {
+	for _, candidate := range candidates {
+		if source, overridden := tracker.fileOverrides[candidate]; overridden {
+			if source == "" {
+				continue
+			}
+			exists, err := regularFileExists(source)
+			if err != nil {
+				return "", err
+			}
+			if exists {
+				return candidate, nil
+			}
+			continue
+		}
+		path, err := findFirstYardFile([]string{candidate}, name)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, ErrUnknownYard) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 }

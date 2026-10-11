@@ -2920,7 +2920,16 @@ target_release=$(printf '%s' "$request" | jq -r .target)
 journal="$config_home/release-transition/v2/journal.json"
 resume_plan=$(jq -r .resumePlan "$journal")
 transaction=$(jq -r .transaction "$journal")
-printf called >> "$V2_GATE_CAPTURE"
+case "${V2_GATE_CAPTURE:-}" in
+/tmp/*)
+  printf called >> "$V2_GATE_CAPTURE"
+  printf '%s\n' "$request" > "$V2_GATE_CAPTURE.request"
+  ;;
+esac
+if [ "$(jq -r .checkpoint "$journal")" = complete ]; then
+  printf '{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":[]},"outcome":{"status":"ready","reachedGoal":true,"active":"%s","previous":"release-a","target":"%s","code":"ready","message":"verified","transaction":"%s"}}}\n' "$target_release" "$target_release" "$transaction"
+  exit 0
+fi
 printf '{"schemaVersion":1,"activationReconciliationOwned":false,"inspection":{"plan":"%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["resume the transition"]},"resume":"%s","outcome":{"status":"recovering","reachedGoal":false,"active":"release-a","target":"%s","code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":"%s"}}}\n' "$resume_plan" "$transaction" "$target_release" "$transaction"
 ;;
 *) exit 64 ;;
@@ -5541,6 +5550,11 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 	writeCLIFile(t, filepath.Join(root, "config", "commands.registry"), manifest, 0o600)
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		content := ""
+		// Required context has persistent shipped defaults; command values may
+		// override these for ordinary requests but cannot mask authored drafts.
+		if name == "subyard.env" {
+			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
+		}
 		if name == "agents.env" {
 			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
 		}
@@ -5632,5 +5646,70 @@ func projectExportObservation(changed bool) func(ports.InstanceExecRequest) (por
 			return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf("%x  ./snapshot.txt\x00", sha256.Sum256([]byte(content))))}, nil
 		}
 		return ports.InstanceExecResult{}, nil
+	}
+}
+
+func TestCanonicalSelectorMutationGateUsesControllerLocalScope(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("complete=%t", complete), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			runtimeRoot := filepath.Join(root, "runtime-v2")
+			capture := filepath.Join(root, "v2-candidate-inspections")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+capture)
+			journalPath, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+			before, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if complete {
+				journal, err := releasetransition.ParseJournal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal.Checkpoint = releasetransition.JournalComplete
+				before, err = releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, journalPath, before, 0o600)
+				links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := links.Activate(journal.Releases); err != nil {
+					t.Fatal(err)
+				}
+			}
+			control := &remoteControlStub{}
+			incus := lifecycleIncus()
+			var stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, RemoteControl: control, Incus: incus,
+				Arguments: []string{"-Y", "remote-owner/build", "start", "--yes"}, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := program.inspectMutationGate(context.Background(), "remote-owner/build")
+			if err != nil || (outcome == nil) != complete {
+				t.Fatalf("local gate complete=%t outcome=%v err=%v", complete, outcome, err)
+			}
+			if !complete && program.Run(context.Background()) == 0 {
+				t.Fatal("canonical operation passed local unfinished gate")
+			}
+			requestBytes, err := os.ReadFile(capture + ".request")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request releasetransition.ProcessRequest
+			if err := json.Unmarshal(requestBytes, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Yard != "default" || request.Mode != releasetransition.ProcessInspect {
+				t.Fatalf("canonical selector entered frozen process request: %#v", request)
+			}
+			after, err := os.ReadFile(journalPath)
+			if err != nil || !bytes.Equal(before, after) || control.applied != 0 || len(incus.PowerUpdates) != 0 || len(incus.ConfigUpdates) != 0 || len(incus.ExecCalls) != 0 {
+				t.Fatal("local readiness gate changed protected history or reached owner/native action")
+			}
+		})
 	}
 }

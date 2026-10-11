@@ -26,7 +26,11 @@ type LoadOptions struct {
 	AllowPendingTransaction bool
 	AllowResetYard          bool // teardown retry only; requires a validated ownership marker
 	LayerPaths              *LayerPaths
-	YardDirs                []string
+	// FileOverrides substitutes retained draft files while keeping logical paths
+	// and normal registration, precedence and resource-endpoint resolution.
+	// An empty source marks a logical file absent.
+	FileOverrides map[string]string
+	YardDirs      []string
 }
 
 const GitSettingsRelativePath = ".sync/settings"
@@ -48,12 +52,19 @@ type LayerPaths struct {
 }
 
 type Loaded struct {
-	Catalog             Catalog
-	Integrations        IntegrationSelection
-	Context             domain.Context
-	Environment         map[string]string
-	Settings            map[string]SettingTrace
-	ConfigurationLayers []ConfigurationLayer
+	Catalog               Catalog
+	Integrations          IntegrationSelection
+	Context               domain.Context
+	Environment           map[string]string
+	Settings              map[string]SettingTrace
+	ConfigurationLayers   []ConfigurationLayer
+	assetValidationInputs []string
+}
+
+// AssetValidationInputs returns the logical file sources opened while validating
+// agent assets. It includes explicit sources outside the configuration layers.
+func (loaded Loaded) AssetValidationInputs() []string {
+	return slices.Clone(loaded.assetValidationInputs)
 }
 
 type retiredYardTemplateError struct {
@@ -73,6 +84,7 @@ func IsRetiredYardTemplate(err error) bool {
 
 func Load(options LoadOptions) (Loaded, error) {
 	tracker := newSettingTracker()
+	tracker.fileOverrides = options.FileOverrides
 	if options.Catalog != nil {
 		tracker.catalog = *options.Catalog
 	} else {
@@ -93,6 +105,7 @@ func Load(options LoadOptions) (Loaded, error) {
 	return Loaded{
 		Catalog: tracker.catalog, Context: ctx, Environment: environment, Settings: tracker.traces(values),
 		ConfigurationLayers: tracker.configurationLayers(), Integrations: tracker.integrations,
+		assetValidationInputs: tracker.assetValidationInputs,
 	}, nil
 }
 
@@ -220,7 +233,7 @@ func load(
 		gitShared, gitHost, gitYard = options.LayerPaths.GitSharedSettings, options.LayerPaths.GitHostSettings, options.LayerPaths.GitYardSettings[yardName]
 		localShared, localHost, localYard = options.LayerPaths.SharedSettings, options.LayerPaths.HostSettings, options.LayerPaths.YardSettings[yardName]
 	} else {
-		hostExists, err := regularFileExists(localHost)
+		hostExists, err := tracker.fileExists(localHost)
 		if err != nil {
 			return domain.Context{}, nil, err
 		}
@@ -231,7 +244,15 @@ func load(
 			}
 		}
 		if yardName != "default" && options.YardSettingsFile == "" {
-			localYard, err = findYardFile(root, yardName, values, options.YardDirs)
+			if len(options.FileOverrides) != 0 && len(options.YardDirs) == 0 {
+				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
+				if resetFallback {
+					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
+				}
+				localYard, err = tracker.findYardFile(candidates, yardName)
+			} else {
+				localYard, err = findYardFile(root, yardName, values, options.YardDirs)
+			}
 			if errors.Is(err, ErrUnknownYard) && options.AllowResetYard && resetFallback {
 				localYard, err = "", nil
 			}
@@ -270,14 +291,14 @@ func load(
 		if path == "" {
 			continue
 		}
-		exists, err := regularFileExists(path)
+		exists, err := tracker.fileExists(path)
 		if err != nil {
 			return domain.Context{}, nil, err
 		}
 		if exists {
 			yardPresent = true
 			templateSource = path
-			if err := tracker.catalog.applyEnvFileValidated(path, probe, ScopeYard, options.SyncSource || path == gitYard, nil); err != nil {
+			if err := tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), probe, ScopeYard, options.SyncSource || path == gitYard, nil); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -320,7 +341,7 @@ func load(
 		}
 		exists := false
 		if layer.path != "" && !(options.LayerPaths != nil && layer.role == "scalar settings" && options.LayerPaths.ExcludedLocalPaths[layer.path]) {
-			exists, err = regularFileExists(layer.path)
+			exists, err = tracker.fileExists(layer.path)
 			if err != nil {
 				return domain.Context{}, nil, err
 			}
@@ -335,7 +356,7 @@ func load(
 			}
 		}
 		extendAgentAssetMappings(logicalAssets, values)
-		assetLayer := tracker.addLayer(layer.scope, layer.assetRole, layer.assets, pathPresent(layer.assets), settingFile)
+		assetLayer := tracker.addLayer(layer.scope, layer.assetRole, layer.assets, tracker.pathPresent(layer.assets), settingFile)
 		var excluded map[string]bool
 		if options.LayerPaths != nil && layer.assetRole == "file settings" {
 			excluded = options.LayerPaths.ExcludedLocalPaths
@@ -384,6 +405,7 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
+
 	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
 		return domain.Context{}, nil, err
 	}
@@ -640,7 +662,7 @@ func applyAgentAssetLayer(
 		if excluded[candidate] {
 			continue
 		}
-		exists, err := regularFileExists(candidate)
+		exists, err := tracker.fileExists(candidate)
 		if err != nil {
 			return sourceContext(candidate, 0, recognizedSettingKey(tracker.catalog, name), "file settings", err)
 		}
@@ -687,20 +709,21 @@ func normalizeAgentAssetPaths(
 			return tracker.sourceError(name, "must name an absolute regular file", nil)
 		}
 		path := filepath.Clean(value)
-		info, err := os.Lstat(path)
+		info, err := os.Lstat(tracker.fileSource(path))
 		if err != nil {
 			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return tracker.sourceError(name, "must name a regular non-symlink file", nil)
 		}
-		file, err := os.Open(path)
+		file, err := os.Open(tracker.fileSource(path))
 		if err != nil {
 			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
 		if err := file.Close(); err != nil {
 			return tracker.sourceError(name, "cannot close file setting source", err)
 		}
+		tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
 		values[name] = path
 		if path != value {
 			tracker.normalize(name, path, "normalized absolute path")
@@ -857,7 +880,7 @@ func applyEnvFileTrackedValidated(
 	scope SettingScope,
 	requireSyncable bool,
 ) error {
-	return tracker.catalog.applyEnvFileValidated(path, values, scope, requireSyncable,
+	return tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
 		})
@@ -870,11 +893,21 @@ func (settings Catalog) applyEnvFileValidated(
 	requireSyncable bool,
 	observer assignmentObserver,
 ) error {
+	return settings.applyEnvFileValidatedFrom(path, path, values, scope, requireSyncable, observer)
+}
+
+func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
-	if err := applyEnvFileObserved(path, probe, func(name, value string, line int) {
+	if err := applyEnvFileObserved(source, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
 	}); err != nil {
+		var diagnostic *SourceError
+		if source != path && errors.As(err, &diagnostic) {
+			copy := *diagnostic
+			copy.Path = path
+			return &copy
+		}
 		return err
 	}
 	normalized := make([]observedAssignment, 0, len(assignments))

@@ -497,3 +497,12 @@ being added to Yard RPC or Veranda. For public backend and SSH access guidance, 
 - [Decisions and glossary](decisions-and-glossary.md) records current accepted decisions and terminology.
 - [Resumable release transition design](resumable-release-transition-design.md) describes the release
   activation and recovery design in detail.
+
+Persistent configuration authoring validates prospective logical overlays through the existing loader
+and binds actual source/profile/asset reads before CAS publication. The bounded early alias-repair
+operation uses the same prospective resolver and writer guards, with release shared lock before the
+configuration lock. Its independent protected metadata proof reads the existing store grammar,
+seals/assets, links, authoritative history and recovery closure; it never observes historical native
+outputs or executes an old unfinished transaction. A completed predecessor binding enters an ordinary
+new candidate plan and is rechecked by the existing engine under its release lock. Source-only success
+means schema-valid source; readiness and changed-input original-owner recovery have separate consent.

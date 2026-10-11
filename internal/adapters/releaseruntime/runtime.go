@@ -171,6 +171,16 @@ func (runtime *Runtime) InspectMutationGate(
 	if inspection == nil {
 		return nil, nil
 	}
+	if yard == "default" && inspection.journal.Checkpoint != releasetransition.JournalComplete && currentScopeBlocker(inspection.inspection) {
+		before, err := runtime.readCurrentSnapshot(runtimeRoot, configHome)
+		if err != nil {
+			return nil, redactReleaseInspectionError(err)
+		}
+		inspection, err = runtime.recoverCurrentScope(ctx, runtimeRoot, configHome, before, inspection)
+		if err != nil {
+			return nil, redactReleaseInspectionError(err)
+		}
+	}
 	outcome := *inspection.inspection.Outcome
 	if outcome.Status == releasetransition.StatusReady {
 		return nil, nil
@@ -485,6 +495,17 @@ func (runtime *Runtime) PrepareTransition(
 	protected, err := runtime.inspectProtectedTransition(
 		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
 	)
+	var completedAdmission *SourceAdmission
+	// A validated fresh repair still belongs to the exact original owner.
+	// Metadata admission is only a fallback for unavailable or blocked inspection.
+	if !parsed.rollback && (err != nil || protected != nil && protected.journal.Checkpoint == releasetransition.JournalComplete && protected.inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired) {
+		proof, proofErr := runtime.InspectSourceAdmission(ctx, parsed.root, configHome)
+		if proofErr == nil && proof.Metadata.Journal != nil && proof.Metadata.Journal.Checkpoint == releasetransition.JournalComplete && proof.Metadata.Journal.SourceIngress == nil {
+			completedAdmission = &proof
+			err = nil
+			protected = nil
+		}
+	}
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
@@ -638,6 +659,20 @@ func (runtime *Runtime) PrepareTransition(
 	}
 	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
+	if err == nil && completedAdmission != nil {
+		if request.Target == completedAdmission.Metadata.Journal.Goal.Target {
+			return Prepared{}, errors.New("same-target convergence must use the exact sealed original owner")
+		}
+		// The candidate's ordinary plan must bind this exact proof inside its
+		// existing release lock. An older candidate without that observation
+		// remains unsupported for this NEW admission path.
+		response, inspectErr := runtime.invokeVerifiedCandidateTransition(ctx, inspectionCandidate, request, "")
+		if inspectErr != nil || response.Inspection == nil || response.Inspection.Resume != nil || !slices.ContainsFunc(response.Inspection.Decisions, func(decision releasetransition.RedactedDecision) bool {
+			return decision.Resource == "transition.source-metadata" && decision.Decision == releasetransition.DecisionPreserve && decision.Result == completedAdmission.Binding
+		}) {
+			return Prepared{}, errors.New("candidate does not bind supported completed history to a new ordinary plan; stage a compatible candidate supporting protected metadata admission")
+		}
+	}
 	if err == nil {
 		if parsed.check {
 			return prepared, nil

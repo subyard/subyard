@@ -258,19 +258,21 @@ func WritePersistentAssignment(
 	name string,
 	value *string,
 ) error {
-	return writePersistentAssignment(configHome, path, name, value, nil)
+	return writePersistentAssignment(configHome, path, name, value, nil, nil)
 }
 
 // WritePersistentAssignmentIfUnchanged updates an assignment only when the
 // complete target still matches the bytes and existence observed at preview.
+// Optional guards run under the configuration root lock before publication.
 func WritePersistentAssignmentIfUnchanged(
 	configHome string,
 	path string,
 	name string,
 	value *string,
 	expected PersistentFileSnapshot,
+	guards ...func() error,
 ) error {
-	return writePersistentAssignment(configHome, path, name, value, &expected)
+	return writePersistentAssignment(configHome, path, name, value, &expected, guards)
 }
 
 func writePersistentAssignment(
@@ -279,6 +281,7 @@ func writePersistentAssignment(
 	name string,
 	value *string,
 	expected *PersistentFileSnapshot,
+	guards []func() error,
 ) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
@@ -297,6 +300,11 @@ func writePersistentAssignment(
 	}
 	if expected != nil && !samePersistentFileSnapshot(current, *expected) {
 		return ErrPersistentTargetStale
+	}
+	for _, guard := range guards {
+		if err := guard(); err != nil {
+			return err
+		}
 	}
 	content := current.Content
 	updated, err := EditPersistentAssignmentContent(path, content, name, value)
@@ -355,11 +363,13 @@ func WritePersistentFile(configHome, path string, content []byte) error {
 
 // WritePersistentFileIfUnchanged replaces a persistent file only when the
 // complete target still matches the bytes and existence observed at preview.
+// Optional guards run under the configuration root lock before publication.
 func WritePersistentFileIfUnchanged(
 	configHome string,
 	path string,
 	expected PersistentFileSnapshot,
 	content []byte,
+	guards ...func() error,
 ) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
@@ -378,6 +388,11 @@ func WritePersistentFileIfUnchanged(
 	}
 	if !samePersistentFileSnapshot(current, expected) {
 		return ErrPersistentTargetStale
+	}
+	for _, guard := range guards {
+		if err := guard(); err != nil {
+			return err
+		}
 	}
 	return writePersistentFile(configHome, path, content)
 }
@@ -458,14 +473,9 @@ func editAssignmentContent(
 	if err != nil {
 		return nil, err
 	}
-	// Selection authoring upgrades the compatibility ingress in place. Leaving
-	// AGENTS behind would make the next canonical edit conflict on reload.
-	if name == "CODING_TOOL_INTEGRATIONS" {
-		for index := range records {
-			if records[index].name == "AGENTS" {
-				records[index].name = name
-			}
-		}
+	name = canonicalSettingName(name)
+	for index := range records {
+		records[index].name = canonicalSettingName(records[index].name)
 	}
 	replacement := []byte(name + "=" + quotePersistentValue(dereference(value)) + "\n")
 	last := -1
@@ -562,6 +572,7 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 	if err := ensurePersistentDirectory(configHome, directory); err != nil {
 		return err
 	}
+	mode := os.FileMode(0o600)
 	if info, err := os.Lstat(path); err == nil {
 		if !replace {
 			return errors.New("persistent setting target already exists")
@@ -573,6 +584,10 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
 			return errors.New("persistent setting target has unsafe ownership or hard links")
 		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return errors.New("persistent setting target is group/world writable")
+		}
+		mode = info.Mode().Perm()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -588,7 +603,7 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 			_ = os.Remove(temp)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := file.Chmod(mode); err != nil {
 		return err
 	}
 	if _, err := file.Write(content); err != nil {

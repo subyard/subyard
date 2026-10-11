@@ -89,7 +89,10 @@ type V2Options struct {
 	RecoveryContract    string
 	NewTransactionID    func() TransactionID
 	VerifyAuthorization func(PlanToken, Authorization) bool
-	fault               func(string) error
+	// CompletedMetadata observes supported predecessor metadata without historical
+	// operational resources. An empty result leaves ordinary compatibility intact.
+	CompletedMetadata func(context.Context) (Fingerprint, error)
+	fault             func(string) error
 }
 
 type V2ActivationReconciler interface {
@@ -1381,6 +1384,16 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		return v2Observation{}, err
 	}
 	observation.assessment = assessment
+	if journal != nil && journal.Checkpoint == JournalComplete && transition.options.CompletedMetadata != nil {
+		binding, err := transition.options.CompletedMetadata(ctx)
+		if err != nil {
+			return v2Observation{}, err
+		}
+		if binding != "" {
+			observation.observations = append(observation.observations, ResourceObservation{Resource: "transition.source-metadata", Class: "completed-metadata-v1", Fingerprint: binding})
+			observation.decisions = append(observation.decisions, RedactedDecision{Resource: "transition.source-metadata", Decision: DecisionPreserve, Result: string(binding)})
+		}
+	}
 	return observation, nil
 }
 

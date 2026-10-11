@@ -45,7 +45,7 @@ var allowedScopes = map[string]bool{
 	"shipped": true, "shared": true, "host": true, "yard": true, "command": true,
 }
 
-func (definition Definition) validateExtensions() error {
+func (definition *Definition) validateExtensions() error {
 	seen := map[string]bool{}
 	for _, setting := range definition.Settings {
 		if !settingNamePattern.MatchString(setting.Name) || seen[setting.Name] {
@@ -176,8 +176,11 @@ func (setting Setting) validateDefault(value string) error {
 	return nil
 }
 
-func (definition Definition) validateExecutable(path string) error {
-	_, err := definition.ExecutablePath(path)
+func (definition *Definition) validateExecutable(path string) error {
+	resolved, err := definition.ExecutablePath(path)
+	if err == nil {
+		definition.validationInputs = append(definition.validationInputs, resolved)
+	}
 	return err
 }
 

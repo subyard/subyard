@@ -113,13 +113,34 @@ python3 dev/verify-release-upgrades.py --release-dir .build/release --version <c
 ```
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.9.1, v0.11.2, v0.17.3 and v0.18.1 runtimes for the local architecture
+downloads checksum-pinned v0.9.1, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtimes for the local architecture
 and verifies the legacy standalone bridge, frozen and published updater contracts, and activation-only
 recovery. It confines all state to a temporary directory and interrupts only its own update process
 group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-baseline-dir PATH`
-and `--published-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
+`--published-baseline-dir PATH` and `--source-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
 installer). For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
 the complete check after building the release assets.
+
+The actual v0.18.6 cases retain completed history and authentically interrupted activation-only
+history, reproduce the released alias writer defect, stage verified repair tooling, require fresh source
+consent, and require separate original-owner recovery consent before ordinary upgrade. Use
+`--only-source-repair` for this focused check. It does not replace the complete released-caller matrix.
+
+The packaged bootstrap supports pinned staging without loading broken configuration:
+
+```sh
+bash subyard-install.sh --publish-only --version <chosen-version>
+```
+
+It uses the normal download/checksum/manifest/provenance verification and reports the exact immutable
+candidate identity and path, then stops before activation, stable links, shell setup or source changes.
+Invoke that candidate's `bin/yard` for explicit supported source repair. Staging is preparation, not
+installation or release readiness; it cannot retroactively upgrade retained caller capabilities.
+Publishing or operator installation requires the separate delivery authorization.
+
+Future persistent schema changes must retain a compatible reader or provide a typed migration and
+capability boundary. Keep generalized alias authoring safety and actual released-caller regressions
+for both completed history and retained unfinished history; rebuilding an old binary is insufficient.
 
 The complete check also uses the actual v0.11.2 and v0.18.1 callers to verify checkpoint-reader bridge
 ordering and rollback refusal after authoritative epochs exceed the frozen projection. It packages a

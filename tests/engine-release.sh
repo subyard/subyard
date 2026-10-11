@@ -249,6 +249,32 @@ if HOME="$TMP/unconfirmed-home" YARD_RUNTIME_ROOT="$TMP/unconfirmed-runtime" \
 fi
 [ ! -e "$TMP/unconfirmed-runtime" ] \
   || fail 'declined standalone bootstrap created a runtime'
+staging_home="$TMP/staging-home"
+staging_runtime="$staging_home/runtime"
+mkdir -p "$staging_home/.config/subyard" "$staging_home/.subyard/recovery/pre-go-source"
+printf 'YARD_PROFILES=one\nENVIRONMENT_PROFILES=two\n' > "$staging_home/.config/subyard/config.env"
+printf 'unsupported source recovery fixture\n' > "$staging_home/.subyard/recovery/pre-go-source/transaction"
+chmod 0600 "$staging_home/.config/subyard/config.env" "$staging_home/.subyard/recovery/pre-go-source/transaction"
+staging_config_before="$(sha256sum "$staging_home/.config/subyard/config.env")"
+if HOME="$staging_home" YARD_RELEASE_VERSION='' \
+  "$release/subyard-install.sh" --publish-only >/dev/null 2>&1; then
+  fail 'staging accepted an unpinned latest release'
+fi
+# shellcheck disable=SC2034 # repetition is the supported staging no-op check
+for stage_repeat in 1 2; do
+  staging_output="$(HOME="$staging_home" SUBYARD_HOME="$staging_home/.subyard" \
+    SUBYARD_CONFIG_HOME="$staging_home/.config/subyard" YARD_RUNTIME_ROOT="$staging_runtime" \
+    YARD_RELEASE_BASE_URL="file://$release" \
+    "$release/subyard-install.sh" --publish-only --version 1.0.0-test </dev/null)"
+  [[ "$staging_output" == *"staged release=releases/1.0.0-test-"*"candidate=$staging_runtime/releases/1.0.0-test-"* ]] \
+    || fail 'staging did not report the exact verified candidate identity and path'
+  [ ! -e "$staging_runtime/current" ] && [ ! -L "$staging_runtime/current" ] \
+    && [ ! -e "$staging_runtime/previous" ] && [ ! -L "$staging_runtime/previous" ] \
+    && [ ! -e "$staging_home/.local/bin/yard" ] && [ ! -e "$staging_home/.bashrc" ] \
+    && [ ! -e "$staging_home/.profile" ] && [ ! -e "$staging_home/.config/subyard/migrations" ] \
+    && [ "$staging_config_before" = "$(sha256sum "$staging_home/.config/subyard/config.env")" ] \
+    || fail 'staging changed activation, entrypoints, shell or configuration state'
+done
 HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   SUBYARD_CONFIG_HOME="$standalone_home/.config/subyard" YARD_BIN_DIR="$standalone_bin" \
   SHELL=/bin/bash ZDOTDIR="$standalone_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \

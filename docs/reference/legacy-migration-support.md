@@ -1,7 +1,7 @@
 ---
 title: Legacy migration support and deprecation policy
 status: accepted policy
-updated: 2026-10-07
+updated: 2026-10-11
 ---
 
 # Legacy migration support and deprecation policy
@@ -22,13 +22,24 @@ The supported released baselines cover distinct contracts:
 | v0.9.1 | Legacy migration V1 layout 1→5; actual updater verifies refusal of the superseded endpoint and upgrade through the standalone bridge |
 | v0.11.2 | Actual caller for frozen process V1 and Ledger V2; update, interrupted resume, compatible rollback and forward retry |
 | v0.17.3 | Actual activation-only journal producer and recovery baseline using Ledger V2 |
+| v0.18.6 | Actual completed and interrupted activation-only source-repair producer; original-owner schema-2 recovery and separately consented candidate upgrade |
 | v0.18.1 | Published caller using frozen process V1 and Ledger V2; update, interrupted resume, rollback, forward retry and checkpoint-reader bridge ordering |
 
 The [closed importer](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical
 journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
-v0.9.1, v0.11.2, v0.17.3 and v0.18.1 runtime checksums and the legacy runtime installer. These binaries
+v0.9.1, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtime checksums and the legacy runtime installer. These binaries
 remain acceptance inputs; rebuilding old versions from current source does not replace them.
+
+Completed-history source admission proves sealed original assets, the supported registry/catalog,
+canonical journal, authoritative ledger/checkpoint and terminal typed evidence independently of old
+operational readiness. A verified different candidate may prepare a new goal and fresh authorization
+when old operational inspection is blocked. Historical journals are neither reopened nor delegated.
+Known closed supersession and recovery provenance remain history; unresolved publications, live
+reservations, unsupported source ingress or unknown provenance refuse this new fallback without
+weakening ordinary/historical paths. Source repair changes only explicit allowed local alias families
+and confers no release authorization. A retained unfinished original owner must advertise its own
+schema-2 activation capability before source repair; newer staged tooling cannot supply it.
 
 Frozen process V1, recovery receipt V1 and legacy migration V1 have separate support policies.
 Retiring the legacy migration engine does not retire the caller protocol or recovery receipts.

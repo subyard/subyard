@@ -19,10 +19,38 @@ fi
 [ "${1:-}" = run ] || { printf 'expected run NUMERIC_TOKEN\n' >&2; exit 2; }
 [[ "${2:-}" =~ ^[0-9]{1,16}$ ]] || { printf 'expected a fresh numeric token (1-16 digits)\n' >&2; exit 2; }
 
+# Both published baselines use fresh marker-owned fixtures on the same worker.
+# Each child owns the existing cleanup path before the next fixture starts.
+if [ -z "${SUBYARD_RELIABILITY_PHASE:-}" ]; then
+  SUBYARD_RELIABILITY_PHASE=historical bash "$0" "$@"
+  SUBYARD_RELIABILITY_PHASE=source bash "$0" "$@"
+  exit 0
+fi
+
 # Helper-only source mode returns before the old fixture's execution dispatch.
 # shellcheck source=dev/e2e/power-reconciler-upgrade.sh
 . "$(dirname "${BASH_SOURCE[0]}")/power-reconciler-upgrade.sh"
 OLD_VERSION=0.17.3
+if [ "$SUBYARD_RELIABILITY_PHASE" = source ]; then
+  OLD_VERSION=0.18.6
+  STATE_ROOT="/var/tmp/subyard-p0-source-repair-$TOKEN"
+  MARKER="subyard-p0-source-repair-$TOKEN"
+  OPERATOR="subyardsource$TOKEN"
+  OPERATOR_HOME="/home/$OPERATOR"
+  OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-source-repair-home"
+  RELEASE_ROOT="$STATE_ROOT/candidate"
+  SUDOERS="/etc/sudoers.d/$MARKER"
+  BEFORE_ROOT="$STATE_ROOT/before"
+  SNAPSHOT_COMPLETE="$BEFORE_ROOT/.complete"
+  PROJECT_MUTATION_ARMED="$STATE_ROOT/.project-mutation-armed"
+  ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
+  ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
+  ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/.subyard-p0-activation-reconcile-interrupted"
+  ACTIVATION_SYSTEMCTL_WRAPPER="$OPERATOR_HOME/.local/bin/systemctl"
+  V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+  V2_LEDGER="$V2_STATE_ROOT/ledger.json"
+  V2_JOURNAL="$V2_STATE_ROOT/journal.json"
+fi
 OLD_INSTALLER_SHA256=a78c10910c0886a8d01c0a2e77718b21ce58e45fa7f0de6064bc1f351d56028b
 INSTALLER="$STATE_ROOT/subyard-install-baseline.sh"
 BASE_IMAGE=subyard-e2e-debian-13-cloud-container
@@ -46,6 +74,9 @@ cleanup_recovery_fixture() {
   set +e
   if [ "$CLEANUP_ARMED" = 1 ]; then
     assert_state_root
+    if [ "$SUBYARD_RELIABILITY_PHASE" = source ]; then
+      source_repair_restore_host_sink || failed=1
+    fi
     for yard in "${OWNED_EXTRA_YARDS[@]}"; do
       cleanup_extra_yard "$yard" || failed=1
     done
@@ -98,8 +129,12 @@ ensure_platform() {
 download_baseline() {
   local arch archive pin name baseline="$STATE_ROOT/baseline"
   case "$(uname -m)" in
-    x86_64) arch=amd64; pin=3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b ;;
-    aarch64) arch=arm64; pin=dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79 ;;
+    x86_64)
+      arch=amd64; pin=3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b
+      [ "$OLD_VERSION" != 0.18.6 ] || pin=458950eccd3831df8d4ed059ccc51a5dece6f8a85aedaae38f863b7252f635f2 ;;
+    aarch64)
+      arch=arm64; pin=dcc1ae42dc25760b9f4fd290c8aec23c09b729d4a04f780107022710f1247e79
+      [ "$OLD_VERSION" != 0.18.6 ] || pin=a3b52c39edfc4930f0e0ab4c697d60db6b39a00b022d344053bc4f4131fca4fa ;;
     *) die 'unsupported published runtime architecture' ;;
   esac
   archive="subyard-$OLD_VERSION-linux-$arch.tar.gz"
@@ -400,4 +435,11 @@ for command in sudo systemctl timeout cmp curl go jq sha256sum python3; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable worker'
-run_acceptance
+if [ "$SUBYARD_RELIABILITY_PHASE" = source ]; then
+  # Owning test-yard assertions include actual route devices and guest reads.
+  # shellcheck source=tests/helpers/test-yard-source-repair.sh
+  . "$ROOT/tests/helpers/test-yard-source-repair.sh"
+  run_source_repair_acceptance
+else
+  run_acceptance
+fi

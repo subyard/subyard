@@ -11,6 +11,7 @@ RUNTIME_ROOT="${YARD_RUNTIME_ROOT:-$DATA_HOME/runtime}"
 CACHE_ROOT="${YARD_RELEASE_CACHE:-$DATA_HOME/releases}"
 BIN_DIR="${YARD_BIN_DIR:-$HOME/.local/bin}"
 OFFLINE=0
+PUBLISH_ONLY=0
 ASSUME_YES="${ASSUME_YES:-0}"
 
 while [ $# -gt 0 ]; do
@@ -19,13 +20,17 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --version needs a value\n' >&2; exit 2; }; VERSION="$2"; shift 2 ;;
     --runtime-root) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --runtime-root needs a path\n' >&2; exit 2; }; RUNTIME_ROOT="$2"; shift 2 ;;
     --offline) OFFLINE=1; shift ;;
+    --publish-only) PUBLISH_ONLY=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help)
-      printf 'Usage: bootstrap-runtime.sh [--version VERSION] [--offline] [--runtime-root PATH] [--yes]\n'
+      printf 'Usage: bootstrap-runtime.sh [--version VERSION] [--offline] [--runtime-root PATH] [--publish-only] [--yes]\n'
       exit 0 ;;
     *) printf 'bootstrap-runtime: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+
+[ "$PUBLISH_ONLY" = 0 ] || [ -n "$VERSION" ] \
+  || { printf 'bootstrap-runtime: --publish-only requires an explicitly chosen --version\n' >&2; exit 2; }
 
 [ "$CHANNEL" = stable ] || { printf 'bootstrap-runtime: unsupported channel: %s\n' "$CHANNEL" >&2; exit 2; }
 case "$RUNTIME_ROOT" in /*) ;; *) printf 'bootstrap-runtime: runtime root must be absolute\n' >&2; exit 2 ;; esac
@@ -67,6 +72,7 @@ else
 fi
 case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) printf 'bootstrap-runtime: unsafe version: %s\n' "$VERSION" >&2; exit 2 ;; esac
 
+if [ "$PUBLISH_ONLY" = 0 ]; then
 # Pick the files that new interactive and login shells actually read. The stable `current` link
 # keeps completion valid across upgrades and rollback.
 RC="${YARD_SHELL_RC:-}"
@@ -221,6 +227,10 @@ if [ "$ASSUME_YES" != 1 ] && [ "$existing_runtime" = 0 ] &&
   esac
 fi
 
+else
+  printf 'Stage verified Subyard %s for %s/%s under %s; activation requires a separate plan and consent.\n' "$VERSION" "$os" "$arch" "$RUNTIME_ROOT"
+fi
+
 name="subyard-$VERSION-$os-$arch.tar.gz"
 release_dir="$CACHE_ROOT/$VERSION"
 bundle="$release_dir/$name"
@@ -267,6 +277,19 @@ installer_actual="$(sha256sum "$installer" | cut -d' ' -f1)"
 chmod 0700 "$installer"
 
 printf 'channel=%s available=%s platform=%s/%s\n' "$CHANNEL" "$VERSION" "$os" "$arch"
+if [ "$PUBLISH_ONLY" = 1 ]; then
+  published_release="$("$installer" --runtime-root "$RUNTIME_ROOT" --publish-only \
+    --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance")"
+  case "$published_release" in
+    releases/"$VERSION"-*) ;;
+    *) printf 'bootstrap-runtime: installer returned an invalid published release identity\n' >&2; exit 1 ;;
+  esac
+  candidate="$RUNTIME_ROOT/$published_release"
+  [ -x "$candidate/bin/yard" ] \
+    || { printf 'bootstrap-runtime: published candidate launcher is unavailable\n' >&2; exit 1; }
+  printf 'staged release=%s candidate=%s\n' "$published_release" "$candidate"
+  exit 0
+fi
 run_transition=0
 if [ "$existing_runtime" = 0 ]; then
   install -d -m 0700 "$CONFIG_HOME"

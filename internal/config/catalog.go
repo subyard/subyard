@@ -292,6 +292,12 @@ func (settings Catalog) LookupSetting(name string) (SettingDefinition, bool) {
 	}
 	if definition, ok := catalog[name]; ok {
 		definition.Name = name
+		for alias, canonical := range legacySettingNames {
+			if canonical == name {
+				definition.Aliases = append(definition.Aliases, alias)
+			}
+		}
+		sort.Strings(definition.Aliases)
 		return definition, true
 	}
 	definition, ok := agentSettingDefinition(name)
@@ -333,7 +339,7 @@ func resourceSettingDefinition(name string) (SettingDefinition, bool) {
 func (settings Catalog) SettingCatalog() []SettingDefinition {
 	result := make([]SettingDefinition, 0, len(catalog))
 	for name, definition := range catalog {
-		definition.Name = name
+		definition, _ = settings.LookupSetting(name)
 		result = append(result, definition)
 	}
 	for _, definition := range settings.profiles {

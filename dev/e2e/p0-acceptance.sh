@@ -98,7 +98,7 @@ list_lanes() {
   printf '%s\n' \
     smoke boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
     power-systemd \
-    reboot-verify peer peer-cleanup cleanup
+    reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
 }
 parse_arguments() {
@@ -126,7 +126,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -1293,6 +1293,12 @@ case "$P0_LANE" in
     run_phase capacity-preflight run_vm 1 capacity-preflight
     run_phase reboot-verify-platform run_vm 1 real-incus
     run_phase reboot-verify reboot_verify_lane 1
+    run_phase cleanup cleanup_lane
+    ;;
+  release-smoke)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase release-smoke-platform run_vm 1 real-incus
+    run_phase release-smoke release_smoke_lane
     run_phase cleanup cleanup_lane
     ;;
   peer)

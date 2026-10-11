@@ -181,9 +181,7 @@ func (cli *CLI) loadInitContext(
 	info, err := os.Lstat(source)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return config.Loaded{}, nil, fmt.Errorf(
-				"profile %q has no named-yard preset", request.profile,
-			)
+			return config.Loaded{}, nil, &config.SourceError{Path: source, Key: "YARD_TEMPLATE", Role: "init profile", Reason: "selected profile has no named-yard preset"}
 		}
 		return config.Loaded{}, nil, fmt.Errorf("inspect profile preset: %w", err)
 	}

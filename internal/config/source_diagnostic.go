@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+
+	"github.com/Subyard/Subyard/internal/domain"
 	"strconv"
 	"strings"
 	"syscall"
@@ -162,4 +165,28 @@ func settingValueReason(definition SettingDefinition) string {
 	default:
 		return "invalid setting value"
 	}
+}
+
+// SourceAliasRepairRetry identifies the bounded local repair boundary without rendering values.
+func SourceAliasRepairRetry(home, yard string, cause error) string {
+	var source *SourceError
+	if !errors.As(cause, &source) || source.Reason != "conflicting legacy and canonical settings" || !slices.Contains([]string{"YARD_IMAGE", "YARD_IMAGE_FALLBACK", "ENVIRONMENT_PROFILES", "CODING_TOOL_INTEGRATIONS"}, source.Key) {
+		return ""
+	}
+	if !domain.SafeName(yard) {
+		return ""
+	}
+	scope := ""
+	switch filepath.Clean(source.Path) {
+	case filepath.Join(home, "config.env"):
+		scope = "host"
+	case filepath.Join(home, "overrides", "shared", "config.env"):
+		scope = "shared"
+	case filepath.Join(home, "yards", yard, "config.env"):
+		scope = "yard"
+	}
+	if scope == "" {
+		return "run config validate; restore the owning source or use its supported schema migration"
+	}
+	return fmt.Sprintf("choose the desired value explicitly, then run yard -Y %s config repair-alias %s CHOSEN_VALUE --scope %s --local --check", yard, source.Key, scope)
 }

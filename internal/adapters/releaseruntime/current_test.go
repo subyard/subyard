@@ -696,6 +696,10 @@ func TestCurrentTransitionRecoversUniqueNamedPostActivationScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			gate, err := runtime.InspectMutationGate(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+			if err != nil || gate == nil || scenario.resumes && gate.Status != releasetransition.StatusRecovering {
+				t.Fatalf("controller-local gate lost retained named scope: %#v, %v", gate, err)
+			}
 			check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, fixture.configHome, "default", nil)
 			if err != nil {
 				t.Fatal(err)
