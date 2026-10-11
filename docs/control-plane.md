@@ -832,6 +832,13 @@ storage, systemd, credential and nested-VM leaves for physical checks or mutatio
 Registered-yard discovery and legacy power-metadata import are native. Shell only applies the
 selected yard's guarded start/stop boundary.
 
+`reconcileruntime.IncusReader` composes the required read-only Incus, instance-list and
+project/shared teardown inventory ports. The runtime dependency and CLI wiring require
+this interface, so production adapters and injected fakes must provide every method at
+compile time. Write capabilities remain separate. This guarantees method availability;
+nil dependencies, observation errors, inventory contents, ownership, stale-plan checks
+and physical postconditions still require runtime checks and behavioral tests.
+
 ### Yard network policy
 
 `yard network status`, `link A B`, `unlink A B`, `isolation on|off`, and `reconcile`

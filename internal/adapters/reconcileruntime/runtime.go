@@ -43,6 +43,15 @@ type vmIPv4Pinner interface {
 	PinVMIPv4(context.Context, yardnetwork.Yard, bool) (bool, error)
 }
 
+// IncusReader is the required read-only Incus surface for reconciliation and reset.
+// Mutation capabilities remain separate Runtime dependencies or optional ports.
+type IncusReader interface {
+	ports.Incus
+	ports.InstanceInventory
+	ports.TeardownInventoryReader
+	ports.TeardownSharedInventoryReader
+}
+
 type Runtime struct {
 	RepositoryRoot string
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
@@ -73,7 +82,7 @@ type Runtime struct {
 	Stdin             io.Reader
 	Stdout            io.Writer
 	Stderr            io.Writer
-	Incus             ports.Incus
+	Incus             IncusReader
 	ConfigWriter      ports.InstanceConfigWriter
 	Executor          ports.InstanceExecutor
 	Yard              domain.Context
@@ -927,15 +936,11 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 		return err
 	}
 	sharedRetained := hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards())
-	if inventory, ok := runtime.Incus.(ports.InstanceInventory); ok {
-		survivors, err := inventory.ListInstances(ctx)
-		if err != nil {
-			return err
-		}
-		sharedRetained = sharedRetained || len(survivors) != 0
-	} else {
-		return errors.New("reset retention verification requires instance inventory")
+	survivors, err := runtime.Incus.ListInstances(ctx)
+	if err != nil {
+		return err
 	}
+	sharedRetained = sharedRetained || len(survivors) != 0
 	for _, resource := range remaining {
 		if (resource.Kind == "network" || resource.Kind == "pool") && sharedRetained {
 			continue
@@ -2135,19 +2140,14 @@ func (runtime Runtime) ApplyProfileService(ctx context.Context, name string, art
 
 // TeardownInventory is read-only and must be called when the reset is planned.
 func (runtime Runtime) TeardownInventory(ctx context.Context) ([]ports.TeardownResource, error) {
-	reader, ok := runtime.Incus.(ports.TeardownInventoryReader)
-	if !ok {
+	if runtime.Incus == nil {
 		return nil, errors.New("exact reset teardown inventory adapter is required")
 	}
-	resources, err := reader.TeardownInventory(ctx, runtime.Yard.IncusProject)
+	resources, err := runtime.Incus.TeardownInventory(ctx, runtime.Yard.IncusProject)
 	if err != nil {
 		return nil, err
 	}
-	sharedReader, ok := runtime.Incus.(ports.TeardownSharedInventoryReader)
-	if !ok {
-		return nil, errors.New("exact shared reset inventory adapter is required")
-	}
-	shared, err := sharedReader.TeardownSharedInventory(ctx, firstTeardownPool(runtime.environmentValue("STORAGE_POOL"), runtime.environmentValue("SRV_POOL")), runtime.Yard.IncusBridge)
+	shared, err := runtime.Incus.TeardownSharedInventory(ctx, firstTeardownPool(runtime.environmentValue("STORAGE_POOL"), runtime.environmentValue("SRV_POOL")), runtime.Yard.IncusBridge)
 	resources = append(resources, shared...)
 	if resources == nil && err == nil {
 		resources = []ports.TeardownResource{}

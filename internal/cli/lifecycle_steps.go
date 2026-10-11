@@ -86,22 +86,14 @@ func teardownArtifactBinding(root string) (string, error) {
 
 func (cli *CLI) captureTeardownSnapshot(ctx context.Context, loaded config.Loaded, state ports.ReconcileState, paths []string) (*teardownSnapshot, error) {
 	incusPort, _ := cli.statusPorts()
-	reader, ok := incusPort.(ports.TeardownInventoryReader)
-	if !ok {
-		return nil, errors.New("exact teardown inventory adapter is required")
-	}
-	resources, err := reader.TeardownInventory(ctx, loaded.Context.IncusProject)
+	resources, err := incusPort.TeardownInventory(ctx, loaded.Context.IncusProject)
 	if err != nil {
 		return nil, err
 	}
 	if resources == nil {
 		resources = []ports.TeardownResource{}
 	}
-	sharedReader, ok := incusPort.(ports.TeardownSharedInventoryReader)
-	if !ok {
-		return nil, errors.New("exact shared teardown inventory adapter is required")
-	}
-	shared, err := sharedReader.TeardownSharedInventory(ctx, firstNonempty(loaded.Environment["STORAGE_POOL"], loaded.Environment["SRV_POOL"]), loaded.Context.IncusBridge)
+	shared, err := incusPort.TeardownSharedInventory(ctx, firstNonempty(loaded.Environment["STORAGE_POOL"], loaded.Environment["SRV_POOL"]), loaded.Context.IncusBridge)
 	if err != nil {
 		return nil, err
 	}
@@ -239,19 +231,11 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 		}
 	}
 	incusPort, _ := cli.statusPorts()
-	reader, ok := incusPort.(ports.TeardownInventoryReader)
-	if !ok {
-		return errors.New("teardown verification inventory adapter is required")
-	}
-	resources, err := reader.TeardownInventory(ctx, loaded.Context.IncusProject)
+	resources, err := incusPort.TeardownInventory(ctx, loaded.Context.IncusProject)
 	if err != nil {
 		return err
 	}
-	sharedReader, ok := incusPort.(ports.TeardownSharedInventoryReader)
-	if !ok {
-		return errors.New("shared teardown verification adapter is required")
-	}
-	shared, err := sharedReader.TeardownSharedInventory(ctx, firstNonempty(loaded.Environment["STORAGE_POOL"], loaded.Environment["SRV_POOL"]), loaded.Context.IncusBridge)
+	shared, err := incusPort.TeardownSharedInventory(ctx, firstNonempty(loaded.Environment["STORAGE_POOL"], loaded.Environment["SRV_POOL"]), loaded.Context.IncusBridge)
 	if err != nil {
 		return err
 	}
@@ -260,11 +244,7 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 	for _, resource := range resources {
 		remaining[resource.Kind+"/"+resource.Pool+"/"+resource.Name] = resource
 	}
-	inventory, ok := incusPort.(ports.InstanceInventory)
-	if !ok {
-		return errors.New("shared teardown retention verification requires instance inventory")
-	}
-	survivors, err := inventory.ListInstances(ctx)
+	survivors, err := incusPort.ListInstances(ctx)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -224,7 +225,7 @@ func TestDeferredIngressKeepsIncusPrerequisiteBeforeNamedBootstrap(t *testing.T)
 }
 
 type orphanIngressCloserStub struct {
-	ports.Incus
+	reconcileruntime.IncusReader
 	host *orphanIngressSnapshotHost
 }
 
@@ -348,7 +349,7 @@ fi
 	host.snapshot.Yards[0].InstanceInfo.Devices[contract.Device] = maps.Clone(device)
 	host.snapshot.Yards[0].InstanceInfo.LocalConfig[contract.OwnershipKey()] = contract.OwnershipValue(device)
 	writeCLIFile(t, filepath.Join(resourceDir, "relay", "handler.sh"), "#!/bin/sh\nexit 1\n", 0o700)
-	program.options.Incus = orphanIngressCloserStub{Incus: host, host: host}
+	program.options.Incus = orphanIngressCloserStub{IncusReader: host, host: host}
 	unavailable, err := program.prepareOrphanIngress(context.Background(), loaded)
 	if err != nil || unavailable == nil || !unavailable.entries[0].shutdownUnavailable {
 		t.Fatalf("unavailable guest did not preserve native closure plan: %+v %v", unavailable, err)

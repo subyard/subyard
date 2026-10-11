@@ -32,6 +32,15 @@ func (nativeIncus) Instance(_ context.Context, project, name string) (ports.Inst
 func (nativeIncus) ReconcileState(context.Context, string, string, string, string, string) (ports.ReconcileState, error) {
 	return ports.ReconcileState{}, fmt.Errorf("project fixture does not support reconciliation")
 }
+func (nativeIncus) ListInstances(context.Context) ([]ports.InstanceInfo, error) {
+	return nil, fmt.Errorf("project fixture does not support instance inventory")
+}
+func (nativeIncus) TeardownInventory(context.Context, string) ([]ports.TeardownResource, error) {
+	return nil, fmt.Errorf("project fixture does not support teardown inventory")
+}
+func (nativeIncus) TeardownSharedInventory(context.Context, string, string) ([]ports.TeardownResource, error) {
+	return nil, fmt.Errorf("project fixture does not support shared teardown inventory")
+}
 func (nativeIncus) Events(context.Context, []string) (<-chan domain.OperationEvent, <-chan error) {
 	events := make(chan domain.OperationEvent)
 	failures := make(chan error)

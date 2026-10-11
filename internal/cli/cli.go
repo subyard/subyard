@@ -30,6 +30,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/projectruntime"
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/securityruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
@@ -71,7 +72,7 @@ type Options struct {
 	Stdin              io.Reader
 	Stdout             io.Writer
 	Stderr             io.Writer
-	Incus              ports.Incus
+	Incus              reconcileruntime.IncusReader
 	NetworkPolicy      *yardnetwork.Service
 	Executor           ports.InstanceExecutor
 	ProjectData        ports.YardExecutor
@@ -1115,7 +1116,7 @@ func (store readOnlyProjectStore) Delete(context.Context, string) error {
 	return errors.New("read-only project store")
 }
 
-func (cli *CLI) statusPorts() (ports.Incus, ports.InstanceExecutor) {
+func (cli *CLI) statusPorts() (reconcileruntime.IncusReader, ports.InstanceExecutor) {
 	incusPort := cli.options.Incus
 	executor := cli.options.Executor
 	if incusPort == nil || executor == nil {
