@@ -433,3 +433,133 @@ func TestPersistentAuthoringPreservesExistingReadPermissions(t *testing.T) {
 		t.Fatalf("mode: %v, %v", info, err)
 	}
 }
+
+func TestWritePersistentAssignmentCanonicalizesLegacyAliases(t *testing.T) {
+	for _, setting := range []struct {
+		legacy, canonical, before, after string
+	}{
+		{"YARD_TYPE", "ACCESS_KIND", "local", "remote"},
+		{"INSTANCE_TYPE", "YARD_KIND", "container", "vm"},
+		{"INSTANCE_NAME", "YARD_INSTANCE_NAME", "yard-old", "yard-new"},
+		{"REMOTE_DEST", "OWNER_ENDPOINT", "dev@old.example", "dev@new.example"},
+		{"REMOTE_YARD", "OWNER_YARD_NAME", "old", "new"},
+		{"BASE_IMAGE", "YARD_IMAGE", "images:debian/12", "images:debian/13"},
+		{"BASE_IMAGE_FALLBACK", "YARD_IMAGE_FALLBACK", "images:debian/12", "images:debian/13"},
+		{"YARD_PROFILES", "ENVIRONMENT_PROFILES", "neighbor", "neighbor fixture"},
+		{"AGENTS", "CODING_TOOL_INTEGRATIONS", "codex", "paseo"},
+	} {
+		for _, mixed := range []bool{false, true} {
+			initial := "export " + setting.legacy + "='" + setting.before + "'\n"
+			if mixed {
+				initial += setting.canonical + "='" + setting.before + "'\n"
+			}
+			t.Run(initial, func(t *testing.T) {
+				configHome := testkit.TempDir(t)
+				path := filepath.Join(configHome, "config.env")
+				prefix, suffix := "# keep this comment\nSSH_PORT=2222\n", "\nDEV_USER='dev'\n"
+				for _, value := range []*string{&setting.after, nil} {
+					testkit.WriteFile(t, path, []byte(prefix+initial+suffix), 0o600)
+					before, err := ReadPersistentFileSnapshot(configHome, path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := WritePersistentAssignmentIfUnchanged(configHome, path, setting.canonical, value, before); err != nil {
+						t.Fatal(err)
+					}
+					content, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := prefix + suffix
+					if value != nil {
+						want = prefix + setting.canonical + "='" + *value + "'\n" + suffix
+					}
+					if string(content) != want {
+						t.Fatalf("canonical content = %q, want %q", content, want)
+					}
+					loaded := environment{}
+					if err := applyEnvFileValidated(path, loaded, ScopeHost, false, nil); err != nil {
+						t.Fatal(err)
+					}
+					if value != nil && loaded[setting.canonical] != *value {
+						t.Fatalf("reloaded value = %q, want %q", loaded[setting.canonical], *value)
+					}
+					if value == nil {
+						if _, exists := loaded[setting.canonical]; exists {
+							t.Fatal("unset retained the selection")
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWritePersistentAssignmentAliasRejectsStaleAndInvalidTargets(t *testing.T) {
+	for _, condition := range []string{"stale content", "stale identity", "invalid record", "unsafe mode"} {
+		t.Run(condition, func(t *testing.T) {
+			configHome := testkit.TempDir(t)
+			path := filepath.Join(configHome, "config.env")
+			initial := []byte("YARD_PROFILES='neighbor'\n")
+			if condition == "invalid record" {
+				initial = append(initial, []byte("SSH_PORT=$(false)\n")...)
+			}
+			testkit.WriteFile(t, path, initial, 0o600)
+			before, err := ReadPersistentFileSnapshot(configHome, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch condition {
+			case "stale content":
+				initial = append(initial, []byte("# operator edit\n")...)
+				testkit.WriteFile(t, path, initial, 0o600)
+			case "stale identity":
+				replacement := filepath.Join(configHome, "replacement")
+				testkit.WriteFile(t, replacement, initial, 0o600)
+				if err := os.Rename(replacement, path); err != nil {
+					t.Fatal(err)
+				}
+			case "unsafe mode":
+				if err := os.Chmod(path, 0o660); err != nil {
+					t.Fatal(err)
+				}
+			}
+			value := "neighbor fixture"
+			err = WritePersistentAssignmentIfUnchanged(configHome, path, "ENVIRONMENT_PROFILES", &value, before)
+			if err == nil || strings.HasPrefix(condition, "stale") && !errors.Is(err, ErrPersistentTargetStale) {
+				t.Fatalf("%s accepted: %v", condition, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, initial) {
+				t.Fatalf("rejected write changed content: %q, %v", after, err)
+			}
+		})
+	}
+}
+
+func TestWritePersistentAssignmentRejectsPreservedConditionalAlias(t *testing.T) {
+	selection := "neighbor fixture"
+	empty := ""
+	for _, setting := range []struct {
+		initial string
+		values  []*string
+	}{
+		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}},
+		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}},
+		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}},
+		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}},
+	} {
+		for _, value := range setting.values {
+			configHome := testkit.TempDir(t)
+			path := filepath.Join(configHome, "config.env")
+			testkit.WriteFile(t, path, []byte(setting.initial), 0o600)
+			if err := WritePersistentAssignment(configHome, path, "ENVIRONMENT_PROFILES", value); err == nil || !strings.Contains(err.Error(), "preserved record") {
+				t.Fatalf("conditional alias accepted: %v", err)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != setting.initial {
+				t.Fatalf("rejected write changed content: %q, %v", content, err)
+			}
+		}
+	}
+}

@@ -512,6 +512,15 @@ Legacy names are accepted only while reading an old input. A file or command env
 conflicting old and canonical values is rejected. `config set`, generated context, JSON and RPC
 writers emit canonical names only.
 
+Saving or unsetting a canonical scalar replaces or removes its legacy assignments in the same
+target file, preserving unrelated settings and comments. An existing conflict must be resolved
+before commands can load that file; `config set` and `config unset` do not bypass validation.
+If a conditional default in a preserved record would reintroduce the setting or its legacy alias,
+authoring fails without changing the file; simplify that conditional assignment first.
+For an existing literal conflict, use the bounded `config repair-alias` ingress described under
+[Applying changes](#applying-changes), choosing the complete intended selection explicitly.
+Then retry the scoped profile action and check its status to complete pending runtime work.
+
 ## Versioned private configuration
 
 Keep private desired settings in a separate clean Git checkout. Do not turn the entire

@@ -81,35 +81,46 @@ func prepareScopedProfile(t *testing.T, cli *CLI, arguments ...string) (*prepare
 }
 
 func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) {
-	cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='neighbor'\nSSH_PORT=2222\n")
-	for _, verb := range []string{"enable", "enable", "disable", "disable", "enable"} {
-		prepared, err := prepareScopedProfile(t, cli, verb, "fixture")
-		if err != nil {
-			t.Fatal(err)
-		}
-		code := cli.runPreparedCommand(context.Background(), prepared, true)
-		prepared.Close()
-		if code != 0 {
-			t.Fatalf("%s exit=%d: %s", verb, code, output)
-		}
-	}
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "neighbor fixture") || !strings.Contains(string(data), "SSH_PORT=2222") {
-		t.Fatalf("selection lost: %s", data)
-	}
-	if strings.Join(runtime.applied, " ") != "fixture fixture fixture" {
-		t.Fatalf("scoped apply=%v", runtime.applied)
-	}
-	if platform := cli.options.InitPlatform.(*initPlatformFixture); len(platform.applied) != 0 {
-		t.Fatalf("entered init: %+v", platform)
-	}
-	prepared, err := prepareScopedProfile(t, cli, "status", "fixture", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer prepared.Close()
-	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 || !strings.Contains(output.String(), `"ready":true`) {
-		t.Fatalf("status=%d %s", code, output)
+	for _, selection := range []string{
+		"ENVIRONMENT_PROFILES='neighbor'\n",
+		"YARD_PROFILES='neighbor'\n",
+		"export YARD_PROFILES='neighbor\n'\n",
+		"YARD_PROFILES='neighbor'\nENVIRONMENT_PROFILES='neighbor'\n",
+		"ENVIRONMENT_PROFILES='neighbor'\nYARD_PROFILES='neighbor'\n",
+		"YARD_PROFILES='neighbor'\n: ${ENVIRONMENT_PROFILES:=neighbor}\n",
+	} {
+		t.Run(selection, func(t *testing.T) {
+			cli, _, runtime, path, output := scopedProfileFixture(t, "# keep this comment\n"+selection+"SSH_PORT=2222\n")
+			for _, verb := range []string{"enable", "enable", "disable", "disable", "enable"} {
+				prepared, err := prepareScopedProfile(t, cli, verb, "fixture")
+				if err != nil {
+					t.Fatal(err)
+				}
+				code := cli.runPreparedCommand(context.Background(), prepared, true)
+				prepared.Close()
+				if code != 0 {
+					t.Fatalf("%s exit=%d: %s", verb, code, output)
+				}
+			}
+			data, _ := os.ReadFile(path)
+			if string(data) != "# keep this comment\nENVIRONMENT_PROFILES='neighbor fixture'\nSSH_PORT=2222\n" {
+				t.Fatalf("selection lost: %s", data)
+			}
+			if strings.Join(runtime.applied, " ") != "fixture fixture fixture" {
+				t.Fatalf("scoped apply=%v", runtime.applied)
+			}
+			if platform := cli.options.InitPlatform.(*initPlatformFixture); len(platform.applied) != 0 {
+				t.Fatalf("entered init: %+v", platform)
+			}
+			prepared, err := prepareScopedProfile(t, cli, "status", "fixture", "--json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 || !strings.Contains(output.String(), `"ready":true`) {
+				t.Fatalf("status=%d %s", code, output)
+			}
+		})
 	}
 }
 
@@ -128,6 +139,32 @@ func TestScopedProfileDisabledGuardRejectsEnableBeforeWrite(t *testing.T) {
 			after, err := os.ReadFile(path)
 			if err != nil || !bytes.Equal(before, after) || len(runtime.applied) != 0 {
 				t.Fatalf("rejected enable mutated the yard: err=%v apply=%v", err, runtime.applied)
+			}
+		})
+	}
+}
+
+func TestScopedProfileRejectsPreservedConditionalAliasBeforeApply(t *testing.T) {
+	for _, test := range []struct {
+		initial, verb string
+	}{
+		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", "enable"},
+		{"ENVIRONMENT_PROFILES=fixture\n: ${ENVIRONMENT_PROFILES:=fixture}\n", "disable"},
+		{"YARD_PROFILES=fixture\nENVIRONMENT_PROFILES=fixture\n: ${ENVIRONMENT_PROFILES:=fixture}\n", "disable"},
+	} {
+		t.Run(test.verb, func(t *testing.T) {
+			initial := test.initial
+			cli, _, runtime, path, _ := scopedProfileFixture(t, initial)
+			runtime.installed = test.verb == "disable"
+			if _, err := prepareScopedProfile(t, cli, test.verb, "fixture"); err == nil || !strings.Contains(err.Error(), "preserved record") {
+				t.Fatalf("conditional alias accepted: %v", err)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != initial || len(runtime.applied) != 0 {
+				t.Fatalf("rejected preparation changed state: content=%q apply=%v err=%v", content, runtime.applied, err)
+			}
+			if platform := cli.options.InitPlatform.(*initPlatformFixture); len(platform.applied) != 0 {
+				t.Fatalf("rejected preparation applied init stages: %+v", platform)
 			}
 		})
 	}

@@ -287,6 +287,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		return err
 	}
 	value := strings.Join(requested, " ")
+	if selectionChanged {
+		if _, err := config.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value); err != nil {
+			return err
+		}
+	}
 	var setups *initProfileSet
 	if request.verb != "disable" && definition.Setup != nil && prepared.interactiveSetup {
 		item, err := cli.prepareInitProfile(ctx, &initExecution{loaded: candidate}, prepared.Arguments, definition)

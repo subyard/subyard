@@ -500,6 +500,26 @@ func editAssignmentContent(
 		}
 		result.Write(replacement)
 	}
+	// Removing a direct assignment can activate a conditional default in a
+	// preserved record. Reject that ambiguity rather than deleting unrelated
+	// settings or saving a file that will conflict on its next load.
+	assignments, err := ParsePersistentAssignments(path, result.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var effective PersistentAssignment
+	for _, assignment := range assignments {
+		if canonicalSettingName(assignment.Name) != name {
+			continue
+		}
+		if value == nil || assignment.Name != name {
+			return nil, sourceError(path, assignment.Line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil)
+		}
+		effective = assignment
+	}
+	if value != nil && effective.Value != *value {
+		return nil, sourceError(path, effective.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil)
+	}
 	return result.Bytes(), nil
 }
 
