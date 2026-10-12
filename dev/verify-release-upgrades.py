@@ -59,11 +59,13 @@ def digest(path):
 def write_observation_incus(shims, control, unexpected):
     source = Path(__file__).resolve().parent.parent
     probes = {}
-    for fixture in sorted(source.glob("config/agents/*/tests/release-observation.py")):
+    fixtures = [fixture for owner in ("agents", "profiles")
+                for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
+    for fixture in sorted(fixtures):
         commands = runpy.run_path(str(fixture))["read_only_commands"](fixture.parent.parent)
         for arguments, response in commands:
             key = tuple(arguments)
-            require(key not in probes, "integration observation fixture has duplicate commands")
+            require(key not in probes, "package observation fixture has duplicate commands")
             probes[key] = response
     incus = shims / "incus"
     # Exact canned observations only; no command or guest script is executed.
@@ -75,6 +77,7 @@ def write_observation_incus(shims, control, unexpected):
                      "    print(json.dumps(observation['instances'][0]['info']))\n"
                      "    sys.exit(0)\n"
                      "if tuple(arguments) in probes:\n"
+                     "    sys.stdin.buffer.read()\n"
                      "    sys.stdout.write(probes[tuple(arguments)])\n"
                      "    sys.exit(0)\n"
                      "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"

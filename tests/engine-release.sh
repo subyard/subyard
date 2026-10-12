@@ -171,6 +171,8 @@ grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
   || fail 'runtime bundle omitted untracked profile assets or native executable'
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
+  && grep -Fxq './internal/adapters/configmaterial/tomli_w.py' "$bundle_list" \
+  && grep -Fxq './internal/adapters/configmaterial/TOMLI_W_LICENSE' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
   && grep -Fxq './scripts/install-ssh-relay.sh' "$bundle_list" \
   && grep -Fxq './scripts/install-test-vms-host-sink.sh' "$bundle_list" \
@@ -206,6 +208,23 @@ grep -Fq "$(basename "$untracked_canary")" "$bundle_list" \
 bundle_extract="$TMP/bundle-extract"
 install -d "$bundle_extract"
 tar -xpzf "$bundle_one" -C "$bundle_extract"
+for directory in config/profiles/package-fixture/bin config/agents/package-fixture/bin internal/adapters/configmaterial; do
+  [ "$(stat -c '%a' "$bundle_extract/$directory")" = 755 ] \
+    || fail 'runtime native or helper directory does not have public mode'
+done
+python3 - "$bundle_one" <<'PY'
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], 'r:gz') as bundle:
+    assert all(member.mode == 0o755 for member in bundle.getmembers() if member.isdir()), \
+        'runtime bundle directory permissions depend on packaging umask'
+PY
+for support in tomli_w.py TOMLI_W_LICENSE; do
+  [ "$(stat -c '%a' "$bundle_extract/internal/adapters/configmaterial/$support")" = 644 ] \
+    && cmp -s "$ROOT/internal/adapters/configmaterial/$support" "$bundle_extract/internal/adapters/configmaterial/$support" \
+    || fail 'runtime bundle changed shared TOML support bytes or public data mode'
+done
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \
   || fail 'runtime bundle changed preview helper bytes or executable mode'
@@ -221,6 +240,12 @@ tar -xpzf "$bundle_one" -C "$bundle_extract"
   && [ "$(stat -c '%a' "$ROOT/scripts/prepare-preview-route.sh")" = 700 ] \
   && [ "$(stat -c '%a' "$fixture_profile/asset.txt")" = 600 ] \
   || fail 'packaging changed source permissions'
+release_umask="$TMP/release-0022"
+(umask 0022; "$ROOT/dev/package-engine.sh" --output-dir "$release_umask" --version 1.0.0-test \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json") >/dev/null
+cmp -s "$bundle_one" "$release_umask/$(basename "$bundle_one")" \
+  && cmp -s "$artifact_one" "$release_umask/$(basename "$artifact_one")" \
+  || fail 'runtime or engine bytes depend on packaging umask'
 [ "$("$bundle_extract/config/profiles/package-fixture/bin/worker")" = "profile native fixture" ] \
   || fail 'packaged native profile executable does not run'
 [ "$("$bundle_extract/config/agents/package-fixture/bin/worker")" = "integration native fixture" ] \

@@ -63,7 +63,7 @@ func TestPreparedProjectHooksRunOnceAfterSuccessfulNativeCatalogChange(t *testin
 				Facts: map[string]string{hook: testRuntimeOldDigest}, Resolved: map[string]string{hook: hook},
 			}}, binding: testRuntimeOldDigest}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
-			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Incus: incus, Executor: executor,
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: incus, Executor: executor,
 				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
 			prepare := func() {
 				t.Helper()
@@ -137,7 +137,7 @@ func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) 
 		t.Run(scenario, func(t *testing.T) {
 			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest, Hooks: []string{"/usr/local/libexec/subyard/projects-changed.d/owned"}, Facts: map[string]string{"/usr/local/libexec/subyard/projects-changed.d/owned": testRuntimeOldDigest}}}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
-			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Incus: incus, Executor: executor, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: incus, Executor: executor, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
 			plan, err := runtime.PrepareProjectHooks(context.Background(), false)
 			if err != nil {
 				t.Fatal(err)
@@ -386,7 +386,7 @@ func TestStoppedProjectHooksSurviveApprovedTemporaryStart(t *testing.T) {
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{
 				"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped",
 			}}}}
-			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Incus: incus, Executor: executor, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: incus, Executor: executor, Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
 			plan, err := runtime.PrepareProjectHooks(context.Background(), unavailable, true)
 			if err != nil {
 				t.Fatal(err)

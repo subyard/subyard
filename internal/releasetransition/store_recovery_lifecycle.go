@@ -245,18 +245,29 @@ func (store *POSIXV2Store) readLifecycleRecord(transaction TransactionID) (Recov
 	if err != nil || !snapshot.Exists {
 		return RecoveryLifecycleRecord{}, false, err
 	}
-	record, err := ParseRecoveryLifecycleRecord(snapshot.Payload)
+	record, err := parseLifecycleRecordPayload(transaction, snapshot.Payload)
+	return record, err == nil, err
+}
+
+func parseLifecycleRecordPayload(transaction TransactionID, payload []byte) (RecoveryLifecycleRecord, error) {
+	record, err := ParseRecoveryLifecycleRecord(payload)
 	if err != nil {
-		return RecoveryLifecycleRecord{}, false, err
+		return RecoveryLifecycleRecord{}, err
 	}
 	canonical, err := MarshalRecoveryLifecycleRecord(record)
-	if err != nil || !bytes.Equal(canonical, snapshot.Payload) || record.Receipt.Successor.Transaction != transaction {
-		return RecoveryLifecycleRecord{}, false, invalid("recovery lifecycle archive is not canonical selected evidence")
+	if err != nil || !bytes.Equal(canonical, payload) || record.Receipt.Successor.Transaction != transaction {
+		return RecoveryLifecycleRecord{}, invalid("recovery lifecycle archive is not canonical selected evidence")
 	}
-	return record, true, nil
+	return record, nil
 }
 
 func (store *POSIXV2Store) readLifecycleArchive() (map[TransactionID]RecoveryLifecycleRecord, error) {
+	return store.readLifecycleArchiveWithRecords(nil, nil)
+}
+
+// Refresh every protected pair and namespace budget. Within one locked operation,
+// an identical payload can reuse its already parsed and canonically validated record.
+func (store *POSIXV2Store) readLifecycleArchiveWithRecords(previous map[TransactionID]RecoveryLifecycleRecord, payloads map[TransactionID][]byte) (map[TransactionID]RecoveryLifecycleRecord, error) {
 	entries, _, err := store.recoveryEntries(recoveryArchiveParts)
 	if err != nil {
 		return nil, err
@@ -278,12 +289,22 @@ func (store *POSIXV2Store) readLifecycleArchive() (map[TransactionID]RecoveryLif
 		if _, exists := result[transaction]; exists {
 			continue
 		}
-		record, present, err := store.readLifecycleRecord(transaction)
+		snapshot, err := store.readRecoveryPair(recoveryArchiveParts, transaction)
 		if err != nil {
 			return nil, err
 		}
-		if !present {
+		if !snapshot.Exists {
 			return nil, invalid("recovery lifecycle archive disappeared during inspection")
+		}
+		record, validated := previous[transaction]
+		if !validated || !bytes.Equal(payloads[transaction], snapshot.Payload) {
+			record, err = parseLifecycleRecordPayload(transaction, snapshot.Payload)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if payloads != nil {
+			payloads[transaction] = snapshot.Payload
 		}
 		result[transaction] = record
 	}
@@ -302,6 +323,12 @@ func (store *POSIXV2Store) createLifecycleRecord(record RecoveryLifecycleRecord)
 	if err != nil {
 		return err
 	}
+	return store.createLifecycleRecordInArchive(record, payload, archive)
+}
+
+// Reuse a fully validated archive only within the caller's locked operation.
+// Byte reservation and immutable publication still recheck the protected files.
+func (store *POSIXV2Store) createLifecycleRecordInArchive(record RecoveryLifecycleRecord, payload []byte, archive map[TransactionID]RecoveryLifecycleRecord) error {
 	transaction := record.Receipt.Successor.Transaction
 	if _, exists := archive[transaction]; !exists && len(archive) >= maxRecoveryLifecycleEntries {
 		return invalid("recovery lifecycle archive horizon is full")
@@ -402,6 +429,10 @@ func (store *POSIXV2Store) lifecycleReservation(request ActivationOnlyRecoveryRe
 // RecoveryReservation binds an already durable reservation into the fresh plan.
 // Reads never cancel or remove evidence, including after a pre-CAS crash.
 func (store *POSIXV2Store) RecoveryReservation(request ActivationOnlyRecoveryRequest, basePlan PlanToken) (Fingerprint, error) {
+	return store.recoveryReservation(request, basePlan, nil)
+}
+
+func (store *POSIXV2Store) recoveryReservation(request ActivationOnlyRecoveryRequest, basePlan PlanToken, archive map[TransactionID]RecoveryLifecycleRecord) (Fingerprint, error) {
 	if err := validatePlanToken(basePlan); err != nil {
 		return "", err
 	}
@@ -451,9 +482,11 @@ func (store *POSIXV2Store) RecoveryReservation(request ActivationOnlyRecoveryReq
 	}
 	// A missing frontier cannot silently convert historical evidence to a new
 	// baseline. Modern writers always publish it before the first live receipt.
-	archive, err := store.readLifecycleArchive()
-	if err != nil {
-		return "", err
+	if archive == nil {
+		archive, err = store.readLifecycleArchive()
+		if err != nil {
+			return "", err
+		}
 	}
 	for _, record := range archive {
 		if record.Receipt.Replacement.Transaction == request.Transaction {
@@ -564,20 +597,37 @@ func (store *POSIXV2Store) createLifecycleRecoveryReceipt(transaction Transactio
 	if !current.Exists || current.Fingerprint != receipt.Replacement.Fingerprint || !bytes.Equal(current.Payload, mustJournalRecoveryPayload(receipt.Predecessor)) {
 		return invalid("lifecycle publication requires its exact selected predecessor")
 	}
-	reservation, err := store.RecoveryReservation(receipt.Replacement, receipt.BasePlan)
+	frontier, present, err := store.recoveryFrontier(receipt.Replacement)
+	if err != nil {
+		return err
+	}
+	var archive map[TransactionID]RecoveryLifecycleRecord
+	if !present {
+		archive, err = store.readLifecycleArchive()
+		if err != nil {
+			return err
+		}
+	}
+	reservation, err := store.recoveryReservation(receipt.Replacement, receipt.BasePlan, archive)
 	if err != nil {
 		return err
 	}
 	if reservation != receipt.Reservation {
 		return invalid("lifecycle receipt does not bind the selected reservation")
 	}
-	frontier, present, err := store.recoveryFrontier(receipt.Replacement)
+	frontier, present, err = store.recoveryFrontier(receipt.Replacement)
 	if err != nil {
 		return err
 	}
 	if !present {
 		frontier = RecoveryFrontier{SchemaVersion: RecoveryLifecycleSchemaV1, Replacement: receipt.Replacement, Generation: 1}
-		if err := store.retireClosedRecoveryEvidence(); err != nil {
+		if archive == nil {
+			archive, err = store.readLifecycleArchive()
+			if err != nil {
+				return err
+			}
+		}
+		if err := store.retireClosedRecoveryEvidenceInArchive(archive); err != nil {
 			return err
 		}
 	}
@@ -735,6 +785,10 @@ func (store *POSIXV2Store) pruneLifecycleHistory(budget, retention int) error {
 	if err != nil {
 		return err
 	}
+	return store.pruneLifecycleArchive(archive, budget, retention)
+}
+
+func (store *POSIXV2Store) pruneLifecycleArchive(archive map[TransactionID]RecoveryLifecycleRecord, budget, retention int) error {
 	roots, err := store.recoveryReferenceRoots()
 	if err != nil {
 		return err
@@ -953,6 +1007,10 @@ func (store *POSIXV2Store) recoveryReferenceRoots(cancelling ...*RecoveryReceipt
 // completed original predecessor that makes an unselected receipt obsolete.
 // The overwrite boundary calls this before replacing any completed journal.
 func (store *POSIXV2Store) RecordCompletedRecovery(current JournalRecord) error {
+	return store.recordCompletedRecovery(current, nil)
+}
+
+func (store *POSIXV2Store) recordCompletedRecovery(current JournalRecord, archive map[TransactionID]RecoveryLifecycleRecord) error {
 	if current.Checkpoint != JournalComplete {
 		return invalid("recovery completion witness requires a completed journal")
 	}
@@ -969,7 +1027,7 @@ func (store *POSIXV2Store) RecordCompletedRecovery(current JournalRecord) error 
 		if err != nil {
 			return err
 		}
-		return store.captureRecoveryCompletion(RecoveryLifecycleRecord{SchemaVersion: RecoveryLifecycleSchemaV1, Receipt: receipt, Completed: &current})
+		return store.captureRecoveryCompletion(RecoveryLifecycleRecord{SchemaVersion: RecoveryLifecycleSchemaV1, Receipt: receipt, Completed: &current}, archive)
 	}
 	// Validate reference metadata before declaring any legacy/current reservation
 	// closed; unknown journals or archives must leave all evidence intact.
@@ -1018,16 +1076,19 @@ func (store *POSIXV2Store) RecordCompletedRecovery(current JournalRecord) error 
 			return nil
 		}
 	}
-	return store.captureRecoveryCompletion(record)
+	return store.captureRecoveryCompletion(record, archive)
 }
 
-func (store *POSIXV2Store) captureRecoveryCompletion(record RecoveryLifecycleRecord) error {
+func (store *POSIXV2Store) captureRecoveryCompletion(record RecoveryLifecycleRecord, archive map[TransactionID]RecoveryLifecycleRecord) error {
 	if err := store.inject("before-recovery-completion"); err != nil {
 		return err
 	}
-	archive, err := store.readLifecycleArchive()
-	if err != nil {
-		return err
+	if archive == nil {
+		var err error
+		archive, err = store.readLifecycleArchive()
+		if err != nil {
+			return err
+		}
 	}
 	payload, err := MarshalRecoveryLifecycleRecord(record)
 	if err != nil {
@@ -1041,14 +1102,19 @@ func (store *POSIXV2Store) captureRecoveryCompletion(record RecoveryLifecycleRec
 		(len(archive) >= maxRecoveryLifecycleEntries || total+int64(len(payload)) > maxRecoveryLifecycleBytes) {
 		// The overwrite hook must also free eligible capacity before capture;
 		// otherwise its best-effort warning would strand a provably closed receipt.
-		if err := store.retireClosedRecoveryEvidence(); err != nil {
+		if err := store.retireClosedRecoveryEvidenceInArchive(archive); err != nil {
 			return err
 		}
-		if err := store.pruneLifecycleHistory(32, 31); err != nil {
+		if err := store.pruneLifecycleArchive(archive, 32, 31); err != nil {
+			return err
+		}
+		// Pruning mutates the archive. Refresh before the publication check.
+		archive, err = store.readLifecycleArchive()
+		if err != nil {
 			return err
 		}
 	}
-	if err := store.createLifecycleRecord(record); err != nil {
+	if err := store.createLifecycleRecordInArchive(record, payload, archive); err != nil {
 		return err
 	}
 	return store.inject("after-recovery-completion")
@@ -1057,6 +1123,14 @@ func (store *POSIXV2Store) captureRecoveryCompletion(record RecoveryLifecycleRec
 // retireClosedRecoveryEvidence also runs before admission. Completion is proved
 // by an exact archived witness; absent current references alone never suffice.
 func (store *POSIXV2Store) retireClosedRecoveryEvidence() error {
+	archive, err := store.readLifecycleArchive()
+	if err != nil {
+		return err
+	}
+	return store.retireClosedRecoveryEvidenceInArchive(archive)
+}
+
+func (store *POSIXV2Store) retireClosedRecoveryEvidenceInArchive(archive map[TransactionID]RecoveryLifecycleRecord) error {
 	roots, err := store.recoveryReferenceRoots()
 	if err != nil {
 		return err
@@ -1066,10 +1140,6 @@ func (store *POSIXV2Store) retireClosedRecoveryEvidence() error {
 		return err
 	}
 	legacy, err := store.readRecoveryReceipts()
-	if err != nil {
-		return err
-	}
-	archive, err := store.readLifecycleArchive()
 	if err != nil {
 		return err
 	}
@@ -1108,7 +1178,11 @@ func (store *POSIXV2Store) retireClosedRecoveryEvidence() error {
 		if referenced {
 			continue
 		}
-		if err := store.createLifecycleRecord(terminal); err != nil {
+		payload, err := MarshalRecoveryLifecycleRecord(terminal)
+		if err != nil {
+			return err
+		}
+		if err := store.createLifecycleRecordInArchive(terminal, payload, archive); err != nil {
 			return err
 		}
 		if err := store.inject("before-recovery-live-retirement"); err != nil {
@@ -1184,11 +1258,12 @@ func (store *POSIXV2Store) CleanupRecovery(current TransactionID) error {
 	if err != nil || journal.Transaction != current || journal.Checkpoint != JournalComplete {
 		return invalid("recovery cleanup journal is not the completed current transaction")
 	}
-	if err := store.retireClosedRecoveryEvidence(); err != nil {
+	payloads := make(map[TransactionID][]byte)
+	archive, err := store.readLifecycleArchiveWithRecords(nil, payloads)
+	if err != nil {
 		return err
 	}
-	archive, err := store.readLifecycleArchive()
-	if err != nil {
+	if err := store.retireClosedRecoveryEvidenceInArchive(archive); err != nil {
 		return err
 	}
 	retention := 32
@@ -1198,9 +1273,16 @@ func (store *POSIXV2Store) CleanupRecovery(current TransactionID) error {
 		// Reserve a slot for a possible unselected predecessor closure witness.
 		retention--
 	}
-	if err := store.pruneLifecycleHistory(32, retention); err != nil {
+	beforePrune := len(archive)
+	if err := store.pruneLifecycleArchive(archive, 32, retention); err != nil {
 		return err
 	}
+	if len(archive) != beforePrune {
+		archive, err = store.readLifecycleArchiveWithRecords(archive, payloads)
+		if err != nil {
+			return err
+		}
+	}
 	// Free eligible history before capturing the selected completion witness.
-	return store.RecordCompletedRecovery(journal)
+	return store.recordCompletedRecovery(journal, archive)
 }

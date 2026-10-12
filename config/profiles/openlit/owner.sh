@@ -59,7 +59,7 @@ for agent in claude codex; do
   fi
 done
 # Exclude tests and do not transport operator files or native config values.
-tar -C "$profile" -cf - guest.sh native.py runtime.py compose.yaml collector.yaml subyard-openlit.service \
+tar -C "$profile" -cf - guest.sh native.py runtime.py compose.yaml collector.yaml openlit-collector.yaml subyard-openlit.service \
   -C "$root/internal/adapters/configmaterial" tomli_w.py | \
   incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- \
     bash -euo pipefail -c '

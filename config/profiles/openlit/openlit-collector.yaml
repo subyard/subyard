@@ -1,0 +1,40 @@
+# OpenLIT 2.1.0's integrated receiver uses the existing private database environment.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 768
+    spike_limit_mib: 192
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+exporters:
+  clickhouse:
+    endpoint: tcp://${env:INIT_DB_HOST}:9000?dial_timeout=10s
+    database: ${env:INIT_DB_DATABASE}
+    username: ${env:INIT_DB_USERNAME}
+    password: ${env:INIT_DB_PASSWORD}
+    create_schema: true
+    ttl: 730h
+    logs_table_name: otel_logs
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]

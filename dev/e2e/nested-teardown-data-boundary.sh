@@ -141,6 +141,133 @@ nested_memory_available_bytes() {
   awk '/MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
 }
 
+require_outer_docker_ready() {
+  local deadline remaining snapshot owner rc now observations
+  docker_ready_report() {
+    printf '{"phase":"%s","reason":"%s","native_exit":%d}\n' "$1" "$2" "$3" >&2
+  }
+  [[ "$OUTER_PROJECT" =~ ^subyard-nested-e2e-[a-z0-9]{6}$ ]] \
+    && [ "$OUTER_POOL" = "${OUTER_PROJECT#subyard-}" ] \
+    && [ "$OUTER_INSTANCE" = "yard-$OUTER_POOL" ] \
+    || { docker_ready_report ownership unsafe-target 0; die 'Docker prerequisite target identity is unsafe'; }
+  now="$(nested_monotonic_seconds)" \
+    || { docker_ready_report clock unavailable "$?"; die 'Docker prerequisite clock is unavailable'; }
+  deadline=$((now + 60))
+  if snapshot="$(timeout --signal=TERM --kill-after=1 3 incus query \
+    "/1.0/instances/$OUTER_INSTANCE?project=$OUTER_PROJECT" 2>/dev/null)"; then
+    jq -e --arg instance "$OUTER_INSTANCE" --arg pool "$OUTER_POOL" '
+      .name == $instance and .type == "virtual-machine" and .status == "Running"
+      and .expanded_config["user.subyard.managed"] == "true"
+      and .expanded_devices.root.pool == $pool
+    ' >/dev/null 2>&1 <<<"$snapshot" \
+      || { docker_ready_report ownership rejected-vm 0; die 'Docker prerequisite VM ownership is unavailable'; }
+  else
+    rc=$?; docker_ready_report ownership vm-query-failed "$rc"
+    die 'Docker prerequisite VM ownership is unavailable'
+  fi
+  now="$(nested_monotonic_seconds)" \
+    || { docker_ready_report clock unavailable "$?"; die 'Docker prerequisite clock is unavailable'; }
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] \
+    || { docker_ready_report clock deadline 0; die 'Docker prerequisite exceeded its 60s deadline'; }
+  [ "$remaining" -le 3 ] || remaining=3
+  if owner="$(timeout --signal=TERM --kill-after=1 "$remaining" incus storage get "$OUTER_POOL" \
+    user.subyard.owner --project default 2>/dev/null)"; then
+    [ "$owner" = nested-teardown-e2e-v1 ] \
+      || { docker_ready_report ownership rejected-pool 0; die 'Docker prerequisite pool ownership is unavailable'; }
+  else
+    rc=$?; docker_ready_report ownership pool-query-failed "$rc"
+    die 'Docker prerequisite pool ownership is unavailable'
+  fi
+  now="$(nested_monotonic_seconds)" \
+    || { docker_ready_report clock unavailable "$?"; die 'Docker prerequisite clock is unavailable'; }
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] \
+    || { docker_ready_report clock deadline 0; die 'Docker prerequisite exceeded its 60s deadline'; }
+  # start guarantees the Incus agent, not boot completion of Docker. Observe only;
+  # never start/restart the daemon or retry init to satisfy this fixture prerequisite.
+  if observations="$(timeout --signal=TERM --kill-after=1 "$remaining" \
+    incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
+    timeout --signal=TERM --kill-after=1 "$remaining" bash -eu -c '
+      report() {
+        printf "{\"phase\":\"%s\",\"reason\":\"%s\",\"native_exit\":%d,\"load\":\"%s\",\"active\":\"%s\",\"sub\":\"%s\"}\n" \
+          "$1" "$2" "$3" "$load" "$active" "$sub"
+      }
+      observed=0
+      while :; do
+        load=unknown active=unknown sub=unknown
+        if state=$(timeout 3 systemctl show docker.service \
+          --property=LoadState --property=ActiveState --property=SubState); then :; else
+          rc=$?
+          reason=unavailable; [ "$rc" != 124 ] || reason=timeout
+          report service-query "$reason" "$rc"; exit 2
+        fi
+        seen_load=0 seen_active=0 seen_sub=0 malformed=0
+        [ "$(
+          LC_ALL=C
+          printf "%s" "${#state}"
+        )" -le 8192 ] || { report service-state malformed 0; exit 2; }
+        while IFS="=" read -r field value; do
+          case "$field" in
+            LoadState)
+              [ "$seen_load" = 0 ] || malformed=1; seen_load=1
+              case "$value" in loaded|not-found|error|masked|bad-setting) load=$value ;; *) malformed=1 ;; esac ;;
+            ActiveState)
+              [ "$seen_active" = 0 ] || malformed=1; seen_active=1
+              case "$value" in active|activating|inactive|failed|deactivating|reloading) active=$value ;; *) malformed=1 ;; esac ;;
+            SubState)
+              [ "$seen_sub" = 0 ] || malformed=1; seen_sub=1
+              case "$value" in running|start|start-pre|start-post|dead|failed|exited|stop|stop-sigterm|stop-sigkill|auto-restart) sub=$value ;; *) malformed=1 ;; esac ;;
+            *) malformed=1 ;;
+          esac
+        done <<<"$state"
+        if [ "$malformed:$seen_load:$seen_active:$seen_sub" != 0:1:1:1 ]; then
+          report service-state malformed 0; exit 2
+        fi
+        case "$load:$active:$sub" in
+          loaded:active:running)
+            if timeout 10 docker container ls -a --format "{{.Names}}" >/dev/null 2>&1; then rc=0; else rc=$?; fi
+            report enumeration completed "$rc"; exit "$rc"
+            ;;
+          loaded:activating:start|loaded:activating:start-pre|loaded:activating:start-post)
+            if [ "$observed" = 0 ]; then report service-state waiting 0; observed=1; fi
+            sleep 1
+            ;;
+          *) report service-state rejected 0; exit 2 ;;
+        esac
+      done
+    ' 2>/dev/null)"; then rc=0; else rc=$?; fi
+  # Only this closed schema reaches the operation boundary; native output stays private.
+  if [ "$(
+    LC_ALL=C
+    printf '%s' "${#observations}"
+  )" -le 2048 ] && observations="$(jq -c -s --argjson rc "$rc" '
+    if (length <= 2 and (length > 0 or $rc != 0)
+      and ($rc != 0 or (.[-1].phase == "enumeration" and .[-1].native_exit == 0)) and all(.[];
+      type == "object" and keys == ["active","load","native_exit","phase","reason","sub"]
+      and (.native_exit | type == "number" and . >= 0 and . <= 255 and floor == .)
+      and (.load | IN("unknown","loaded","not-found","error","masked","bad-setting"))
+      and (.active | IN("unknown","active","activating","inactive","failed","deactivating","reloading"))
+      and (.sub | IN("unknown","running","start","start-pre","start-post","dead","failed","exited","stop","stop-sigterm","stop-sigkill","auto-restart"))
+      and ((.phase == "service-query" and (.reason | IN("timeout","unavailable")))
+        or (.phase == "service-state" and (.reason | IN("malformed","waiting","rejected")))
+        or (.phase == "enumeration" and .reason == "completed"))))
+    then .[] | {phase,reason,native_exit,load,active,sub}
+    else error("invalid Docker prerequisite diagnostics") end
+  ' 2>/dev/null <<<"$observations")"; then
+    [ -z "$observations" ] || printf '%s\n' "$observations" >&2
+    if [ "$rc" = 124 ]; then docker_ready_report boundary timeout "$rc";
+    elif [ "$rc" = 0 ]; then docker_ready_report boundary completed "$rc";
+    else docker_ready_report boundary native-failure "$rc"; fi
+  else
+    docker_ready_report boundary malformed-diagnostics "$rc"
+    [ "$rc" != 0 ] || rc=2
+  fi
+  [ "$rc" != 0 ] || return 0
+  printf 'nested-teardown-boundary: Docker prerequisite failed within its 60s budget\n' >&2
+  return "$rc"
+}
+
 require_nested_memory_reserve() {
   local vm_budget="${NESTED_TEARDOWN_VM_MEMORY_BYTES:-2147483648}"
   local host_reserve="${NESTED_TEARDOWN_POST_LAUNCH_RESERVE_BYTES:-1073741824}"
@@ -356,6 +483,7 @@ OUTER_DATA_HOME_METADATA="$(outer_data_home_metadata)"
 yard start --yes
 [ "$(incus config get "$OUTER_INSTANCE" user.subyard.managed --project "$OUTER_PROJECT")" = true ] \
   || die 'outer instance is not marker-owned'
+require_outer_docker_ready
 ensure_outer_foreign_ipv4
 assert_outer_vm_ssh_address fresh-init
 canonical_identity="$SUBYARD_HOME/ssh/id_ed25519"
@@ -412,6 +540,7 @@ assert_outer_vm_ssh_address repeated-init
   || die 'repeated init restarted Docker without config drift'
 yard stop --yes
 yard start --yes
+require_outer_docker_ready
 ensure_outer_foreign_ipv4
 yard init --yes
 assert_outer_data_home_metadata restart-init
@@ -426,7 +555,7 @@ project_id="$(jq -r '.projectId' "$project_state")"
 outer_source="/srv/workspaces/$project_id/src"
 
 yard code "$project_id" --yes > "$STATE/code.out"
-outer_ssh="$(setting SSH_HOST).code"
+outer_ssh="$(setting SSH_HOST)"
 outer_ssh_namespace="$(printf '%s' "$outer_ssh" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
 descriptor="$SUBYARD_CONFIG_HOME/workspaces/$outer_ssh_namespace.$project_id/NestedBoundary.code-workspace"
 [ -f "$descriptor" ] || die 'controller-local workspace descriptor is missing'

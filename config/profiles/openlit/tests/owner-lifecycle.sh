@@ -36,7 +36,7 @@ export SUBYARD_PROFILE_SELECTED=1
 bash "$root/config/profiles/openlit/owner.sh" --yes
 printf 'apply\n1\ndev\nclaude codex\n' > "$state/expected"
 cmp "$state/expected" "$state/calls"
-printf 'collector.yaml\ncompose.yaml\nguest.sh\nnative.py\nruntime.py\nsubyard-openlit.service\ntomli_w.py\n' > "$state/expected"
+printf 'collector.yaml\ncompose.yaml\nguest.sh\nnative.py\nopenlit-collector.yaml\nruntime.py\nsubyard-openlit.service\ntomli_w.py\n' > "$state/expected"
 cmp "$state/expected" "$state/files"
 : > "$state/calls"
 bash "$root/config/profiles/openlit/owner.sh" --remove
