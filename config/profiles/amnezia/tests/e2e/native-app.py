@@ -108,7 +108,9 @@ def guard():
 
 
 def run(command, timeout=30, capture=False, env=None, input_data=None, operation='external'):
-    require(operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install'),
+    require(operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install',
+                          'pointer-click', 'pointer-tab', 'frame-capture', 'ocr',
+                          'clipboard-write', 'clipboard-clear', 'keyboard-input'),
             'invalid external operation label')
     diagnostic = f'external command failed operation={operation}'
     try:
@@ -396,10 +398,10 @@ class GUI:
                 'OCR requires one bounded application frame')
         image = run(['import', '-window', 'root', '-crop',
                      f'{frame.width}x{frame.height}+{frame.x}+{frame.y}', '-resize', '200%', 'png:-'],
-                    capture=True, timeout=5)
+                    capture=True, timeout=5, operation='frame-capture')
         require(len(image) <= 12582912, 'OCR frame capture is too large')
         tsv = run(['tesseract', 'stdin', 'stdout', '-l', 'eng', '--psm', '11', 'tsv'],
-                  capture=True, input_data=image, timeout=5)
+                  capture=True, input_data=image, timeout=5, operation='ocr')
         require(len(tsv) <= 262144, 'OCR output is too large')
         return visible_text(tsv.decode(), names, frame, scale=2)
 
@@ -424,7 +426,7 @@ class GUI:
         rectangle = node.queryComponent().getExtents(self.api.DESKTOP_COORDS)
         require(rectangle.width > 0 and rectangle.height > 0, 'GUI target has no visible geometry')
         run(['xdotool', 'mousemove', '--sync', str(rectangle.x + rectangle.width // 2),
-             str(rectangle.y + rectangle.height // 2), 'click', '1'])
+             str(rectangle.y + rectangle.height // 2), 'click', '1'], operation='pointer-click')
 
     def click(self, names, seconds=30, description='a named control'):
         nodes = self.wait(lambda: self.matching(names), description, seconds)
@@ -586,16 +588,16 @@ class GUI:
         except Exception:
             # The private key stays on stdin to xclip, never in argv/env.
             self.click_node(node)
-            run(['xdotool', 'key', 'ctrl+a'])
-            run(['xclip', '-selection', 'clipboard'], input_data=value.encode())
+            run(['xdotool', 'key', 'ctrl+a'], operation='keyboard-input')
+            run(['xclip', '-selection', 'clipboard'], input_data=value.encode(), operation='clipboard-write')
             try:
-                run(['xdotool', 'key', 'ctrl+v'])
+                run(['xdotool', 'key', 'ctrl+v'], operation='keyboard-input')
                 time.sleep(0.2)
             finally:
-                run(['xclip', '-selection', 'clipboard'], input_data=b'')
+                run(['xclip', '-selection', 'clipboard'], input_data=b'', operation='clipboard-clear')
 
     def key(self, value):
-        run(['xdotool', 'key', value])
+        run(['xdotool', 'key', value], operation='keyboard-input')
         time.sleep(0.25)
 
     def tab(self, index):
@@ -605,7 +607,7 @@ class GUI:
         # PageStart.qml 319-428: four icon-only tabs with 96 px side padding.
         x = frame.x + 96 + int((frame.width - 192) * (index + 0.5) / 4)
         y = frame.y + frame.height - 32
-        run(['xdotool', 'mousemove', '--sync', str(x), str(y), 'click', '1'])
+        run(['xdotool', 'mousemove', '--sync', str(x), str(y), 'click', '1'], operation='pointer-tab')
         time.sleep(0.5)
 
     def diagnostics(self):
@@ -1054,7 +1056,9 @@ def self_check():
                     'external command diagnostics are missing or expose private values')
         else:
             raise Failure('failed external command was accepted')
-    for operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install'):
+    for operation in ('external', 'apt-update', 'apt-install', 'installer-help', 'installer-install',
+                      'pointer-click', 'pointer-tab', 'frame-capture', 'ocr',
+                      'clipboard-write', 'clipboard-clear', 'keyboard-input'):
         prefix = f'external command failed operation={operation}'
         outcomes = ((subprocess.CompletedProcess(command, -6, b'synthetic-private-stdout', b'synthetic-private-stderr'),
                      prefix + ' status=exit exit_code=-6'),

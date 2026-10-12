@@ -775,11 +775,59 @@ func TestSSHProbeOwnsProxyAndClientConfig(t *testing.T) {
 	}
 }
 
+func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
+	previewLoopbackFixture(t)
+	transport := errors.New("native transport unavailable")
+	for _, test := range []struct {
+		name       string
+		step       testkit.IncusExecStep
+		report     string
+		wantErr    error
+		wantCalled bool
+	}{
+		{name: "command missing", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 127}, Err: errors.New("native exit")}},
+		{name: "API not ready", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("native exit")}},
+		{name: "API deadline", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 124}, Err: errors.New("native timeout")}},
+		{name: "transport unavailable", step: testkit.IncusExecStep{Err: transport}, wantErr: transport},
+		{name: "caller cancelled", step: testkit.IncusExecStep{Err: context.Canceled}, wantErr: context.Canceled},
+		{name: "caller deadline", step: testkit.IncusExecStep{Err: context.DeadlineExceeded}, wantErr: context.DeadlineExceeded},
+		{name: "ready substrate", wantCalled: true},
+		{name: "ready substrate preserves schema rejection", report: "invalid", wantCalled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, definition, _, _ := lifecycleFixture(t)
+			called := filepath.Join(definition.Root, "called")
+			testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf observed > \"$CALLED\"\ncat \"$STATE\"\n"), 0o755)
+			if test.report != "" {
+				testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(test.report), 0o600)
+			}
+			runtime.Environment = append(runtime.Environment, "CCUSAGE_VERSION=1.2.3", "CALLED="+called)
+			incus := &testkit.Incus{
+				ServerInfo: ports.ServerInfo{Environment: "incus"},
+				Reconcile:  ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
+				ExecSteps:  []testkit.IncusExecStep{test.step},
+			}
+			runtime.Incus, runtime.Executor = incus, incus
+			converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
+			if converged || (test.report == "" && !errors.Is(err, test.wantErr)) || (test.report != "" && err == nil) {
+				t.Fatalf("provision check: converged=%v err=%v", converged, err)
+			}
+			_, readErr := os.Stat(called)
+			if (readErr == nil) != test.wantCalled {
+				t.Fatalf("integration ownership handler called=%v, want=%v", readErr == nil, test.wantCalled)
+			}
+			if len(incus.ExecCalls) != 1 || strings.Join(incus.ExecCalls[0].Request.Command, " ") != "sh -c command -v docker >/dev/null && timeout 10 docker info >/dev/null" {
+				t.Fatalf("Docker substrate check = %#v", incus.ExecCalls)
+			}
+		})
+	}
+}
+
 func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	previewLoopbackFixture(t)
 	steps := func(stat, configHash string) []testkit.IncusExecStep {
 		return []testkit.IncusExecStep{
-			{}, {}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}},
+			{}, {}, {}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte(stat + "\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte(" 7f 45 4c 46\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}},
@@ -813,7 +861,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		},
 	}
 	assertStage(t, runtime, "provision", true, "matching running provision state")
-	if command := incus.ExecCalls[7].Request.Command; len(command) != 3 ||
+	if command := incus.ExecCalls[8].Request.Command; len(command) != 3 ||
 		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {
 		t.Fatalf("OpenCode instructions were not checked natively: %#v", command)
 	}
@@ -839,13 +887,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	missing := steps("regular file|755|0:0", digest)
-	missing[7] = testkit.IncusExecStep{
+	missing[8] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing config"),
 	}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
 	forwardDrop := steps("regular file|755|0:0", digest)
-	forwardDrop[1] = testkit.IncusExecStep{
+	forwardDrop[2] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("FORWARD DROP"),
 	}
 	incus.ExecSteps = forwardDrop

@@ -73,6 +73,181 @@ class LifecycleTest(unittest.TestCase):
         with patch.object(sys, "argv", ["lifecycle.py", "apply", "sample-operation", observed["actual"], observed["desired"]]):
             module.main()
 
+    def startup_fixture(self, states, enumeration_codes=(124, 0), probe_duration=0):
+        clock, calls = [0], []
+        states, codes = iter(states), iter(enumeration_codes)
+        original_guest = self.guest
+
+        def guest(*arguments, **options):
+            if arguments[0] == "timeout" and arguments[2:5] == ("docker", "container", "ls"):
+                self.assertLessEqual(float(arguments[1]), min(10, options.get("timeout", 20)))
+                code = next(codes)
+                calls.append(("enumerate", options))
+                if code and options.get("check", True):
+                    raise module.Failure("native-unavailable")
+                return subprocess.CompletedProcess(arguments, code, b"subyard-ai-observer\n", b"PRIVATE native failure")
+            if arguments[0] == "timeout" and arguments[2:4] == ("systemctl", "show"):
+                self.assertLessEqual(float(arguments[1]), min(10, options["timeout"]))
+                calls.append(("state", options))
+                state = next(states)
+                clock[0] += min(probe_duration, options["timeout"])
+                if probe_duration >= options["timeout"]:
+                    raise subprocess.TimeoutExpired("PRIVATE transport", options["timeout"])
+                if isinstance(state, Exception):
+                    raise state
+                return subprocess.CompletedProcess(arguments, 0, state if isinstance(state, bytes) else state.encode(), b"")
+            return original_guest(*arguments, **options)
+
+        module.guest = guest
+        for mocked in (patch.object(module.time, "monotonic", side_effect=lambda: clock[0]),
+                       patch.object(module.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay))):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        return clock, calls
+
+    def test_healthy_enumeration_does_not_wait_or_probe_service(self):
+        _, calls = self.startup_fixture([], enumeration_codes=(0,))
+        with patch.object(module.time, "sleep", side_effect=AssertionError("healthy API waited")):
+            self.assertEqual(module.observe()[0]["state"], "stale")
+        self.assertEqual(calls, [("enumerate", {"check": False})])
+        self.assertEqual(self.effects, [])
+
+    def test_docker_startup_and_completion_race_keep_native_ownership_required(self):
+        for states in (("activating", "activating", "active"), ("active",)):
+            for selected in (True, False):
+                for foreign in (False, True):
+                    with self.subTest(states=states, selected=selected, foreign=foreign):
+                        module.SELECTED = selected
+                        self.container["Config"]["Labels"]["org.subyard.managed"] = "foreign" if foreign else "ai-observer-v1"
+                        _, calls = self.startup_fixture(states)
+                        if foreign:
+                            with self.assertRaisesRegex(module.Failure, "foreign-ownership"):
+                                module.observe()
+                        else:
+                            self.assertEqual(module.observe()[0]["state"], "stale")
+                        self.assertEqual([kind for kind, _ in calls].count("enumerate"), 2)
+                        self.assertEqual([kind for kind, _ in calls].count("state"), len(states))
+                        self.assertEqual(self.effects, [])
+
+    def test_docker_startup_terminal_state_query_failure_and_second_read_failure(self):
+        for state in ("inactive", "failed", "deactivating", "", "unknown", b"\xff",
+                      module.Failure("native-unavailable"), subprocess.TimeoutExpired("PRIVATE", 20)):
+            with self.subTest(state=type(state).__name__ if isinstance(state, Exception) else state):
+                _, calls = self.startup_fixture((state,))
+                with self.assertRaises((module.Failure, subprocess.TimeoutExpired)) as failure:
+                    module.native_container_json()
+                if isinstance(failure.exception, module.Failure):
+                    self.assertEqual(failure.exception.reason, "native-unavailable")
+                self.assertEqual([kind for kind, _ in calls], ["enumerate", "state"])
+        _, calls = self.startup_fixture(("active",), enumeration_codes=(124, 1))
+        with self.assertRaisesRegex(module.Failure, "native-unavailable"):
+            module.native_container_json()
+        self.assertEqual([kind for kind, _ in calls], ["enumerate", "state", "enumerate"])
+        self.assertEqual(self.effects, [])
+
+    def test_docker_startup_has_one_absolute_deadline_and_caps_transport(self):
+        clock, calls = self.startup_fixture(itertools.repeat("activating"), probe_duration=2)
+        with self.assertRaisesRegex(module.Failure, "native-unavailable"):
+            module.native_container_json()
+        self.assertEqual(clock[0], 60)
+        self.assertEqual([kind for kind, _ in calls].count("enumerate"), 1)
+        clock, calls = self.startup_fixture(("activating", "activating", "active"), probe_duration=19)
+        module.native_container_json()
+        self.assertEqual(calls[-1], ("enumerate", {"timeout": 1}))
+        clock, calls = self.startup_fixture(("activating", "activating", "active"), probe_duration=19)
+        original_guest = module.guest
+
+        def late_enumeration(*arguments, **options):
+            result = original_guest(*arguments, **options)
+            if arguments[2:5] == ("docker", "container", "ls") and "timeout" in options:
+                clock[0] += 1
+            return result
+
+        module.guest = late_enumeration
+        with self.assertRaisesRegex(module.Failure, "native-unavailable"):
+            module.native_container_json()
+        self.assertEqual(clock[0], 60)
+        clock, calls = self.startup_fixture(itertools.repeat("activating"), probe_duration=19.5)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            module.native_container_json()
+        self.assertEqual(clock[0], 60)
+        self.assertEqual(calls[-1], ("state", {"timeout": 19}))
+        self.assertEqual(self.effects, [])
+
+    def test_initial_transport_failure_does_not_start_readiness_recovery(self):
+        with patch.object(module, "guest", side_effect=subprocess.TimeoutExpired("PRIVATE transport", 20)) as guest:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                module.native_container_json()
+        self.assertEqual(guest.call_count, 1)
+        self.assertEqual(self.effects, [])
+
+    def test_probe_failures_keep_origin_duration_and_private_output_hidden(self):
+        for stage, function in (("instance-query", module.observe), ("enumeration", module.native_container_json)):
+            for error, category in ((subprocess.TimeoutExpired("PRIVATE argv", 20, output=b"PRIVATE stdout", stderr=b"PRIVATE stderr"), "transport-timeout"),
+                                    (OSError("PRIVATE path"), "os-error"), (module.Failure("native-unavailable"), "native-exit")):
+                with self.subTest(stage=stage, category=category):
+                    name = "run" if stage == "instance-query" else "guest"
+                    with patch.object(module, name, side_effect=error), patch.object(module.time, "monotonic", side_effect=(100, 100.125)):
+                        with self.assertRaises(type(error)) as failed:
+                            function()
+                    self.assertIs(failed.exception, error)
+                    self.assertEqual(error.readiness_diagnostic, (stage, category, 125, 20000))
+                    self.assertNotIn("PRIVATE", str(error.readiness_diagnostic))
+
+        for states, codes, stage, category in ((("failed",), (124,), "service-window", "service-failed"),
+                                               (("PRIVATE state",), (124,), "service-window", "service-unknown"),
+                                               (("active",), (124, 1), "recovery-enumeration", "native-exit"),
+                                               ((subprocess.TimeoutExpired("PRIVATE", 20),), (124,), "service-state", "transport-timeout")):
+            with self.subTest(stage=stage, category=category):
+                self.startup_fixture(states, enumeration_codes=codes)
+                with self.assertRaises((module.Failure, subprocess.TimeoutExpired)) as failed:
+                    module.native_container_json()
+                self.assertEqual(failed.exception.readiness_diagnostic[:2], (stage, category))
+                self.assertNotIn("PRIVATE", str(failed.exception.readiness_diagnostic))
+        self.startup_fixture(itertools.repeat("activating"), probe_duration=2)
+        with self.assertRaises(module.Failure) as failed:
+            module.native_container_json()
+        self.assertEqual(failed.exception.readiness_diagnostic, ("service-window", "startup-deadline", 60000, 60000))
+
+    def test_native_failure_terminal_record_does_not_expose_output_or_environment(self):
+        package = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            fake = Path(temporary) / "incus"
+            fake.write_text("#!/bin/sh\nprintf 'PRIVATE native stdout'\nprintf 'PRIVATE native stderr' >&2\nexit 1\n")
+            fake.chmod(0o755)
+            environment = {"PATH": temporary + ":/usr/bin:/bin", "INCUS_PROJECT": "PRIVATE-project",
+                           "YARD_INSTANCE_NAME": "PRIVATE-instance", "SUBYARD_INTEGRATION_SELECTED": "0",
+                           "PRIVATE_KEY": "PRIVATE-value"}
+            result = subprocess.run(["python3", str(package / "lifecycle.py"), "observe"],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            lines = result.stderr.splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0], module.DIAGNOSTIC + "inspect native-unavailable")
+            self.assertRegex(lines[1], r"^subyard-readiness-diagnostic-v1 inspect instance-query native-exit [0-9]+ 20000$")
+            self.assertLessEqual(len(lines[1]), 160)
+            self.assertNotIn("PRIVATE", result.stderr)
+        with patch.object(module.time, "monotonic", side_effect=(0, 999999999)):
+            with self.assertRaises(OSError) as failed:
+                module.probe("instance-query", 20, lambda: (_ for _ in ()).throw(OSError("PRIVATE")))
+        self.assertEqual(failed.exception.readiness_diagnostic, ("instance-query", "os-error", 1320000, 20000))
+
+    def test_later_native_probes_preserve_failure_origin(self):
+        for stage in ("inspection", "ownership", "installation", "native-producer"):
+            with self.subTest(stage=stage):
+                error = subprocess.TimeoutExpired("PRIVATE argv", 20, stderr=b"PRIVATE stderr")
+                original = self.guest
+                def guest(*arguments, **options):
+                    if stage == "inspection" and arguments[2:5] == ("docker", "container", "inspect") or stage == "ownership" and arguments[0] == "sh" or stage == "installation" and arguments[0] == "/usr/local/bin/ai-observer-installed":
+                        raise error
+                    return original(*arguments, **options)
+                with patch.object(module, "guest", guest), patch.object(module, "_producer_run", side_effect=error) if stage == "native-producer" else patch.object(module, "_producer_run", module._producer_run):
+                    with self.assertRaises(subprocess.TimeoutExpired) as failed:
+                        module.observe()
+                self.assertEqual(failed.exception.readiness_diagnostic[:2], (stage, "transport-timeout"))
+                self.assertNotIn("PRIVATE", str(failed.exception.readiness_diagnostic))
+
     def test_released_updater_fixture_observes_absence_and_rejects_mutation(self):
         package = Path(__file__).resolve().parents[1]
         harness = runpy.run_path(str(package.parents[2] / "dev/verify-release-upgrades.py"))

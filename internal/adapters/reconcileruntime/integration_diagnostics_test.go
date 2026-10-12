@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLifecycleFailureRecordIsClosedAndPhaseAware(t *testing.T) {
@@ -203,5 +205,54 @@ func TestIntegrationDiagnosticPreservesExistingSafeCause(t *testing.T) {
 	_, retry := diagnostic.ActivationDiagnostic()
 	if retry != "yard -Y sample-yard integration status --json" {
 		t.Fatalf("unidentified component inspection lost its yard: %s", retry)
+	}
+}
+
+func TestReadinessFailureDetailIsClosedAndConsistent(t *testing.T) {
+	const lifecycle = lifecycleDiagnosticPrefix + "inspect native-unavailable\n"
+	const detail = "subyard-readiness-diagnostic-v1 inspect enumeration transport-timeout 125 20000\n"
+	want := " (probe enumeration; transport-timeout; elapsed 125 ms; budget 20000 ms)"
+	if got := readinessFailure([]byte("PRIVATE native stderr\n"+lifecycle+detail), "inspect"); got != want {
+		t.Fatalf("safe detail = %q", got)
+	}
+	for _, output := range []string{
+		detail, lifecycle, lifecycle + detail + detail, lifecycle + lifecycle + detail,
+		strings.Replace(lifecycle+detail, "inspect enumeration", "apply enumeration", 1),
+		strings.Replace(lifecycle+detail, "enumeration", "PRIVATE", 1),
+		strings.Replace(lifecycle+detail, "transport-timeout", "PRIVATE", 1),
+		strings.Replace(lifecycle+detail, "125", "-1", 1),
+		strings.Replace(lifecycle+detail, "125", "0125", 1),
+		strings.Replace(lifecycle+detail, "125", "1320001", 1),
+		strings.Replace(lifecycle+detail, "125", "999999999999999999999", 1),
+		strings.Replace(lifecycle+detail, "20000", "PRIVATE", 1),
+		strings.Replace(lifecycle+detail, "20000", "20000 extra", 1),
+		strings.Replace(lifecycle+detail, "inspect native-unavailable", "apply native-unavailable", 1),
+		strings.Replace(lifecycle+detail, "inspect native-unavailable", "inspect PRIVATE", 1),
+	} {
+		if got := readinessFailure([]byte(output), "inspect"); got != "" {
+			t.Fatalf("malformed detail rendered: %q", got)
+		}
+	}
+}
+
+func TestIntegrationReadinessDetailReachesOperationDiagnostic(t *testing.T) {
+	runtime, definition, _, _ := lifecycleFixture(t)
+	runtime.Yard.YardName = "sample-yard"
+	testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf '%s\\n' 'PRIVATE argv env stdout stderr' '"+lifecycleDiagnosticPrefix+"inspect native-unavailable' 'subyard-readiness-diagnostic-v1 inspect recovery-enumeration native-timeout 10000 20000' >&2\nexit 1\n"), 0755)
+	for _, phase := range []string{"inspect", "apply", "verify"} {
+		_, err := runtime.observeIntegrationLifecyclePhase(context.Background(), definition, phase)
+		assertIntegrationDiagnostic(t, err, phase, "native-unavailable")
+		if !strings.Contains(err.Error(), "probe recovery-enumeration; native-timeout; elapsed 10000 ms; budget 20000 ms") || strings.Contains(err.Error(), "PRIVATE") {
+			t.Fatalf("failure detail = %v", err)
+		}
+	}
+}
+
+func TestIntegrationHandlerAggregateDeadlineIsDistinct(t *testing.T) {
+	runtime, definition, _, _ := lifecycleFixture(t)
+	cause := fmt.Errorf("PRIVATE native cause: %w", context.DeadlineExceeded)
+	failure := runtime.integrationExecutionDiagnostic(cause, definition, "inspect", "inspect", "native-unavailable", nil, 120*time.Second, 120*time.Second, nil)
+	if !errors.Is(failure, context.DeadlineExceeded) || !strings.Contains(failure.Error(), "probe handler; handler-deadline; elapsed 120000 ms; budget 120000 ms") || strings.Contains(failure.Error(), "PRIVATE") {
+		t.Fatalf("aggregate deadline = %v", failure)
 	}
 }

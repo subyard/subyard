@@ -166,6 +166,8 @@ chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit t
 
 # Services live in the container's own systemd (does not touch host systemd).
 systemctl enable --now ssh docker
+timeout 10 docker info >/dev/null 2>&1 \
+  || { echo 'Docker API is unavailable after service startup' >&2; exit 1; }
 EOS
 ok "in-yard provisioning complete"
 

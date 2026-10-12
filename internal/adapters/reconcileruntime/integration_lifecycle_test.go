@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -73,5 +74,39 @@ func TestIntegrationLifecycleRejectsStaleWithEqualFingerprints(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(`{"state":"stale","actual":"`+actual+`","desired":"`+actual+`"}`), 0600)
 	if _, err := runtime.observeIntegrationLifecycle(context.Background(), definition); err == nil {
 		t.Fatal("stale report with equal fingerprints accepted")
+	}
+}
+
+func TestIntegrationLifecycleObservationAllowsBoundedStartup(t *testing.T) {
+	runtime, definition, _, _ := lifecycleFixture(t)
+	// Exercise the composed handler budget beyond the unchanged profile limit.
+	testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nsleep 31\ncat \"$STATE\"\n"), 0755)
+	observation, err := runtime.observeIntegrationLifecycle(context.Background(), definition)
+	if err != nil || observation.State != ports.RuntimeStateStale {
+		t.Fatalf("bounded startup observe = %+v, %v", observation, err)
+	}
+}
+
+func TestIntegrationLifecycleObservationParentDeadlineWins(t *testing.T) {
+	runtime, definition, _, _ := lifecycleFixture(t)
+	testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf 'PRIVATE native detail' >&2\nsleep 60\ncat \"$STATE\"\n"), 0755)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := runtime.observeIntegrationLifecycle(ctx, definition)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("parent deadline = %v", err)
+	}
+	if time.Since(started) > 5*time.Second {
+		t.Fatal("cancelled handler retained its child process pipes")
+	}
+	if strings.Contains(err.Error(), "PRIVATE") || !strings.Contains(err.Error(), "native dependency or observation unavailable") || !strings.Contains(err.Error(), "probe handler; caller-deadline;") {
+		t.Fatalf("cancelled observation diagnostic = %v", err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	_, err = runtime.observeIntegrationLifecycle(ctx, definition)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "native dependency or observation unavailable") || !strings.Contains(err.Error(), "probe handler; caller-cancelled;") {
+		t.Fatalf("parent cancellation = %v", err)
 	}
 }

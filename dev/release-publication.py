@@ -216,7 +216,7 @@ def attestation(output, identity):
         if result["status"] == "passed":
             if result.get("exit_code") != 0 or not re.fullmatch(r"[0-9a-f]{64}", result.get("log_sha256", "")):
                 raise ValueError("passing check lacks evidence")
-            if not a.is_live(name) and result.get("execution_environment") != receipt["environment"]:
+            if not a.is_live(name) and "evidence_transfer" not in result and result.get("execution_environment") != receipt["environment"]:
                 raise ValueError("passing local check execution environment differs")
             if name != "package" and result.get("command") != a.command_identity(a.commands(root, receipt["version"], receipt["profiles"])[name], root):
                 raise ValueError("passing check lacks command binding")
@@ -224,6 +224,9 @@ def attestation(output, identity):
                                                      if result["status"] == "passed" else {})}
         if a.is_live(name) and result["status"] == "passed":
             checks[name]["environments"] = result.get("environments", [])
+        if "evidence_transfer" in result:
+            checks[name]["execution"] = "inherited"
+            checks[name]["evidence_transfer"] = result["evidence_transfer"]
     external = {}
     for name, result in receipt["external_obligations"].items():
         if "deferral" in result:
@@ -233,17 +236,26 @@ def attestation(output, identity):
             if result["status"] != "passed" or not re.fullmatch(r"[0-9a-f]{64}", result.get("evidence_sha256", "")):
                 raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
             external[name] = {"status": "passed", "evidence_sha256": result["evidence_sha256"]}
-    return {"schema_version": 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
+    transfers = sorted(name for name, result in checks.items() if "evidence_transfer" in result)
+    return {"schema_version": 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
             "receipt_sha256": a.digest(output / "receipt.json"), "environment": receipt["environment"],
-            "checks": checks, "external_obligations": external}
+            "checks": checks, "external_obligations": external,
+            **({"reviewed_transfers": transfers} if transfers else {})}
 
 
 def validate_attestation(document, identity, root):
-    if (set(document) != {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
-        or type(document["schema_version"]) is not int or document["schema_version"] != 1 or document["candidate_id"] != identity["candidate_id"]
+    version = document.get("schema_version")
+    keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
+    if version == 2:
+        keys.add("reviewed_transfers")
+    if (set(document) != keys or type(version) is not int or version not in (1, 2) or document["candidate_id"] != identity["candidate_id"]
         or document["identity_sha256"] != identity_hash(identity)
         or not re.fullmatch(r"[0-9a-f]{64}", document["receipt_sha256"])):
         raise ValueError("acceptance attestation identity mismatch")
+    transfers = sorted(name for name, result in document["checks"].items() if "evidence_transfer" in result)
+    if (version == 1 and transfers or version == 2 and
+        (not transfers or document["reviewed_transfers"] != transfers)):
+        raise ValueError("reviewed transfer attestation inventory mismatch")
     environment = document["environment"]
     if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
         or any(not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value)
@@ -261,9 +273,17 @@ def validate_attestation(document, identity, root):
                 raise ValueError("invalid not-applicable attestation")
         else:
             keys = {"status", "log_sha256", "exit_code"} | ({"environments"} if a.is_live(name) else set())
+            if "evidence_transfer" in result:
+                keys |= {"execution", "evidence_transfer"}
             if (set(result) != keys or result["status"] != "passed" or type(result["exit_code"]) is not int or result["exit_code"] != 0
                 or not re.fullmatch(r"[0-9a-f]{64}", result["log_sha256"])):
                 raise ValueError("missing passing acceptance evidence")
+            if "evidence_transfer" in result:
+                target = {"candidate_sha256": identity_hash(identity), "version": identity["version"],
+                          "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}
+                a.validate_evidence_transfer(result["evidence_transfer"], name, a.command_identity(command, root), target, result["log_sha256"])
+                if result["execution"] != "inherited" or result.get("environments", []) != result["evidence_transfer"]["environments"]:
+                    raise ValueError("reviewed transfer execution provenance changed")
             if a.is_live(name):
                 environments = result["environments"]
                 if not isinstance(environments, list) or not environments:

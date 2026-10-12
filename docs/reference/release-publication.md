@@ -105,6 +105,18 @@ verified separately using the exact successful preparation run and attempt. The 
 checks out the artifact's commit, verifies its public source fingerprint and publishes
 its exact assets. Branch movement cannot change the candidate.
 
+Explicit [reviewed evidence transfers](../testing.md#one-release-candidate) retain the
+candidate that was actually tested and distinguish inherited coverage from current execution.
+An attestation containing transfers uses schema version 2 with an exact `reviewed_transfers`
+check-ID list and complete sanitized per-check transfer provenance. Remote validation checks
+that inventory, the target preparation identity, original hashes, declared/actual command,
+environment provenance and nonblank scope/reason/authorization. Ordinary attestations retain
+strict schema version 1; transfer fields cannot be silently downgraded to that schema.
+The trusted operator owns the reviewed unchanged-scope decision. A transfer does not waive
+new or affected scenarios, invent an old collector PASS or replace current preparation.
+The pinned publication candidate must contain this tooling before using schema version 2;
+never amend an older frozen snapshot to add support.
+
 All publication workflow runs use the same repository-wide stable concurrency group,
 `cancel-in-progress: false` and `queue: max`. This serializes different versions as well
 as same-version retries across operator machines, and preserves queued requests. Local

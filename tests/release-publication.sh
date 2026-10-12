@@ -220,6 +220,50 @@ class Contracts(unittest.TestCase):
         self.assertEqual(self.github.assets, before)
         self.assertFalse(any(method == "DELETE" for _, method in self.github.calls))
 
+    def test_reviewed_transfer_survives_attestation_and_rejects_remote_provenance_drift(self):
+        target = self.directory / "transferred"
+        with patch.object(m.a, "execution_environment", return_value=self.document["environment"]):
+            m.a.prepare(target, self.identity["version"], self.prepared)
+        target_root, receipt = m.a.load_bound(target)
+        source_root, source = m.a.load_bound(self.output)
+        name = "verify"
+        review = {"schema_version": 1, "check": name, "tested": m.a.transfer_candidate(source),
+            "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(self.output / "receipt.json"),
+            "review": {"unchanged_scope": "Exact unchanged verification scope", "reason": "Original native PASS reviewed",
+                       "authorization_reference": "operator-confirmation:fixture"}, "standalone": None}
+        declaration = self.directory / "review.json"
+        declaration.write_text(json.dumps(review))
+        m.a.transfer_evidence(target, self.output, name, declaration)
+        _, receipt = m.a.load_bound(target)
+        for check, result in source["checks"].items():
+            if check in ("package", name):
+                continue
+            receipt["checks"][check] = copy.deepcopy(result)
+            shutil.copyfile(self.output / result["log"], target / result["log"])
+        receipt["external_obligations"] = copy.deepcopy(source["external_obligations"])
+        m.a.save(target, receipt)
+        document = m.attestation(target, self.identity)
+        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["reviewed_transfers"], [name])
+        transferred = document["checks"][name]
+        self.assertEqual(transferred["execution"], "inherited")
+        self.assertEqual(transferred["evidence_transfer"]["artifacts"]["receipt"], review["source_receipt_sha256"])
+        self.assertNotIn("evidence_files", transferred)
+        self.assertNotIn(str(self.directory), json.dumps(document))
+        m.validate_attestation(document, self.identity, target_root)
+        for mutate in (lambda d: d["checks"][name]["evidence_transfer"]["review"].update(authorization_reference=""),
+                       lambda d: d["checks"][name]["evidence_transfer"]["target"].update(source_fingerprint="f" * 64),
+                       lambda d: d["checks"][name]["evidence_transfer"].update(actual_command=["foreign-command"]),
+                       lambda d: d["checks"][name].pop("evidence_transfer"),
+                       lambda d: d.update(schema_version=1),
+                       lambda d: d.update(reviewed_transfers=[])):
+            invalid = copy.deepcopy(document)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                m.validate_attestation(invalid, self.identity, target_root)
+        self.assertEqual(self.document["schema_version"], 1)
+        m.validate_attestation(self.document, self.identity, self.frozen)
+
     def deferred(self):
         receipt = json.loads((self.output / "receipt.json").read_text())
         receipt["external_obligations"]["sample:fixture-external"].update({"status": "not-run"})

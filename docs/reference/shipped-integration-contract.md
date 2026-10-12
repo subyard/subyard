@@ -63,12 +63,33 @@ yard/component/phase context through ActivationDiagnostic; arbitrary handler
 stderr remains private. Historical handlers retain a fixed generic failure.
 Success observation JSON remains unchanged.
 
-Observation shares the existing 30-second, 64-KiB shipped-hook boundary. Integration
-apply has a fixed 22-minute limit covering the package's 600-second image pull,
-guest installation, bounded recovery and route verification. Profile limits stay
-unchanged. Process-group cancellation terminates native children. A deselected
-apply may verify `absent`; its plan fact retains desired absence through retirement
-while privately binding the captured native actual and desired fingerprints.
+A failed handler may also emit exactly one optional terminal probe detail:
+`subyard-readiness-diagnostic-v1 PHASE PROBE CATEGORY ELAPSED_MS BUDGET_MS`.
+It must accompany one valid lifecycle diagnostic with the same phase. Generic
+probe labels are instance-query, owner-address, enumeration, service-state,
+service-window, recovery-enumeration, inspection, ownership, installation and
+native-producer. Categories are transport-timeout, os-error, native-exit,
+native-timeout, invalid-schema, dependency-missing, native-rejected,
+startup-deadline, service-inactive, service-failed, service-deactivating and
+service-unknown. Decimal millisecond values are canonical nonnegative integers
+bounded by 1320000; the record is at most 160 bytes. Core renders validated
+terminal detail through the existing operation diagnostic. Missing, malformed,
+duplicate or inconsistent detail retains the original fixed lifecycle reason.
+No native output, arguments, environment or configuration values are public.
+At the execution boundary, handler-deadline, caller-deadline and caller-cancelled
+identify the aggregate budget or caller context, with bounded handler duration.
+These details preserve the original error classification and retry command.
+
+Integration observation has a 120-second aggregate handler limit and a 64-KiB
+limit on each stdout and stderr stream. The aggregate includes bounded startup
+readiness waits, native probes, transport and projection; individual limits
+cannot all consume their full allowance. Profile observation retains its
+30-second limit. Caller deadlines and cancellation take precedence. Cancellation
+terminates the handler's process group, including native child commands.
+Integration apply has a fixed 22-minute limit covering the package's 600-second
+image pull, guest installation, bounded recovery and route verification. A
+deselected apply may verify `absent`; its plan fact retains desired absence through
+retirement while privately binding the captured native actual and desired fingerprints.
 
 Dashboard metadata supplies scheme, path, configured owner port, guest port and
 optional container route receipt/device names. Core renders direct owner routes

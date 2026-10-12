@@ -313,6 +313,55 @@ Local evidence also requires its recorded execution environment to match.
 profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
 remain identical. This exception never applies to local gates or continuous release smoke.
 
+When the operator explicitly approves reuse after a reviewed change, use the separate
+per-check transfer contract. It accepts inherited coverage, never execution on the new candidate:
+
+```sh
+python3 dev/release-acceptance.py transfer --output NEW --from OLD --check CHECK --review REVIEW.json
+```
+
+Both directories must be valid frozen candidates. The target check must still be pending;
+failed, blocked, interrupted or already passed target attempts cannot be overwritten.
+`REVIEW.json` has exactly `schema_version: 1`, `check`, `tested`, `target`,
+`source_receipt_sha256`, `review` and `standalone`. Each candidate identity contains
+`version`, `source_fingerprint`, `runtime_file`, `runtime_sha256`,
+`candidate_bundle_sha256`, the complete `release_files` hash map and `candidate_sha256`.
+The latter is the preparation identity hash for CI candidates, otherwise the collector's
+version/source/assets/transport identity hash. Generate these identities with the tooling's
+`transfer_candidate(receipt)` helper; no field may be omitted. `review` contains public,
+nonblank `unchanged_scope`, `reason` and `authorization_reference` strings identifying the
+actual reviewed decision. The scope must explain why this exact check remains valid despite
+the recorded source/runtime/asset differences. New or affected scenarios require fresh execution.
+The tool checks bindings and evidence; the trusted operator owns that scope judgment and
+the authenticity of the authorization reference.
+
+For an original collector PASS, `standalone` is `null`. The original exit must be zero,
+the exact command must match, and the original receipt/log and execution environment are
+retained. Already inherited results cannot be transferred again. `package` and external
+obligations cannot use this path; current preparation and external rules remain authoritative.
+
+An uncollected physical controller PASS may instead supply `standalone` with exactly
+`native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
+Relative paths resolve beside the review declaration. The original collector entry stays
+pending. The native terminal object must have a final integer exit zero, and the complete
+controller log must prove the tested bundle, VM base, guest/transport/cleanup success and lease
+release. The existing manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
+`runtime_sha256`, `bundle_sha256`, `acceptance_script_sha256` and, when measured,
+`launched_at_utc`. Its actual command must be the exact check plus `--slot N`, inside the
+existing finite `timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`
+and the three declared controller/transport assignments. Other wrappers or check-scope mappings
+are rejected. Whole-run duration and independently measured execution environment remain
+unknown when this launcher did not record them; preparation environment is kept separately.
+The native tool's final-poll duration is never presented as whole-run duration.
+
+Transfer copies and hashes the original review, receipt and logs, plus standalone terminal
+and launcher artifacts when applicable. Subsequent loads revalidate them and the exact target.
+Receipts distinguish `coverage.executed` from `coverage.inherited`; unaffected pending gates
+stay pending. Tampered, failed, incomplete, wrong-command or unauthorized evidence is rejected.
+Publication retains sanitized tested/target identities, original artifact hashes, actual and
+declared commands, environment provenance and the reviewed authorization. It uploads no raw
+logs, native objects or private evidence paths.
+
 Profile-owned `tests/e2e/external-obligations.json` declares checks requiring an authorized external
 application/account. The receipt distinguishes these from reproducible VM results and initially
 marks them `not-run`; synthetic credentials do not prove external API acceptance. Missing external

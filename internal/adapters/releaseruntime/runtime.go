@@ -406,7 +406,6 @@ func (runtime *Runtime) inspectProtectedTransition(
 		outcome.Status = releasetransition.StatusMigrationRequired
 		outcome.Code = releasetransition.CodeTransitionRequired
 		outcome.Transaction = nil
-		outcome.Message = "the inspected release transition has not started"
 		inspection.Outcome = &outcome
 	}
 	protected := &protectedTransitionInspection{
