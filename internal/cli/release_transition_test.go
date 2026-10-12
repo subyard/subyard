@@ -44,7 +44,9 @@ func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *tes
 }
 
 func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
 	settingsPath := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
@@ -80,7 +82,15 @@ func TestMaterializedConfigScopeBindsPersistedIntegrationSelection(t *testing.T)
 }
 
 func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
-	root, _, configHome, environment := configCommandFixture(t)
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
+	rules := filepath.Join(root, "fixture.rules")
+	writeCLIFile(t, rules, "fixture rules\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"),
+		"AGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"+
+			"AGENT_codex_RULES='"+rules+"'\nAGENT_codex_RULES_DEST=.codex/fixture.rules\n"+
+			"AGENT_claude_RULES='"+rules+"'\nAGENT_claude_RULES_DEST=.claude/fixture.rules\n", 0o600)
 	settingsPath := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, settingsPath, "CODING_TOOL_INTEGRATIONS='codex'\n")
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}

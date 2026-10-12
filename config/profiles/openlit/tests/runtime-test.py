@@ -3,7 +3,9 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -19,6 +21,53 @@ import tomli_w
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_released_updater_fixture_observes_absence_and_rejects_mutation(self):
+        harness = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))
+        observation = runpy.run_path(str(PROFILE/'tests/release-observation.py'))
+        runtime_root = Path(os.environ.get('SUBYARD_OPENLIT_TEST_RUNTIME_ROOT', ROOT))
+        with tempfile.TemporaryDirectory(prefix='subyard-openlit-release-', dir='/tmp') as temporary:
+            root = Path(temporary)
+            control, rejected = root/'control.json', root/'rejected'
+            control.write_text(json.dumps({'instances': [{'info': {'status': 'Running'}}]}))
+            harness['write_observation_incus'](root, control, rejected)
+            environment = {
+                'PATH': str(root)+':/usr/bin:/bin',
+                'SUBYARD_ENGINE_CONTEXT': '1', 'SUBYARD_ENGINE_CONTEXT_SCHEMA': '1',
+                'SUBYARD_OPERATOR_HOME': str(root), 'SUBYARD_CONFIG_DIR': str(runtime_root/'config'),
+                'SUBYARD_CONFIG_HOME': str(root), 'SUBYARD_HOME': str(root),
+                'STORAGE_PATH': str(root), 'HOST_BASE': str(root), 'RESTRICTED_DISK_PATHS': str(root),
+                'ACCESS_KIND': 'local', 'YARD_KIND': 'container', 'YARD_INSTANCE_NAME': 'yard',
+                'INCUS_PROJECT': 'subyard', 'INCUS_BRIDGE': 'fixture', 'SSH_HOST': '127.0.0.1',
+                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': '0',
+                'FORWARD_SSH_AGENT': '0', 'NESTED_E2E_VMS': '0',
+                'ENVIRONMENT_PROFILES': '', 'CODING_TOOL_INTEGRATIONS': 'codex',
+            }
+            result = subprocess.run([str(runtime_root/'config/profiles/openlit/runtime.sh'), 'observe'], env=environment,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {'state': 'absent', 'actual': '', 'desired': ''})
+            self.assertFalse(rejected.exists())
+            arguments, response = observation['read_only_commands'](PROFILE)[0]
+            # The accepted transport drains binary archives larger than a pipe.
+            result = subprocess.run([str(root/'incus'), *arguments], input=b'\xff'*131072,
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.decode(), response)
+            for changed in (
+                arguments[:-4] + ['refresh', '0', 'dev', 'codex', 'a'*64, 'b'*64],
+                arguments[:-4] + ['apply', '0', 'dev', 'codex'],
+                arguments[:9] + [arguments[9]+'\n'] + arguments[10:],
+                arguments[:1] + ['foreign'] + arguments[2:],
+                arguments + ['unexpected'],
+                ['config', 'set', 'yard', 'key', 'value'],
+            ):
+                with self.subTest(arguments=changed[:2]):
+                    result = subprocess.run([str(root/'incus'), *changed],
+                                            capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 99)
+                    self.assertEqual(rejected.read_text(), 'incus operation rejected')
+                    rejected.unlink()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='subyard-openlit-runtime-', dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
@@ -37,7 +86,7 @@ class RuntimeTest(unittest.TestCase):
                                  'Env': ['PRIVATE=synthetic-unexported'], 'User': '10001:10001' if name == 'collector' else ''},
                       'State': {'Status': 'running', **({} if name == 'collector' else {'Health': {'Status': 'healthy'}})}}
                      for i, name in enumerate(sorted(runtime.SERVICES), 1)]
-        self.mounted = (self.source/'collector.yaml').read_bytes()
+        self.mounted = {name: (self.source/asset).read_bytes() for name, (asset, _) in runtime.MOUNTS.items()}
         self.service_active = True
         self.service_enabled = True
         self.probe_failure = False
@@ -65,7 +114,7 @@ class RuntimeTest(unittest.TestCase):
         for i, row in enumerate(self.rows, 7):
             row['Id'] = format(i, 'x')*64
             row['Image'] = self.expected_images[row['Config']['Labels']['com.docker.compose.service']]
-        self.mounted = (self.source/'collector.yaml').read_bytes()
+        self.mounted = {name: (self.source/asset).read_bytes() for name, (asset, _) in runtime.MOUNTS.items()}
 
     def probe(self, arguments):
         self.commands.append(arguments)
@@ -87,11 +136,15 @@ class RuntimeTest(unittest.TestCase):
             if arguments[-2:] == ['--hash', '*']:
                 return '\n'.join(name+' '+str(i)*64 for i, name in enumerate(sorted(runtime.SERVICES), 1)).encode()
         if arguments[:2] == ['docker', 'cp']:
+            container, destination = arguments[2].split(':', 1)
+            name = next(row['Config']['Labels']['com.docker.compose.service'] for row in self.rows if row['Id'] == container)
+            self.assertEqual(destination, runtime.MOUNTS[name][1])
+            mounted = self.mounted[name]
             out = io.BytesIO()
             with tarfile.open(fileobj=out, mode='w') as tar:
                 member = tarfile.TarInfo('config.yaml')
-                member.size = len(self.mounted)
-                tar.addfile(member, io.BytesIO(self.mounted))
+                member.size = len(mounted)
+                tar.addfile(member, io.BytesIO(mounted))
             return out.getvalue()
         if arguments[0] == 'curl':
             if arguments[-1] == 'http://127.0.0.1:13133/' and self.collector_unavailable:
@@ -103,6 +156,30 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.observe(*self.args), {'state': 'absent', 'actual': '', 'desired': ''})
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands, [])
+
+    def test_integrated_receiver_mount_and_healthcheck_require_both_signals(self):
+        environment = dict(os.environ, OPENLIT_DB_PASSWORD='synthetic-private')
+        rendered = subprocess.run(['docker', 'compose', '-f', str(PROFILE/'compose.yaml'),
+                                   'config', '--format', 'json'], env=environment,
+                                  capture_output=True, text=True, check=True, timeout=10)
+        service = json.loads(rendered.stdout)['services']['openlit']
+        mount = next(volume for volume in service['volumes']
+                     if volume['target'] == runtime.MOUNTS['openlit'][1])
+        self.assertEqual(mount['type'], 'bind')
+        self.assertEqual(Path(mount['source']), PROFILE/'openlit-collector.yaml')
+        self.assertTrue(mount['read_only'])
+        self.assertEqual(service['healthcheck']['test'][:3], ['CMD', 'node', '-e'])
+        script = service['healthcheck']['test'][3]
+        for statuses, expected in [([200, 405, 405], 0), ([500, 405, 405], 1),
+                                   ([200, 404, 405], 1), ([200, 405, 404], 1),
+                                   ([200, 0, 405], 1)]:
+            with self.subTest(statuses=statuses):
+                urls = ['http://localhost:3000', 'http://localhost:4318/v1/logs',
+                        'http://localhost:4318/v1/metrics']
+                responses = dict(zip(urls, statuses))
+                stub = 'const responses='+json.dumps(responses)+';global.fetch=url=>{const status=responses[url];return status?Promise.resolve({ok:status===200,status}):Promise.reject(new Error("unavailable"));};'
+                result = subprocess.run(['node', '-e', stub+script], capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_receipt_is_required_and_published_only_after_actual_verification(self):
         self.install()
@@ -126,7 +203,8 @@ class RuntimeTest(unittest.TestCase):
         receipt = (self.state/'receipt.json').read_bytes()
         for path, permissions in [(self.state, 0o700), (self.state/'database.env', 0o600),
                                   (self.state/'native.json', 0o600), (self.state/'receipt.json', 0o600),
-                                  (self.state/'collector.yaml', 0o644)]:
+                                  (self.state/'collector.yaml', 0o644),
+                                  (self.state/'openlit-collector.yaml', 0o600)]:
             self.assertEqual(path.stat().st_mode & 0o777, permissions)
         for bad_mode in (0o600, 0o666):
             (self.state/'collector.yaml').chmod(bad_mode)
@@ -164,17 +242,43 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.publish(*self.args)['state'], 'current')
         self.assertEqual(runtime.observe(*self.args)['state'], 'current')
 
-    def test_changed_collector_bind_inode_requires_recreate_even_with_matching_compose_hash(self):
+    def test_changed_receiver_bind_inode_requires_recreate_even_with_matching_compose_hash(self):
         self.install()
         runtime.publish(*self.args)
-        with (self.source/'collector.yaml').open('a') as out:
-            out.write('\n# new collector recipe\n')
-        self.publish_assets()
-        self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+        for asset, _ in runtime.MOUNTS.values():
+            with self.subTest(asset=asset):
+                receipt = (self.state/'receipt.json').read_bytes()
+                with (self.source/asset).open('a') as out:
+                    out.write('\n# new receiver recipe\n')
+                self.publish_assets()
+                self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+                with self.assertRaises(ValueError):
+                    runtime.publish(*self.args)
+                self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+                self.recreate()
+                self.assertEqual(runtime.publish(*self.args)['state'], 'current')
+
+    def test_integrated_receiver_unsafe_asset_and_unhealthy_service_prevent_receipts(self):
+        self.install()
+        runtime.publish(*self.args)
+        receipt = (self.state/'receipt.json').read_bytes()
+        asset = self.state/'openlit-collector.yaml'
+        asset.chmod(0o644)
         with self.assertRaises(ValueError):
             runtime.publish(*self.args)
-        self.recreate()
-        self.assertEqual(runtime.publish(*self.args)['state'], 'current')
+        asset.chmod(0o600)
+        asset.unlink()
+        asset.symlink_to(self.source/asset.name)
+        with self.assertRaises(ValueError):
+            runtime.publish(*self.args)
+        self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+        asset.unlink()
+        self.publish_assets()
+        openlit = next(row for row in self.rows if row['Config']['Labels']['com.docker.compose.service'] == 'openlit')
+        openlit['State']['Health']['Status'] = 'unhealthy'
+        with self.assertRaises(ValueError):
+            runtime.publish(*self.args)
+        self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
 
     def test_receipt_container_identity_and_compose_labels_detect_drift(self):
         self.install()

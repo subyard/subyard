@@ -1063,6 +1063,188 @@ nested_yard_init_line="$(grep -nF 'yard init --yes' "$nested_teardown_script" \
   && grep -A1 -F 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
     "$nested_teardown_script" | grep -Fq 'user.subyard.owner=nested-teardown-e2e-v1' \
   || fail 'nested teardown does not publish marker-owned pool and bridge before yard init'
+# Execute the nested fixture's passive Docker prerequisite with stateful native stubs.
+docker_ready_function="$TMP/nested-docker-ready.sh"
+sed -n '/^require_outer_docker_ready()/,/^}$/p' "$nested_teardown_script" > "$docker_ready_function"
+docker_ready_bin="$TMP/nested-docker-ready-bin"
+mkdir -p "$docker_ready_bin"
+cat > "$docker_ready_bin/incus" <<'EOF_DOCKER_READY_INCUS'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  query)
+    printf 'query\n' >> "$DOCKER_READY_LOG"
+    [ "$DOCKER_READY_CASE" != query-failure ] || exit 17
+    managed=true
+    [ "$DOCKER_READY_CASE" != foreign-vm ] || managed=false
+    printf '{"name":"yard-nested-e2e-abcdef","type":"virtual-machine","status":"Running","expanded_config":{"user.subyard.managed":"%s"},"expanded_devices":{"root":{"pool":"nested-e2e-abcdef"}}}\n' "$managed"
+    ;;
+  storage)
+    printf 'pool\n' >> "$DOCKER_READY_LOG"
+    if [ "$DOCKER_READY_CASE" = foreign-pool ]; then printf 'foreign\n'; else printf 'nested-teardown-e2e-v1\n'; fi
+    ;;
+  exec)
+    printf 'exec\n' >> "$DOCKER_READY_LOG"
+    case "$DOCKER_READY_CASE" in
+      diagnostic-utf8-overflow)
+        [ "$(locale charmap)" = UTF-8 ] || exit 91
+        printf -v padding '%01100d' 0
+        padding=${padding//0/é}
+        payload="{\"phase\":\"enumeration\",\"reason\":\"completed\",\"native_exit\":0,\"load\":\"$padding\",\"load\":\"loaded\",\"active\":\"active\",\"sub\":\"running\"}"
+        # This valid JSON hides its multibyte oversized value behind a duplicate key.
+        [ "${#payload}" -lt 2048 ] || exit 91
+        [ "$(LC_ALL=C; printf '%s' "${#payload}")" -gt 2048 ] || exit 91
+        printf '%s\n' "$payload"; exit 0 ;;
+      diagnostic-empty) exit 0 ;;
+      diagnostic-duplicate) printf '{"phase":"service-state","reason":"rejected","native_exit":0,"load":"PRIVATE_SYNTHETIC_PAYLOAD","load":"loaded","active":"inactive","sub":"dead"}\n'; exit 2 ;;
+      diagnostic-injection) printf '{"unexpected_text":"PRIVATE_SYNTHETIC_PAYLOAD"}\n'; exit 0 ;;
+      diagnostic-overflow) printf '%03000d\n' 0; exit 0 ;;
+    esac
+    shift 5
+    exec "$@"
+    ;;
+  *) exit 91 ;;
+esac
+EOF_DOCKER_READY_INCUS
+cat > "$docker_ready_bin/systemctl" <<'EOF_DOCKER_READY_SYSTEMCTL'
+#!/usr/bin/env bash
+set -eu
+[ "$*" = 'show docker.service --property=LoadState --property=ActiveState --property=SubState' ] || exit 91
+count=$(cat "$DOCKER_READY_COUNT")
+printf '%s\n' "$((count + 1))" > "$DOCKER_READY_COUNT"
+printf 'state\n' >> "$DOCKER_READY_LOG"
+load=loaded active=active sub=running
+case "$DOCKER_READY_CASE" in
+  activating) [ "$count" -gt 0 ] || { active=activating; sub=start; } ;;
+  failed) active=failed; sub=failed ;;
+  inactive) active=inactive; sub=dead ;;
+  load-unknown) load=not-found ;;
+  malformed) printf 'PRIVATE_SYNTHETIC_PAYLOAD\n'; exit 0 ;;
+  duplicate) printf 'LoadState=loaded\n' ;;
+  active-exited) sub=exited ;;
+  unavailable) exit 17 ;;
+  query-timeout) exit 124 ;;
+  invalid-enum) active=PRIVATE_SYNTHETIC_PAYLOAD ;;
+  unexpected-field) printf 'Unexpected=PRIVATE_SYNTHETIC_PAYLOAD\n' ;;
+  expiry) active=activating; sub=start ;;
+esac
+printf 'LoadState=%s\nActiveState=%s\nSubState=%s\n' "$load" "$active" "$sub"
+EOF_DOCKER_READY_SYSTEMCTL
+cat > "$docker_ready_bin/docker" <<'EOF_DOCKER_READY_DOCKER'
+#!/usr/bin/env bash
+set -eu
+[ "$*" = 'container ls -a --format {{.Names}}' ] || exit 91
+printf 'enumeration\n' >> "$DOCKER_READY_LOG"
+printf 'PRIVATE_SYNTHETIC_PAYLOAD\n' >&2
+[ "$DOCKER_READY_CASE" != enumeration-failure ] || exit 23
+EOF_DOCKER_READY_DOCKER
+chmod 0700 "$docker_ready_bin/incus" "$docker_ready_bin/systemctl" "$docker_ready_bin/docker"
+for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnostic-overflow diagnostic-empty diagnostic-duplicate query-timeout invalid-enum unexpected-field \
+  active activating failed inactive load-unknown malformed duplicate active-exited unavailable expiry \
+  enumeration-failure query-failure foreign-vm foreign-pool clock-failure; do
+  docker_ready_log="$TMP/nested-docker-ready-$docker_ready_case.log"
+  docker_ready_count="$TMP/nested-docker-ready-$docker_ready_case.count"
+  : > "$docker_ready_log"
+  printf '0\n' > "$docker_ready_count"
+  set +e
+  docker_ready_output="$(
+    LC_ALL=C.utf8 PATH="$docker_ready_bin:$PATH" DOCKER_READY_CASE="$docker_ready_case" \
+      DOCKER_READY_LOG="$docker_ready_log" DOCKER_READY_COUNT="$docker_ready_count" \
+      DOCKER_READY_FUNCTION="$docker_ready_function" bash -c '
+        set -eu
+        . "$DOCKER_READY_FUNCTION"
+        die() { printf "fixture failure: %s\n" "$*" >&2; exit 2; }
+        nested_monotonic_seconds() {
+          [ "$DOCKER_READY_CASE" != clock-failure ] || return 17
+          # Leave one real second for an activating guest in the expiry case.
+          if [ "$DOCKER_READY_CASE" = expiry ] && [ -s "$DOCKER_READY_LOG" ]; then
+            printf "59\n"
+          else
+            printf "0\n"
+          fi
+        }
+        OUTER_PROJECT=subyard-nested-e2e-abcdef
+        OUTER_POOL=nested-e2e-abcdef
+        OUTER_INSTANCE=yard-nested-e2e-abcdef
+        require_outer_docker_ready
+      ' 2>&1
+  )"
+  docker_ready_rc=$?
+  set -e
+  ! grep -Fq PRIVATE_SYNTHETIC_PAYLOAD <<<"$docker_ready_output" \
+    || fail "Docker prerequisite exposed native output for $docker_ready_case"
+  docker_ready_records="$(sed -n '/^{/p' <<<"$docker_ready_output")"
+  jq -e -s '
+    length >= 1 and length <= 3 and all(.[];
+      type == "object" and (.native_exit | type == "number" and . >= 0 and . <= 255 and floor == .)
+      and (if has("load") then
+        keys == ["active","load","native_exit","phase","reason","sub"]
+        and (.load | IN("unknown","loaded","not-found","error","masked","bad-setting"))
+        and (.active | IN("unknown","active","activating","inactive","failed","deactivating","reloading"))
+        and (.sub | IN("unknown","running","start","start-pre","start-post","dead","failed","exited","stop","stop-sigterm","stop-sigkill","auto-restart"))
+        and ((.phase == "service-query" and (.reason | IN("timeout","unavailable")))
+          or (.phase == "service-state" and (.reason | IN("malformed","waiting","rejected")))
+          or (.phase == "enumeration" and .reason == "completed"))
+      else
+        keys == ["native_exit","phase","reason"]
+        and ((.phase == "clock" and (.reason | IN("unavailable","deadline")))
+          or (.phase == "ownership" and (.reason | IN("unsafe-target","rejected-vm","vm-query-failed","rejected-pool","pool-query-failed")))
+          or (.phase == "boundary" and (.reason | IN("completed","timeout","native-failure","malformed-diagnostics"))))
+      end))
+  ' >/dev/null <<<"$docker_ready_records" \
+    || fail "Docker prerequisite diagnostics schema failed for $docker_ready_case"
+  case "$docker_ready_case" in
+    diagnostic-utf8-overflow|diagnostic-injection|diagnostic-overflow|diagnostic-empty)
+      jq -e -s 'length == 1 and .[0].reason == "malformed-diagnostics"' >/dev/null <<<"$docker_ready_records" \
+        || fail 'Docker prerequisite emitted untrusted diagnostics'
+      ;;
+    unavailable|query-timeout)
+      expected_reason=unavailable expected_exit=17
+      [ "$docker_ready_case" != query-timeout ] || { expected_reason=timeout; expected_exit=124; }
+      jq -e -s --arg reason "$expected_reason" --argjson rc "$expected_exit" '
+        .[0].phase == "service-query" and .[0].reason == $reason and .[0].native_exit == $rc
+      ' >/dev/null <<<"$docker_ready_records" || fail 'Docker prerequisite lost native service-query cause'
+      ;;
+    malformed|duplicate|invalid-enum|unexpected-field)
+      jq -e -s '.[0].phase == "service-state" and .[0].reason == "malformed"' \
+        >/dev/null <<<"$docker_ready_records" || fail 'Docker prerequisite lost malformed service-state cause'
+      ;;
+    inactive|diagnostic-duplicate)
+      jq -e -s '.[0].reason == "rejected" and .[0].load == "loaded"
+        and .[0].active == "inactive" and .[0].sub == "dead"' >/dev/null <<<"$docker_ready_records" \
+        || fail 'Docker prerequisite lost rejected service-state cause'
+      ;;
+    enumeration-failure)
+      jq -e -s '.[0].phase == "enumeration" and .[0].native_exit == 23' \
+        >/dev/null <<<"$docker_ready_records" || fail 'Docker prerequisite lost native enumeration cause'
+      ;;
+    expiry)
+      jq -e -s '.[-1].phase == "boundary" and .[-1].reason == "timeout" and .[-1].native_exit == 124' \
+        >/dev/null <<<"$docker_ready_records" || fail 'Docker prerequisite lost absolute timeout cause'
+      ;;
+  esac
+  case "$docker_ready_case" in
+    active|activating)
+      [ "$docker_ready_rc" = 0 ] \
+        && [ "$(grep -Fxc enumeration "$docker_ready_log")" = 1 ] \
+        && [ "$(cat "$docker_ready_count")" = "$([ "$docker_ready_case" = activating ] && printf 2 || printf 1)" ] \
+        || fail "Docker prerequisite did not observe $docker_ready_case before one enumeration"
+      ;;
+    enumeration-failure)
+      [ "$docker_ready_rc" = 23 ] && [ "$(grep -Fxc enumeration "$docker_ready_log")" = 1 ] \
+        || fail 'Docker prerequisite retried or masked enumeration failure'
+      ;;
+    expiry)
+      [ "$docker_ready_rc" = 124 ] && ! grep -Fxq enumeration "$docker_ready_log" \
+        || fail 'Docker prerequisite exceeded its absolute budget or enumerated while activating'
+      ;;
+    *)
+      [ "$docker_ready_rc" = 2 ] && ! grep -Fxq enumeration "$docker_ready_log" \
+        || fail "Docker prerequisite accepted unsafe $docker_ready_case state"
+      ;;
+  esac
+done
+printf 'ok: nested Docker prerequisite state transitions and failures\n'
 memory_reserve_source="$(awk '
   /^(nested_decimal_at_most|nested_monotonic_seconds|nested_memory_available_bytes|require_nested_memory_reserve)\(\)/ {
     copying=1

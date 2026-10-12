@@ -84,6 +84,8 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  internal/adapters/configmaterial/tomli_w.py
+  internal/adapters/configmaterial/TOMLI_W_LICENSE
   scripts/e2e-lab/base.sh
   scripts/lib/owner-address.sh
   scripts/lib/preview-proxy.sh
@@ -114,7 +116,7 @@ while IFS= read -r -d '' relative; do
     config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go) continue ;;
   esac
   case "$relative" in
-    scripts/*|config/*|completions/*) ;;
+    scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;
   esac
   case "$relative" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) printf 'package-engine: unsafe runtime path\n' >&2; exit 1 ;; esac
@@ -133,6 +135,8 @@ install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-rele
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in \
+  internal/adapters/configmaterial/tomli_w.py \
+  internal/adapters/configmaterial/TOMLI_W_LICENSE \
   scripts/e2e-lab/base.sh \
   scripts/install-runtime-release.sh \
   scripts/install-ssh-relay.sh \
@@ -156,6 +160,8 @@ done
     > runtime-files.sha256
 )
 chmod 0644 "$bundle_stage/runtime-files.sha256"
+# Native builders also create directories; normalize only the public staging tree.
+find "$bundle_stage" -type d -exec chmod 0755 {} +
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$bundle_stage" -cf - . \
   | gzip -n > "$bundle"
 chmod 0644 "$bundle"

@@ -13,7 +13,9 @@ import tarfile
 
 import native
 
-FILES = ('guest.sh', 'native.py', 'runtime.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml')
+FILES = ('guest.sh', 'native.py', 'runtime.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml', 'openlit-collector.yaml')
+MOUNTS = {'collector': ('collector.yaml', '/etc/otelcol-contrib/config.yaml'),
+          'openlit': ('openlit-collector.yaml', '/etc/otel/otel-collector-config.yaml')}
 SERVICES = {'clickhouse', 'openlit', 'collector'}
 MARKER = 'subyard-openlit-v1'
 
@@ -125,16 +127,17 @@ def capture(state, source, unit, home, selected, agents, user):
                 ready = ready and matches and row['State']['Status'] == 'running'
                 if name != 'collector':
                     ready = ready and row['State'].get('Health', {}).get('Status') == 'healthy'
-                if name == 'collector':
+                if name in MOUNTS:
                     # Docker reads the mounted inode inside the container, detecting an old bind
                     # after atomic host publication even when the host path has desired bytes.
-                    archive = run(['docker', 'cp', row['Id']+':/etc/otelcol-contrib/config.yaml', '-'])
+                    asset, destination = MOUNTS[name]
+                    archive = run(['docker', 'cp', row['Id']+':'+destination, '-'])
                     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:*') as tar:
                         members = tar.getmembers()
                         if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
-                            raise ValueError('unexpected collector asset')
-                        mounted_matches = tar.extractfile(members[0]).read() == (source/'collector.yaml').read_bytes()
-                    facts['collector_mount_matches'] = mounted_matches
+                            raise ValueError('unexpected mounted receiver asset')
+                        mounted_matches = tar.extractfile(members[0]).read() == (source/asset).read_bytes()
+                    facts[name+'_mount_matches'] = mounted_matches
                     ready = ready and mounted_matches
             for endpoint in ('http://127.0.0.1:13133/', 'http://127.0.0.1:3000/'):
                 run(['curl', '-fsS', '--max-time', '1', endpoint])

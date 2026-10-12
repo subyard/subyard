@@ -34,6 +34,23 @@ yard() {
   fi
 }
 
+retained_data() {
+  incus exec "$instance" --project "$project" -- python3 - <<'PYCODE'
+import json, subprocess
+from pathlib import Path
+state = Path('/var/lib/subyard/openlit')
+compose = ['docker', 'compose', '--env-file', str(state/'database.env'), '-f', str(state/'compose.yaml')]
+def count(table):
+    return int(subprocess.check_output([*compose, 'exec', '-T', 'clickhouse', 'bash', '-c',
+        'exec clickhouse-client --user openlit --password "$CLICKHOUSE_PASSWORD" --database openlit --query "$1"',
+        'fixture', 'SELECT count() FROM '+table], timeout=10, text=True))
+volumes = subprocess.check_output(['docker', 'volume', 'ls', '-q', '--filter',
+    'label=com.docker.compose.project=subyard-openlit'], timeout=10, text=True).split()
+print(json.dumps({'volumes': sorted(volumes), 'logs': count('otel_logs'),
+                  'metrics': count('otel_metrics_sum')+count('otel_metrics_histogram')}))
+PYCODE
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -93,7 +110,43 @@ printf 'openlit_e2e_stage=default-off-init\n'
 yard init --yes
 instance="yard-$YARD_NAME"
 project="subyard-$YARD_NAME"
+[ "$(incus list "$instance" --project "$project" --format csv -c s)" = STOPPED ] \
+  || die 'named yard did not finish init stopped'
+[ "$(incus config get "$instance" user.subyard.desired_power --project "$project")" = stopped ] \
+  || die 'named yard did not preserve stopped power intent'
+yard start --yes
 incus exec "$instance" --project "$project" -- test ! -e /var/lib/subyard/openlit
+printf 'openlit_e2e_stage=native-cli-prerequisites\n'
+# Claude selection materializes configuration but has no shipped installer hook.
+# Pin official native artifacts verified against the signed release manifest:
+# https://downloads.claude.ai/claude-code-releases/2.1.287/manifest.json
+incus exec "$instance" --project "$project" -- bash -euo pipefail -s <<'CLAUDE_CLI'
+version=2.1.287
+case "$(dpkg --print-architecture)" in
+  amd64) platform=linux-x64; checksum=3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0 ;;
+  arm64) platform=linux-arm64; checksum=e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03 ;;
+  *) echo 'openlit-e2e: unsupported Claude native architecture' >&2; exit 1 ;;
+esac
+[ ! -e /usr/local/bin/claude ]
+[ ! -L /usr/local/bin/claude ]
+stage="$(mktemp -d /tmp/subyard-openlit-claude.XXXXXX)"
+trap 'rm -rf -- "$stage"' EXIT
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --connect-timeout 10 --max-time 180 \
+  "https://downloads.claude.ai/claude-code-releases/$version/$platform/claude" -o "$stage/claude"
+printf '%s  %s\n' "$checksum" "$stage/claude" | sha256sum --check --status
+install -m 0755 -o root -g root "$stage/claude" /usr/local/bin/claude
+cd /tmp
+# Match the real native signals' HOME/PATH; also verify the root profile guard's lookup.
+export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+for agent in claude codex; do
+  command -v "$agent" >/dev/null
+  actual="$(runuser -u dev -- env -i HOME=/home/dev PATH="$PATH" DISABLE_AUTOUPDATER=1 \
+    timeout 15 "$agent" --version)"
+  [ "$agent" != claude ] || [ "$actual" = "$version (Claude Code)" ]
+  printf 'native_prerequisite=%s version=%s\n' "$agent" "$actual"
+done
+CLAUDE_CLI
 printf 'openlit_e2e_stage=enable\n'
 yard profile enable openlit --yes
 # The guest uses only synthetic prompts and local fake model APIs; no account credentials.
@@ -109,6 +162,8 @@ printf 'openlit_e2e_stage=repeat-init-and-configs\n'
 yard init --yes
 yard config apply --yes
 yard profile status openlit --json >/dev/null
+retained_data > "$STATE/retained-before.json"
+chmod 0600 "$STATE/retained-before.json"
 printf 'openlit_e2e_stage=disable\n'
 yard profile disable openlit --yes
 incus exec "$instance" --project "$project" -- bash -euo pipefail -c '
@@ -128,4 +183,17 @@ assert claude["env"]["OPENLIT_E2E_CUSTOM"] == "preserved"
 PYCODE
 '
 yard init --yes
-printf 'ok: OpenLIT default off, enable, runtime CAS update/rollback, repeat init/config apply, native logs+metrics ingestion and disable\n'
+printf 'openlit_e2e_stage=re-enable-retained-data\n'
+yard profile enable openlit --yes
+retained_data > "$STATE/retained-after.json"
+chmod 0600 "$STATE/retained-after.json"
+python3 - "$STATE/retained-before.json" "$STATE/retained-after.json" <<'PYCODE'
+import json, sys
+from pathlib import Path
+before, after = [json.loads(Path(path).read_text()) for path in sys.argv[1:]]
+assert len(before['volumes']) == 2 and after['volumes'] == before['volumes']
+assert after['logs'] >= before['logs'] > 0
+assert after['metrics'] >= before['metrics'] > 0
+PYCODE
+yard profile disable openlit --yes
+printf 'ok: OpenLIT default off, enable, receiver CAS update/rollback, repeat init/config apply, native logs+metrics ingestion, disable and retained data after re-enable\n'

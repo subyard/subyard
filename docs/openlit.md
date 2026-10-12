@@ -35,6 +35,9 @@ the yard's trust boundary and can reach its local services.
 
 Native logs and metrics flow through the dedicated Collector to OpenLIT's internal OTLP HTTP
 receiver, which writes `otel_logs` and `otel_metrics_*` tables in the `openlit` database.
+The profile mounts the integrated receiver's configuration at OpenLIT's upstream path;
+its ClickHouse exporter creates the signal tables during startup. OpenLIT readiness requires
+both the UI and its internal log and metric receivers to respond.
 OpenLIT's coding-agent views and generic telemetry queries consume these tables. Native agent
 signals carry their original names and attributes; the profile does not manufacture OpenLIT SDK
 spans or rewrite metrics into apparent model calls. Available dashboard detail depends on what

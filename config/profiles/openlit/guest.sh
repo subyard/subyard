@@ -81,7 +81,7 @@ if ! owned; then
   printf 'subyard-openlit-v1\n' > "$state/marker"
   chmod 0600 "$state/marker"
 fi
-for file in marker database.env guest.sh native.py runtime.py tomli_w.py compose.yaml collector.yaml native.json receipt.json pull.log; do
+for file in marker database.env guest.sh native.py runtime.py tomli_w.py compose.yaml collector.yaml openlit-collector.yaml native.json receipt.json pull.log; do
   safe_file "$state/$file" || die 'unsafe runtime file'
 done
 if [ ! -e "$state/database.env" ]; then
@@ -116,7 +116,7 @@ publish_asset() {
   install -m "$permissions" -o 0 -g 0 "$source" "$temporary"
   mv -f -- "$temporary" "$destination"
 }
-for source in guest.sh native.py runtime.py tomli_w.py compose.yaml; do
+for source in guest.sh native.py runtime.py tomli_w.py compose.yaml openlit-collector.yaml; do
   publish_asset "$root/$source" "$state/$source" 600
 done
 # The pinned Collector runs as 10001:10001. Only this nonsecret mounted asset
