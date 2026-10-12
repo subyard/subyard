@@ -28,6 +28,13 @@ type V2SettingsSnapshotView interface {
 	ReadSnapshot(path string) (config.PersistentFileSnapshot, error)
 }
 
+// V2ProspectiveActivationObserver plans desired configuration against the
+// validated ingress/settings result while observing actual runtime state.
+// It is optional; ordinary observations retain the existing contract.
+type V2ProspectiveActivationObserver interface {
+	ObserveProspective(context.Context, ReleasePair, ReleaseLinks, V2SettingsSnapshotView) (V2ActivationObservation, error)
+}
+
 // V2Ingress is the closed compatibility leaf below the release transition's
 // authorization and journal. It never receives an authorization.
 type V2Ingress interface {

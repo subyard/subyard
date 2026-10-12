@@ -24,6 +24,8 @@ const (
 )
 
 type Options struct {
+	// ProspectiveFiles is used only by read-only activation planning.
+	ProspectiveFiles        *config.ProspectiveFiles
 	Executable              string
 	RepositoryRoot          string
 	Incus                   string
@@ -895,10 +897,10 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 	yardsRoot := filepath.Join(options.ConfigHome, "yards")
 	if exists, err := pathExists(yardsRoot); err != nil {
 		return registrationSet{}, err
-	} else if !exists {
+	} else if !exists && options.ProspectiveFiles == nil {
 		return registrationSet{}, nil
 	}
-	if err := ownedDirectory(yardsRoot); err != nil {
+	if err := prospectiveOwnedDirectory(options, yardsRoot); err != nil {
 		return registrationSet{}, err
 	}
 	type candidate struct {
@@ -925,17 +927,24 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		for _, entry := range group.source {
 			var exists bool
 			var err error
+			snapshot, projected, snapshotErr := options.ProspectiveFiles.Snapshot(entry.path)
+			if snapshotErr != nil {
+				return registrationSet{}, snapshotErr
+			}
 			if group.publishedCurrent {
 				exists, err = ownedCurrentRegistration(entry.path)
 			} else {
 				exists, err = ownedRegular(entry.path)
+			}
+			if projected {
+				exists = snapshot.Exists
 			}
 			if err != nil {
 				return registrationSet{}, err
 			}
 			if exists {
 				if filepath.Base(entry.path) == "config.env" {
-					if err := ownedDirectory(filepath.Dir(entry.path)); err != nil {
+					if err := prospectiveOwnedDirectory(options, filepath.Dir(entry.path)); err != nil {
 						return registrationSet{}, err
 					}
 				}
@@ -953,7 +962,7 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 	}
 	result := registrationSet{}
 	if len(foundLegacy) > 0 {
-		payload, err := os.ReadFile(foundLegacy[0].path)
+		payload, err := readRegistration(options, foundLegacy[0].path)
 		if err != nil {
 			return registrationSet{}, err
 		}
@@ -961,9 +970,10 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 			return registrationSet{}, errors.New("e2e-yard does not select YARD_TEMPLATE=test-vms")
 		}
 		if foundLegacy[0].state == StateLegacyDirectory {
-			foundLegacy[0].state, err = inspectLegacyDirectoryState(
-				filepath.Dir(foundLegacy[0].path),
-			)
+			directory := filepath.Dir(foundLegacy[0].path)
+			if _, statErr := os.Lstat(directory); options.ProspectiveFiles == nil || !os.IsNotExist(statErr) {
+				foundLegacy[0].state, err = inspectLegacyDirectoryState(directory)
+			}
 			if err != nil {
 				return registrationSet{}, err
 			}
@@ -973,7 +983,7 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		result.oldRegistration = foundLegacy[0].path
 	}
 	if len(foundCurrent) > 0 {
-		payload, err := os.ReadFile(foundCurrent[0].path)
+		payload, err := readRegistration(options, foundCurrent[0].path)
 		if err != nil {
 			return registrationSet{}, err
 		}
@@ -2035,4 +2045,20 @@ func selectsTestVMs(payload string) bool {
 		}
 	}
 	return false
+}
+
+func prospectiveOwnedDirectory(options Options, path string) error {
+	if options.ProspectiveFiles != nil {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return nil
+		}
+	}
+	return ownedDirectory(path)
+}
+
+func readRegistration(options Options, path string) ([]byte, error) {
+	if options.ProspectiveFiles == nil {
+		return os.ReadFile(path)
+	}
+	return options.ProspectiveFiles.ReadAsset(config.MaterializedAsset{Source: path})
 }

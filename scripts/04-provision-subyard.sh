@@ -166,8 +166,84 @@ chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit t
 
 # Services live in the container's own systemd (does not touch host systemd).
 systemctl enable --now ssh docker
-timeout 10 docker info >/dev/null 2>&1 \
-  || { echo 'Docker API is unavailable after service startup' >&2; exit 1; }
+docker_info_started=$EPOCHREALTIME
+if timeout 10 docker info >/dev/null 2>&1; then
+  :
+else
+  docker_info_exit=$?
+  docker_info_ended=$EPOCHREALTIME
+  # Keep diagnostic interpreter startup off the original readiness boundary.
+  if ! python3 - "$docker_info_exit" "$docker_info_started" "$docker_info_ended" >&2 2>/dev/null <<'PY'
+from decimal import Decimal
+import json
+import subprocess
+import sys
+import time
+
+
+def emit(**record):
+    print(json.dumps(dict(diagnostic="docker-provision-startup", **record)), flush=True)
+
+
+def run(arguments, stdout=subprocess.DEVNULL):
+    try:
+        return subprocess.run(arguments, stdout=stdout, stderr=subprocess.DEVNULL)
+    except OSError:
+        # Report execution failure without exception paths or environment details.
+        return subprocess.CompletedProcess(arguments, None, stdout=b"")
+
+
+elapsed_ms = int((Decimal(sys.argv[3]) - Decimal(sys.argv[2])) * 1000)
+emit(probe="info", exit=int(sys.argv[1]), elapsed_ms=elapsed_ms,
+     clock="realtime", budget_ms=10000)
+
+# Failure-only comparisons cannot replace the original readiness failure.
+for probe, arguments in (
+    ("server-version", ["version", "--format", "{{.Server.Version}}"]),
+    ("container-enumeration", ["container", "ls", "-a", "--format", "{{.Names}}"]),
+):
+    started = time.monotonic()
+    result = run(["timeout", "--kill-after=1", "10", "docker", *arguments])
+    emit(probe=probe, exit=result.returncode,
+         elapsed_ms=int((time.monotonic() - started) * 1000), budget_ms=10000, kill_after_ms=1000)
+
+enums = {
+    "Type": {"simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle"},
+    "LoadState": {"loaded", "not-found", "error", "masked", "bad-setting", "merged", "stub"},
+    "ActiveState": {"active", "reloading", "inactive", "failed", "activating", "deactivating",
+                    "maintenance", "refreshing"},
+    "SubState": {"dead", "start-pre", "start", "start-post", "running", "exited", "reload",
+                 "stop", "stop-sigterm", "stop-sigkill", "stop-post", "failed", "auto-restart",
+                 "auto-restart-queued", "cleaning"},
+    "Result": {"success", "resources", "timeout", "exit-code", "signal", "core-dump",
+               "watchdog", "start-limit-hit", "oom-kill", "protocol", "exec-condition", "assert"},
+}
+numbers = {"MainPID", "ControlPID", "ExecMainStatus", "NRestarts",
+           "ExecMainStartTimestampMonotonic", "InactiveExitTimestampMonotonic",
+           "ActiveEnterTimestampMonotonic"}
+properties = ",".join([*enums, *sorted(numbers)])
+for unit in ("docker.service", "containerd.service"):
+    started = time.monotonic()
+    result = run(["timeout", "--kill-after=1", "3", "systemctl", "show", unit,
+                  "--property=" + properties], stdout=subprocess.PIPE)
+    state = {}
+    if result.returncode == 0:
+        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in enums:
+                state[key] = value if value in enums[key] else "unknown"
+            elif separator and key in numbers:
+                state[key] = value if value.isascii() and value.isdigit() and len(value) <= 20 else "unknown"
+    emit(probe="service-state", unit=unit, exit=result.returncode,
+         elapsed_ms=int((time.monotonic() - started) * 1000), budget_ms=3000,
+         kill_after_ms=1000, state=state)
+PY
+  then
+    echo 'Docker startup diagnostics unavailable' >&2
+  fi
+  echo 'Docker API is unavailable after service startup' >&2
+  exit 1
+fi
 EOS
 ok "in-yard provisioning complete"
 

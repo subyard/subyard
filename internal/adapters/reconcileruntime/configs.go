@@ -19,6 +19,7 @@ import (
 )
 
 type guestConfigFile struct {
+	sourceReader        func(config.MaterializedAsset) ([]byte, error)
 	integration         string
 	label               string
 	source              string
@@ -265,11 +266,21 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 		}
 	}
 
+	for index := range files {
+		files[index].sourceReader = runtime.SourceReader
+	}
 	return files, nil
 }
 
 func (file guestConfigFile) readSource() ([]byte, error) {
-	payload, err := (config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}).ReadSource()
+	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}
+	var payload []byte
+	var err error
+	if file.sourceReader != nil {
+		payload, err = file.sourceReader(asset)
+	} else {
+		payload, err = asset.ReadSource()
+	}
 	if !file.previewInstructions {
 		return payload, err
 	}
@@ -323,7 +334,14 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 	if !file.previewInstructions {
 		return "", nil
 	}
-	payload, err := (config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}).ReadSource()
+	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}
+	var payload []byte
+	var err error
+	if file.sourceReader != nil {
+		payload, err = file.sourceReader(asset)
+	} else {
+		payload, err = asset.ReadSource()
+	}
 	if os.IsNotExist(err) {
 		return "", nil
 	}

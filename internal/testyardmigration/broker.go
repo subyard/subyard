@@ -327,11 +327,12 @@ func loadBrokerYard(options Options, yard string) (config.Loaded, error) {
 		operatorHome = environment["HOME"]
 	}
 	loaded, err := config.Load(config.LoadOptions{
-		RepositoryRoot: options.RepositoryRoot,
-		OperatorHome:   operatorHome,
-		YardName:       yard,
-		Environment:    environment,
-		DisablePrivate: true,
+		RepositoryRoot:   options.RepositoryRoot,
+		OperatorHome:     operatorHome,
+		YardName:         yard,
+		Environment:      environment,
+		DisablePrivate:   true,
+		ProspectiveFiles: options.ProspectiveFiles,
 	})
 	if err != nil {
 		return config.Loaded{}, fmt.Errorf("load %s for broker migration: %w", yard, err)

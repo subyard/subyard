@@ -2,7 +2,9 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -52,15 +54,25 @@ func applyEnvFile(path string, values environment) error {
 	return applyEnvFileObserved(path, values, nil)
 }
 
-func applyEnvFileObserved(path string, values environment, observer assignmentObserver) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return sourceAccessError(path, "scalar settings", err)
+func applyEnvFileObserved(path string, values environment, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
+	var input io.Reader
+	if len(readers) != 0 && readers[0] != nil {
+		payload, err := readers[0](path)
+		if err != nil {
+			return sourceAccessError(path, "scalar settings", err)
+		}
+		input = bytes.NewReader(payload)
+	} else {
+		file, err := os.Open(path)
+		if err != nil {
+			return sourceAccessError(path, "scalar settings", err)
+		}
+		defer file.Close()
+		input = file
 	}
-	defer file.Close()
 	discardRetiredSettings(values)
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	var record strings.Builder
 	quote := byte(0)

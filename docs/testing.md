@@ -344,8 +344,11 @@ An uncollected physical controller PASS may instead supply `standalone` with exa
 `native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
-controller log must prove the tested bundle, VM base, guest/transport/cleanup success and lease
-release. The existing manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
+controller log must retain the VM base, successful cleanup of every VM and lease release.
+The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
+native exit zero proves controller completion. Transport and guest phase timing may be absent
+for direct controllers and stays unknown; any observed failed phase rejects the transfer.
+The existing manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
 `runtime_sha256`, `bundle_sha256`, `acceptance_script_sha256` and, when measured,
 `launched_at_utc`. Its actual command must be the exact check plus `--slot N`, inside the
 existing finite `timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`

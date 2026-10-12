@@ -52,7 +52,7 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (state
 	if err := validateOptions(&options); err != nil {
 		return "", err
 	}
-	prepared, err := Prepare(ctx, options)
+	prepared, err := prepareRouteActivationOwner(ctx, options)
 	if err != nil || prepared.State != StateCurrent {
 		return prepared.State, routeConfigDiagnostic(err, "owner registration preparation failed", CurrentYard, options.ConfigHome)
 	}
@@ -712,4 +712,14 @@ func hasManagedYard(yards []managedYard, name string) bool {
 		}
 	}
 	return false
+}
+
+// Prospective registration affects planning only; backend and consumer probes
+// below still read actual native state. Mutation entry points use normal Options.
+func prepareRouteActivationOwner(ctx context.Context, options Options) (Prepared, error) {
+	if options.ProspectiveFiles == nil {
+		return Prepare(ctx, options)
+	}
+	observed, err := inspectRegistration(options)
+	return Prepared{State: observed.state}, err
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -962,9 +963,25 @@ func (cli *CLI) localConfigTargets(loaded config.Loaded, allLocal bool) ([]confi
 	if err != nil {
 		return nil, err
 	}
+	if loaded.ProspectiveFiles != nil {
+		for _, name := range loaded.ProspectiveFiles.Yards {
+			if !domain.SafeName(name) {
+				return nil, errors.New("invalid prospective yard name")
+			}
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
 	targets := make([]configTarget, 0, len(names))
 	for _, name := range names {
-		targetLoaded, err := cli.loadInventoryLoaded(name, loaded)
+		var targetLoaded config.Loaded
+		var err error
+		if loaded.ProspectiveFiles != nil {
+			targetLoaded, err = cli.resolveReleaseTransitionContext(name, loaded.Context.Paths.ConfigHome, loaded.ProspectiveFiles)
+		} else {
+			targetLoaded, err = cli.loadInventoryLoaded(name, loaded)
+		}
 		if err != nil {
 			return nil, materializedConfigActivationError{err, name, "configuration", "config status", "inspect", loaded.Context.Paths.ConfigHome}
 		}
@@ -1137,7 +1154,7 @@ func (cli *CLI) assessConfigTarget(
 		}
 		desiredHashes = make([]string, 0, len(assets))
 		for _, asset := range assets {
-			payload, err := (config.MaterializedAsset{Source: asset.Source}).ReadSource()
+			payload, err := target.Loaded.ProspectiveFiles.ReadAsset(config.MaterializedAsset{Source: asset.Source})
 			if err != nil {
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}

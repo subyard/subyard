@@ -232,6 +232,40 @@ class TestAcceptance(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.load_bound(second)
 
+    def test_standalone_direct_controller_keeps_optional_phases_unknown(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True)
+            old_receipt = (first / "receipt.json").read_bytes()
+            before = (second / "receipt.json").read_bytes()
+            log = Path(review["standalone"]["log"]["path"])
+            direct = ("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
+                + "sample_source_bundle_sha256=" + review["tested"]["candidate_bundle_sha256"] + " base_fingerprint=" + "a" * 64 + " lane=one\n"
+                + "".join(f"E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm={vm}\n" for vm in (1, 2))
+                + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
+                + "E2E lease released: slot=slot-002 run=sample\n")
+            for invalid in (direct.replace(" vm=2\n", " vm=1\n"),
+                            direct.replace("E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n", ""),
+                            direct.replace("E2E lease released: slot=slot-002 run=sample\n", ""),
+                            direct + "E2E_PHASE phase=fixture/sample state=end duration_seconds=1 exit_code=1\n",
+                            direct + "  [fail] phase=sample\n"):
+                log.write_text(invalid)
+                review["standalone"]["log"]["sha256"] = m.digest(log)
+                declaration.write_text(json.dumps(review))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+            log.write_text(direct)
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            result = target["checks"][name]
+            self.assertEqual(result["execution"], "inherited")
+            self.assertEqual(result["environments"][0]["vm_count"], 2)
+            self.assertIsNone(result["duration_seconds"])
+            self.assertNotIn("phases", result)
+            self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
+
     def test_prepare_uses_plain_sources_and_retains_only_needed_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

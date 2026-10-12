@@ -1088,22 +1088,24 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
     if command[:1] == ["bash"] and (not re.fullmatch(r"[0-9a-f]{64}", launch.get("acceptance_script_sha256", ""))
         or verify_source and launch["acceptance_script_sha256"] != digest(root / command[1])):
         raise ValueError("standalone launcher script changed")
-    environments, stages, bundle_seen, released = set(), set(), False, False
+    # The bound source and exact launcher select a checksum-verified bundle.
+    # Direct controllers need not use run_guest's transport/guest timing wrapper.
+    environments, stages, released = set(), set(), False
     with files["log"].open("rb") as stream:
         for line in stream:
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
             if environment:
                 environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if stage:
                 if stage[2] != b"0":
                     raise ValueError("standalone controller contains a failed phase")
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
-            bundle_seen |= b"worktree bundle ready (sha256=" + receipt["candidate_bundle_sha256"].encode() + b")" in line
+            if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
+                raise ValueError("standalone controller contains a failed phase")
             released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-    if (not environments or not bundle_seen or not released or ("cleanup/release", None) not in stages
-        or any((phase, vm) not in stages for _, count, _ in environments
-               for vm in range(1, count + 1) for phase in ("transport", "guest", "guest-cleanup"))):
+    if (not environments or not released or ("cleanup/release", None) not in stages
+        or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
         raise ValueError("standalone controller evidence incomplete")
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)

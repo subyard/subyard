@@ -744,3 +744,39 @@ func writeRouteGeneration(t *testing.T, root string, publishCurrent bool) string
 	}
 	return hostKey
 }
+
+func TestRouteActivationProspectiveRegistrationKeepsActualBackend(t *testing.T) {
+	options, state := routeConsumerFixture(t, StateCurrent, true)
+	path := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	options.ProspectiveFiles = &config.ProspectiveFiles{Root: options.ConfigHome, ReadSnapshot: func(candidate string) (config.PersistentFileSnapshot, error) {
+		if candidate == path {
+			return config.PersistentFileSnapshot{Exists: true, Content: payload}, nil
+		}
+		return config.ReadPersistentFileSnapshot(options.ConfigHome, candidate)
+	}}
+	observed, err := PrepareRouteConsumerActivation(context.Background(), options)
+	if err != nil || observed != StateCurrent {
+		t.Fatalf("prospective route owner=%s: %v", observed, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("read-only route projection published registration")
+	}
+	if strings.Contains(read(t, state.calls), "config device") {
+		t.Fatal("read-only route projection mutated guest devices")
+	}
+	options.ProspectiveFiles = nil
+	observed, err = PrepareRouteConsumerActivation(context.Background(), options)
+	if err != nil || observed != StateAbsent {
+		t.Fatalf("ordinary absent route owner=%s: %v", observed, err)
+	}
+}
