@@ -12,16 +12,31 @@ TMP=''
 
 die() { printf 'p0-real-incus: %s\n' "$*" >&2; exit 2; }
 CLEANUP_ONLY=0
+PREPARE_ONLY=0
 case "$#:${1:-}" in
   0:) ;;
   1:--cleanup-only) CLEANUP_ONLY=1 ;;
-  *) die 'usage: p0-real-incus.sh [--cleanup-only]' ;;
+  1:--prepare-only) PREPARE_ONLY=1 ;;
+  *) die 'usage: p0-real-incus.sh [--cleanup-only|--prepare-only]' ;;
 esac
 # Incus create/init/launch may consume YAML from stdin. The P0 lane is reached through SSH, so an
 # inherited non-TTY stream can stay open forever after the operation itself succeeds.
 real_incus() { timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incus "$@" </dev/null; }
 real_incus_quiet() { real_incus "$@" >/dev/null; }
 project_exists() { real_incus project show "$PROJECT" >/dev/null 2>&1; }
+
+prepare_container_image() {
+  local cache_info
+  if ! real_incus image info "$CONTAINER_CACHE_ALIAS" --project default >/dev/null 2>&1; then
+    run_with_progress 'caching the P0 container image' \
+      real_incus_quiet image copy "$CONTAINER_IMAGE" local: \
+        --alias "$CONTAINER_CACHE_ALIAS" --project default || return
+  fi
+  cache_info="$(real_incus image info "$CONTAINER_CACHE_ALIAS" --project default)" \
+    || die "container image alias $CONTAINER_CACHE_ALIAS is unavailable after preparation"
+  grep -Fqx 'Type: container' <<<"$cache_info" \
+    || die "provisioned image alias $CONTAINER_CACHE_ALIAS is not a container image"
+}
 
 real_incus_observe() {
   P0_REAL_INCUS_COMMAND_TIMEOUT="${P0_REAL_INCUS_OBSERVE_TIMEOUT:-30}" real_incus "$@"
@@ -203,13 +218,19 @@ cleanup() {
   fi
 }
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
-for command in go incus jq sudo; do command -v "$command" >/dev/null || die "$command is required"; done
+for command in incus jq sudo; do command -v "$command" >/dev/null || die "$command is required"; done
 sudo -n true || die 'passwordless sudo is required in a disposable test VM'
 [ -S /var/lib/incus/unix.socket ] || die 'Incus socket is unavailable'
+if [ "$PREPARE_ONLY" = 1 ]; then
+  prepare_container_image
+  printf 'ok: P0 container image prepared\n'
+  exit 0
+fi
 if [ "$CLEANUP_ONLY" = 1 ]; then
   cleanup
   exit 0
 fi
+command -v go >/dev/null || die 'go is required'
 trap 'trap - EXIT; trap "" INT TERM HUP; cleanup' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

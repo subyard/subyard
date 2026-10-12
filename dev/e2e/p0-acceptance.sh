@@ -963,7 +963,7 @@ full_aux_lane() (
   trap 'full_aux_exit "$?"' EXIT
   trap 'exit 143' TERM
   run_full_aux_stage nested-teardown run_vm 2 nested-teardown
-  run_full_aux_stage fixture-platform run_vm 2 real-incus
+  run_full_aux_stage fixture-platform run_vm 2 fixture-platform
   run_full_aux_stage source-upgrade source_upgrade_lane 2 prepared
   find "$FULL_SOURCE_ARM_FILE" -delete
   run_full_aux_stage power-systemd power_systemd_lane 2
@@ -1279,25 +1279,25 @@ case "$P0_LANE" in
     ;;
   source-upgrade)
     run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase source-upgrade-platform run_vm 1 real-incus
+    run_phase source-upgrade-platform run_vm 1 fixture-platform
     run_phase source-upgrade source_upgrade_lane 1
     run_phase cleanup cleanup_lane
     ;;
   power-systemd)
     run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase power-systemd-platform run_vm 1 real-incus
+    run_phase power-systemd-platform run_vm 1 fixture-platform
     run_phase power-systemd power_systemd_lane 1
     run_phase cleanup cleanup_lane
     ;;
   reboot-verify)
     run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase reboot-verify-platform run_vm 1 real-incus
+    run_phase reboot-verify-platform run_vm 1 fixture-platform
     run_phase reboot-verify reboot_verify_lane 1
     run_phase cleanup cleanup_lane
     ;;
   release-smoke)
     run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase release-smoke-platform run_vm 1 real-incus
+    run_phase release-smoke-platform run_vm 1 fixture-platform
     run_phase release-smoke release_smoke_lane
     run_phase cleanup cleanup_lane
     ;;

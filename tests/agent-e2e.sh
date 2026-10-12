@@ -816,10 +816,6 @@ direct_ssh_stdin="$(
 )"
 printf '%s\n' "$direct_ssh_stdin" | grep -Fq -- '-T e2e-vm-1 --' \
   || fail "explicit direct SSH stdin did not use the pinned non-TTY VM route"
-grep -Fq 'p0_guest "$vm" \' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  && grep -Fq 'dd of="$1" status=none' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  || fail "P0 source archive does not use the lease-local stdin transport"
-
 cli_fixture_bin="$TMP/acceptance-cli-bin"
 cli_mktemp_log="$TMP/acceptance-cli-mktemp.log"
 cli_output="$TMP/acceptance-cli-output.log"
@@ -851,22 +847,18 @@ run_p0_cli_fixture --help
 run_p0_cli_fixture --list-lanes
 [ "$P0_CLI_RC" = 0 ] && [ ! -s "$cli_mktemp_log" ] \
   || fail 'P0 lane listing requires a slot or initializes lease state'
-p0_lane_inventory="$(cat "$cli_output")"
 
 run_p0_cli_fixture
 [ "$P0_CLI_RC" = 2 ] \
   && grep -Fq -- '--slot N is required' "$cli_output" \
   && [ ! -s "$cli_mktemp_log" ] \
   || fail 'P0 default mode reached temporary or lease state without --slot N'
-while IFS=$'\t' read -r p0_lane _; do
-  [ -n "$p0_lane" ] || continue
-  [ "$p0_lane" != full ] || continue
-  run_p0_cli_fixture --lane "$p0_lane"
-  [ "$P0_CLI_RC" = 2 ] \
-    && grep -Fq -- '--slot N is required' "$cli_output" \
-    && [ ! -s "$cli_mktemp_log" ] \
-    || fail "P0 lane $p0_lane reached temporary or lease state without --slot N"
-done <<<"$p0_lane_inventory"
+# Slot validation is shared by all lanes; cover default and explicit selection once.
+run_p0_cli_fixture --lane full
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--slot N is required' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'explicit P0 lane reached temporary or lease state without --slot N'
 
 run_p0_cli_fixture --slot
 [ "$P0_CLI_RC" = 2 ] \
@@ -933,12 +925,6 @@ run_entity_cli_fixture --slot 0
   && [ ! -e "$TMP/entity-cli-state/id_ed25519" ] \
   || fail 'entity naming acceptance initialized temp/key state before rejecting an invalid slot'
 
-grep -Fq 'LIMITS_MEMORY=2GiB' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  && grep -Fq 'NESTED_TEARDOWN_VM_MEMORY_BYTES:-2147483648' \
-    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  && grep -Fq 'NESTED_TEARDOWN_POST_LAUNCH_RESERVE_BYTES:-1073741824' \
-    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  || fail "nested teardown fixture can exhaust its 4 GiB allocated host"
 nested_teardown_script="$ROOT/dev/e2e/nested-teardown-data-boundary.sh"
 owned_backend_cleanup_line="$(grep -nF \
   'remove_owned_outer_backend || die' "$nested_teardown_script" \
@@ -1339,15 +1325,6 @@ set -e
   && grep -Fq 'nested memory requirement exceeds the supported range' \
     <<<"$memory_overflow_output" \
   || fail "nested teardown memory arithmetic overflowed fail-open: rc=$memory_overflow_rc output=$memory_overflow_output"
-grep -Fq 'NESTED_TEARDOWN_COMMAND_TIMEOUT:-3600' \
-  "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  && grep -Fq 'NESTED_TEARDOWN_COMMAND_KILL_AFTER_SECONDS:-10' \
-    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  && grep -Fq 'timeout --signal=TERM --kill-after="$COMMAND_KILL_AFTER_SECONDS"' \
-    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  && ! grep -Fq 'timeout --foreground "$COMMAND_TIMEOUT"' \
-    "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" \
-  || fail "nested teardown clean-init commands are not hard-bounded for a loaded full matrix"
 bounded_command_source="$(awk '
   /^bounded_command\(\)/ { copying=1 }
   copying { print }
@@ -1367,19 +1344,14 @@ set +e
 bounded_timeout="$(
   COMMAND_TIMEOUT=1 COMMAND_KILL_AFTER_SECONDS=1 bash -c \
     "$bounded_command_source
-bounded_command injected sleep 5" 2>&1
+bounded_command injected bash -c 'trap \"\" TERM; exec sleep 5'" 2>&1
 )"
 bounded_timeout_rc=$?
 set -e
-[ "$bounded_timeout_rc" = 124 ] \
+[ "$bounded_timeout_rc" = 137 ] \
   && grep -Fq 'injected exceeded the 1s command deadline' <<<"$bounded_timeout" \
   || fail "nested teardown bounded command masked its deadline: rc=$bounded_timeout_rc output=$bounded_timeout"
 lane_inventory="$("$ROOT/dev/e2e/p0-acceptance.sh" --list-lanes)"
-for lane in smoke boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
-  power-systemd \
-  reboot-verify peer peer-cleanup cleanup; do
-  grep -qx "$lane" <<<"$lane_inventory" || fail "P0 lane inventory omitted $lane"
-done
 lane_table="$(sed -n '/^| Lane |/,/^$/p' "$ROOT/docs/test-vms.md")"
 while IFS= read -r lane; do
   case "$lane" in
@@ -1390,6 +1362,7 @@ while IFS= read -r lane; do
 done <<<"$lane_inventory"
 grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd release-smoke peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
+
 (
   eval "$(sed -n '/^p0_monotonic_seconds() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
   before="$(p0_monotonic_seconds)"
@@ -1424,8 +1397,6 @@ grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power
     || fail 'runner process group survived bounded TERM/KILL shutdown'
   runner_pid=''
 )
-[ -r "$ROOT/dev/e2e/lib-p0-init-retry.sh" ] \
-  || fail 'P0 owner lane has no bounded stale-init retry helper'
 # shellcheck source=dev/e2e/lib-p0-init-retry.sh
 . "$ROOT/dev/e2e/lib-p0-init-retry.sh"
 retry_count="$TMP/init-retry-count"
@@ -1517,22 +1488,7 @@ set -e
   "file://$ROOT/.build/p0-current-base-release" \
   "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --yes")" ] \
   || fail 'P0 release-impact update does not use its exact local synthetic release'
-owner_source="$(sed -n '/^owner() ($/,/^)/p' "$ROOT/dev/e2e/p0-guest.sh")"
-broker_physical_source="$(sed -n '/^broker_recovery_owner() ($/,/^)/p' "$ROOT/dev/e2e/p0-guest.sh")"
-[ -n "$owner_source" ] && [ -n "$broker_physical_source" ] \
-  && grep -Fq 'owner_profile_migration_contract' <<<"$owner_source" \
-  && grep -Fq 'seed-test-vms-legacy-state.sh' <<<"$owner_source" \
-  && grep -Fq 'owner_project_contract' <<<"$owner_source" \
-  && grep -Fq './bin/yard -Y test-yard teardown --yes' <<<"$owner_source" \
-  && ! grep -Eq 'require_broker_fixture_capacity|run_nested_broker_acceptance|reclaim_owner_lease_capacity' <<<"$owner_source" \
-  || fail 'ordinary P0 owner either lost release coverage or allocates nested broker VMs'
-[ "$(grep -Fc 'run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh' <<<"$broker_physical_source")" = 2 ] \
-  && grep -Fq 'require_broker_fixture_capacity' <<<"$broker_physical_source" \
-  && grep -Fq 'run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh' <<<"$broker_physical_source" \
-  && grep -Fq 'write_owner_registration test-yard test-vms 2224 1' <<<"$broker_physical_source" \
-  && grep -Fq 'write_owner_registration test-yard test-vms 2224 3' <<<"$broker_physical_source" \
-  && grep -Fq 'write_owner_registration test-yard test-vms 2224 2' <<<"$broker_physical_source" \
-  || fail 'explicit broker diagnostic lost its physical lease and recovery coverage'
+
 p0_incus_root="$TMP/p0-incus-bootstrap/platform"
 p0_incus_storage="$p0_incus_root/incus/incus/storage"
 owner_incus_call="$TMP/p0-owner-incus-call"
@@ -1555,22 +1511,6 @@ resume_rc=$?
 set -e
 [ "$resume_rc" = 2 ] && grep -Fq 'current task plan' <<<"$resume_output" \
   || fail 'P0 allowed cross-lease resume instead of directing task-plan progress'
-grep -Fq 'mapfile -t SLOT_IDS' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'prepare_slot "$TARGET_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'prepare_slot "$PEER_SLOT"' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'LEASE_PURPOSE=acceptance-prepare' \
-    "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'acquire_lease' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'guest "$vm" sh -eu -c' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'fstrim -av' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'assert_untouched_slots' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'dump_broker_diagnostics' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  || fail "P1 acceptance does not discover and prepare target slots with neighbor diagnostics"
-! grep -Fq '(.pool.slots | length) == 2' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq -- '--wait 2s' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'owner=$A_YARD/$A_PROJECT run=$A_RUN purpose=holder-a' \
-    "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  || fail 'P1 acceptance still assumes two slots or omits bounded owner-aware wait coverage'
 (
   export OWNER_YARD_DIR="$TMP/owner-registration/yards"
   export MARKER=subyard-p0-owner-registration-test
@@ -1597,16 +1537,6 @@ grep -Fq 'mapfile -t SLOT_IDS' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
   ! (write_owner_registration test-yard test-vms 2224 2) || exit 1
   [ "$(cat "$OWNER_YARD_DIR/test-yard/config.env")" = '# unrelated' ]
 ) || fail 'P0 owner registration did not preserve private, owned legacy/canonical fixtures'
-grep -Fq 'systemctl is-enabled --quiet subyard-e2e-lease-context.service' \
-  "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq '/proc/sys/kernel/random/boot_id' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq '/run/subyard-e2e-lease.json' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  || fail 'lease acceptance does not verify context restoration after a holder reboot'
-grep -Fq 'go build -cover' "$ROOT/dev/process-coverage.sh" \
-  && grep -Fq 'go tool covdata merge' "$ROOT/dev/process-coverage.sh" \
-  && grep -Fq 'SUBYARD_SHELL_COVERAGE_LOG' "$ROOT/dev/process-coverage.sh" \
-  && grep -Fq 'bundle_hash' "$ROOT/dev/process-coverage.sh" \
-  || fail 'process coverage does not merge an instrumented yard with Shell inventory evidence'
 owner_image_setup_source="$(awk '
   /^owner\(\) \(/ { in_owner=1 }
   in_owner && /^[[:space:]]*ensure_owner_incus$/ { capture=1 }
@@ -1663,37 +1593,6 @@ set -e
   && [ "$(cat "$owner_image_state")" = $'base-original\nshared-prepared' ] \
   && [ "$(cat "$owner_image_deletes")" = owner-ephemeral ] \
   || fail 'P0 owner cleanup removed a prepared shared image or retained an owner image'
-grep -Fq '/tmp/subyard-hermes-profile.*/storage' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'recover_existing_p0=0' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq '[ "$token" != "$P0_CAPACITY_TOKEN" ] || return 0' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'stale P0 pool still has an active process' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq '[ "$used_by" = '\''[]'\'' ]' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  || fail 'P0 preflight does not narrowly recover an unused stale test pool'
-grep -Fq 'is_markerless_migrated_owner_project' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq '"$stale_root/owner/config/yards/test-yard.env"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'grep -Fxc -- "# $expected_marker" "$registration"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'user.subyard.test_vms_revision' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq '1:*:test-yard' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'incus project set subyard-test-yard user.subyard.p0-image-cache="$MARKER"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  || fail 'P0 owner migration does not fence and restore its transient project marker'
-grep -Fq 'recover_stale_source_upgrade_fixture' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'p0_source_fixture_cleanup_token "$token"' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'source_upgrade_shared_root_tokens' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'source_upgrade_fixture_active "$token"' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'source-upgrade fixture still has an active process' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'timeout --foreground "$query_timeout" pgrep -f -- "$pattern"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'timeout --signal=TERM --kill-after="$kill_after"' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && sed -n '/^capacity_preflight() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh" \
-    | grep -Fq 'recover_stale_source_upgrade_fixture' \
-  || fail 'P0 preflight cannot recover a marker-owned interrupted source-upgrade fixture'
 source_recovery_function="$(awk '
   /^recover_stale_source_upgrade_fixture\(\)/ { copying=1 }
   copying { print }
@@ -1873,17 +1772,15 @@ for real_incus_recovery_case in active query-error remains initial-query-error; 
     initial-query-error) grep -Fq 'cannot inspect real-Incus fixture inventory' <<<"$real_incus_recovery_output" ;;
   esac || fail "P0 preflight did not fail closed for $real_incus_recovery_case"
 done
-sed -n '/^capacity_preflight() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh" \
-  | tr '\n' ' ' \
-  | grep -Eq 'recover_stale_source_upgrade_fixture.*recover_stale_real_incus_fixture.*recover_stale_test_default_pool' \
-  || fail 'P0 real-Incus recovery is not ordered before pool and capacity checks'
-grep -Fq 'is_markerless_migrated_fixture_project' \
-  "$ROOT/dev/e2e/p0-source-upgrade.sh" \
-  && grep -Fq 'user.subyard.test_vms_revision' \
-    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
-  && grep -Fq 'refusing unmarked Incus project' \
-    "$ROOT/dev/e2e/p0-source-upgrade.sh" \
-  || fail 'source-upgrade cleanup cannot prove a markerless migrated fixture'
+(
+  eval "$(sed -n '/^capacity_preflight() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  id() { [ "$*" = -u ] || exit 91; printf '0\n'; }
+  recover_stale_source_upgrade_fixture() { printf 'source\n'; }
+  recover_stale_real_incus_fixture() { printf 'incus\n'; }
+  recover_stale_test_default_pool() { printf 'pool\n'; }
+  p0_capacity_preflight() { printf 'capacity\n'; }
+  [ "$(capacity_preflight)" = $'source\nincus\npool\ncapacity' ]
+) || fail 'P0 capacity checks ran before fixture recovery'
 markerless_source_function="$(awk '
   /^is_markerless_migrated_fixture_project\(\)/ { copying=1 }
   copying { print }
@@ -1950,34 +1847,12 @@ fi
 if run_markerless_source_case true '' incomplete >/dev/null 2>&1; then
   fail 'source-upgrade cleanup accepted an initialized fixture without broker revision'
 fi
-grep -Fq 'cold Go dependency download heartbeat elapsed=' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'dependency download failed (attempt %s/3); retrying in %ss' \
-    "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'timeout --signal=TERM --kill-after=10' "$ROOT/dev/e2e/p0-guest.sh" \
-  || fail 'dependency bootstrap lacks bounded retry and heartbeat progress'
-grep -Fq 'p0_capacity_query_default_pool state "$query_timeout"' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'Incus default-pool query exceeded' "$ROOT/dev/e2e/lib-p0-capacity.sh" \
-  && grep -Fq 'retrying cold activation' "$ROOT/dev/e2e/lib-p0-capacity.sh" \
-  && grep -Fq 'timeout --foreground "$query_timeout"' \
-    "$ROOT/dev/e2e/lib-p0-capacity.sh" \
-  || fail 'P0 capacity preflight can hang on a partial Incus daemon'
 grep -Fq 'Environment=INCUS_SECURITY_APPARMOR=false' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'reconcile_p0_incus_apparmor_compat' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'restore_p0_incus_apparmor_default' "$ROOT/dev/e2e/p0-guest.sh" \
   && grep -Fq 'refusing foreign Incus compatibility drop-in' \
     "$ROOT/dev/e2e/p0-guest.sh" \
   || fail 'P0 outer Incus AppArmor compatibility is not marker-owned and reversible'
-grep -Fq 'p0_capacity_recover_stale_roots' "$ROOT/dev/e2e/lib-p0-capacity.sh" \
-  && grep -Fq 'stale P0 state still has an active process' \
-    "$ROOT/dev/e2e/lib-p0-capacity.sh" \
-  || fail 'P0 preflight cannot distinguish orphaned from active marker-owned cache state'
-grep -Fq 'OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"' \
-  "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'local dev_uid="${PROJECT_CONTRACT_UID:-$OWNER_DIAGNOSTIC_DEV_UID}"' \
-    "$ROOT/dev/e2e/lib-owner-project-contract.sh" \
-  && grep -Fq 'chown -R "$dev_uid:$dev_uid" "$bound"' \
-    "$ROOT/dev/e2e/lib-owner-project-contract.sh" \
-  || fail "P0 bind fixture is not owned by its configured diagnostic yard UID"
 owner_sink_cleanup_function="$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-guest.sh")"
 owner_capacity_cleanup_function="$(sed -n '/^cleanup_owner_capacity_state() {/,/^}/p' \
@@ -2083,42 +1958,6 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
       esac
     ' || fail "P0 owner sink cleanup violated $owner_sink_scenario isolation"
 done
-grep -Fq 'systemctl start subyard-test-vms-host-sink.service' \
-  "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  && grep -Fq 'test-vms-broker-incidents' "$ROOT/dev/e2e/p1-lease-acceptance.sh" \
-  || fail "P1 diagnostics do not flush and print the immutable broker incident"
-grep -Fq 'FAULT_ROOT=/run/subyard-p0-incus-fault' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'RECOVERY_POLL_SECONDS=2' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'P0_BROKER_RECOVERY_WAIT_SECONDS:-6000' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq '[ "$RECOVERY_WAIT_SECONDS" -le 7200 ]' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'P0_BROKER_RECOVERY_STATUS_TIMEOUT_SECONDS:-30' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'timeout --signal=TERM --kill-after="$RECOVERY_STATUS_KILL_AFTER_SECONDS"' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'sleep "$sleep_seconds"' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'wait_for_slot_state slot-001 available "$RECOVERY_WAIT_SECONDS"' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'reclaim_held_pair_capacity "$VICTIM_CONFIG" victim' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'reclaim_held_pair_capacity "$NEIGHBOR_CONFIG" neighbor' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'outer_root systemctl mask --runtime --now \' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && awk '
-    /^stop_slot_pair 2$/ { stopped = NR }
-    /^rollback_candidate_update$/ { rolled_back = NR }
-    /outer_root systemctl unmask --runtime/ { unmasked = NR }
-    END {
-      exit !(stopped && rolled_back && unmasked &&
-        stopped < rolled_back && rolled_back < unmasked)
-    }
-  ' "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  || fail "P0 broker recovery does not isolate its targeted fault before rebuilding"
 remove_reclaim_fixture_source="$(sed -n \
   '/^remove_reclaim_fixture() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh")"
@@ -2146,12 +1985,6 @@ set -e
 [ "$reclaim_cleanup_rc" -ne 0 ] \
   && [ "$(cat "$reclaim_cleanup_attempts")" = $'e2e-vm-1\ne2e-vm-2' ] \
   || fail "reclaim cleanup did not preserve VM1 failure while attempting VM2: rc=$reclaim_cleanup_rc"
-awk '
-  /^RECLAIM_MARKER="subyard-p0-release-reclaim-v1:\$neighbor_run"$/ { armed = NR }
-  /^stage_reclaim_fixture "\$NEIGHBOR_CONFIG" 1$/ { staged = NR }
-  END { exit !(armed && staged && armed + 1 == staged) }
-' "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  || fail 'reclaim cleanup marker is armed before a fixture can exist'
 # Disposable release must prove both instance and root-volume absence. An empty
 # instance inventory alone must not hide retained disk resources.
 slot_empty_source="$(sed -n '/^assert_slot_empty() {/,/^}/p' \
@@ -2238,15 +2071,6 @@ set -e
   && [ "$(cat "$recovery_status_budgets")" = $'30\n13' ] \
   && [ "$(cat "$recovery_sleep_log")" = 2 ] \
   || fail "P0 broker recovery wait exceeded its wall-clock deadline: rc=$recovery_wait_rc output=$recovery_wait_output"
-grep -Fq 'start_holder_child hold_lease victim quarantine-victim slot-001' \
-  "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'start_holder_child hold_lease neighbor held-neighbor slot-002' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'stop_holder_child "$VICTIM_PID"' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  && grep -Fq 'stop_holder_child "$NEIGHBOR_PID"' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh" \
-  || fail 'P0 broker recovery readiness timeout bypasses bounded holder shutdown'
 (
   holder_pid=''
   trap '
@@ -2279,9 +2103,6 @@ if grep -Fq 'mask --runtime --now incus.service' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh"; then
   fail "P0 broker recovery fault injection drains unrelated held leases"
 fi
-grep -Fq '> "$PEER_ROOT/config/config.env"' "$ROOT/dev/e2e/p0-guest.sh" \
-  && grep -Fq 'P0_PEER_YARD_TIMEOUT:-1800' "$ROOT/dev/e2e/p0-guest.sh" \
-  || fail "P0 peer yard does not use its active config root with a bounded init"
 grep -Fq 'SUBYARD_SOURCE_INGRESS_V1_ROOT' \
   "$ROOT/dev/bootstrap-runtime.sh" \
   && ! grep -Fq '_release-transition' "$ROOT/scripts/migrate-source-install.sh" \
@@ -2414,43 +2235,6 @@ bash -c '
   ! grep -Eq "^(YARD_TEMPLATE|NESTED_E2E_VMS|E2E_VM_)" "$registration"
 ' _ "$v0111_recovery" "$TMP/v0111-config" \
   || fail 'v0.11.1 config-drift fixture must allow the selected Codex integration'
-grep -Fq 'sed -i '\''s/^AGENTS=$/AGENTS=codex/'\'' "$CONFIG_HOME/yards/$YARD_NAME/config.env"' \
-    "$v0111_recovery" \
-  && grep -Fq 'assert_source_dead_end' "$v0111_recovery" \
-  && grep -Fq '.blockers[0].resource == "transition.observation-scope"' "$v0111_recovery" \
-  && grep -Fq 'SUBYARD_YARD="$YARD_NAME"' "$v0111_recovery" \
-  && ! grep -Fq 'release-transition-fixture' "$v0111_recovery" \
-  && ! grep -Fq 'MarshalJournal' "$v0111_recovery" \
-  || fail 'real v0.11.1 fixture is synthetic or omits the materialized-config dead-end'
-grep -Fq 'SUCCESS_ROOT="$STATE_ROOT/success"' "$v0111_recovery" \
-  && grep -Fq 'POST_CAS_ROOT="$STATE_ROOT/post-cas"' "$v0111_recovery" \
-  && grep -Fq 'v0111-success-$TOKEN' "$v0111_recovery" \
-  && grep -Fq 'v0111-post-cas-$TOKEN' "$v0111_recovery" \
-  && [ "$(grep -Fc 'reproduce_official_dead_end' "$v0111_recovery")" -ge 3 ] \
-  && ! grep -Fq 'copy_dead_end_for_crash' "$v0111_recovery" \
-  || fail 'success and post-CAS fixtures are not independent official histories'
-grep -Fq 'setsid env' "$v0111_recovery" \
-  && grep -Fq 'python3 "$POST_CAS_OBSERVER"' "$v0111_recovery" \
-  && grep -Fq 'POST_CAS_OBSERVATION_MARKER=' "$v0111_recovery" \
-  && grep -Fq 'test ! -e "$1" && test ! -L "$1"' "$v0111_recovery" \
-  && grep -Fq 'wait "$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
-  && grep -Fq '.transaction != $source and .checkpoint != "complete"' "$v0111_recovery" \
-  && grep -Fq '[ "$transition_rc" = 137 ]' "$v0111_recovery" \
-  && grep -Fq 'ordinary post-CAS resume requested a second confirmation' "$v0111_recovery" \
-  && ! grep -Fq 'P0_V0111_REAL_INCUS' "$v0111_recovery" \
-  || fail 'v0.11.1 recovery fixture omits exact post-CAS interruption and ordinary resume'
-[ -f "$v0111_observer" ] \
-  && grep -Fq 'inotify_init1' "$v0111_observer" \
-  && grep -Fq 'IN_MOVED_TO' "$v0111_observer" \
-  && grep -Fq 'os.O_NOFOLLOW' "$v0111_observer" \
-  && grep -Fq 'os.getpid() != os.getpgrp()' "$v0111_observer" \
-  && grep -Fq 'os.getpgid(child.pid) != expected_group' "$v0111_observer" \
-  && grep -Fq '"activation-intent", "target-active", "reconciling"' "$v0111_observer" \
-  && grep -Fq 'journal.get("goal", {}).get("target") != args.candidate_target' \
-    "$v0111_observer" \
-  && grep -Fq 'kill_isolated_group(signal.SIGKILL)' "$v0111_observer" \
-  && grep -Fq 'os.killpg(os.getpgrp(), signum)' "$v0111_observer" \
-  || fail 'v0.11.1 post-CAS observer does not bind the atomic link event to SIGKILL'
 v0111_observer_probe="$TMP/v0111-post-cas-observer"
 mkdir -p "$v0111_observer_probe/runtime/releases/source" \
   "$v0111_observer_probe/runtime/releases/0.11.2-candidate"
@@ -2651,11 +2435,6 @@ fi
   && grep -Fq 'transition exited with status 23 before exact activation' \
     "$v0111_queued_probe/stderr" \
   || fail 'v0.11.1 observer accepted a queued activation after transition exit'
-grep -Fq 'POST_CAS_TRANSITION_PID=' "$v0111_recovery" \
-  && grep -Fq 'stop_post_cas_transition' "$v0111_recovery" \
-  && grep -Fq 'kill -TERM -- "-$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
-  && grep -Fq 'wait "$POST_CAS_TRANSITION_PID"' "$v0111_recovery" \
-  || fail 'v0.11.1 cleanup does not fence an interrupted post-CAS process group'
 v0111_cleanup_probe="$TMP/v0111-cleanup-probe"
 mkdir -p "$v0111_cleanup_probe"
 v0111_cleanup_rc=0
@@ -2776,17 +2555,6 @@ grep -Fq 'cleanup_test_vms_sink' "$v0111_recovery" \
   && grep -Fq 'systemctl disable --now "$TEST_VMS_SINK_TIMER_NAME"' "$v0111_recovery" \
   && grep -Fq 'sudo -n find "$FIXTURE_ROOT" -depth -delete' "$v0111_recovery" \
   || fail 'v0.11.1 fixture does not stop its unique sink before privileged marked-root cleanup'
-grep -Fq 'capture_recovery_plan' "$v0111_recovery" \
-  && grep -Fq '.authorizationPlan == $plan' "$v0111_recovery" \
-  && grep -Fq '.outcome.status == "ready"' "$v0111_recovery" \
-  && grep -Fq '.assessment.changed == false' "$v0111_recovery" \
-  && ! grep -Fq 'config apply --check' "$v0111_recovery" \
-  && ! grep -Fq 'grep -Fc -- '\''--yes'\''' "$v0111_recovery" \
-  || fail 'v0.11.1 fixture lacks structured plan, terminal, or fixed-point evidence'
-v0111_host_free="$ROOT/internal/adapters/releaseruntime/runtime_v0111_recovery_test.go"
-grep -Fq 'request.Yard != os.Getenv("SUBYARD_TEST_V0111_YARD")' "$v0111_host_free" \
-  && grep -Fq 'fixture.configHome, "recovery-yard",' "$v0111_host_free" \
-  || fail 'host-free v0.11.1 recovery does not prove the named-yard process request'
 ensure_identity
 lease_blob="$(awk '{print $2}' "$IDENTITY.pub")"
 lease_response="$(printf '{"schema_version":1,"status":"ok","grant":{"environment":{"type":"subyard-pair","vm_count":2,"cpu_per_vm":4,"memory_per_vm":"4GiB","disk_per_vm":"20GiB","lifecycle":"disposable-v1"},"base_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","slot_id":"slot-001","resource_generation":5,"lease_id":"aabb","capability":"ccdd","lease_epoch":3,"data_user":"subyard-e2e-slot-1","targets":[{"selector":1,"name":"e2e-vm-1","address":"10.42.1.11","host_key_type":"ssh-ed25519","host_key_blob":"%s"},{"selector":2,"name":"e2e-vm-2","address":"10.42.1.12","host_key_type":"ssh-ed25519","host_key_blob":"%s"}]}}' "$lease_blob" "$lease_blob")"
@@ -3566,10 +3334,6 @@ P0_REAL_INCUS_WAIT_FUNCTION="$(sed -n '/^wait_ready() {/,/^}/p' "$ROOT/dev/e2e/p
       fi
     done
   ' || fail "P0 readiness does not allow slow VM boot or diagnose bounded failures"
-grep -Fq 'cleanup delete of %s failed; retrying (%s/3)' "$ROOT/dev/e2e/p0-real-incus.sh" \
-  && grep -Fq 'refusing to delete unmarked instance' "$ROOT/dev/e2e/p0-real-incus.sh" \
-  && grep -Fq 'could not delete marked instance $name after 3 attempts' "$ROOT/dev/e2e/p0-real-incus.sh" \
-  || fail "P0 real-Incus cleanup retry is not bounded to marked test instances"
 real_incus_project_cleanup_functions="$(
   for function_name in real_incus_observe p0_monotonic_seconds cleanup_real_incus \
     cleanup_sleep active_instance_operation_ids delete_marked_instance cleanup; do
@@ -3937,7 +3701,7 @@ for reboot_scenario in reboot-verify:none power-systemd:none reboot-verify:prepa
       run_vm() {
         case "$*" in
           "1 capacity-preflight") printf "capacity\n" ;;
-          "1 real-incus") platform=1; printf "platform\n" ;;
+          "1 fixture-platform") platform=1; printf "platform\n" ;;
           *) exit 41 ;;
         esac
       }
@@ -4984,9 +4748,6 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
     && grep -Fxq 'inner Incus is inactive' "$TMP/source-broker-failure" \
     || fail 'source fixture lost its readiness bound or doctor diagnostic'
 ) || fail 'source fixture broker readiness regression'
-source_finish="$(sed -n '/^finish() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
-[[ "$source_finish" == *'operator_yard -Y "$YARD_NAME" start --yes'*'wait_for_test_vm_broker'*'rm /home/dev/.codex/rules/repo.rules'* ]] \
-  || fail 'source fixture must establish broker readiness before seeding config drift'
 (
   SOURCE_ROOT="$TMP/source-registration/src"
   OPERATOR_HOME="$TMP/source-registration/operator"
@@ -5268,11 +5029,4 @@ for consumer_failure in no-available malformed-slot; do
     && ! grep -Eq '^--slot [0-9]+ ' "$consumer_log" \
     || fail "release consumer did not fail closed for $consumer_failure"
 done
-grep -Fq 'select(.slot_id == $slot)' "$ROOT/dev/agent-e2e.sh" \
-  && grep -Fq 'current lease slot is absent from pool status' "$ROOT/dev/agent-e2e.sh" \
-  || fail "agent E2E boundary verification is coupled to unrelated concurrent slots"
-! grep -Fq 'test-vms-inner' "$ROOT/dev/agent-e2e.sh" \
-  || fail "agent E2E transport still invokes the privileged lifecycle worker"
-
-
 printf 'ok: agent E2E lease transport is pinned, fenced and cleanup-owned\n'

@@ -51,6 +51,7 @@ OWNER_BASELINE_IMAGES=''
 OWNER_BASELINE_CAPTURED=0
 OWNER_BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 OWNER_BASE_IMAGE_CREATED=0
+OWNER_RELEASE_PREPARED=0
 OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-700MiB}"
 OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT="${P0_E2E_DIAGNOSTIC_VM_BOOT_TIMEOUT:-600}"
 OWNER_DIAGNOSTIC_DEV_UID="${P0_E2E_DIAGNOSTIC_DEV_UID:-1001}"
@@ -328,8 +329,13 @@ install_owner_runtime() {
   arch="$(go env GOARCH)"
   release="$ROOT/.build/p0-owner-release"
   artifact="$release/subyard-$P0_OWNER_VERSION-linux-$arch"
-  dev/package-engine.sh \
-    --output-dir "$release" --version "$P0_OWNER_VERSION" --arch "$arch" >/dev/null
+  # One immutable candidate per guest invocation; installations still exercise
+  # each independent predecessor history and the supported updater.
+  if [ "$OWNER_RELEASE_PREPARED" = 0 ]; then
+    dev/package-engine.sh \
+      --output-dir "$release" --version "$P0_OWNER_VERSION" --arch "$arch" >/dev/null || return
+    OWNER_RELEASE_PREPARED=1
+  fi
   release_cache="$SUBYARD_HOME/releases/$P0_OWNER_VERSION"
   name="$(basename "$artifact").tar.gz"
   install -d -m 0700 "$release_cache"
@@ -2186,10 +2192,14 @@ capacity_verify_cleanup() {
     ensure_owner_incus nested-teardown
     bash dev/e2e/nested-teardown-data-boundary.sh
     ;;
-  real-incus)
+  fixture-platform|real-incus)
     p0_capacity_use_build_cache
-    ensure_owner_incus real-incus
-    bash dev/e2e/p0-real-incus.sh
+    ensure_owner_incus "$MODE"
+    if [ "$MODE" = fixture-platform ]; then
+      bash dev/e2e/p0-real-incus.sh --prepare-only
+    else
+      bash dev/e2e/p0-real-incus.sh
+    fi
     p0_capacity_remove_build_cache
     p0_capacity_remove_root_if_empty
     ;;

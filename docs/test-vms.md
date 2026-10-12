@@ -515,7 +515,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
 | `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
-| `real-incus` | VM1 when targeted/smoke and in the full owner chain; VM2 also runs it as a full-matrix prerequisite; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
+| `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state and bound-resource profile | targeted diagnostic; full covers only the dependency-free resource portion |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
@@ -833,8 +833,12 @@ The cache fill and local launch both emit progress. Their independent positive-i
 `SUBYARD_SYSTEMD255_RESTART_TIMEOUT_SECONDS`. A timed-out cache fill or launch fails once with its
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
-The full matrix keeps the historical owner, release and broker-migration chain on VM1. VM2 independently
-runs nested teardown, a real-Incus platform check, source upgrade and power-systemd in that order.
+The full matrix keeps the historical owner, real-Incus contract, release and broker-migration chain on VM1.
+VM2 independently runs nested teardown, container-image preparation, source upgrade and power-systemd in that order.
+Independent source-upgrade, power-systemd, reboot-verify and release-smoke lanes reconcile Incus and cache
+their container image without repeating the real-Incus contract's container/VM launches and Go tests.
+The owner fixture packages its candidate once and reuses those exact assets across its independent
+predecessor installations, active/inactive broker checks and rollback scenarios.
 The two chains join before the shared release-smoke phase and full peer checks, followed by cleanup
 and final boundary verification. Host-free `./tests/run.sh`, prepared loopback SSH/crypto contracts
 and the owner engine-release contract run in their own required gates and are not repeated here.

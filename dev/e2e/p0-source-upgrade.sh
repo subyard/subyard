@@ -623,11 +623,14 @@ verify_v2_release_transition() { # <version>
   local expected="$1"
   [ "$(operator_yard --version)" = "yard $expected" ] \
     || die "release transition did not activate $expected"
-  jq -e '
-    .schemaVersion == 2 and .domains.settings.epoch == 2 and
-    .domains.settings.applied == ["canonicalize-test-vms-settings-v2"]
-  ' < <(operator_env cat \
-    "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json") >/dev/null \
+  operator_env jq -e --slurpfile registry \
+    "$OPERATOR_HOME/.subyard/runtime/current/config/release-transition.json" '
+    .schemaVersion == 2 and
+    (.domains | keys) == ($registry[0].currentEpochs | keys) and
+    all(.domains | to_entries[]; .key as $domain |
+      .value.epoch == $registry[0].currentEpochs[$domain] and
+      .value.applied == [$registry[0].migrations[] | select(.domain == $domain) | .id])
+  ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
     || die 'release transition domain ledger is not at the verified fixed point'
   jq -e --arg version "$expected" '
     .schemaVersion == 2 and .checkpoint == "complete" and
@@ -885,7 +888,7 @@ prepare() {
     run_incus_installer --yes --zabbly
   fi
   if ! incus image info "$BASE_IMAGE" --project default >/dev/null 2>&1; then
-    bash "$ROOT/dev/e2e/p0-real-incus.sh"
+    bash "$ROOT/dev/e2e/p0-real-incus.sh" --prepare-only
   fi
   cleanup_fixture
   p0_capacity_reset_build_cache
