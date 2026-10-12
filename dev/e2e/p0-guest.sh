@@ -680,7 +680,6 @@ owner() (
   OWNER_BASELINE_CAPTURED=1
 	P0_V0111_BASE_IMAGE="$OWNER_BASE_IMAGE" \
 	  bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"
-	profile_resource
   prepare_owner_image_cache_project subyard-test-yard
   owner_profile_migration_contract
   write_owner_registration test-yard test-vms 2224 1
@@ -1256,20 +1255,18 @@ decode_frames() { # framed-input json-lines-output
 }
 
 peer_rpc() {
-  local request response body remote_engine remote_root expected_version
+  local request response body expected_version
   expected_version="p0-peer-vm-$((3 - SUBYARD_E2E_VM))"
   if [ -e "$PEER_ROOT/src/.subyard-acceptance/candidate.json" ]; then
     expected_version="$(jq -er '.version | select(type == "string" and length > 0)' \
       "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"
   fi
   valid_ip "$PEER_IP" || die 'peer IP is invalid'
-  remote_root="/home/dev/.cache/subyard-p0-$TOKEN/peer/subyard/runtime/current"
-  remote_engine="$remote_root/bin/yard-engine"
   request="$PEER_ROOT/rpc-request"; response="$PEER_ROOT/rpc-response"; body="$PEER_ROOT/rpc-body"
   : > "$request"
   append_frame '{"version":1,"type":"request","id":"negotiate","method":"rpc.negotiate"}' "$request"
-  peer_ssh "dev@$PEER_IP" -- env SUBYARD_REPOSITORY_ROOT="$remote_root" \
-    "$remote_engine" rpc --stdio \
+  append_frame '{"version":1,"type":"request","id":"projects","method":"project.list"}' "$request"
+  peer_ssh "dev@$PEER_IP" -- "$PEER_YARD_ENTRY" -Y default rpc --stdio \
     < "$request" > "$response"
   decode_frames "$response" "$body"
   jq -e --arg version "$expected_version" \
@@ -1277,33 +1274,15 @@ peer_rpc() {
     "$body" >/dev/null \
     || die 'cross-owner negotiation failed'
 
-  : > "$request"
-  append_frame '{"version":2,"type":"request","id":"bad","method":"rpc.negotiate"}' "$request"
-  peer_ssh "dev@$PEER_IP" -- env SUBYARD_REPOSITORY_ROOT="$remote_root" \
-    "$remote_engine" rpc --stdio \
-    < "$request" > "$response"
-  decode_frames "$response" "$body"
-  jq -e 'select(.id=="bad" and .error.code=="incompatible_version")' "$body" >/dev/null \
-    || die 'version skew was not rejected'
+  jq -s -e 'any(.[]; .id=="projects" and .type=="response" and .error==null and
+    any(.result.projects[]; .projectId=="project-5"))' "$body" >/dev/null \
+    || die 'deployed selected-yard RPC did not return the synced owner project'
+  # The completed SSH session disconnects before a fresh session resynchronizes.
 
-  : > "$request"
-  append_frame '{"version":1,"type":"request","id":"negotiate","method":"rpc.negotiate"}' "$request"
-  append_frame '{"version":1,"type":"request","id":"events","operationId":"operation-events","method":"incus.events"}' "$request"
-  append_frame '{"version":1,"type":"cancel","id":"cancel","operationId":"operation-events"}' "$request"
-  peer_ssh "dev@$PEER_IP" -- env SUBYARD_REPOSITORY_ROOT="$remote_root" \
-    "$remote_engine" rpc --stdio < "$request" > "$response"
-  decode_frames "$response" "$body"
-  jq -s -e 'any(.[]; .id=="cancel" and .result.cancelled=="operation-events") and
-    any(.[]; .id=="events" and .operationId=="operation-events" and .error.code=="cancelled")' \
-    "$body" >/dev/null || die 'live RPC cancellation failed'
-
-  printf '\0\0\0\20broken' | peer_ssh "dev@$PEER_IP" -- \
-    env SUBYARD_REPOSITORY_ROOT="$remote_root" "$remote_engine" rpc --stdio >/dev/null 2>&1 || true
   : > "$request"
   append_frame '{"version":1,"type":"request","id":"negotiate","method":"rpc.negotiate"}' "$request"
   append_frame '{"version":1,"type":"request","id":"snapshot","method":"system.snapshot"}' "$request"
-  peer_ssh "dev@$PEER_IP" -- env SUBYARD_REPOSITORY_ROOT="$remote_root" \
-    "$remote_engine" rpc --stdio \
+  peer_ssh "dev@$PEER_IP" -- "$PEER_YARD_ENTRY" -Y default rpc --stdio \
     < "$request" > "$response"
   decode_frames "$response" "$body"
   if ! jq -s -e 'any(.[]; .id=="negotiate" and .error==null) and
@@ -1314,7 +1293,7 @@ peer_rpc() {
     sed -n '1,12p' "$body" >&2
     die 'RPC did not renegotiate and resync after disconnect'
   fi
-  printf 'ok: VM%s cross-owner RPC, cancellation, skew and resync\n' "$SUBYARD_E2E_VM"
+  printf 'ok: VM%s deployed selected-yard RPC and reconnect resync\n' "$SUBYARD_E2E_VM"
 }
 
 peer_credentials() {
@@ -1887,217 +1866,6 @@ dependency_bootstrap() (
   printf 'ok: VM%s cold Go dependency bootstrap passed\n' "$SUBYARD_E2E_VM"
 )
 
-profile_resource() (
-  local fixture="$P0_CAPACITY_STATE_ROOT/profile-resource" handler rc setup output
-  p0_capacity_prepare_root
-  p0_capacity_prepare_subtree "$fixture"
-  trap 'rc=$?; set +e; p0_capacity_remove_subtree "$fixture"; p0_capacity_remove_root_if_empty; exit "$rc"' EXIT
-  cp -a "$ROOT/config" "$fixture/config"
-  install -d -m 0700 "$fixture/config/profiles/p0-smoke/resources/p0-smoke"
-  cat > "$fixture/config/profiles/p0-smoke/resources/p0-smoke.res" <<'EOF'
-COMMAND=p0-smoke
-HANDLER=resources/p0-smoke/handler.sh
-TITLE=Dependency-free P0 smoke
-ACTION="up up yard-change recreatable"
-ACTION="is-up is-up read-only not-needed"
-ACTION="status status read-only not-needed"
-ACTION="down down runtime-destruction recreatable"
-ACTION="purge purge persistent-data-destruction irreversible"
-BRINGUP=up
-SHUTDOWN=down
-EOF
-  handler="$fixture/config/profiles/p0-smoke/resources/p0-smoke/handler.sh"
-  cat > "$handler" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-state="${SUBYARD_HOME:?}/p0-profile-resource.state"
-data="${SUBYARD_HOME:?}/p0-profile-resource.data"
-verb="${1:-}"; [ $# -eq 0 ] || shift
-[ $# -eq 0 ] || { printf 'unexpected resource argument\n' >&2; exit 2; }
-
-emit_query() {
-  printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":false,"consequences":[]}\n' "$verb"
-}
-
-case "$verb" in
-  is-up|status)
-    case "${SUBYARD_RESOURCE_MODE:-}" in
-      prepare) emit_query ;;
-      apply|'')
-        if [ "$verb" = is-up ]; then [ "$(cat "$state" 2>/dev/null)" = up ]
-        else [ "$(cat "$state" 2>/dev/null)" = up ] && printf 'up\n' || { printf 'down\n'; exit 1; }; fi
-        ;;
-      *) exit 2 ;;
-    esac
-    exit
-    ;;
-  -h|--help|help|'') printf 'P0 typed resource fixture\n'; exit ;;
-  up|down|purge) ;;
-  *) exit 2 ;;
-esac
-
-# Native preparation and verification only observe these two fixture-owned
-# files. Apply holds the owner lock and checks the captured identities again.
-python3 - "$verb" <<'PYTHON'
-import fcntl
-import hashlib
-import json
-import os
-from pathlib import Path
-import stat
-import sys
-
-verb = sys.argv[1]
-mode = os.environ.get("SUBYARD_RESOURCE_MODE", "")
-root = Path(os.environ["SUBYARD_HOME"])
-paths = [root / "p0-profile-resource.state", root / "p0-profile-resource.data"]
-expected = [b"up\n", b"persistent\n"]
-
-def stale(reason):
-    raise SystemExit("plan_stale: " + reason)
-
-def fingerprint(path, content):
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return "absent"
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != len(content) or path.read_bytes() != content:
-        stale("unexpected marker-owned P0 file")
-    identity = [metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
-                metadata.st_gid, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]
-    return "present native fingerprint " + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-
-def assessment():
-    observed = [fingerprint(path, content) for path, content in zip(paths, expected)]
-    if verb == "up":
-        desired = ["up", "present"]
-        changed = [value == "absent" for value in observed]
-        consequences = ["start the marker-owned P0 resource runtime", "create marker-owned P0 persistent data"]
-    elif verb == "down":
-        desired = ["absent", "retain " + observed[1]]
-        changed = [observed[0] != "absent", False]
-        consequences = ["stop the marker-owned P0 resource runtime", "retain marker-owned P0 persistent data"]
-    else:
-        desired = ["retain " + observed[0], "absent"]
-        changed = [False, observed[1] != "absent"]
-        consequences = ["retain the marker-owned P0 resource runtime", "irreversibly delete marker-owned P0 persistent data"]
-    steps = [{"id": identity, "target": target, "observed": value,
-              "desired": want, "decision": "apply" if change else "skip",
-              "preconditions": ["only the two captured marker-owned P0 files"],
-              "verify": verify, "consequence": consequence}
-             for identity, target, value, want, change, verify, consequence in zip(
-                 ["runtime", "persistent-data"], ["marker-owned P0 runtime", "marker-owned P0 persistent data"],
-                 observed, desired, changed,
-                 ["read actual runtime presence and retained identity", "read actual persistent data presence and retained identity"],
-                 consequences)]
-    metadata = root.lstat()
-    if not stat.S_ISDIR(metadata.st_mode):
-        stale("P0 owner root replaced")
-    scope = [str(root), metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
-             metadata.st_gid, verb, [(step["id"], step["target"], step["desired"]) for step in steps]]
-    binding = hashlib.sha256(json.dumps(scope).encode()).hexdigest()
-    return {"schema": "yard.resource-action-assessment.v2", "action": verb,
-            "binding": binding, "steps": steps, "changed": any(changed),
-            "consequences": [step["consequence"] for step in steps if step["decision"] == "apply"]}
-
-def check(current):
-    try:
-        approved = json.loads(os.environ["SUBYARD_RESOURCE_STEPS"])
-    except (KeyError, ValueError):
-        stale("P0 approved native steps missing")
-    if (current["binding"] != os.environ.get("SUBYARD_RESOURCE_BINDING") or
-            not isinstance(approved, list) or len(approved) != 2 or
-            not all(isinstance(step, dict) for step in approved)):
-        stale("P0 native target scope changed")
-    for old, fresh in zip(approved, current["steps"]):
-        if any(old.get(key) != fresh[key] for key in
-               ("id", "target", "desired", "preconditions", "verify", "consequence")):
-            stale("P0 native desired state changed")
-        if old.get("decision") == "skip":
-            if fresh["decision"] != "skip" or fresh["observed"] != old.get("observed"):
-                stale("P0 native skipped identity changed")
-        elif old.get("decision") != "apply" or (fresh["decision"] == "apply" and old.get("observed") != fresh["observed"]):
-            stale("P0 native file identity changed")
-
-if mode == "prepare":
-    result = assessment()
-    if os.environ.get("SUBYARD_RESOURCE_STEPS"):
-        check(result)
-    print(json.dumps(result))
-elif mode == "verify":
-    result = assessment()
-    check(result)
-    if result["changed"]:
-        stale("P0 native postcondition did not converge")
-    for step in result["steps"]:
-        step["observed"] = step["desired"]
-    print(json.dumps(result))
-elif mode == "apply":
-    if os.environ.get("SUBYARD_RESOURCE_ACTION") != verb or not os.environ.get("SUBYARD_OPERATION_ID"):
-        stale("P0 native action is not approved")
-    with (root / ".p0-profile-resource.lock").open("a") as lock:
-        os.chmod(lock.name, 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        current = assessment()
-        check(current)
-        for path, content, step in zip(paths, expected, current["steps"]):
-            if step["decision"] == "skip":
-                continue
-            if verb == "up":
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "wb") as output:
-                    output.write(content)
-            else:
-                path.unlink()
-        verified = assessment()
-        check(verified)
-        if verified["changed"]:
-            stale("P0 native apply did not converge")
-else:
-    raise SystemExit(2)
-PYTHON
-EOF
-  chmod 0700 "$handler"
-  ./dev/build-engine.sh
-  setup="$fixture/context"
-  # shellcheck source=tests/helpers/test-context.sh
-  . "$ROOT/tests/helpers/test-context.sh"
-  setup_test_context "$setup"
-  export HOME="$setup/home" SUBYARD_NO_AUDIT=1 SUBYARD_CONFIG_DIR="$fixture/config"
-  output="$fixture/default-yes.out"
-  printf '\n' | script -qefc \
-    "SUBYARD_REPOSITORY_ROOT='$fixture' '$ROOT/.build/yard' p0-smoke up" \
-    /dev/null >"$output"
-  grep -Fq 'Proceed? [Y/n]' "$output" || die 'P0 Default-Yes resource prompt is missing'
-  SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke is-up
-  [ "$(SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke status)" = up ] \
-    || die 'dependency-free profile resource status failed'
-  output="$(SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke up)"
-  ! grep -Fq 'Proceed?' <<<"$output" || die 'converged P0 resource prompted'
-  SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke down --yes >/dev/null
-  if SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke is-up; then
-    die 'dependency-free profile resource survived reverse lifecycle'
-  fi
-  [ -e "$setup/subyard/p0-profile-resource.data" ] \
-    || die 'P0 resource down removed persistent data'
-
-  output="$fixture/default-no.out"
-  set +e
-  printf '\n' | script -qefc \
-    "SUBYARD_REPOSITORY_ROOT='$fixture' '$ROOT/.build/yard' p0-smoke purge" \
-    /dev/null >"$output" 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || die 'P0 Default-No purge accepted empty Enter'
-  grep -Fq 'Proceed? [y/N]' "$output" || die 'P0 Default-No resource prompt is missing'
-  [ -e "$setup/subyard/p0-profile-resource.data" ] \
-    || die 'declined P0 purge removed persistent data'
-  SUBYARD_REPOSITORY_ROOT="$fixture" "$ROOT/.build/yard" p0-smoke purge --yes >/dev/null
-  [ ! -e "$setup/subyard/p0-profile-resource.data" ] \
-    || die 'explicit P0 purge kept marker-owned persistent data'
-  printf 'ok: VM%s typed profile resource covers no-op, Default Yes and marker-owned Default No purge\n' "$SUBYARD_E2E_VM"
-)
-
 capacity_verify_cleanup() {
   local path project leftover
   restore_p0_incus_apparmor_default
@@ -2206,7 +1974,6 @@ capacity_verify_cleanup() {
   profile-resource)
     p0_capacity_use_build_cache
     ensure_owner_incus profile-resource
-    profile_resource
     bash dev/e2e/bind-resource-profile.sh
     p0_capacity_remove_build_cache
     p0_capacity_remove_root_if_empty

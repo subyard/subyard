@@ -1168,9 +1168,8 @@ peer_lane() {
     direct_vm 1 peer-projects-offline "$vm2_ip"
     direct_vm 2 peer-allow
   fi
-  direct_vm 1 peer-projects-finish "$vm2_ip"
   direct_vm 1 peer-rpc "$vm2_ip"
-  direct_vm 2 peer-rpc "$vm1_ip"
+  direct_vm 1 peer-projects-finish "$vm2_ip"
   if [ "$scope" = full ]; then
     direct_vm 1 peer-credentials "$vm2_ip"
   fi

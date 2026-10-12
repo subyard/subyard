@@ -247,7 +247,7 @@
       ],
       "category": "leaf", "expected_full": false,
       "required_check_sets": ["e2e:ssh-rpc", "go:adapters/remotecontrol", "go:adapters/transport", "go:rpc", "go:sshidentity", "go:sshrelay", "host-free:core", "p0:peer", "p0:transport", "shell:remote-projects", "shell:ssh-config", "shell:ssh-transport-identity", "shell:yard-remote"],
-      "required_e2e_checks": ["e2e:ssh-rpc", "p0:peer", "p0:transport"]
+      "required_e2e_checks": ["p0:peer", "p0:transport"]
     },
     {
       "id": "history-24",

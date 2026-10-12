@@ -4769,100 +4769,8 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
     fail 'registration comparison accepted unrelated setting drift'
   fi
 ) || fail 'source-upgrade registration comparison did not retain exact migration evidence'
-source_normalizer_function="$(sed -n '/^assert_direct_normalizer_is_pure() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-source-upgrade.sh")"
-run_source_normalizer_contract() (
-  set -euo pipefail
-  local scenario="$1"
-  local fixture="$TMP/source-normalizer-$scenario"
-  SOURCE_ROOT="$fixture/operator/src"
-  OPERATOR_HOME="$fixture/operator"
-  SHARED_ROOT="$fixture/shared"
-  RELEASE_ROOT="$SHARED_ROOT/releases"
-  CANDIDATE_A_REPOSITORY="$SHARED_ROOT/candidate-a-runtime"
-  CANDIDATE_A_ENGINE="$CANDIDATE_A_REPOSITORY/bin/yard-engine"
-  NORMALIZER_SCRATCH="$fixture/scratch"
-  NORMALIZER_CALLS="$fixture/normalizer-calls"
-  NORMALIZER_SCENARIO="$scenario"
-  EXPECTED_CANDIDATE_REPOSITORY="$CANDIDATE_A_REPOSITORY"
-  export EXPECTED_CANDIDATE_REPOSITORY NORMALIZER_CALLS NORMALIZER_SCENARIO \
-    NORMALIZER_SCRATCH OPERATOR_HOME
-  mkdir -p "$SOURCE_ROOT/bin" "$SOURCE_ROOT/private/yards" \
-    "$CANDIDATE_A_REPOSITORY/bin" "$CANDIDATE_A_REPOSITORY/config" \
-    "$OPERATOR_HOME/.config/subyard/yards/test-yard" "$OPERATOR_HOME/.local/bin" \
-    "$SHARED_ROOT" "$NORMALIZER_SCRATCH"
-  printf 'ALPHA=1\nYARD_TEMPLATE=e2e-vms\nOMEGA=2\n' \
-    > "$SOURCE_ROOT/private/yards/e2e-yard.env"
-  : > "$NORMALIZER_CALLS"
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    '[ "${SUBYARD_REPOSITORY_ROOT:-}" = "$EXPECTED_CANDIDATE_REPOSITORY" ] || exit 65' \
-    '[ -f "$SUBYARD_REPOSITORY_ROOT/config/commands.registry" ] || exit 66' \
-    '[ "${1:-}" = _migrate ] && [ "${2:-}" = normalize-yard-config ] || exit 63' \
-    'printf "invoke:%s\n" "$*" >> "$NORMALIZER_CALLS"' \
-    'shift 2' \
-    'if [ "$#" -ne 0 ]; then' \
-    '  [ "$NORMALIZER_SCENARIO" != reject-stdout ] || printf "leaked rejected output\n"' \
-    '  printf "path arguments rejected\n" >&2' \
-    '  exit 64' \
-    'fi' \
-    'input="$NORMALIZER_SCRATCH/input"' \
-    'cp /dev/stdin "$input"' \
-    'bytes=$(wc -c < "$input")' \
-    'printf "%s:read\n" "$bytes" >> "$NORMALIZER_CALLS"' \
-    'if [ "$bytes" -gt 1048576 ] && [ "$NORMALIZER_SCENARIO" != oversized-accept ]; then' \
-    '  if [ "$NORMALIZER_SCENARIO" = oversized-wrong-diagnostic ]; then' \
-    '    printf "bash: oversized.env: Permission denied\n" >&2' \
-    '  else' \
-    '    printf "%s: source-install yard config normalization: legacy yard config exceeds its size bound\n" "${0##*/}" >&2' \
-    '  fi' \
-    '  exit 1' \
-    'fi' \
-    '[ "$NORMALIZER_SCENARIO" != mutate-tree ] || printf "mutated\n" > "$OPERATOR_HOME/.local/bin/unexpected"' \
-    'if [ "$NORMALIZER_SCENARIO" = strip-newline ]; then' \
-    '  normalized=$(sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$input")' \
-    '  printf "%s" "$normalized"' \
-    'else' \
-    '  sed "s/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/" "$input"' \
-    'fi' \
-    > "$CANDIDATE_A_ENGINE"
-  printf 'fixture command registry\n' \
-    > "$CANDIDATE_A_REPOSITORY/config/commands.registry"
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'printf "yard: internal: _migrate expects check or apply\n" >&2' \
-    'exit 2' \
-    > "$SOURCE_ROOT/bin/yard"
-  chmod 0755 "$SOURCE_ROOT/bin/yard" "$CANDIDATE_A_ENGINE"
-  eval "$source_normalizer_function"
-  operator_env() {
-    local argument
-    for argument in "$@"; do
-      if [ "$argument" = "$SHARED_ROOT/direct-normalizer-evidence/oversized.env" ]; then
-        printf 'bash: %s: Permission denied\n' "$argument" >&2
-        return 126
-      fi
-    done
-    "$@"
-  }
-  die() { printf 'source normalizer fixture: %s\n' "$*" >&2; exit 2; }
-  assert_direct_normalizer_is_pure
-  [ "$(grep -c '^invoke:' "$NORMALIZER_CALLS")" = 3 ]
-  grep -Fxq '1048577:read' "$NORMALIZER_CALLS"
-)
-run_source_normalizer_contract valid \
-  || fail 'source normalizer helper rejected the exact pure boundary behavior'
-for source_normalizer_scenario in strip-newline reject-stdout oversized-accept \
-  oversized-wrong-diagnostic mutate-tree; do
-  set +e
-  run_source_normalizer_contract "$source_normalizer_scenario" >/dev/null 2>&1
-  source_normalizer_rc=$?
-  set -e
-  [ "$source_normalizer_rc" -ne 0 ] \
-    || fail "source normalizer helper missed $source_normalizer_scenario boundary drift"
-done
-
+# The native CLI tests own normalization and detailed journal/evidence validation.
+# Here validate only the physical lane's retained ingress binding/checkpoint gate.
 source_ingress_function="$(sed -n '/^verify_authorized_source_ingress() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh")"
 (
@@ -4871,91 +4779,31 @@ source_ingress_function="$(sed -n '/^verify_authorized_source_ingress() {/,/^}/p
   SOURCE_ROOT="$OPERATOR_HOME/src"
   V2_JOURNAL="$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json"
   mkdir -p "$(dirname "$V2_JOURNAL")"
-  source_digest_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  source_digest_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  source_digest_c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  source_digest_d=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   jq -n \
     --arg source "$SOURCE_ROOT" --arg data "$OPERATOR_HOME/.subyard" \
     --arg bin "$OPERATOR_HOME/.local/bin" --arg rc "$OPERATOR_HOME/.bashrc" \
-    --arg login "$OPERATOR_HOME/.profile" \
-    --arg a "$source_digest_a" --arg b "$source_digest_b" \
-    --arg c "$source_digest_c" --arg d "$source_digest_d" '
-      {
-        schemaVersion: 2,
-        transaction: "source-transaction",
-        releases: {from: "source-old", target: "source-candidate"},
-        checkpoint: "complete",
-        sourceIngress: {
-          schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
-          dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
-        },
-        steps: [
-          {
-            id: "source-install.import", migration: "source-install-v1",
-            resource: "source-install.config", decision: "canonicalize",
-            expectedFingerprint: $a, desiredFingerprint: $b, checkpoint: "verified",
-            evidence: {
-              schemaVersion: 2, transaction: "source-transaction",
-              releases: {from: "source-old", target: "source-candidate"},
-              step: "source-install.import", expectedFingerprint: $a,
-              desiredFingerprint: $b, observedFingerprint: $b, checkpoint: "verified"
-            }
-          },
-          {
-            id: "source-install.entrypoints", migration: "source-install-v1",
-            resource: "source-install.entrypoints", decision: "canonicalize",
-            expectedFingerprint: $c, desiredFingerprint: $d, checkpoint: "verified",
-            evidence: {
-              schemaVersion: 2, transaction: "source-transaction",
-              releases: {from: "source-old", target: "source-candidate"},
-              step: "source-install.entrypoints", expectedFingerprint: $c,
-              desiredFingerprint: $d, observedFingerprint: $d, checkpoint: "verified"
-            }
-          }
-        ]
-      }
-    ' > "$V2_JOURNAL"
-  cp "$V2_JOURNAL" "$V2_JOURNAL.valid"
+    --arg login "$OPERATOR_HOME/.profile" '{
+      schemaVersion: 2, checkpoint: "complete",
+      sourceIngress: {
+        schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
+        dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
+      },
+      steps: ["source-install.import", "source-install.entrypoints"] |
+        map({id: ., checkpoint: "verified"})
+    }' > "$V2_JOURNAL.valid"
+  cp "$V2_JOURNAL.valid" "$V2_JOURNAL"
   eval "$source_ingress_function"
   operator_env() { "$@"; }
   die() { return 2; }
   verify_authorized_source_ingress
-  for source_ingress_mutation in foreign-role wrong-step wrong-decision \
-    wrong-evidence unexpected-recovery duplicate-step; do
-    case "$source_ingress_mutation" in
-      foreign-role)
-        jq '.sourceIngress.dataHome += "-foreign"' "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-      wrong-step)
-        jq '.steps[0].resource = "source-install.foreign"' \
-          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-      wrong-decision)
-        jq '.steps[0].decision = "retain"' \
-          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-      wrong-evidence)
-        jq '.steps[0].evidence.observedFingerprint = .steps[0].expectedFingerprint' \
-          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-      unexpected-recovery)
-        jq '.steps[0].evidence.recoveryFingerprint =
-          "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"' \
-          "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-      duplicate-step)
-        jq '.steps += [.steps[0]]' "$V2_JOURNAL.valid" > "$V2_JOURNAL"
-        ;;
-    esac
-    set +e
-    verify_authorized_source_ingress >/dev/null 2>&1
-    source_ingress_rc=$?
-    set -e
-    [ "$source_ingress_rc" -ne 0 ] \
-      || fail "source ingress helper accepted $source_ingress_mutation journal evidence"
+  for mutation in '.sourceIngress.dataHome += "-foreign"' \
+    '.checkpoint = "migrating"' '.steps = .steps[1:]' '.steps[1].checkpoint = "pending"'; do
+    jq "$mutation" "$V2_JOURNAL.valid" > "$V2_JOURNAL"
+    if verify_authorized_source_ingress >/dev/null 2>&1; then
+      fail "source ingress helper accepted $mutation"
+    fi
   done
-) || fail 'P0 source-upgrade does not behaviorally verify its authorized source ingress'
+) || fail 'P0 source-upgrade does not verify its authorized source ingress'
 consumer_fixture="$TMP/release-consumer"
 consumer_registry="$consumer_fixture/routes"
 consumer_log="$consumer_fixture/runner.log"

@@ -516,7 +516,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
-| `profile-resource` | VM1 and current candidate | temporary dependency-free resource/state and bound-resource profile | targeted diagnostic; full covers only the dependency-free resource portion |
+| `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |

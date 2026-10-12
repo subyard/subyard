@@ -706,6 +706,71 @@ esac
 	}
 }
 
+// Keep terminal consent and retained-data lifecycle local; physical profile gates
+// exercise their own real handlers.
+func TestResourceExactTerminalConsentAndRetainedData(t *testing.T) {
+	const helper = "TestResourceExactTerminalConsentAndRetainedData"
+	if os.Getenv(resourceTTYHelper) != helper {
+		for _, action := range []string{"run", "purge"} {
+			t.Run(action, func(t *testing.T) {
+				t.Setenv("SUBYARD_RESOURCE_TEST_ACTION", action)
+				runResourceTTYHelper(t, helper, "\n")
+			})
+		}
+		return
+	}
+	root, environment, _ := resourceExactFixture(t)
+	descriptor := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo.res")
+	contents, err := os.ReadFile(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, descriptor, string(contents)+"\nACTION=\"down down runtime-destruction recreatable\"\n", 0o600)
+	var output bytes.Buffer
+	run := func(arguments ...string) int {
+		t.Helper()
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"demo"}, arguments...),
+			Environment: environment, WorkingDir: root, Stdin: os.Stdin, Stdout: &output, Stderr: &output})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return program.Run(context.Background())
+	}
+	for _, unit := range []string{"first", "second"} {
+		if os.Getenv("SUBYARD_RESOURCE_TEST_ACTION") == "purge" {
+			writeCLIFile(t, filepath.Join(root, "unit-"+unit), "running", 0o600)
+		}
+	}
+	if os.Getenv("SUBYARD_RESOURCE_TEST_ACTION") == "run" {
+		if code := run("run"); code != 0 || !strings.Contains(output.String(), "Proceed? [Y/n]") {
+			t.Fatalf("interactive Enter failed: code=%d output=%s", code, output.String())
+		}
+		output.Reset()
+		if code := run("run"); code != 0 || strings.Contains(output.String(), "Proceed?") {
+			t.Fatalf("converged resource prompted: code=%d output=%s", code, output.String())
+		}
+		if code := run("down", "--yes"); code != 0 {
+			t.Fatalf("down failed: code=%d output=%s", code, output.String())
+		}
+		if _, err := os.Stat(filepath.Join(root, "unit-first")); !os.IsNotExist(err) {
+			t.Fatalf("down retained runtime: %v", err)
+		}
+	} else if code := run("purge"); code == 0 || !strings.Contains(output.String(), "Proceed? [y/N]") {
+		t.Fatalf("purge accepted Enter: code=%d output=%s", code, output.String())
+	}
+	if contents, err := os.ReadFile(filepath.Join(root, "unit-second")); err != nil || string(contents) != "running" {
+		t.Fatalf("retained data changed: %q, %v", contents, err)
+	}
+	if code := run("purge", "--yes"); code != 0 {
+		t.Fatalf("explicit purge failed: code=%d output=%s", code, output.String())
+	}
+	for _, unit := range []string{"first", "second"} {
+		if _, err := os.Stat(filepath.Join(root, "unit-"+unit)); !os.IsNotExist(err) {
+			t.Fatalf("purge retained %s: %v", unit, err)
+		}
+	}
+}
+
 func resourceTestChildProcess(t *testing.T, path string) *os.Process {
 	t.Helper()
 	value, err := os.ReadFile(path)

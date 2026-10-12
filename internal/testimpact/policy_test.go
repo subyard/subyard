@@ -131,11 +131,9 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			"dev/e2e/yard-network-policy.sh",
 		},
 		"e2e:adapter-contracts": {
-			"dev/agent-e2e.sh", "--purpose", "adapter-contracts", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh",
 		},
 		"e2e:credential-tools": {
-			"dev/agent-e2e.sh", "--purpose", "credential-tools", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh", "--check", "credential-tools",
 		},
 		"e2e:hermes-profile": {
@@ -163,11 +161,9 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			"env", "SUBYARD_E2E_ORCA_PROJECTS=1", "./config/profiles/orca/tests/e2e/orca-projects.sh",
 		},
 		"e2e:ssh-credential-peer": {
-			"dev/agent-e2e.sh", "--purpose", "ssh-credential-peer", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh", "--check", "ssh-credential-peer",
 		},
 		"e2e:ssh-rpc": {
-			"dev/agent-e2e.sh", "--purpose", "ssh-rpc", "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh", "--check", "ssh-rpc",
 		},
 	}
@@ -192,8 +188,12 @@ func TestRegistryNamedE2EChecksUsePreparedRunnableEntrypoints(t *testing.T) {
 			t.Errorf("registry is missing %s", id)
 			continue
 		}
-		if check.Tier != "T3" || !reflect.DeepEqual(check.Argv, argv) {
-			t.Errorf("%s = %#v, want fixed runnable T3 argv %v", id, check, argv)
+		wantTier := "T3"
+		if argv[0] == "bash" {
+			wantTier = "T1"
+		}
+		if check.Tier != wantTier || !reflect.DeepEqual(check.Argv, argv) {
+			t.Errorf("%s = %#v, want fixed runnable %s argv %v", id, check, wantTier, argv)
 		}
 	}
 	if _, exists := registry.Check("e2e:incus-contract"); exists {

@@ -478,102 +478,6 @@ bootstrap_candidate() {
     || die 'standalone installer invoked Go'
 }
 
-assert_direct_normalizer_is_pure() {
-  local legacy_yard="$SOURCE_ROOT/private/yards/e2e-yard.env"
-  local candidate_repository="$CANDIDATE_A_REPOSITORY"
-  local normalized_target="$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
-  local evidence="$SHARED_ROOT/direct-normalizer-evidence"
-  local before_tree="$evidence/operator-tree.before"
-  local after_tree="$evidence/operator-tree.after"
-  local normalized="$evidence/normalized.stdout"
-  local normalized_stderr="$evidence/normalized.stderr"
-  local expected="$evidence/normalized.expected"
-  local rejected_stdout="$evidence/rejected.stdout"
-  local rejected_stderr="$evidence/rejected.stderr"
-  local oversized="$evidence/oversized.env"
-  local oversized_stdout="$evidence/oversized.stdout"
-  local oversized_stderr="$evidence/oversized.stderr"
-  local oversized_expected="$evidence/oversized.expected"
-  local rejected_rc oversized_rc
-
-  snapshot_operator_tree() {
-    operator_env bash -c '
-      set -euo pipefail
-      for path in "$@"; do
-        if [ -e "$path" ] || [ -L "$path" ]; then
-          find "$path" -xdev -printf "node\t%p\t%y\t%m\t%U\t%G\t%s\t%l\n"
-          find "$path" -xdev -type f -exec sha256sum {} \; \
-            | sed "s/^/file\t/"
-        else
-          printf "absent\t%s\n" "$path"
-        fi
-      done | LC_ALL=C sort
-    ' _ \
-      "$SOURCE_ROOT" \
-      "$CANDIDATE_A_REPOSITORY" \
-      "$OPERATOR_HOME/.subyard" \
-      "$OPERATOR_HOME/.config/subyard" \
-      "$OPERATOR_HOME/.local/bin" \
-      "$OPERATOR_HOME/.bashrc" \
-      "$OPERATOR_HOME/.profile"
-  }
-
-  install -d -m 0700 "$evidence"
-  operator_env test ! -e "$normalized_target" \
-    && operator_env test ! -L "$normalized_target" \
-    || die 'normalized target exists before the authorized source ingress'
-  snapshot_operator_tree > "$before_tree"
-  if ! operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" bash -c '
-    exec "$1" _migrate normalize-yard-config < "$2"
-  ' _ "$CANDIDATE_A_ENGINE" "$legacy_yard" \
-    > "$normalized" 2> "$normalized_stderr"; then
-    sed -n '1,20p' "$normalized_stderr" >&2
-    die 'direct stdin-to-stdout normalization failed'
-  fi
-  operator_env sed 's/^YARD_TEMPLATE=e2e-vms$/YARD_TEMPLATE=test-vms/' \
-    "$legacy_yard" > "$expected"
-  cmp "$normalized" "$expected" \
-    || die 'direct normalizer did not remain a pure stdin-to-stdout transform'
-  [ ! -s "$normalized_stderr" ] \
-    || die 'successful direct normalization wrote diagnostics to stderr'
-  operator_env test ! -e "$normalized_target" \
-    && operator_env test ! -L "$normalized_target" \
-    || die 'direct stdin-to-stdout normalization mutated the target'
-
-  set +e
-  operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" \
-    "$CANDIDATE_A_ENGINE" _migrate normalize-yard-config \
-    "$legacy_yard" "$normalized_target" \
-    > "$rejected_stdout" 2> "$rejected_stderr"
-  rejected_rc=$?
-  set -e
-  [ "$rejected_rc" -ne 0 ] && [ ! -s "$rejected_stdout" ] \
-    && [ -s "$rejected_stderr" ] \
-    || die 'direct normalizer accepted its retired path-to-path form'
-  operator_env test ! -e "$normalized_target" \
-    && operator_env test ! -L "$normalized_target" \
-    || die 'rejected direct path normalization mutated the target'
-
-  head -c 1048577 /dev/zero | tr '\0' x > "$oversized"
-  printf '%s: source-install yard config normalization: legacy yard config exceeds its size bound\n' \
-    "${CANDIDATE_A_ENGINE##*/}" \
-    > "$oversized_expected"
-  set +e
-  operator_env env SUBYARD_REPOSITORY_ROOT="$candidate_repository" \
-    "$CANDIDATE_A_ENGINE" _migrate normalize-yard-config \
-    < "$oversized" \
-    > "$oversized_stdout" 2> "$oversized_stderr"
-  oversized_rc=$?
-  set -e
-  [ "$oversized_rc" = 1 ] && [ ! -s "$oversized_stdout" ] \
-    && cmp "$oversized_expected" "$oversized_stderr" \
-    || die 'direct normalizer did not return the exact bound-plus-one diagnostic'
-
-  snapshot_operator_tree > "$after_tree"
-  cmp "$before_tree" "$after_tree" \
-    || die 'direct normalization changed the scoped operator tree'
-}
-
 verify_migrated_yard_registration() {
   operator_env bash -c '
     set -euo pipefail
@@ -647,69 +551,20 @@ verify_authorized_source_ingress() {
     --arg bin "$OPERATOR_HOME/.local/bin" \
     --arg rc "$OPERATOR_HOME/.bashrc" \
     --arg login "$OPERATOR_HOME/.profile" '
-    def fingerprint:
-      type == "string" and test("^[0-9a-f]{64}$");
-    def exact_source_step($id; $resource; $transaction; $releases):
-      [.steps[] | select(.id == $id)] as $matches |
-      ($matches | length) == 1 and
-      ($matches[0] |
-        .migration == "source-install-v1" and
-        .resource == $resource and
-        .decision == "canonicalize" and
-        .checkpoint == "verified" and
-        (.expectedFingerprint | fingerprint) and
-        (.desiredFingerprint | fingerprint) and
-        .expectedFingerprint as $expected |
-        .desiredFingerprint as $desired |
-        .evidence.schemaVersion == 2 and
-        .evidence.transaction == $transaction and
-        .evidence.releases == $releases and
-        .evidence.step == $id and
-        (.evidence | has("recoveryFingerprint") | not) and
-        .evidence.expectedFingerprint == $expected and
-        .evidence.desiredFingerprint == $desired and
-        .evidence.observedFingerprint == $desired and
-        .evidence.checkpoint == "verified"
-      );
-    .transaction as $transaction |
-    .releases as $releases |
+    . as $journal |
     .schemaVersion == 2 and .checkpoint == "complete" and
     .sourceIngress == {
       schemaVersion: 1, kind: "pre-go-source-v1", sourceRoot: $source,
       dataHome: $data, binDir: $bin, rc: $rc, loginRC: $login
     } and
-    exact_source_step("source-install.import"; "source-install.config";
-      $transaction; $releases) and
-    exact_source_step("source-install.entrypoints"; "source-install.entrypoints";
-      $transaction; $releases)
+    all(["source-install.import", "source-install.entrypoints"][];
+      . as $id | any($journal.steps[]; .id == $id and .checkpoint == "verified"))
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
     || die 'normalized source state was not committed by the authorized outer ingress'
 }
 
 verify_config_workflow() {
-  local default_show paths show_output host_hash guest_hash status_output status_rc
-  [ "$(operator_yard -Y "$YARD_NAME" config show CODING_TOOL_INTEGRATIONS | sed -n 's/^effective: //p')" = '<unset>' ] \
-    && [ "$(operator_yard config show CODING_TOOL_INTEGRATIONS | sed -n 's/^effective: //p')" = codex ] \
-    || die 'migrated integration selection did not preserve the broker/workspace roles'
-  default_show="$(operator_yard config show DEV_SUDO)"
-  grep -Fq 'effective: 1' <<<"$default_show" \
-    && grep -Fq "$OPERATOR_HOME/.config/subyard/config.env" <<<"$default_show" \
-    || die 'default-yard config did not consume migrated host settings'
-  paths="$(operator_yard config paths)"
-  grep -Fq "configuration-root: $OPERATOR_HOME/.config/subyard" <<<"$paths" \
-    || die 'config paths did not report the persistent configuration root'
-  grep -Fq \
-    "$OPERATOR_HOME/.config/subyard/overrides/host/agents/codex/repo.rules (scope=host, role=file settings, consumer=" \
-    <<<"$paths" || die 'config paths did not resolve the migrated Codex asset'
-  ! grep -Fq 'source-staging-fixture' <<<"$paths" \
-    || die 'config paths printed a secret value'
-  show_output="$(operator_yard -Y "$YARD_NAME" config show SSH_PORT)"
-  grep -Fq 'effective: 2223' <<<"$show_output" \
-    && grep -Fq "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" <<<"$show_output" \
-    && grep -Fq 'effective' <<<"$show_output" \
-    || die 'config show did not explain the effective yard setting'
-  ! grep -Eq 'source-(staging|qa|profile)-fixture' <<<"$show_output" \
-    || die 'config show printed a secret value'
+  local host_hash guest_hash status_output status_rc
   set +e
   status_output="$(operator_yard config status --all-local 2>&1)"
   status_rc=$?
@@ -722,8 +577,6 @@ verify_config_workflow() {
         <<<"$status_output" \
       || die 'config status failed for a reason other than expected agent drift'
   fi
-  ! grep -Eq 'source-(staging|qa|profile)-fixture' <<<"$status_output" \
-    || die 'config status printed a secret value'
   operator_yard config apply --all-local --yes
   operator_yard config status --all-local
   host_hash="$(sudo -n sha256sum \
@@ -912,7 +765,6 @@ prepare() {
   [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \
     || die 'legacy yard did not enter the stopped desired-running upgrade fixture'
 
-  assert_direct_normalizer_is_pure
   bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A"
   select_current_test_yard
   incus project set "$PROJECT" user.subyard.p0-source="$MARKER"

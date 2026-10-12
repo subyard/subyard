@@ -12,7 +12,7 @@ command -v go >/dev/null 2>&1 || { printf 'ssh-rpc: Go is required to build the 
 "$ROOT/dev/build-engine.sh" >/dev/null
 ENGINE="$ROOT/.build/yard"
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-ssh-rpc.XXXXXX)"
 sshd_pid=''
 occupied_sshd_pid=''
 cleanup() {
@@ -37,9 +37,11 @@ user="$(id -un)"
 port=$((42000 + RANDOM % 10000))
 remote_home="$TMP/remote-home"
 remote_config="$TMP/remote-config"
-mkdir -p "$remote_home" "$remote_config"
+install -d -m 0700 "$remote_home" "$remote_config/yards/fixture"
+printf 'SSH_PORT=3333\n' > "$remote_config/yards/fixture/config.env"
+chmod 0600 "$remote_config/yards/fixture/config.env"
 public_key="$(cat "$TMP/client-key.pub")"
-printf 'restrict,command="env HOME=%s SUBYARD_OPERATOR_HOME=%s SUBYARD_CONFIG_HOME=%s SUBYARD_NO_AUDIT=1 %s rpc --stdio" %s\n' \
+printf 'restrict,command="env HOME=%s SUBYARD_OPERATOR_HOME=%s SUBYARD_CONFIG_HOME=%s SUBYARD_NO_AUDIT=1 %s -Y fixture rpc --stdio" %s\n' \
   "$remote_home" "$remote_home" "$remote_config" "$ENGINE" "$public_key" > "$TMP/authorized_keys"
 chmod 0600 "$TMP/authorized_keys"
 
@@ -94,7 +96,7 @@ append_frame() { # json output
 }
 request="$TMP/request"
 append_frame '{"version":1,"type":"request","id":"negotiate","method":"rpc.negotiate"}' "$request"
-append_frame '{"version":1,"type":"request","id":"ping","operationId":"operation-ping","method":"system.ping"}' "$request"
+append_frame '{"version":1,"type":"request","id":"settings","method":"settings.list"}' "$request"
 
 ssh -F /dev/null -T -p "$port" -i "$TMP/client-key" \
   -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile="$TMP/known_hosts" \
@@ -102,7 +104,7 @@ ssh -F /dev/null -T -p "$port" -i "$TMP/client-key" \
   "$user@127.0.0.1" -- yard rpc --stdio < "$request" > "$TMP/response"
 
 offset=0
-for index in 1 2 3 4; do
+for index in 1 2; do
   header="$(dd if="$TMP/response" bs=1 skip="$offset" count=4 status=none | od -An -tx1 | tr -d ' \n')"
   [ "${#header}" -eq 8 ] || fail "response frame $index has no complete header"
   size=$((16#$header))
@@ -113,14 +115,9 @@ done
 [ "$offset" -eq "$(stat -c '%s' "$TMP/response")" ] || fail 'SSH RPC returned an unexpected extra frame'
 jq -e '.id=="negotiate" and .result.version==1 and .error==null' "$TMP/frame-1.json" >/dev/null \
   || fail 'SSH negotiation response is invalid'
-jq -e '.type=="event" and .id=="ping" and .operationId=="operation-ping" and
-  .sequence==1 and .revision==1 and .event=="operation.started"' "$TMP/frame-2.json" >/dev/null \
-  || fail 'SSH operation-start event is invalid'
-jq -e '.type=="event" and .id=="ping" and .operationId=="operation-ping" and
-  .sequence==2 and .revision==2 and .event=="operation.finished"' "$TMP/frame-3.json" >/dev/null \
-  || fail 'SSH operation-finish event is invalid'
-jq -e '.type=="response" and .id=="ping" and .operationId=="operation-ping" and
-  .result.ok==true and .error==null' "$TMP/frame-4.json" >/dev/null \
-  || fail 'SSH operation response is invalid'
+jq -e '.type=="response" and .id=="settings" and .error==null and
+  .result.yardName=="fixture" and
+  any(.result.settings[]; .name=="SSH_PORT" and .value=="3333" and .valueAvailable==true)' \
+  "$TMP/frame-2.json" >/dev/null || fail 'SSH native query did not use the selected persisted yard'
 
-printf 'ok: real loopback OpenSSH handshake and framed RPC contract\n'
+printf 'ok: real loopback OpenSSH handshake and selected-yard native settings RPC\n'

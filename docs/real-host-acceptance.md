@@ -140,7 +140,8 @@ peer/exclusive-handoff check.
 
 If OpenSSH server is installed, a non-privileged loopback gate verifies the real SSH handshake,
 temporary host/client keys, strict host-key checking and the framed RPC stream without touching the
-system daemon.
+system daemon. It also dispatches a native owner `settings.list` query and checks the selected
+yard against a distinct persisted setting. The existing adapter registry IDs are local T1 checks.
 
 This closes the OpenSSH transport implementation itself; the two-E2E-VM run remains responsible
 for routing, disconnect and exclusive-handoff behavior across a real host boundary.

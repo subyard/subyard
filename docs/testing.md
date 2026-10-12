@@ -22,6 +22,34 @@ Profile settings/descriptor Go checks run once under `0022` through `profile-go.
 The GitHub profile runs its full Go race suite under `0022` and repeats only its explicit
 broker protected-file checks under `0002` and `0077`.
 
+## Coverage ownership
+
+Logical matrices belong to their unit or local integration owner. Physical E2E keeps
+installed-runtime, real Incus/systemd, routing, reboot and retained-data evidence.
+The IDs below are the existing registry/check-set names in `tests/impact-map.json`;
+choose checks by the changed contract, rather than repeating its matrix in P0.
+
+| Contract | Owning unit checks | Local integration | Physical gate | Trigger |
+| --- | --- | --- | --- | --- |
+| Legacy config normalization and pure stdin/stdout | `go:migration`: `TestNormalizeLegacyYardConfigContent` | `go:cli`: `TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery` runs CLI stdin/stdout against a real filesystem fixture | `p0:source-upgrade`: authorized import, installed readiness/history and real host-to-guest materialization | Normalizer or source ingress changes (`migration-release`) |
+| Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: source bootstrap and pinned predecessor histories | Transition/installer changes (`migration-release`, `release-tools`) |
+| Config precedence, safe diagnostics and drift | `go:config`: `TestResolveIntegrationSelection` | `go:config`: precedence over persisted layers; `go:cli`: config paths/show/status/apply tests use persisted config fixtures and native materialization; `shell:engine-release`: installed process checks | `p0:source-upgrade`: config apply/status plus actual guest file hash | Config resolver/materializer changes (`materialized-config`) |
+| Generic resource consent, exact plans and retained data | `go:resource`: `TestStructuredPrepareContract`; `go:cli`: stream prompt logic | `go:resource`: registry/assessment over descriptor files; `go:cli`: resource command/prepared tests execute handlers; `TestResourceExactTerminalConsentAndRetainedData` adds real files and PTY; shipped profile host-free checks own handler semantics | `p0:profile-resource`: bound-resource profile; shipped profile E2E gates own external services | Resource contract or profile changes (`profile-generic` and owning profile sets) |
+| RPC framing, skew, cancellation, EOF and ordered streams | `go:rpc`: in-memory framing/stream checks in `session_test.go` | `go:cli`: typed owner queries over config fixtures; `shell:engine-release`: packaged version negotiation; `e2e:ssh-rpc`: real loopback SSH and selected-yard native settings | `p0:peer`: deployed selected-yard project query and reconnect snapshot; `p0:transport`: real disconnect | RPC/SSH changes (`yard-rpc-contract`, `ssh-transport`) |
+| Project copies, owner inventory and offline recovery | `go:application`, `go:ownerinventory`: decisions with in-memory ports | `go:state`: file-backed persistence/recovery; `shell:project-registry-convergence`, `shell:remote-projects`: native owner/project fixture | `p0:peer`: real concurrent copies, remote shells, offline stale inventory and refresh/deletion | Project admission/routing changes (`project-runtime`, `ssh-transport`) |
+| Crypto and SSH adapter compatibility | Owning crypto, trust and transport packages | `e2e:adapter-contracts`, `e2e:credential-tools`, `e2e:ssh-credential-peer`: pinned real tools and loopback SSH | `e2e:ssh-unknown-host`, `p0:peer`: separate host identities, routing and failure/reconnect | Adapter/tool/trust changes (`real-adapter-contract`, `real-credential-contract`, `real-ssh-credential-contract`) |
+
+Go package IDs can contain both unit and local integration checks; the fixture boundary
+determines their evidence, rather than the test language or package name.
+
+The four local adapter IDs retain their `e2e:` prefix for compatibility, but are T1 checks
+with local entrypoints; they require their documented tools and never acquire VM leases.
+A local native fixture does not establish systemd/cgroup, physical disk or Incus behavior.
+Frozen release smoke and peer fixtures already reuse collector candidate assets when present;
+source A/B, tagged owner histories and pinned predecessors retain distinct artifact identities.
+Full/release-smoke, reboot observations, nested teardown and all shipped-profile acceptance
+requirements remain as documented; local passes do not replace them.
+
 ## Execution and reporting principles
 
 Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)

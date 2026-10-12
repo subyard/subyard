@@ -2814,11 +2814,11 @@ func TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery(t *testing.T) 
 	}); code != 2 || stdout != "" || stderr == "" {
 		t.Fatalf("path normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	for _, input := range []string{
-		"PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n",
-		strings.Repeat("x", (1<<20)+1),
+	for _, test := range []struct{ input, diagnostic string }{
+		{input: "PROFILE=e2e-vms\nYARD_TEMPLATE=$PROFILE\n"},
+		{input: strings.Repeat("x", (1<<20)+1), diagnostic: "yard: source-install yard config normalization: legacy yard config exceeds its size bound\n"},
 	} {
-		if code, stdout, stderr := run(input, []string{"normalize-yard-config"}); code != 1 || stdout != "" || stderr == "" {
+		if code, stdout, stderr := run(test.input, []string{"normalize-yard-config"}); code != 1 || stdout != "" || stderr == "" || test.diagnostic != "" && stderr != test.diagnostic {
 			t.Fatalf("invalid normalization code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
 	}

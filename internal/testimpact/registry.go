@@ -148,17 +148,16 @@ func BuiltInRegistry() (Registry, error) {
 	}
 	for _, name := range preparedAdapterChecks {
 		argv := []string{
-			"dev/agent-e2e.sh", "--purpose", name, "--vm", "1", "--",
 			"bash", "tests/real-host/adapter-contracts.sh",
 		}
-		rationale := "prepared real crypto and OpenSSH adapter contract"
+		rationale := "local pinned crypto and loopback OpenSSH adapter contract"
 		if name != "adapter-contracts" {
 			argv = append(argv, "--check", name)
-			rationale = "prepared targeted real-host adapter contract"
+			rationale = "local targeted crypto or loopback OpenSSH adapter contract"
 		}
 		checks = append(checks, Check{
 			ID:            "e2e:" + name,
-			Tier:          "T3",
+			Tier:          "T1",
 			Argv:          argv,
 			BudgetSeconds: 900,
 			Rationale:     rationale,

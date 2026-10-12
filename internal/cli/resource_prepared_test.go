@@ -24,9 +24,14 @@ import hashlib, json, os, pathlib, sys
 root = pathlib.Path(os.environ['SUBYARD_REPOSITORY_ROOT'])
 mode = os.environ.get('SUBYARD_RESOURCE_MODE')
 args = sys.argv[1:]
-if not args or args[0] != 'run':
+if not args or args[0] not in ('run', 'down', 'purge'):
     sys.exit(2)
+verb = args[0]
 if mode == 'apply':
+    if verb != 'run':
+        for unit in (('first',) if verb == 'down' else ('first', 'second')):
+            (root / ('unit-' + unit)).unlink(missing_ok=True)
+        sys.exit(0)
     if '--no-effect' not in args:
         for unit in ('first', 'second'):
             path = root / ('unit-' + unit)
@@ -55,17 +60,19 @@ if '--binding-on-second' in args and count >= 2:
 first_ready = (root / 'unit-first').exists()
 steps = []
 for unit in ('first', 'second'):
-    ready = (root / ('unit-' + unit)).exists()
+    exists = (root / ('unit-' + unit)).exists()
+    desired = 'running' if verb == 'run' or verb == 'down' and unit == 'second' else 'inactive'
+    ready = exists == (desired == 'running')
     if '--noop-expands' in args and count == 1:
         ready = True
     if '--verify-not-converged' in args and mode == 'verify' and unit == 'second':
         ready = False
-    conditional = unit == 'second' and not first_ready and not ready
+    conditional = verb == 'run' and unit == 'second' and not first_ready and not ready
     step = dict(id=unit, target='fixture unit ' + unit,
-                observed='running' if ready else ('unknown' if conditional else 'inactive'),
-                desired='running', decision='skip' if ready else ('conditional' if conditional else 'apply'),
+                observed='unknown' if conditional else ('running' if exists else 'inactive'),
+                desired=desired, decision='skip' if ready else ('conditional' if conditional else 'apply'),
                 verify='read fixture unit ' + unit, consequence='start fixture unit ' + unit)
-    if unit == 'second':
+    if verb == 'run' and unit == 'second':
         step['preconditions'] = ['the first fixture unit is running']
         step['dependsOn'] = ['first']
     if '--target-drift' in args and (root / 'resource-drift').exists() and unit == 'second':
@@ -74,7 +81,7 @@ for unit in ('first', 'second'):
         step['target'] = 'another fixture unit'
     steps.append(step)
 changed = any(step['decision'] != 'skip' for step in steps)
-print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action='run', changed=changed,
+print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, changed=changed,
     consequences=[step['consequence'] for step in steps if step['decision'] != 'skip'],
     steps=steps, binding=hashlib.sha256(binding.encode()).hexdigest())))
 `
