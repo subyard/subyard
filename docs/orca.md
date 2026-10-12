@@ -283,6 +283,11 @@ checkout; Subyard does not create sessions automatically.
 `up` and `pair` reconcile known roots and schedule discovery. Later Subyard clone, sync, bind and remove
 actions invoke the same registration hook, adding their canonical root immediately. An explicit `init` repairs the common dispatcher and retries
 installed hooks once for active resources, including when provisioning is already current.
+Before hooks run, `init` restores missing `.subyard-meta.json` files from the selected
+yard's authoritative owner registry. Repeated `init` and `orca up` preserve existing
+matching metadata, project identities, sources and server state. Unregistered guest
+directories are not adopted. Missing or unsafe registered roots and conflicting
+metadata fail the operation rather than reporting registration complete.
 These hooks do not start a stopped Orca service. Run `orca up` to install or repair the
 Orca component and register projects accumulated while it was stopped.
 

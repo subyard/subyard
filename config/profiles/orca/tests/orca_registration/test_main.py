@@ -253,3 +253,27 @@ class MainTests(unittest.TestCase):
         code, report = self.run_cli("status")
         self.assertNotEqual(0, code)
         self.assertTrue(report["errors"])
+
+    def test_missing_metadata_projection_matches_native_catalog_after_publication(self):
+        import discovery
+        from reconcile import reconcile
+        metadata = self.root.parent / '.subyard-meta.json'
+        payload = metadata.read_text()
+        metadata.unlink()
+        projection = {'schema': 1, 'missingMetadata': [
+            {'root': str(self.root.parent), 'payload': payload}]}
+        with mock.patch.object(discovery, 'metadata_projection', projection):
+            projected_scan = discovery.discover(self.workspaces)
+            projected = reconcile(projected_scan, self.rpc, self.state, apply=False,
+                                  host_name='owner-host')
+        self.assertFalse(metadata.exists())
+        metadata.write_text(payload)
+        actual = reconcile(discovery.discover(self.workspaces), self.rpc, self.state,
+                           apply=False, host_name='owner-host')
+        self.assertEqual(projected['scopeDigest'], actual['scopeDigest'])
+        self.assertEqual(projected['catalogDigest'], actual['catalogDigest'])
+        # The projection must retain the actual native catalog as a guard.
+        self.rpc.repos.append({'id': 'foreign', 'path': '/elsewhere', 'kind': 'folder'})
+        drift = reconcile(discovery.discover(self.workspaces), self.rpc, self.state,
+                          apply=False, host_name='owner-host')
+        self.assertNotEqual(projected['catalogDigest'], drift['catalogDigest'])

@@ -41,6 +41,12 @@ class ScanLimit(Exception):
     pass
 
 
+# Optional owner-built, read-only projection for init's missing-metadata step.
+# Actual registration never supplies it; publication and normal native readback
+# must match the captured projected catalog before any hook is authorized.
+metadata_projection = None
+
+
 def _open_dir(path, parent=None):
     return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
 
@@ -128,6 +134,15 @@ def verify_missing(scan, path):
 
 def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):
     workspaces = os.path.abspath(workspaces)
+    projected = {}
+    if metadata_projection is not None:
+        for target in metadata_projection["missingMetadata"]:
+            payload = json.loads(target["payload"])
+            root = os.path.join(workspaces, payload["projectId"])
+            if (target["root"] != root or os.path.dirname(root) != workspaces
+                    or payload.get("schema") != 1 or root in projected):
+                raise ValueError("invalid projected project metadata")
+            projected[root] = target["payload"].encode()
     scan = Scan(workspaces=workspaces)
     deadline = deadline if deadline is not None else time.monotonic() + 20.0
     entries_left = max_entries
@@ -222,12 +237,16 @@ def discover(workspaces, deadline=None, max_entries=1000000, recursive=True):
                         metadata_fd = os.open(".subyard-meta.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                                               dir_fd=project_fd)
                     except FileNotFoundError:
-                        continue
+                        raw = projected.get(os.path.join(workspaces, project_id))
+                        if raw is None:
+                            continue
+                        metadata_fd = None
                     try:
-                        with os.fdopen(metadata_fd, "rb") as source:
-                            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-                                raise ValueError()
-                            raw = source.read(65537)
+                        if metadata_fd is not None:
+                            with os.fdopen(metadata_fd, "rb") as source:
+                                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                                    raise ValueError()
+                                raw = source.read(65537)
                         metadata = json.loads(raw) if len(raw) <= 65536 else None
                         if (not isinstance(metadata, dict) or type(metadata.get("schema")) is not int
                                 or metadata["schema"] != 1 or metadata.get("projectId") != project_id

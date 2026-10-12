@@ -33,7 +33,8 @@ if root.exists():
   observe_path(workspace)
   projects.append(workspace)
   roots.append(str(workspace))
-  if workspace.is_dir():
+  # Match the publisher: hash directory symlinks themselves without descending.
+  if stat.S_ISDIR(workspace.lstat().st_mode):
    for p in workspace.iterdir():
     observe_path(p)
     projects.append(p)

@@ -56,6 +56,22 @@ and reconciliation. Guest ownership evidence covers structured fields, plain fil
 files, derived session links and known service receipts; evidence conflicts preserve artifacts.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
+Explicit initialization also binds the selected yard's authoritative project records and
+guest metadata observations before approval. Its generic metadata step atomically restores
+missing canonical metadata before the installed project hooks run. Matching legacy metadata
+is preserved. Missing roots, unsafe ownership or paths, conflicting identity and stale
+observations stop initialization; guest directories never authorize additional projects.
+Read-only project inventory and status do not perform this repair.
+When missing metadata changes a profile's native hook catalog, its runtime observer
+can consume an optional stdin object with `schema: 1` and `missingMetadata` entries
+containing canonical `root` and metadata `payload`. This is a read-only projection:
+native repos, groups, registration state and source facts remain actual observations.
+Init captures the projected hook binding before approval, rechecks the original
+binding before publication, and requires normal readback to match the projected
+binding afterward. This preserves catalog guards on the first repair. A profile that
+does not support the projection fails verification if publication changes its binding.
+The Orca observer uses captured shipped sources even while installed helpers await repair.
+
 `AGENT_<name>_CHECK` is a package-owned installation/convergence probe; release activation
 may require it to succeed. Long-running service initialization belongs outside that gate.
 Optional `AGENT_<name>_HEALTH` probes report advisory service health for `yard status` and

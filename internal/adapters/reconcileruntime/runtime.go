@@ -62,9 +62,10 @@ type Runtime struct {
 	Profiles     []profile.Definition
 	Integrations []profile.IntegrationDefinition
 	// RuntimePlan retains the individual native contracts approved before init.
-	RuntimePlan *ProfileRuntimePlan
-	HookPlan    *ProjectHookPlan
-	Environment []string
+	RuntimePlan               *ProfileRuntimePlan
+	HookPlan                  *ProjectHookPlan
+	projectMetadataProjection []byte
+	Environment               []string
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
 	AdoptLegacyIntegrations bool

@@ -112,6 +112,7 @@ check_go_race() {
     './internal/adapters/credentialruntime:TestProtectedJSONAtomicWriteAndCounter|TestSetupCredentialImportMaterializeAndResume' \
     './internal/adapters/codexdesktop:TestProtectedCreationModes' \
     './internal/adapters/projectruntime:TestPatchStorePublishesProtectedArtifact' \
+    './internal/adapters/reconcileruntime:TestPreparedProjectMetadataRepair' \
     './internal/adapters/remotecontrol:TestTransactionalRestoresExistingFilesAndRemovesNewFiles' \
     './internal/adapters/networkruntime:TestEnsureHostLockCreatesAndPreservesValidatedInode' \
     './internal/adapters/testvmsruntime:TestBackendApplyInstallsCurrentEngineAndPublishesRoute|TestBrokerInputPublicationAndDirectory' \

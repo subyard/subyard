@@ -74,6 +74,14 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 	if err != nil || !applicable {
 		return err
 	}
+	if runtime.HookPlan != nil && runtime.HookPlan.metadata != nil && !runtime.HookPlan.metadataCompleted {
+		if err := runtime.repairProjectMetadata(ctx); err != nil {
+			return err
+		}
+		if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {
+			return err
+		}
+	}
 	if err := application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		for name, value := range runtime.HookPlan.Environment() {
 			request.Environment[name] = value

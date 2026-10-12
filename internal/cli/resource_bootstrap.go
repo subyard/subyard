@@ -134,10 +134,14 @@ func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loade
 	}
 	// An already initialized yard does not need the unconditional init hook retry:
 	// the resource performs its own project reconciliation during bring-up.
-	if !execution.hooksOnly() {
+	if execution.needsResourceInit() {
 		bootstrap.init = execution
 	}
 	return bootstrap, nil
+}
+
+func (execution *initExecution) needsResourceInit() bool {
+	return !execution.hooksOnly() || execution.hookPlan.HasMetadataRepair()
 }
 
 // Reserve configured owner ports even when another yard is stopped and its

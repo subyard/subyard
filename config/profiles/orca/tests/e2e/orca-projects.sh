@@ -298,6 +298,54 @@ guest_dev /usr/local/libexec/subyard/projects-changed >/dev/null
 yard init --yes >/dev/null
 assert_no_managed_duplicates
 
+stage 'repairing legacy missing metadata through repeated init and Orca up'
+clone_repo_before="$(repo_id "$clone_root")"
+clone_source_before="$(guest_dev sha256sum "$clone_root/fixture.txt")"
+clone_meta=/srv/workspaces/clone-project/.subyard-meta.json
+clone_metadata_before="$(guest_dev cat "$clone_meta")"
+guest_dev rm -- "$clone_meta"
+yard init --yes >/dev/null
+[ "$(guest_dev cat "$clone_meta")" = "$clone_metadata_before" ] \
+  || die 'init did not restore canonical owner metadata'
+[ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
+  || die 'metadata repair changed an existing Orca repository identity'
+[ "$(guest_dev sha256sum "$clone_root/fixture.txt")" = "$clone_source_before" ] \
+  || die 'metadata repair changed project source'
+guest_dev rm -- "$clone_meta"
+yard orca up --yes >/dev/null
+[ "$(guest_dev cat "$clone_meta")" = "$clone_metadata_before" ] \
+  || die 'already-running Orca up skipped missing owner metadata'
+[ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
+  || die 'already-running Orca up changed repository identity'
+yard orca down --yes >/dev/null
+yard clone "file://$guest_seed/source.git" --name metadata-recovery --yes >/dev/null
+recovery_root=/srv/workspaces/metadata-recovery/src
+recovery_meta=/srv/workspaces/metadata-recovery/.subyard-meta.json
+recovery_metadata_before="$(guest_dev cat "$recovery_meta")"
+guest_dev rm -- "$recovery_meta"
+yard init --yes >/dev/null
+[ "$(guest_dev cat "$recovery_meta")" = "$recovery_metadata_before" ] \
+  || die 'init skipped a registered project missing guest metadata'
+if guest_root systemctl is-active --quiet subyard-orca.service; then
+  die 'metadata repair started an intentionally stopped Orca service'
+fi
+guest_dev rm -- "$recovery_meta"
+yard orca up --yes >/dev/null
+recovery_group="$(group_id "$recovery_root")"
+assert_repo "$recovery_root" git "$recovery_group" metadata-recovery
+recovery_repo="$(repo_id "$recovery_root")"
+recovery_metadata_stamp="$(guest_dev stat -c '%i:%y' "$recovery_meta")"
+yard init --yes >/dev/null
+yard orca up --yes >/dev/null
+[ "$(guest_dev stat -c '%i:%y' "$recovery_meta")" = "$recovery_metadata_stamp" ] \
+  || die 'repeat init/up rewrote matching project metadata'
+[ "$(repo_id "$recovery_root")" = "$recovery_repo" ] \
+  || die 'repeat init/up changed the recovered repository identity'
+[ "$(repo_id "$clone_root")" = "$clone_repo_before" ] \
+  || die 'repeat init/up lost preserved Orca server state'
+assert_no_managed_duplicates
+yard remove metadata-recovery --yes >/dev/null
+
 if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then
   # Explicit extended diagnostic; ordinary acceptance never enters this branch.
   # shellcheck source=config/profiles/orca/tests/e2e/load-discovery.sh
