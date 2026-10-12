@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
+import copy
 import importlib.util
 import io
 import json
@@ -73,6 +74,164 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def transfer_fixture(self, directory, standalone=False):
+        checkout = fixture_checkout(directory)
+        first, second = directory / "old", directory / "new"
+        old_root, old = prepare_fixture(checkout, first)
+        name = "profile:sample/one" if standalone else "verify"
+        command = m.commands(old_root, "test", old["profiles"])[name]
+        artifacts = None
+        if standalone:
+            log, native, launch = directory / "original.log", directory / "native.json", directory / "launch.json"
+            log.write_text("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
+                "  [ ok ] worktree bundle ready (sha256=" + old["candidate_bundle_sha256"] + ")\n"
+                + "".join(f"E2E_PHASE phase={phase} state=end duration_seconds=1 exit_code=0 vm=1\n"
+                          for phase in ("transport", "guest", "guest-cleanup"))
+                + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
+                + "E2E lease released: slot=slot-002 run=sample\n")
+            native.write_text(json.dumps({"chunk_id": "original", "exit_code": 0, "output": "", "wall_time_seconds": 1.5}))
+            launch.write_text(json.dumps({"cwd": str(old_root), "source_fingerprint": old["source_fingerprint"],
+                "runtime_sha256": old["runtime_sha256"], "bundle_sha256": old["candidate_bundle_sha256"],
+                "acceptance_script_sha256": m.digest(old_root / command[1]), "launched_at_utc": "2026-01-01T00:00:00+00:00",
+                "argv": ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
+                    "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/workspace", "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(first / "candidate-bundle.tar.gz"),
+                    "SUBYARD_E2E_CANDIDATE_SHA256=" + old["candidate_bundle_sha256"], *command, "--slot", "2"]}))
+            artifacts = {role: {"path": str(path), "sha256": m.digest(path)} for role, path in (("log", log), ("native", native), ("launch", launch))}
+        else:
+            old["checks"][name] = m.execute(name, command, old_root, first, m.clean_environment())
+            old["checks"][name]["execution_environment"] = old["environment"]
+            m.save(first, old)
+        package = checkout / "dev/package-engine.sh"
+        package.write_text(package.read_text().replace("packaged candidate", "changed reviewed runtime"))
+        _, new = prepare_fixture(checkout, second)
+        review = {"schema_version": 1, "check": name, "tested": m.transfer_candidate(old), "target": m.transfer_candidate(new),
+            "source_receipt_sha256": m.digest(first / "receipt.json"), "review": {"unchanged_scope": "Synthetic check behavior is unchanged",
+            "reason": "Reviewed unrelated fixture runtime change", "authorization_reference": "operator-confirmation:fixture"}, "standalone": artifacts}
+        declaration = directory / "review.json"
+        declaration.write_text(json.dumps(review))
+        return first, second, name, declaration, review
+
+    def test_reviewed_receipt_transfer_retains_old_identity_and_strict_import(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary))
+            old_receipt = (first / "receipt.json").read_bytes()
+            with self.assertRaises(ValueError):
+                m.import_evidence(second, first, [name])
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            result = target["checks"][name]
+            self.assertNotEqual(result["evidence_transfer"]["tested"]["runtime_sha256"], target["runtime_sha256"])
+            self.assertEqual(result["evidence_transfer"]["target"], review["target"])
+            self.assertEqual(result["execution"], "inherited")
+            self.assertEqual(target["coverage"]["inherited"], [name])
+            self.assertNotIn(name, target["coverage"]["executed"])
+            self.assertEqual(target["checks"]["compatibility"]["status"], "pending")
+            self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
+            for filename in result["evidence_files"].values():
+                self.assertEqual((second / filename).stat().st_mode & 0o777, 0o600)
+            result["evidence_transfer"]["actual_command"] = ["wrong-command"]
+            m.save(second, target)
+            with self.assertRaises(ValueError):
+                m.load_bound(second)
+
+    def test_ordinary_import_rejects_reviewed_transfer_before_batch_writes(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            first, second, name, declaration, _ = self.transfer_fixture(directory)
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            source_root, source = m.load_bound(second)
+            executed = "profile:sample/two"
+            command = m.commands(source_root, "test", source["profiles"])[executed]
+            source["checks"][executed] = m.execute(executed, command, source_root, second, m.clean_environment())
+            m.save(second, source)
+            third = directory / "third"
+            prepare_fixture(directory / "checkout", third)
+            before = {path.name: path.read_bytes() for path in third.iterdir() if path.is_file()}
+            with self.assertRaisesRegex(ValueError, "cannot chain reviewed evidence transfers"):
+                m.import_evidence(third, second, [executed, name])
+            self.assertEqual({path.name: path.read_bytes() for path in third.iterdir() if path.is_file()}, before)
+            _, target = m.load_bound(third)
+            self.assertEqual(target["checks"][name]["status"], "pending")
+            self.assertEqual(target["checks"][executed]["status"], "pending")
+            self.assertEqual(m.import_evidence(third, second, [executed]), 0)
+            _, target = m.load_bound(third)
+            self.assertEqual(target["checks"][executed]["status"], "passed")
+
+    def test_reviewed_transfer_rejects_missing_authorization_binding_and_original_pass(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary))
+            before = (second / "receipt.json").read_bytes()
+            for change in (lambda r: r["review"].update(authorization_reference=""),
+                           lambda r: r.update(schema_version=True),
+                           lambda r: r["review"].update(unchanged_scope=""),
+                           lambda r: r["target"].update(runtime_sha256="f" * 64),
+                           lambda r: r.update(check="compatibility")):
+                invalid = copy.deepcopy(review)
+                change(invalid)
+                declaration.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+            _, old = m.load_bound(first)
+            declaration.write_text(json.dumps(review)[:-1] + ', "check": "verify"}')
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                m.transfer_evidence(second, first, name, declaration)
+            original = copy.deepcopy(old["checks"][name])
+            for status, code in (("failed", 1), ("interrupted", -15), ("pending", None), ("passed", 1), ("passed", True)):
+                old["checks"][name] = {**original, "status": status, "exit_code": code}
+                m.save(first, old)
+                review["source_receipt_sha256"] = m.digest(first / "receipt.json")
+                declaration.write_text(json.dumps(review))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+
+    def test_standalone_transfer_requires_original_complete_native_and_controller_evidence(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True)
+            before = (second / "receipt.json").read_bytes()
+            for role, mutate in (("native", lambda r: r.update(exit_code=1)),
+                                 ("native", lambda r: r.update(session_id=123)),
+                                 ("launch", lambda r: r["argv"].__setitem__(-4, "foreign.sh"))):
+                path = Path(review["standalone"][role]["path"])
+                original = path.read_bytes()
+                invalid = json.loads(original)
+                mutate(invalid)
+                path.write_text(json.dumps(invalid))
+                review["standalone"][role]["sha256"] = m.digest(path)
+                declaration.write_text(json.dumps(review))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+                path.write_bytes(original)
+                review["standalone"][role]["sha256"] = m.digest(path)
+            log = Path(review["standalone"]["log"]["path"])
+            original_log = log.read_bytes()
+            log.write_text("incomplete controller\n")
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            with self.assertRaises(ValueError):
+                m.transfer_evidence(second, first, name, declaration)
+            log.write_bytes(original_log.replace(b"phase=guest state=end duration_seconds=1 exit_code=0", b"phase=guest state=end duration_seconds=1 exit_code=1"))
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            with self.assertRaises(ValueError):
+                m.transfer_evidence(second, first, name, declaration)
+            log.write_bytes(original_log)
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            result = target["checks"][name]
+            self.assertIsNone(result["duration_seconds"])
+            self.assertIsNone(result["execution_environment"])
+            self.assertEqual(result["evidence_transfer"]["launched_at_utc"], "2026-01-01T00:00:00+00:00")
+            self.assertEqual(result["environments"][0]["base_fingerprint"], "a" * 64)
+            self.assertEqual(json.loads((first / "receipt.json").read_text())["checks"][name]["status"], "pending")
+            (second / result["evidence_files"]["native"]).write_text("tampered")
+            with self.assertRaises(ValueError):
+                m.load_bound(second)
+
     def test_prepare_uses_plain_sources_and_retains_only_needed_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

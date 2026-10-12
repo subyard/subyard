@@ -17,8 +17,15 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
-// Integration install includes the existing bounded image pull and package work.
-const integrationLifecycleApplyLimit = 22 * time.Minute
+const (
+	// Integration observations can include a bounded service startup wait.
+	// This aggregate cap includes all probes, transport and projection; their
+	// individual limits cannot all consume their full allowance. Startup gets
+	// margin without extending profile observers or cancellation ownership.
+	integrationLifecycleObserveLimit = 2 * time.Minute
+	// Integration install includes the existing bounded image pull and package work.
+	integrationLifecycleApplyLimit = 22 * time.Minute
+)
 
 func (runtime Runtime) integrationDefinitions() ([]profile.IntegrationDefinition, error) {
 	if runtime.Integrations != nil {
@@ -128,10 +135,14 @@ func (runtime Runtime) observeIntegrationLifecyclePhase(ctx context.Context, def
 	if err != nil {
 		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 	}
-	stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, profileRuntimeObserveLimit, "observe")
+	started := time.Now()
+	stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, integrationLifecycleObserveLimit, "observe")
 	if err != nil {
 		_, reason := lifecycleFailure(stderr, "inspect")
-		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, reason)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			reason = "native-unavailable"
+		}
+		return ports.RuntimeObservation{}, runtime.integrationExecutionDiagnostic(err, definition, phase, "inspect", reason, stderr, time.Since(started), integrationLifecycleObserveLimit, ctx.Err())
 	}
 	observation, err := decodeProfileRuntimeObservation(stdout)
 	selected := slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), definition.Name)
@@ -189,10 +200,11 @@ func (runtime Runtime) applyIntegrationLifecycles(ctx context.Context, plan Inte
 		if !domain.SafeID(operationID) {
 			return errors.New("integration lifecycle requires a valid operation ID")
 		}
+		started := time.Now()
 		stdout, stderr, err := runtime.runShippedHandler(ctx, profile.Definition{Root: definition.Root}, definition.Lifecycle.Handler, environment, integrationLifecycleApplyLimit, "apply", operationID, observation.Actual, observation.Desired)
 		if err != nil {
 			phase, reason := lifecycleFailure(stderr, "apply")
-			return runtime.integrationDiagnostic(err, definition, phase, reason)
+			return runtime.integrationExecutionDiagnostic(err, definition, phase, "apply", reason, stderr, time.Since(started), integrationLifecycleApplyLimit, ctx.Err())
 		}
 		applied, err := decodeProfileRuntimeObservation(stdout)
 		if err != nil {
