@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|diagnostics|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
   exit 2
 fi
-case "$lane" in full|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|diagnostics|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -63,6 +63,9 @@ project=''
 instance=''
 monitor_pid=''
 monitor_stop=''
+definition_checksum=''
+sdk_pool=''
+sdk_volume=''
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 cleanup() {
@@ -83,7 +86,7 @@ cleanup() {
     kill -TERM "$monitor_pid" 2>/dev/null || true
     wait "$monitor_pid" 2>/dev/null || true
   fi
-  if [ "$status" -ne 0 ] && [ -n "$project" ] && [ -n "$instance" ]; then
+  if [ "$status" -ne 0 ] && [ "$lane" != full ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 15 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --once \
       < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
       || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2
@@ -96,17 +99,72 @@ cleanup() {
     fi
   fi
   if yard teardown --yes > "$state/teardown.log" 2>&1; then
-    printf 'android cleanup=passed\n'
+    if [ "$lane" = full ] && [ -n "$project" ]; then
+      if incus list --all-projects --format=json | python3 -c '
+import json, sys
+assert all(item["project"] != sys.argv[1] for item in json.load(sys.stdin))
+' "$project" \
+        && incus project list --format=json | python3 -c '
+import json, sys
+assert all(item["name"] != sys.argv[1] for item in json.load(sys.stdin))
+' "$project" \
+        && [ ! -e "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/projects" ] \
+        && [ ! -L "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/projects" ]; then
+        printf 'android SDK environment: instance, project and owned state removed=PASS\n'
+      else
+        printf 'android SDK environment removal=failed\n' >&2
+        cleanup_status=3
+        [ "$status" -ne 0 ] || status=3
+      fi
+      if [ -n "$sdk_volume" ]; then
+        if incus storage list --format=json | python3 -c '
+import json, subprocess, sys
+pool, volume = sys.argv[1:3]
+if any(item["name"] == pool for item in json.load(sys.stdin)):
+    volumes = json.loads(subprocess.check_output(sys.argv[3:] + ["storage", "volume", "list", pool,
+                                                               "--all-projects", "--format=json"]))
+    assert not any(item["type"] == "custom" and item["name"] == volume for item in volumes)
+' "$sdk_pool" "$sdk_volume" "${incus_binary[@]}"; then
+          printf 'android SDK backing: owned srv volume removed=PASS\n'
+        else
+          printf 'android SDK backing removal=failed\n' >&2
+          cleanup_status=3
+          [ "$status" -ne 0 ] || status=3
+        fi
+      fi
+      if [ -n "$definition_checksum" ]; then
+        definition="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+        if [ "$(sha256sum "$definition")" = "$definition_checksum" ] \
+          && [ "$(stat -c %a "$definition")" = 600 ] \
+          && [ "$(cat "$SUBYARD_CONFIG_HOME/android-acceptance-user-file")" = preserved ]; then
+          printf 'android teardown: reusable definition and unrelated user file preserved=PASS\n'
+        else
+          printf 'android teardown user-file preservation=failed\n' >&2
+          cleanup_status=3
+          [ "$status" -ne 0 ] || status=3
+        fi
+      fi
+    fi
+    [ "$cleanup_status" -ne 0 ] || printf 'android cleanup=passed\n'
   else
     printf 'android cleanup=failed\n' >&2
     cleanup_status=3
     [ "$status" -ne 0 ] || status=3
   fi
-  sudo -n find "$state" -depth -delete >/dev/null 2>&1 || {
+  if [ "$(cat "$state/.marker" 2>/dev/null)" = subyard-android-pool-runtime-v1 ]; then
+    sudo -n find "$state" -depth -delete >/dev/null 2>&1
+  else
+    false
+  fi || {
     printf 'android cleanup=state-removal-failed\n' >&2
     cleanup_status=3
     [ "$status" -ne 0 ] || status=3
   }
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    printf 'android cleanup=owned-state-remains\n' >&2
+    cleanup_status=3
+    [ "$status" -ne 0 ] || status=3
+  fi
   android_phase_end "$cleanup_status"
   exit "$status"
 }
@@ -128,7 +186,8 @@ yard init --yes
 project="$(yard config show INCUS_PROJECT | sed -n 's/^effective: //p')"
 instance="$(yard config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')"
 yard start --yes
-# Verify the required physical namespace boundary before downloading the Android SDK.
+# Emulator diagnostics require the physical namespace boundary before downloading images.
+if [ "$lane" != full ]; then
 incus --project "$project" exec "$instance" -- bash -ceu '
   name="$1"
   test ! -e "/run/netns/$name"
@@ -139,7 +198,35 @@ incus --project "$project" exec "$instance" -- bash -ceu '
   test "$owner" != "$child"
   printf "android namespace-preflight=PASS\n"
 ' _ "subyard-android-probe-$token"
+fi
 yard provision --yes
+if [ "$lane" = full ]; then
+  android_phase_begin sdk-build
+  sdk_pool="$(yard config show SRV_POOL | sed -n 's/^effective: //p')"
+  sdk_volume="$(yard config show SRV_VOLUME | sed -n 's/^effective: //p')"
+  [ "$sdk_volume" = "yard-srv-$YARD_NAME" ] || exit 1
+  [ "$(incus --project "$project" config device get "$instance" srv pool)" = "$sdk_pool" ]
+  [ "$(incus --project "$project" config device get "$instance" srv source)" = "$sdk_volume" ]
+  [ "$(incus --project "$project" config device get "$instance" srv path)" = /srv ]
+  printf 'android SDK backing: project=%s pool=%s volume=%s path=/srv\n' "$project" "$sdk_pool" "$sdk_volume"
+  # The fixture owns the canonical named-yard state; this is not a public setting.
+  owned_state="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/projects"
+  install -d -m 0700 "$owned_state"
+  printf '%s\n' android-acceptance-owned-state > "$owned_state/.android-acceptance-marker"
+  chmod 0600 "$owned_state/.android-acceptance-marker"
+  printf preserved > "$SUBYARD_CONFIG_HOME/android-acceptance-user-file"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/android-acceptance-user-file"
+  definition_checksum="$(sha256sum "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env")"
+  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+    incus_binary=(sudo -n /usr/bin/incus)
+  fi
+  timeout --foreground --kill-after=10 120 "${incus_binary[@]}" --project "$project" exec "$instance" \
+    --user 1000 --group 1000 --env HOME=/home/dev -- bash -se \
+    < "$root/config/profiles/android/tests/e2e/android-sdk-build.sh"
+  android_phase_end 0
+  printf 'android_sdk_build=passed\n'
+  exit 0
+fi
 incus --project "$project" exec "$instance" --user 1000 --group 1000 --env HOME=/home/dev -- bash -ceu '
   mkdir -p "$HOME/.android/avd/personal-acceptance.avd"
   printf preserved > "$HOME/.android/avd/personal-acceptance.avd/userdata-marker"
@@ -277,7 +364,7 @@ for ((attempt = 0; attempt < 100; attempt++)); do
 done
 grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
   || { printf 'android boot monitor did not start\n' >&2; exit 1; }
-if [ "$lane" = full ]; then
+if [ "$lane" = diagnostics ]; then
   android_phase_begin boot
   adb_log="$state/adb-getprop.log"
   adb_status=0
@@ -368,7 +455,7 @@ timeout --foreground --kill-after=60 7200 bash "$root/config/profiles/android/te
 android_phase_end 0
 [ "$lane" != viewer ] || exit 0
 [ "$lane" != viewer-native-debug ] || exit 0
-if [ "$lane" = full ]; then
+if [ "$lane" = diagnostics ]; then
   android_phase_begin projects
   # The L2 fixture exercises sequential device/API leases and clean reuse through its normal facade.
   bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"

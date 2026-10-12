@@ -271,3 +271,27 @@ when the profile changes.
 Owners can use `yard emu revoke --slot 001` or `yard emu down` to drain leases through the normal
 confirmation policy. These operations use a separate owner-only socket, never the socket mounted
 into project environments. Service diagnostics are available through the yard's system journal.
+
+## Release acceptance
+
+Run the ordinary Android gate on one disposable `android-test` VM:
+
+```sh
+bash config/profiles/android/tests/e2e/acceptance.sh --slot "$slot" --lane full
+```
+
+It initializes a real yard and provisions the Android profile, builds one tiny launchable
+application with the installed AAPT2, javac, D8, zipalign and apksigner, and verifies its
+resources, Activity, API levels, DEX, alignment and signature. It uses no Gradle distribution
+or emulator runtime. It verifies that the SDK lives on this yard's owned `/srv` volume.
+Marker-owned yard teardown removes that volume and the disposable SDK environment;
+the fixture verifies removal of its backing volume, instance, Incus project, project state
+and temporary state, while preserving the reusable yard definition and an unrelated user file. The outer
+runner releases the disposable VM lease. This checks environment removal through the normal
+Yard lifecycle; emulator image-cache work remains in the diagnostic lanes.
+
+The longer emulator, viewer, restart/recovery and two-project workflows are explicit optional
+diagnostics: `--lane diagnostics` runs the former broad sequence; `recovery`, `viewer`,
+`viewer-native-debug`, `sdk-images` and `memory-lease` select their existing focused diagnostics.
+They use the same controller and fresh disposable allocation. Run them when changes need those
+physical contracts; they are separate from the ordinary release gate.

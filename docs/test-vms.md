@@ -342,15 +342,21 @@ That singleton reserves 4.5 GiB including VM overhead, rather than the pair's 9 
 OpenClaw, GitHub, Hermes, Orca and subyard-dev acceptance request one standard guest; Amnezia
 retains its owner/client pair. Android retains its larger guest. The generic Android VM base
 does not include the SDK; the fixture provisions it.
-The full lane first checks the default phone (API 36), including native and remote use,
-viewers, recovery, APK installation, clean userdata on reuse and lease expiry. It then checks
-the API 35 phone and API 36 tablet sequentially. Complete acceptance requires both phases.
-On the standard 8 GiB VM, acceptance checks one emulator and a typed safe memory refusal
-for a second request, preserving the first lease and its runtime. It releases the first
-emulator before testing successful standalone acquire, rendering, renewal and release.
-The idle-display recovery check returns the device to ACTIVE before cancellation and cleanup.
-The attached viewer check deliberately delays scrcpy's server launch by 20 seconds to verify
-bounded startup waiting on a real device, without allocating another emulator.
+The ordinary Android `--lane full` gate initializes and provisions a real yard, builds one
+small launchable APK with the installed SDK tools, verifies APK semantics and its signature,
+then removes the disposable SDK environment through normal marker-owned yard teardown. It
+verifies the SDK's owned `/srv` backing and volume, instance, project and state removal,
+preserving the reusable yard definition and an unrelated user file. It needs no Gradle download or emulator runtime.
+See [Android acceptance](android.md#release-acceptance).
+
+The optional `--lane diagnostics` retains the broader phone/API 36, native/remote viewers,
+recovery, APK installation, clean userdata, lease expiry and sequential API 35 phone/API 36
+tablet checks, including the two-project Gradle builds and legacy rebuild fixture. On the
+standard 8 GiB VM, it checks one emulator and a typed safe memory refusal for a second request,
+preserving the first lease and runtime. It releases the first emulator before successful
+standalone acquire, rendering, renewal and release. The idle-display recovery check returns
+the device to ACTIVE before cancellation and cleanup. Attached viewer startup is deliberately
+delayed by 20 seconds. These checks are separate from the ordinary release gate.
 
 After a viewer-only change, pass `--lane viewer` to `config/profiles/android/tests/e2e/android-pool-runtime.sh`.
 It checks owner, yard and remote controller viewers, including real SSH transport and rendered
@@ -358,16 +364,17 @@ frames, delayed startup, attachment without lease renewal or release, and a stan
 after the borrowed lease is released, then cleans up. Remote controller coverage also checks cancellation
 and EOF cleanup of wire processes. It prepares both API35 and
 API36 images, skipping the separate remote workload-run and repeated API35 preparation assertions.
-Those assertions remain in the full lane. It uses the same single VM.
+Those assertions remain in the diagnostics lane. It uses the same single VM.
 
 After a recovery change, pass `--lane recovery` to
 `config/profiles/android/tests/e2e/android-pool-runtime.sh`. This lane performs its own fresh setup and image preparation,
 then checks pool and yard restarts, stale lease fencing, final remote owner execution, cache pruning
 and cleanup. It boots both phones across the restart sequence and skips viewer subtests and scrcpy
-installation. The full lane retains the owner, attached and standalone viewers before recovery.
+installation. The diagnostics lane retains the owner, attached and standalone viewers before recovery.
 It skips the separate L2 builds, concurrent device lifecycle and expiry checks; retain their
-source-specific evidence when those paths are unchanged. The default remains the complete lane. Android fixtures emit bounded `E2E_PHASE` durations and exit
-codes, validated numeric tool versions, capture observations and read-only numeric monitor samples.
+source-specific evidence when those paths are unchanged. The default remains the small SDK/build/removal
+gate. Android fixtures emit bounded `E2E_PHASE` durations and exit codes. Diagnostic lanes also emit
+validated numeric tool versions, capture observations and read-only numeric monitor samples.
 Unknown, incomplete or timed-out display queries remain unknown. Scrcpy download and extraction
 are measured separately; these timings do not establish a reusable dependency cache.
 
