@@ -34,7 +34,7 @@ diagnose_failure() {
   local rc="$1"
   if [ "$rc" -ne 0 ] && [ -n "${GUEST_DIRS[1]:-}" ]; then
     printf 'amnezia_acceptance_failure_exit=%s\n' "$rc" >&2
-    # Bound read-only probes and report timings only, never runtime/config contents.
+    # Bound read-only probes; expose only timings and selected service states.
     guest 1 timeout 100 bash -c '
       probe() {
         local label="$1" started=$SECONDS rc=0
@@ -44,6 +44,17 @@ diagnose_failure() {
       }
       probe guest-observe incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
         python3 /usr/local/lib/subyard-amnezia/runtime.py observe
+      probe guest-docker-enumerate incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        timeout 10 docker container ls -a --format "{{.Names}}"
+      probe guest-observe-management incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        python3 /usr/local/lib/subyard-amnezia/runtime.py observe-management
+      started=$SECONDS rc=0
+      timeout 20 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        systemctl show docker.service containerd.service subyard-amnezia.service \
+          --property=Id --property=LoadState --property=ActiveState --property=SubState \
+          --property=Result --property=ExecMainStatus \
+          --property=ExecMainStartTimestampMonotonic --property=NRestarts 2>/dev/null || rc=$?
+      printf "startup_probe=guest-service-state duration_seconds=%s exit=%s\n" "$((SECONDS - started))" "$rc"
       probe owner-config incus query "/1.0/instances?recursion=1&all-projects=true"
       probe owner-state incus list --all-projects --format=json
       probe guest-projects incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \

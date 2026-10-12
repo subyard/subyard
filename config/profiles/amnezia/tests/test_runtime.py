@@ -40,6 +40,47 @@ def result(stdout=b'', code=0):
     return subprocess.CompletedProcess([], code, stdout, b'')
 
 
+class AcceptanceDiagnosticsTest(unittest.TestCase):
+    def test_failure_probes_preserve_exit_and_suppress_native_contents(self):
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        start = source.index('diagnose_failure() {')
+        function = source[start:source.index('\n}\n', start) + 3]
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            incus = directory / 'incus'
+            incus.write_text('''#!/bin/sh
+case "$*" in
+  *"docker container ls"*) echo private-container-canary; exit 17 ;;
+  *"runtime.py observe-management"*) echo private-management-canary; exit 18 ;;
+  *"systemctl show"*)
+    printf '%s\\n' "$*" > "$DIAGNOSTIC_SYSTEMD_CALL"
+    printf 'Id=docker.service\\nActiveState=activating\\n'
+    exit 19 ;;
+  *) echo private-observation-canary ;;
+esac
+''')
+            incus.chmod(0o755)
+            script = '''GUEST_DIRS[1]=fixture
+guest() { shift; [ "$2" != 100 ] || "$@"; }
+''' + function + '\ndiagnose_failure 23\n'
+            call = directory / 'systemd-call'
+            observed = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                                      env=dict(os.environ, PATH=str(directory) + ':/usr/bin:/bin',
+                                               DIAGNOSTIC_SYSTEMD_CALL=str(call)), timeout=10)
+            self.assertEqual(observed.returncode, 23)
+            self.assertNotIn('canary', observed.stdout + observed.stderr)
+            for label, code in [('guest-docker-enumerate', 17), ('guest-observe-management', 18),
+                                ('guest-service-state', 19)]:
+                self.assertRegex(observed.stderr, rf'startup_probe={label} duration_seconds=[0-9]+ exit={code}')
+            self.assertIn('Id=docker.service\nActiveState=activating\n', observed.stderr)
+            self.assertEqual(call.read_text().split(), [
+                'exec', 'yard-vpn-e2e', '--project', 'subyard-vpn-e2e', '--', 'systemctl', 'show',
+                'docker.service', 'containerd.service', 'subyard-amnezia.service',
+                '--property=Id', '--property=LoadState', '--property=ActiveState', '--property=SubState',
+                '--property=Result', '--property=ExecMainStatus',
+                '--property=ExecMainStartTimestampMonotonic', '--property=NRestarts'])
+
+
 class OwnerHandlerTest(unittest.TestCase):
     def setUp(self):
         values = {

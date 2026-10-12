@@ -666,6 +666,7 @@ owner() (
 	trap owner_cleanup EXIT
   prepare_owner_go_cache
 	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+	dev/build-profiles.sh >/dev/null
 	ensure_owner_incus
 	bash dev/e2e/p0-real-incus.sh
 	# Retain the shared base-image cache for later release smoke and peer fixtures.
@@ -715,6 +716,7 @@ owner_migration() (
   trap owner_cleanup EXIT
   prepare_owner_go_cache
   YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+  dev/build-profiles.sh >/dev/null
   ensure_owner_incus
   OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
@@ -731,6 +733,7 @@ broker_recovery_owner() (
   trap owner_cleanup EXIT
   prepare_owner_go_cache
   YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+  dev/build-profiles.sh >/dev/null
   ensure_owner_incus
   OWNER_BASELINE_IMAGES="$(incus image list --project default --format csv -c f)"
   OWNER_BASELINE_CAPTURED=1
