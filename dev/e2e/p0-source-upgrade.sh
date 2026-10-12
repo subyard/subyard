@@ -420,11 +420,60 @@ package_candidates() {
   chmod -R a+rX "$RELEASE_ROOT"
 }
 
+bootstrap_failure_diagnostics() {
+  local launcher="$OPERATOR_HOME/.subyard/runtime/current/bin/yard" report status=0
+  if ! operator_env test -x "$launcher" 2>/dev/null; then
+    launcher="$CANDIDATE_A_REPOSITORY/bin/yard"
+  fi
+  if ! operator_env test -x "$launcher" 2>/dev/null; then
+    printf '  [ .. ] bootstrap failure readiness inspection unavailable: no runtime launcher\n' >&2
+    return 0
+  fi
+  report="$(mktemp "$SHARED_ROOT/bootstrap-readiness.XXXXXX")" || return 0
+  # Inspect once without extending the failed operation's authorization or
+  # printing raw command output, configuration, or probe stderr.
+  operator_no_go timeout --signal=TERM --kill-after=5s 30s \
+    "$launcher" migrate --check --json > "$report" 2>/dev/null || status=$?
+  printf '  [ .. ] bootstrap failure readiness inspection exit=%s\n' "$status" >&2
+  if [ "$status" = 0 ]; then
+    jq -ces '
+      def member($values): . as $value | type == "string" and ($values | index($value)) != null;
+      {"activation.materialized-config":"materialized-config", "activation.host-power":"host-power",
+       "activation.test-vm-broker":"test-vm-broker", "activation.test-yard-route-consumers":"route-consumers",
+       "activation.orca-runtime":"orca-runtime", "activation.openlit-runtime":"openlit-runtime",
+       "source-install.config":"source-config", "source-install.entrypoints":"source-entrypoints",
+       "test-yard-owner":"owner-registration", "migration-history.checkpoint":"migration-history",
+       "transition.source-metadata":"source-metadata"} as $resources |
+      select(length == 1) | .[0] |
+      select(.outcome.status | member(["ready", "migration-required", "recovering", "operator-action-required"])) |
+      select(.outcome.code | member(["ready", "transition-required", "recovery-pending", "registry-invalid",
+        "unsupported-epoch", "unsupported-kind", "confirmation-required", "operation-declined", "plan-stale",
+        "migration-stale", "resource-conflict", "precondition-blocked", "dependency-unavailable",
+        "verification-failed", "activation-ambiguous", "recovery-ambiguous", "journal-invalid",
+        "rollback-incompatible", "rollback-expired"])) |
+      select(.decisions == null or (.decisions | type) == "array") |
+      (.decisions // []) as $decisions | select($decisions | length <= 64) |
+      select(all($decisions[]; type == "object" and
+        (.resource | member($resources | keys)) and
+        (.decision | member(["preserve", "transform", "canonicalize", "reset", "quarantine", "block"])))) |
+      {status: .outcome.status, code: .outcome.code,
+       decisions: [$decisions[] | {resource_class: $resources[.resource], decision}]}' \
+      "$report" >&2 2>/dev/null \
+      || printf '  [ .. ] bootstrap failure readiness inspection unavailable: invalid public report\n' >&2
+  fi
+  find "$report" -delete
+  return 0
+}
+
 bootstrap_candidate() {
-  local release="$1" version="$2"
+  local release="$1" version="$2" status=0
   operator_no_go env \
     YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION="$version" \
-    "$release/subyard-install.sh" --yes
+    "$release/subyard-install.sh" --yes || status=$?
+  if [ "$status" -ne 0 ]; then
+    bootstrap_failure_diagnostics || true
+    return "$status"
+  fi
   operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
     || die 'standalone installer invoked Go'
 }

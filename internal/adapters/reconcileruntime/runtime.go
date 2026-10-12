@@ -1717,6 +1717,10 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if runtime.Executor == nil {
 		return false, errors.New("Incus executor is required")
 	}
+	// Integration ownership probes require the generic Docker substrate first.
+	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "command -v docker >/dev/null && timeout 10 docker info >/dev/null"}); err != nil || !ok {
+		return false, err
+	}
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return false, err

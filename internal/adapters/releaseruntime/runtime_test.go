@@ -1072,9 +1072,10 @@ func TestPrepareTransitionRepairsCompletedActivationDriftWithOneGrant(t *testing
 	repairTransaction := "tx-fedcba9876543210"
 	repairPlan := "plan-v1-" + strings.Repeat("f", 64)
 	resumePlan := "resume-v1-" + strings.Repeat("9", 64)
+	repairMessage := "completed migrations remain applied; a new release activation repair requires authorization: activation.materialized-config"
 	driftInspection := fmt.Sprintf(
-		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the inspected release transition has not started","retry":"run yard update","transaction":%q}}}`,
-		repairPlan, fixture.target, fixture.target, fixture.transaction,
+		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":%q,"retry":"run yard update","transaction":%q}}}`,
+		repairPlan, fixture.target, fixture.target, repairMessage, fixture.transaction,
 	)
 	recoveringInspection := fmt.Sprintf(
 		`{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":%q,"assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the exact typed migration and release activation plan"]},"resume":%q,"outcome":{"status":"recovering","reachedGoal":false,"active":%q,"previous":"release-a","target":%q,"code":"recovery-pending","message":"the authorized release transition can resume from observed facts","retry":"run yard update","transaction":%q}}}`,
@@ -1130,6 +1131,8 @@ esac
 		t.Fatalf("inspect completed repair: inspection=%#v err=%v", inspection, err)
 	}
 	if inspection.inspection.Outcome.Status != releasetransition.StatusMigrationRequired ||
+		inspection.inspection.Outcome.Code != releasetransition.CodeTransitionRequired ||
+		inspection.inspection.Outcome.Message != repairMessage ||
 		inspection.inspection.Outcome.Transaction != nil || inspection.inspection.Resume != nil ||
 		inspection.inspection.Plan != releasetransition.PlanToken(repairPlan) ||
 		!inspection.inspection.Assessment.Changed {
