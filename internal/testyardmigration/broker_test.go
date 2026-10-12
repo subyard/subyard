@@ -542,3 +542,67 @@ func brokerRepository(t *testing.T, root string) string {
 	}
 	return root
 }
+
+func TestBrokerRuntimeProspectiveRegistrationMatchesPublishedObservation(t *testing.T) {
+	options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+	expected, yard, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	absent, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || absent != BrokerRuntimeAbsent {
+		t.Fatalf("ordinary absent: %s %v", absent, err)
+	}
+	options.ProspectiveFiles = &config.ProspectiveFiles{Root: options.ConfigHome, Yards: []string{CurrentYard}, ReadSnapshot: func(candidate string) (config.PersistentFileSnapshot, error) {
+		if candidate == path {
+			return config.PersistentFileSnapshot{Exists: true, Content: payload}, nil
+		}
+		return config.ReadPersistentFileSnapshot(options.ConfigHome, candidate)
+	}}
+	observed, target, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || observed != expected || target != yard {
+		t.Fatalf("prospective activation applicability changed: got %s/%s, want %s/%s: %v", observed, target, expected, yard, err)
+	}
+}
+
+func TestBrokerProspectiveRegistrationPreservesConsumerPermissionGuard(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o644, 0o600 | os.ModeSetuid} {
+		t.Run(mode.String(), func(t *testing.T) {
+			options, _ := brokerRuntimeFixture(t, "RUNNING", "active")
+			path := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
+			payload := []byte("YARD_TEMPLATE=test-vms\n")
+			testkit.WriteFile(t, path, payload, mode)
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ordinary, _, ordinaryErr := PrepareBrokerRuntimeTarget(context.Background(), options)
+			options.ProspectiveFiles = &config.ProspectiveFiles{Root: options.ConfigHome, ReadSnapshot: func(candidate string) (config.PersistentFileSnapshot, error) {
+				return config.ReadPersistentFileSnapshot(options.ConfigHome, candidate)
+			}}
+			projected, _, projectedErr := PrepareBrokerRuntimeTarget(context.Background(), options)
+			if mode&os.ModeSetuid != 0 {
+				if ordinaryErr == nil || projectedErr == nil {
+					t.Fatalf("special-mode registration accepted: ordinary=%s/%v prospective=%s/%v", ordinary, ordinaryErr, projected, projectedErr)
+				}
+			} else if ordinaryErr != nil || projectedErr != nil || projected != ordinary {
+				t.Fatalf("readable registration rejected: ordinary=%s/%v prospective=%s/%v", ordinary, ordinaryErr, projected, projectedErr)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() || read(t, path) != string(payload) {
+				t.Fatal("read-only observation changed registration")
+			}
+		})
+	}
+}

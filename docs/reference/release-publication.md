@@ -117,6 +117,76 @@ new or affected scenarios, invent an old collector PASS or replace current prepa
 The pinned publication candidate must contain this tooling before using schema version 2;
 never amend an older frozen snapshot to add support.
 
+Publication transports the complete canonical attestation in a `subyard-attestation-zlib-v1`
+JSON envelope inside the workflow's existing outer Base64 input. The envelope contains exactly
+`transport`, `uncompressed_bytes`, `sha256` and a Base64 `payload` holding one zlib stream.
+Its size and hash describe the uncompressed original canonical JSON; durable
+`attestation_sha256` continues to identify that original document. Compression preserves every
+check, status, identity, inventory and reviewed transfer field. The unchanged initial workflow
+checkout decodes the outer Base64 JSON and persists the envelope; the pinned candidate's
+`publish-ci` expands it with a 1 MiB uncompressed limit before running the existing complete
+attestation validators. Plain JSON attestations from earlier workflow inputs remain supported
+within that limit. Malformed, truncated, trailing, oversized or hash-mismatched compressed data
+refuses publication before remote mutation.
+
+The complete serialized dispatch inputs, including candidate and durable request ID, must fit
+GitHub's [65,535-character inputs limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
+An oversized request is refused before dispatch intent or a remote request. Transport does not
+change trusted operator authority, request recovery, permissions or worker checkout behavior.
+The pinned candidate must include envelope decoding before using compressed publication inputs;
+prepare a new candidate rather than modifying an older frozen snapshot.
+
+An operator can explicitly accept a known terminal failure of one exact declared runnable
+profile check for one exact preparation candidate. This publication-only decision requires
+a public reason, authorization reference and separate repair reference. It does not change
+collector receipts, native outcomes, passing-evidence transfers or external deferrals. The
+collector and `accept` retain their original failed/incomplete results. Core, packaging,
+physical smoke, other profile checks and external obligations keep their normal requirements;
+there is no default decision or automatic waiver.
+
+Supply a local JSON declaration explicitly when publishing:
+
+```sh
+dev/release.sh publish --candidate rRUN_ID-aATTEMPT \
+  --operator-acceptance /path/to/exact-candidate-decision.json
+```
+
+The declaration has exactly these fields:
+
+| Field | Required value |
+| --- | --- |
+| `schema_version` | Integer `1` |
+| `check` | Exact runnable `profile:NAME` or `profile:NAME/LANE` from the frozen inventory |
+| `target` | Complete target preparation `identity.json`, including candidate, version, commit and every asset hash |
+| `tested` | Original frozen receipt's complete public transfer-candidate identity: version, source/runtime/bundle hashes, runtime filename, complete release inventory and candidate identity hash |
+| `command` | Exact normalized declared check command (`release_acceptance.command_identity`) |
+| `decision` | Exactly `reason`, `authorization_reference`, `repair_reference`; nonblank public English strings without credentials or private paths |
+| `source` | Exactly local frozen acceptance `output` path and original `receipt_sha256` |
+| `artifacts` | Exactly `native`, `launch`, `timing`, `log`; each has a local `path` and its original `sha256` |
+
+Paths resolve relative to the declaration. Repeat `--operator-acceptance` only for separately
+authorized distinct checks. The source must retain its verified source, exact runtime, bundle
+and full release asset inventory. Original and target normalized commands and versions must
+match. The original native object must contain a terminal nonzero exit, without a live session
+or interruption status. Its complete timing record must match the launch, terminal exit and
+monotonic whole duration. The bounded controller launch must select the original frozen source
+and checksum-bound bundle through its existing transport arguments. The log must retain physical
+base identities, successful cleanup for every allocated guest and one successful lease release.
+Missing, changed, ambiguous or incomplete evidence refuses this path. Only pending/uncollected
+or matching failed collector entries are eligible; passing or inherited entries cannot use it.
+
+An attestation with such decisions uses strict schema version `3`, with exact
+`operator_acceptances` and `reviewed_transfers` lists. The check remains `status: failed` with
+the original nonzero `exit_code`, `execution: operator-accepted` and original log hash. Its
+sanitized `operator_acceptance` binds the full target preparation, tested identity, normalized
+and actual commands, public decision, original evidence hashes, native failure, original and
+target collector statuses, whole duration, launch/end times, base identities and cleanup/release
+facts. Local paths and raw evidence are omitted. Publication prints the accepted check and
+`native_status=failed`; it does not claim that the check passed. GitHub validates this complete
+statement by the trusted operator against the pinned candidate and all other required gates.
+Schemas `1` and `2` continue to require normal passing evidence and cannot contain decisions.
+The pinned candidate must include schema `3` support before using this explicit path.
+
 All publication workflow runs use the same repository-wide stable concurrency group,
 `cancel-in-progress: false` and `queue: max`. This serializes different versions as well
 as same-version retries across operator machines, and preserves queued requests. Local
@@ -169,7 +239,9 @@ candidate to current branch HEAD as a workaround.
 `TMPDIR=/tmp bash tests/release-publication.sh` exercises exact imports, absent/changed
 acceptance, candidate/provenance/inventory binding, foreign refs/drafts, partial upload,
 HTTP 502 starter recovery, response loss at ref/draft/upload/publication, idempotent
-retry and the native workflow serialization contract using an in-memory GitHub fixture.
+retry, large complete reviewed-transfer transport, legacy plain inputs, bounded malformed/bomb
+refusal, explicit exact-candidate profile failure decisions and the native workflow serialization
+contract using an in-memory GitHub fixture.
 The existing collector, workflow gates and packaging contracts cover their own preserved
 behavior. These tests perform no real workflow dispatch, release publication or VM work;
 actual GitHub runner behavior, immutable publication and full runtime/profile/external

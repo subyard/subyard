@@ -86,6 +86,7 @@ type settingAssignment struct {
 type settingTracker struct {
 	catalog               Catalog
 	fileOverrides         map[string]string
+	prospectiveFiles      *ProspectiveFiles
 	assetValidationInputs []string
 	integrations          IntegrationSelection
 	layers                []settingLayer
@@ -314,7 +315,16 @@ func (tracker *settingTracker) fileSource(path string) string {
 	return path
 }
 
+func (tracker *settingTracker) prospectiveReader() func(string) ([]byte, error) {
+	if tracker.prospectiveFiles == nil {
+		return nil
+	}
+	return tracker.prospectiveFiles.readFile
+}
 func (tracker *settingTracker) fileExists(path string) (bool, error) {
+	if snapshot, handled, err := tracker.prospectiveFiles.snapshot(path); handled || err != nil {
+		return snapshot.Exists, err
+	}
 	source := tracker.fileSource(path)
 	if source == "" {
 		return false, nil
@@ -339,6 +349,15 @@ func (tracker *settingTracker) pathPresent(path string) bool {
 
 func (tracker *settingTracker) findYardFile(candidates []string, name string) (string, error) {
 	for _, candidate := range candidates {
+		if snapshot, handled, err := tracker.prospectiveFiles.snapshot(candidate); handled || err != nil {
+			if err != nil {
+				return "", err
+			}
+			if snapshot.Exists {
+				return candidate, nil
+			}
+			continue
+		}
 		if source, overridden := tracker.fileOverrides[candidate]; overridden {
 			if source == "" {
 				continue

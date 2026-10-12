@@ -2,9 +2,11 @@
 """Prepare exact CI assets, collect local acceptance, publish through serialized Actions."""
 import argparse
 import base64
+from datetime import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,12 +18,16 @@ import tempfile
 import time
 import uuid
 import zipfile
+import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("release_acceptance", ROOT / "dev/release-acceptance.py")
 a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "Subyard/Subyard")
+DISPATCH_INPUT_LIMIT = 65535
+ATTESTATION_BYTE_LIMIT = 1 << 20
+ATTESTATION_TRANSPORT = "subyard-attestation-zlib-v1"
 
 
 def canonical(value):
@@ -30,6 +36,54 @@ def canonical(value):
 
 def identity_hash(identity):
     return hashlib.sha256(canonical(identity).encode()).hexdigest()
+
+
+def encode_attestation(document):
+    original = canonical(document).encode()
+    if len(original) > ATTESTATION_BYTE_LIMIT:
+        raise ValueError("acceptance attestation exceeds uncompressed byte limit")
+    envelope = {"transport": ATTESTATION_TRANSPORT, "uncompressed_bytes": len(original),
+                "sha256": identity_hash(document), "payload": base64.b64encode(zlib.compress(original)).decode()}
+    return base64.b64encode(canonical(envelope).encode()).decode()
+
+
+def decode_attestation(document):
+    if not isinstance(document, dict):
+        raise ValueError("acceptance attestation must be a JSON object")
+    if "transport" not in document:
+        if len(canonical(document).encode()) > ATTESTATION_BYTE_LIMIT:
+            raise ValueError("acceptance attestation exceeds uncompressed byte limit")
+        return document  # Existing plain JSON workflow inputs remain valid.
+    if (set(document) != {"transport", "uncompressed_bytes", "sha256", "payload"}
+        or document["transport"] != ATTESTATION_TRANSPORT
+        or type(document["uncompressed_bytes"]) is not int
+        or not 0 < document["uncompressed_bytes"] <= ATTESTATION_BYTE_LIMIT
+        or not isinstance(document["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", document["sha256"])
+        or not isinstance(document["payload"], str)
+        or len(base64.b64encode(canonical(document).encode())) > DISPATCH_INPUT_LIMIT):
+        raise ValueError("invalid acceptance attestation envelope")
+    try:
+        compressed = base64.b64decode(document["payload"], validate=True)
+        decoder = zlib.decompressobj()
+        original = decoder.decompress(compressed, document["uncompressed_bytes"] + 1)
+    except (ValueError, zlib.error) as error:
+        raise ValueError("invalid compressed acceptance attestation") from error
+    if (len(original) != document["uncompressed_bytes"] or not decoder.eof
+        or decoder.unconsumed_tail or decoder.unused_data
+        or hashlib.sha256(original).hexdigest() != document["sha256"]):
+        raise ValueError("acceptance attestation envelope size, stream or hash mismatch")
+    decoded = json.loads(original)
+    if not isinstance(decoded, dict) or canonical(decoded).encode() != original:
+        raise ValueError("acceptance attestation envelope must contain canonical JSON object")
+    return decoded
+
+
+def read_attestation(path):
+    with path.open("rb") as stream:
+        raw = stream.read(ATTESTATION_BYTE_LIMIT + 1)
+    if len(raw) > ATTESTATION_BYTE_LIMIT:
+        raise ValueError("acceptance attestation file exceeds byte limit")
+    return json.loads(raw)
 
 
 def write_json(path, value):
@@ -204,15 +258,188 @@ def export_candidate(output, version, commit, candidate, repository):
     checked_identity(output)
 
 
-def attestation(output, identity):
+def validate_operator_acceptance(document, name, command, identity):
+    def sha(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+    def text(value, limit):
+        return isinstance(value, str) and bool(value.strip()) and len(value) <= limit and not any(ord(c) < 32 for c in value)
+    keys = {"schema_version", "check", "target", "tested", "command", "actual_command", "decision", "artifacts",
+            "source_status", "target_status", "native_status", "exit_code", "duration_seconds", "launched_at_utc",
+            "ended_at_utc", "environments", "cleanup"}
+    if (not isinstance(document, dict) or set(document) != keys or type(document["schema_version"]) is not int
+        or document["schema_version"] != 1 or not name.startswith("profile:") or document["check"] != name
+        or canonical(document["target"]) != canonical(identity) or document["command"] != command
+        or document["source_status"] not in ("pending", "failed") or document["target_status"] not in ("pending", "failed")
+        or document["native_status"] != "failed" or type(document["exit_code"]) is not int
+        or not 1 <= document["exit_code"] <= 255 or document["exit_code"] in (130, 143)):
+        raise ValueError("invalid exact-candidate operator acceptance")
+    tested = document["tested"]
+    if (not isinstance(tested, dict) or set(tested) != {"version", "source_fingerprint", "runtime_file", "runtime_sha256",
+        "candidate_bundle_sha256", "release_files", "candidate_sha256"} or tested["version"] != identity["version"]
+        or not text(tested["runtime_file"], 128) or Path(tested["runtime_file"]).name != tested["runtime_file"]
+        or any(not sha(tested[key]) for key in ("source_fingerprint", "runtime_sha256", "candidate_bundle_sha256", "candidate_sha256"))
+        or not isinstance(tested["release_files"], dict) or not tested["release_files"]
+        or any(not text(filename, 128) or Path(filename).name != filename or not sha(value)
+               for filename, value in tested["release_files"].items())
+        or tested["release_files"].get(tested["runtime_file"]) != tested["runtime_sha256"]):
+        raise ValueError("operator acceptance tested candidate identity missing")
+    decision = document["decision"]
+    if (not isinstance(decision, dict) or set(decision) != {"reason", "authorization_reference", "repair_reference"}
+        or any(not text(decision[key], limit) for key, limit in
+               (("reason", 1024), ("authorization_reference", 256), ("repair_reference", 256)))):
+        raise ValueError("operator acceptance requires public reason, authorization and repair reference")
+    if (not isinstance(document["artifacts"], dict)
+        or set(document["artifacts"]) != {"receipt", "declaration", "native", "launch", "timing", "log"}
+        or any(not sha(value) for value in document["artifacts"].values())):
+        raise ValueError("operator acceptance original evidence hashes missing")
+    actual = document["actual_command"]
+    prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
+              "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
+              "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
+              "SUBYARD_E2E_CANDIDATE_SHA256=" + tested["candidate_bundle_sha256"]]
+    if (not isinstance(actual, list) or actual[:-2] != prefix + command or actual[-2:-1] != ["--slot"]
+        or not isinstance(actual[-1], str) or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
+        raise ValueError("operator acceptance original command differs")
+    duration = document["duration_seconds"]
+    try:
+        started, ended = (datetime.fromisoformat(document[key]) for key in ("launched_at_utc", "ended_at_utc"))
+        if (started.utcoffset() is None or ended.utcoffset() is None or ended < started
+            or type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise ValueError("operator acceptance complete timing missing") from None
+    environments = document["environments"]
+    if not isinstance(environments, list) or not environments:
+        raise ValueError("operator acceptance physical environment missing")
+    counts = set()
+    for item in environments:
+        if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
+            or not isinstance(item["type"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
+            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
+            raise ValueError("invalid operator acceptance physical environment")
+        counts.add(item["vm_count"])
+    cleanup = {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in range(1, max(counts) + 1)],
+               "release_exit_code": 0, "lease_released": True}
+    if canonical(document["cleanup"]) != canonical(cleanup):
+        raise ValueError("operator acceptance cleanup or release unconfirmed")
+
+
+def operator_acceptances(paths, identity, root, receipt):
+    accepted = {}
+    required = a.commands(root, identity["version"], receipt["profiles"])
+    for path in paths:
+        declaration = a.read_transfer_json(path)
+        if (not isinstance(declaration, dict) or set(declaration) != {"schema_version", "check", "target", "tested",
+            "command", "decision", "source", "artifacts"} or type(declaration["schema_version"]) is not int
+            or declaration["schema_version"] != 1):
+            raise ValueError("invalid operator acceptance declaration")
+        name = declaration["check"]
+        if not isinstance(name, str) or not name.startswith("profile:") or name not in required or required[name] is None or name in accepted:
+            raise ValueError("operator acceptance requires one exact declared runnable profile check")
+        command = a.command_identity(required[name], root)
+        source = declaration["source"]
+        if not isinstance(source, dict) or set(source) != {"output", "receipt_sha256"} or not isinstance(source["output"], str):
+            raise ValueError("operator acceptance source declaration missing")
+        source_output = (path.parent / source["output"]).resolve()
+        source_root, original = a.load_bound(source_output)
+        old_commands = a.commands(source_root, original["version"], original["profiles"])
+        if (name not in old_commands or old_commands[name] is None
+            or a.command_identity(old_commands[name], source_root) != command
+            or declaration["command"] != command or canonical(declaration["target"]) != canonical(identity)
+            or declaration["tested"] != a.transfer_candidate(original)
+            or source["receipt_sha256"] != a.digest(source_output / "receipt.json")):
+            raise ValueError("operator acceptance original or target candidate binding changed")
+        descriptors = declaration["artifacts"]
+        if not isinstance(descriptors, dict) or set(descriptors) != {"native", "launch", "timing", "log"}:
+            raise ValueError("operator acceptance original artifact declarations missing")
+        files, hashes = {}, {"receipt": source["receipt_sha256"], "declaration": a.digest(path)}
+        for role, descriptor in descriptors.items():
+            if not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"} or not isinstance(descriptor["path"], str):
+                raise ValueError("invalid operator acceptance artifact declaration")
+            files[role] = (path.parent / descriptor["path"]).resolve()
+            hashes[role] = a.digest(files[role])
+            if hashes[role] != descriptor["sha256"]:
+                raise ValueError("operator acceptance original artifact changed")
+        native, launch, timing = (a.read_transfer_json(files[role]) for role in ("native", "launch", "timing"))
+        if (type(native.get("exit_code")) is not int or not 1 <= native["exit_code"] <= 255
+            or native["exit_code"] in (130, 143) or native.get("session_id") is not None
+            or not isinstance(native.get("chunk_id"), str) or not native["chunk_id"] or not isinstance(native.get("output"), str)
+            or type(native.get("wall_time_seconds")) not in (int, float) or not math.isfinite(native["wall_time_seconds"])
+            or native["wall_time_seconds"] < 0):
+            raise ValueError("operator acceptance requires complete original native failure")
+        prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
+        argv = launch.get("argv")
+        if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
+            or argv[:6] != prefix or len(argv) != len(prefix) + 3 + len(command) + 2):
+            raise ValueError("operator acceptance original launcher differs")
+        assignments = dict(value.split("=", 1) for value in argv[6:9] if "=" in value)
+        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256"}
+            or assignments["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(source_output / "candidate-bundle.tar.gz")
+            or assignments["SUBYARD_E2E_CANDIDATE_SHA256"] != original["candidate_bundle_sha256"]
+            or a.command_identity(argv[9:-2], source_root) != command or argv[-2] != "--slot"
+            or not re.fullmatch(r"[1-9][0-9]{0,2}", argv[-1])):
+            raise ValueError("operator acceptance original transport or command differs")
+        duration = timing.get("whole_duration_seconds")
+        clocks = [timing.get(key) for key in ("started_monotonic", "ended_monotonic")]
+        if (any(timing.get(key) != launch.get(key) for key in ("cwd", "argv", "started_at", "started_monotonic"))
+            or type(timing.get("exit_code")) is not int or timing["exit_code"] != native["exit_code"]
+            or type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
+            or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
+            raise ValueError("operator acceptance original complete timing differs")
+        environments, cleanup, release_codes, released = set(), {}, [], False
+        with files["log"].open("rb") as stream:
+            for line in stream:
+                environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
+                if environment:
+                    environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
+                stage = re.fullmatch(rb"E2E_PHASE phase=(guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+                if stage:
+                    if stage[1] == b"guest-cleanup":
+                        vm = int(stage[3]) if stage[3] else None
+                        if vm in cleanup:
+                            raise ValueError("operator acceptance cleanup evidence is ambiguous")
+                        cleanup[vm] = int(stage[2])
+                    else:
+                        release_codes.append(int(stage[2]))
+                released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
+        if not environments or release_codes != [0] or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)} or not released:
+            raise ValueError("operator acceptance original cleanup or release unconfirmed")
+        for original_result in (original["checks"][name], receipt["checks"][name]):
+            if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
+                or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
+                (original_result.get("exit_code") != native["exit_code"] or original_result.get("log_sha256") != hashes["log"]
+                 or original_result.get("command") != command)):
+                raise ValueError("operator acceptance collector status or original failure differs")
+        public = {"schema_version": 1, "check": name, "target": identity, "tested": declaration["tested"], "command": command,
+                  "actual_command": prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
+                      "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"]] + command + argv[-2:],
+                  "decision": declaration["decision"], "artifacts": hashes, "source_status": original["checks"][name]["status"],
+                  "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
+                  "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
+                  "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
+                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": cleanup[vm]} for vm in sorted(cleanup)],
+                              "release_exit_code": 0, "lease_released": True}}
+        validate_operator_acceptance(public, name, command, identity)
+        accepted[name] = public
+    return accepted
+
+
+def attestation(output, identity, operator_acceptance_paths=()):
     root, receipt = a.load_bound(output)
     a.update_result(receipt)
-    if (receipt["reproducible_result"] != "passed" or receipt.get("superseded") or receipt.get("preparation") != identity
+    accepted = operator_acceptances(operator_acceptance_paths, identity, root, receipt)
+    if ((receipt["reproducible_result"] != "passed" and not accepted) or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
     checks = {}
     for name, result in receipt["checks"].items():
+        if name in accepted:
+            decision = accepted[name]
+            checks[name] = {"status": "failed", "exit_code": decision["exit_code"], "log_sha256": decision["artifacts"]["log"],
+                            "execution": "operator-accepted", "environments": decision["environments"], "operator_acceptance": decision}
+            continue
         if result["status"] == "passed":
             if result.get("exit_code") != 0 or not re.fullmatch(r"[0-9a-f]{64}", result.get("log_sha256", "")):
                 raise ValueError("passing check lacks evidence")
@@ -237,25 +464,33 @@ def attestation(output, identity):
                 raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
             external[name] = {"status": "passed", "evidence_sha256": result["evidence_sha256"]}
     transfers = sorted(name for name, result in checks.items() if "evidence_transfer" in result)
-    return {"schema_version": 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
+    document = {"schema_version": 3 if accepted else 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
             "receipt_sha256": a.digest(output / "receipt.json"), "environment": receipt["environment"],
             "checks": checks, "external_obligations": external,
-            **({"reviewed_transfers": transfers} if transfers else {})}
+            **({"reviewed_transfers": transfers} if transfers or accepted else {}),
+            **({"operator_acceptances": sorted(accepted)} if accepted else {})}
+    validate_attestation(document, identity, root)
+    return document
 
 
 def validate_attestation(document, identity, root):
     version = document.get("schema_version")
     keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
-    if version == 2:
+    if version in (2, 3):
         keys.add("reviewed_transfers")
-    if (set(document) != keys or type(version) is not int or version not in (1, 2) or document["candidate_id"] != identity["candidate_id"]
+    if version == 3:
+        keys.add("operator_acceptances")
+    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3) or document["candidate_id"] != identity["candidate_id"]
         or document["identity_sha256"] != identity_hash(identity)
         or not re.fullmatch(r"[0-9a-f]{64}", document["receipt_sha256"])):
         raise ValueError("acceptance attestation identity mismatch")
     transfers = sorted(name for name, result in document["checks"].items() if "evidence_transfer" in result)
-    if (version == 1 and transfers or version == 2 and
-        (not transfers or document["reviewed_transfers"] != transfers)):
+    if (version == 1 and transfers or version in (2, 3) and
+        (version == 2 and not transfers or document["reviewed_transfers"] != transfers)):
         raise ValueError("reviewed transfer attestation inventory mismatch")
+    accepted = sorted(name for name, result in document["checks"].items() if "operator_acceptance" in result)
+    if (version != 3 and accepted or version == 3 and (not accepted or document["operator_acceptances"] != accepted)):
+        raise ValueError("operator acceptance attestation inventory mismatch")
     environment = document["environment"]
     if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
         or any(not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value)
@@ -272,6 +507,15 @@ def validate_attestation(document, identity, root):
             if result != {"status": "not-applicable"}:
                 raise ValueError("invalid not-applicable attestation")
         else:
+            if name in accepted:
+                decision = result["operator_acceptance"]
+                validate_operator_acceptance(decision, name, a.command_identity(command, root), identity)
+                if (set(result) != {"status", "exit_code", "log_sha256", "execution", "environments", "operator_acceptance"}
+                    or result["status"] != "failed" or type(result["exit_code"]) is not int or result["exit_code"] != decision["exit_code"]
+                    or result["log_sha256"] != decision["artifacts"]["log"] or result["execution"] != "operator-accepted"
+                    or result["environments"] != decision["environments"]):
+                    raise ValueError("operator acceptance original failure changed")
+                continue
             keys = {"status", "log_sha256", "exit_code"} | ({"environments"} if a.is_live(name) else set())
             if "evidence_transfer" in result:
                 keys |= {"execution", "evidence_transfer"}
@@ -319,11 +563,14 @@ def verify_owned_ref(github, tag, marker, commit, ref=None):
 
 
 def publish_remote(github, prepared, document, root):
+    document = decode_attestation(document)
     identity = checked_identity(prepared)
     if identity["repository"] != github.repository or a.source_fingerprint(root) != identity["source_fingerprint"]:
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
+    for name in document.get("operator_acceptances", []):
+        print(f"PUBLICATION operator_accepted={name} native_status=failed exit_code={document['checks'][name]['exit_code']}", flush=True)
     deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
     if deferred:
         print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
@@ -400,10 +647,13 @@ def discover(github, workflow, request):
 def dispatch(github, workflow, inputs, state, path):
     request = state["request"]
     if not state.get("dispatch_started"):
+        dispatched_inputs = {**inputs, "request": request}
+        if len(canonical(dispatched_inputs)) > DISPATCH_INPUT_LIMIT:
+            raise ValueError("workflow dispatch inputs exceed 65535-character limit")
         state["dispatch_started"] = True
         state["status"] = "dispatch-outcome-unknown"
         write_json(path, state)  # Persist intent before a possibly lost response.
-        github.api(f"actions/workflows/{workflow}/dispatches", "POST", {"ref": state["workflow_ref"], "inputs": {**inputs, "request": request}})
+        github.api(f"actions/workflows/{workflow}/dispatches", "POST", {"ref": state["workflow_ref"], "inputs": dispatched_inputs})
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         run = discover(github, workflow, request)
@@ -467,6 +717,8 @@ def main():
             command.add_argument("--slots", nargs="+", type=int, required=True)
         else:
             command.add_argument("--workflow-ref", default="master")
+            command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
+                                 help="explicit exact-candidate profile failure declaration; repeat for each authorized check")
     export = sub.add_parser("export-ci", help="internal CI asset freezing entrypoint")
     for name in ("version", "commit", "candidate"):
         export.add_argument("--" + name, required=True)
@@ -486,7 +738,7 @@ def main():
         # Mutation entrypoint belongs only to the single native concurrency workflow.
         if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_WORKFLOW") != "Release publication":
             raise ValueError("publication must run in the serialized Release publication workflow")
-        actual = publish_remote(github, args.prepared.resolve(), json.loads(args.attestation.read_text()), ROOT)
+        actual = publish_remote(github, args.prepared.resolve(), read_attestation(args.attestation), ROOT)
         print("PUBLISHED " + actual["html_url"])
         return 0
     state_dir = args.state_dir.resolve()
@@ -558,7 +810,7 @@ def main():
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result
         with a.acceptance_lock(output, shared=True):
-            document = attestation(output, identity)
+            document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance])
             validate_attestation(document, identity, output / "source")
             write_json(directory / "attestation.json", document)
         deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
@@ -570,7 +822,7 @@ def main():
         if state["attestation_sha256"] != identity_hash(document):
             raise ValueError("publication attestation changed; preserve original unfinished state")
         write_json(path, state)
-        encoded = base64.b64encode(canonical(document).encode()).decode()
+        encoded = encode_attestation(document)
         run = dispatch(github, "release-publish.yml", {"candidate": args.candidate, "attestation": encoded}, state, path)
         # A failed/cancelled run can be rerun natively; no second publication request is needed.
         release = github.api("releases/tags/v" + identity["version"])

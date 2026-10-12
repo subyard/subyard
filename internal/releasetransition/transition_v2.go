@@ -162,6 +162,7 @@ type v2Observation struct {
 	intents                 []PlannerStepIntent
 	work                    []v2Work
 	activationScope         []v2ActivationScope
+	prospectiveSettings     V2SettingsSnapshotView
 	activationConsequences  []string
 	activationWarnings      []string
 	observationScope        Fingerprint
@@ -1807,6 +1808,7 @@ func (transition *V2Transition) observeFresh(
 	if ingressAfterSettings != nil {
 		transition.appendFreshIngressWork(observation, *ingressAfterSettings)
 	}
+	observation.prospectiveSettings = settingsView
 	return nil
 }
 
@@ -1879,6 +1881,7 @@ func (transition *V2Transition) observeResume(
 	ownerSettingsView := settingsViewAfterPlan(
 		transition.options.ConfigHome, ingressPlan.Prospective, capabilityPlan.Files,
 	)
+	observation.prospectiveSettings = ownerSettingsView
 	planned := make(map[string]settingsV2FilePlan, len(capabilityPlan.Files))
 	for _, file := range capabilityPlan.Files {
 		planned[file.Yard] = file
@@ -2858,7 +2861,13 @@ func (transition *V2Transition) observeActivation(
 			return invalid("duplicate activation reconciler %q", id)
 		}
 		seen[id] = struct{}{}
-		actual, err := reconciler.Observe(ctx, transition.options.Releases, observation.links)
+		var actual V2ActivationObservation
+		var err error
+		if prospective, ok := reconciler.(V2ProspectiveActivationObserver); ok && observation.prospectiveSettings != nil {
+			actual, err = prospective.ObserveProspective(ctx, transition.options.Releases, observation.links, observation.prospectiveSettings)
+		} else {
+			actual, err = reconciler.Observe(ctx, transition.options.Releases, observation.links)
+		}
 		if err != nil {
 			observation.activationFixed = false
 			observation.blockers = append(

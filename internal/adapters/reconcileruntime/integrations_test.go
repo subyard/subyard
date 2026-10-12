@@ -18,11 +18,56 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestIntegrationScopeUsesProspectiveAssetsWithoutChangingLogicalBinding(t *testing.T) {
+	root, configHome := testkit.TempDir(t), testkit.TempDir(t)
+	for _, directory := range []string{"config", "package"} {
+		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config", "projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "package", "integration.json"), []byte(`{"schema_version":1}`), 0o644)
+	rules, provision := filepath.Join(configHome, "rules"), filepath.Join(configHome, "provision.sh")
+	snapshots := map[string]config.PersistentFileSnapshot{
+		rules:     {Exists: true, Content: []byte("allow_rule()\n")},
+		provision: {Exists: true, Content: []byte("#!/bin/sh\nexit 0\n")},
+	}
+	files := &config.ProspectiveFiles{Root: configHome, ReadSnapshot: func(path string) (config.PersistentFileSnapshot, error) { return snapshots[path], nil }}
+	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{DevUser: "dev", DevUID: 1001},
+		Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: filepath.Join(root, "package")}},
+		Environment:  []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_RULES=" + rules, "AGENT_sample_RULES_DEST=.sample/rules", "AGENT_sample_PROVISION=" + provision},
+		SourceReader: files.ReadAsset,
+	}
+	planned, _, err := runtime.IntegrationScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, snapshot := range snapshots {
+		testkit.WriteFile(t, path, snapshot.Content, 0o600)
+	}
+	ordinary := runtime
+	ordinary.SourceReader = nil
+	published, _, err := ordinary.IntegrationScope()
+	if err != nil || planned != published {
+		t.Fatalf("logical binding changed at publication: %s %s %v", planned, published, err)
+	}
+	for _, path := range []string{rules, provision} {
+		before := snapshots[path]
+		snapshots[path] = config.PersistentFileSnapshot{Exists: true, Content: []byte("changed\n")}
+		changed, _, err := runtime.IntegrationScope()
+		if err != nil || changed == planned {
+			t.Fatalf("prospective asset change unbound: %s %v", path, err)
+		}
+		snapshots[path] = before
+	}
+}
 
 func TestIntegrationInventoryPreservesDriftAndRetiresOnlyOwnedFiles(t *testing.T) {
 	root := t.TempDir()

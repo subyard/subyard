@@ -50,7 +50,14 @@ func (runtime Runtime) integrationPackageBinding(definition profile.IntegrationD
 		if path == "" {
 			continue
 		}
-		data, err := (config.MaterializedAsset{Source: path}).ReadSource()
+		asset := config.MaterializedAsset{Source: path}
+		var data []byte
+		var err error
+		if runtime.SourceReader != nil {
+			data, err = runtime.SourceReader(asset)
+		} else {
+			data, err = asset.ReadSource()
+		}
 		if err != nil {
 			return "", err
 		}

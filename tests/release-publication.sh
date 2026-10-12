@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
+import base64
 import copy
 import importlib.util
 import json
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from unittest.mock import patch
 
 ROOT = Path(sys.argv[1])
@@ -22,7 +24,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory):
+def fixture(directory, lanes=()):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -34,6 +36,9 @@ def fixture(directory):
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
     (profile / "acceptance.sh").write_text("#!/bin/bash\nexit 0\n")
+    if lanes:
+        (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
+            {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
     (profile / "external-obligations.json").write_text(json.dumps({"schema_version": 1, "obligations": [
         {"id": "fixture-external", "description": "fixture obligation", "required_inputs": ["fixture account"]}]}))
     (root / "dev/package-engine.sh").write_text("#!/bin/bash\necho 'must not repackage'; exit 99\n")
@@ -73,7 +78,7 @@ def accepted(directory, prepared, identity):
     root, receipt = m.a.load_bound(output)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
         if command:
-            log = output / (name.replace(":", "-") + ".log")
+            log = output / (name.replace(":", "-").replace("/", "-") + ".log")
             log.write_text("synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
                 "log_sha256": m.a.digest(log), "command": m.a.command_identity(command, root),
@@ -263,6 +268,302 @@ class Contracts(unittest.TestCase):
                 m.validate_attestation(invalid, self.identity, target_root)
         self.assertEqual(self.document["schema_version"], 1)
         m.validate_attestation(self.document, self.identity, self.frozen)
+
+    def test_large_reviewed_attestation_roundtrips_existing_workflow_and_retained_request(self):
+        large = self.directory / "large"
+        _, prepared, identity = fixture(large, ("one", "two", "three", "four"))
+        source_output, _, _ = accepted(large, prepared, identity)
+        _, source = m.a.load_bound(source_output)
+        for name, result in source["checks"].items():
+            if name != "package":
+                result["duration_seconds"] = 123.5
+                if m.a.is_live(name):
+                    result["slot"] = 2
+        m.a.save(source_output, source)
+        state_dir = self.directory / "publication"
+        candidate = state_dir / identity["candidate_id"]
+        candidate.mkdir(parents=True)
+        shutil.copytree(prepared, candidate / "prepared")
+        output = candidate / "acceptance"
+        with patch.object(m.a, "execution_environment", return_value=source["environment"]):
+            m.a.prepare(output, identity["version"], candidate / "prepared")
+        root, receipt = m.a.load_bound(output)
+        names = sorted(set(source["checks"]) - {"package"})
+        self.assertEqual(len(names), 10)
+        for name in names:
+            review = {"schema_version": 1, "check": name, "tested": m.a.transfer_candidate(source),
+                "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(source_output / "receipt.json"),
+                "review": {"unchanged_scope": "Reviewed unchanged scope. " * 70,
+                           "reason": "Retain original passing evidence. " * 30,
+                           "authorization_reference": "operator-confirmation:fixture"}, "standalone": None}
+            declaration = self.directory / "large-review.json"
+            declaration.write_text(json.dumps(review))
+            m.a.transfer_evidence(output, source_output, name, declaration)
+        m.a.defer_external(output, ["sample:fixture-external"], "External account unavailable", "fixture-authorization")
+        document = m.attestation(output, identity)
+        original = m.canonical(document).encode()
+        self.assertGreater(len(base64.b64encode(original)), m.DISPATCH_INPUT_LIMIT)
+        self.assertEqual(document["reviewed_transfers"], names)
+        github = FakeGitHub(identity)
+        dispatched = []
+        run = {"id": 456, "status": "completed", "conclusion": "success", "run_attempt": 1,
+               "html_url": "https://fixture/run"}
+        original_api = github.api
+        def api(path, method="GET", payload=None, missing=False):
+            if path.endswith("/dispatches"):
+                dispatched.append(copy.deepcopy(payload["inputs"]))
+                self.assertLessEqual(len(m.canonical(payload["inputs"])), m.DISPATCH_INPUT_LIMIT)
+                print(f"TRANSPORT original_bytes={len(original)} plain_base64_characters={len(base64.b64encode(original))} "
+                      f"complete_input_characters={len(m.canonical(payload['inputs']))}")
+                # The unchanged first checkout decodes outer Base64 JSON and persists it.
+                envelope = json.loads(base64.b64decode(payload["inputs"]["attestation"], validate=True))
+                worker_file = self.directory / "worker-attestation.json"
+                m.write_json(worker_file, envelope)
+                self.assertEqual(worker_file.stat().st_mode & 0o777, 0o600)
+                decoded = m.decode_attestation(m.read_attestation(worker_file))
+                self.assertEqual(decoded, document)
+                self.assertEqual(decoded["external_obligations"]["sample:fixture-external"]["status"], "not-run")
+                # The pinned second checkout validates the entire original document.
+                m.publish_remote(github, candidate / "prepared", m.read_attestation(worker_file), root)
+                return None
+            if path == "actions/runs/456":
+                return run
+            if path == "releases/tags/v1.2.3":
+                return copy.deepcopy(github.release)
+            return original_api(path, method, payload, missing)
+        github.api = api
+        argv = ["release-publication", "--state-dir", str(state_dir), "publish", "--candidate", identity["candidate_id"]]
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=github), patch.object(m, "discover", return_value=run):
+            self.assertEqual(m.main(), 0)
+            self.assertEqual(m.main(), 0)
+        retained = json.loads((candidate / "publication.json").read_text())
+        self.assertEqual(retained["attestation_sha256"], m.identity_hash(document))
+        self.assertEqual(retained["request"], dispatched[0]["request"])
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(retained["status"], "published")
+
+    def test_plain_attestation_inputs_keep_working(self):
+        encoded = base64.b64encode(m.canonical(self.document).encode()).decode()
+        path = self.directory / "legacy-attestation.json"
+        m.write_json(path, json.loads(base64.b64decode(encoded, validate=True)))
+        self.assertEqual(m.decode_attestation(m.read_attestation(path)), self.document)
+        self.assertTrue(m.publish_remote(self.github, self.prepared, m.read_attestation(path), self.frozen)["immutable"])
+
+    def test_compressed_envelope_refuses_malformed_truncated_oversized_and_bomb_before_mutation(self):
+        valid = json.loads(base64.b64decode(m.encode_attestation(self.document), validate=True))
+        compressed = base64.b64decode(valid["payload"], validate=True)
+        invalids = []
+        for changes in ({"transport": "unknown"}, {"extra": True}, {"payload": "!invalid"},
+                        {"uncompressed_bytes": True}, {"uncompressed_bytes": m.ATTESTATION_BYTE_LIMIT + 1},
+                        {"uncompressed_bytes": valid["uncompressed_bytes"] - 1}, {"sha256": "f" * 64},
+                        {"payload": base64.b64encode(compressed[:-1]).decode()},
+                        {"payload": base64.b64encode(compressed + b"trailing").decode()},
+                        {"payload": base64.b64encode(compressed + compressed).decode()},
+                        {"payload": "A" * m.DISPATCH_INPUT_LIMIT},
+                        {"payload": base64.b64encode(zlib.compress(b"x" * (m.ATTESTATION_BYTE_LIMIT + 1))).decode()}):
+            invalids.append({**valid, **changes})
+        for invalid in invalids:
+            with self.subTest(changes=set(invalid)), self.assertRaises(ValueError):
+                m.publish_remote(self.github, self.prepared, invalid, self.frozen)
+            self.assertEqual(self.github.calls, [])
+            self.assertIsNone(self.github.ref)
+        for document in ({"padding": "x" * m.ATTESTATION_BYTE_LIMIT}, [],
+                         {"transport": m.ATTESTATION_TRANSPORT}):
+            with self.assertRaises(ValueError):
+                m.decode_attestation(document)
+        with self.assertRaises(ValueError):
+            m.encode_attestation({"padding": "x" * m.ATTESTATION_BYTE_LIMIT})
+        path = self.directory / "oversized-attestation.json"
+        path.write_bytes(b" " * (m.ATTESTATION_BYTE_LIMIT + 1))
+        with self.assertRaises(ValueError):
+            m.read_attestation(path)
+
+    def test_compressed_attestation_preserves_original_validation_before_mutation(self):
+        for change in ("candidate", "inventory", "status", "identity"):
+            document = copy.deepcopy(self.document)
+            if change == "candidate":
+                document["candidate_id"] = "r124-a1"
+            elif change == "inventory":
+                del document["checks"]["verify"]
+            elif change == "status":
+                document["checks"]["verify"]["status"] = "failed"
+            else:
+                document["identity_sha256"] = "d" * 64
+            envelope = json.loads(base64.b64decode(m.encode_attestation(document), validate=True))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.publish_remote(self.github, self.prepared, envelope, self.frozen)
+            self.assertFalse(any(method != "GET" for _, method in self.github.calls))
+            self.assertIsNone(self.github.ref)
+
+    def operator_failure(self):
+        source_output = self.directory / "original-failure"
+        _, prepared, identity = fixture(source_output)
+        identity["candidate_id"] = "r122-a1"
+        m.write_json(prepared / "identity.json", identity)
+        original_output, original_root, _ = accepted(source_output, prepared, identity)
+        _, original = m.a.load_bound(original_output)
+        name = "profile:sample"
+        original["checks"][name] = {"status": "pending"}
+        m.a.save(original_output, original)
+        _, target = m.a.load_bound(self.output)
+        target["checks"][name] = {"status": "pending"}
+        m.a.save(self.output, target)
+        command = m.a.command_identity(m.a.commands(original_root, identity["version"], original["profiles"])[name], original_root)
+        argv = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
+                "SUBYARD_E2E_CONTROLLER_WORKSPACE=" + str(self.directory / "controller"),
+                "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]
+        launch = {"argv": argv, "cwd": str(original_root), "started_at": "2026-10-12T00:00:00+00:00", "started_monotonic": 1000.0}
+        timing = {**launch, "ended_at": "2026-10-12T00:02:03.500000+00:00", "ended_monotonic": 1123.5,
+                  "whole_duration_seconds": 123.5, "exit_code": 1}
+        native = {"exit_code": 1, "chunk_id": "fixture", "wall_time_seconds": 0.1, "output": "native failure"}
+        files = {role: self.directory / ("failure-" + role + ".json") for role in ("native", "launch", "timing")}
+        for role, data in (("native", native), ("launch", launch), ("timing", timing)):
+            m.write_json(files[role], data)
+        files["log"] = self.directory / "failure.log"
+        files["log"].write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
+            "  [fail] phase=fixture/init\n"
+            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
+            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
+            "E2E lease released: slot=2 run=fixture\n"
+            "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
+        declaration = {"schema_version": 1, "check": name, "target": self.identity, "tested": m.a.transfer_candidate(original),
+            "command": command, "decision": {"reason": "Accept this known failure for this exact release",
+                "authorization_reference": "operator-decision:fixture", "repair_reference": "p0-repair:fixture"},
+            "source": {"output": str(original_output), "receipt_sha256": m.a.digest(original_output / "receipt.json")},
+            "artifacts": {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in files.items()}}
+        path = self.directory / "operator-acceptance.json"
+        m.write_json(path, declaration)
+        return path, files, original_output
+
+    def test_explicit_profile_failure_decision_preserves_native_failure_and_receipts(self):
+        path, files, original_output = self.operator_failure()
+        before = [(output / "receipt.json").read_bytes() for output in (self.output, original_output)]
+        document = m.attestation(self.output, self.identity, [path])
+        self.assertEqual(document["schema_version"], 3)
+        self.assertEqual(document["operator_acceptances"], ["profile:sample"])
+        self.assertEqual(document["reviewed_transfers"], [])
+        result = document["checks"]["profile:sample"]
+        self.assertEqual((result["status"], result["exit_code"], result["execution"]), ("failed", 1, "operator-accepted"))
+        decision = result["operator_acceptance"]
+        self.assertEqual(decision["duration_seconds"], 123.5)
+        self.assertEqual(decision["native_status"], "failed")
+        self.assertEqual(decision["target"], self.identity)
+        self.assertEqual(decision["source_status"], "pending")
+        self.assertEqual(decision["target_status"], "pending")
+        self.assertEqual(decision["artifacts"]["native"], m.a.digest(files["native"]))
+        self.assertNotIn(str(self.directory), json.dumps(document))
+        envelope = json.loads(base64.b64decode(m.encode_attestation(document), validate=True))
+        self.assertEqual(m.decode_attestation(envelope), document)
+        self.assertTrue(m.publish_remote(self.github, self.prepared, envelope, self.frozen)["immutable"])
+        self.assertEqual(before, [(output / "receipt.json").read_bytes() for output in (self.output, original_output)])
+        with self.assertRaisesRegex(ValueError, "complete passing"):
+            m.attestation(self.output, self.identity)
+
+    def test_operator_declaration_unknown_core_wrong_candidate_version_command_and_tamper_refuse(self):
+        path, files, _ = self.operator_failure()
+        declaration = json.loads(path.read_text())
+        for change in ("unknown", "core", "candidate", "version", "typed-target", "tested", "command", "authorization", "repair", "artifact", "extra"):
+            invalid = copy.deepcopy(declaration)
+            if change == "unknown":
+                invalid["check"] = "profile:unknown"
+            elif change == "core":
+                invalid["check"] = "verify"
+            elif change == "candidate":
+                invalid["target"]["candidate_id"] = "r124-a1"
+            elif change == "version":
+                invalid["target"]["version"] = "1.2.4"
+            elif change == "typed-target":
+                invalid["target"]["schema_version"] = True
+            elif change == "tested":
+                invalid["tested"]["runtime_sha256"] = "f" * 64
+            elif change == "command":
+                invalid["command"] = ["true"]
+            elif change in ("authorization", "repair"):
+                invalid["decision"][change + "_reference"] = ""
+            elif change == "artifact":
+                invalid["artifacts"]["log"]["sha256"] = "f" * 64
+            else:
+                invalid["automatic"] = True
+            m.write_json(path, invalid)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.attestation(self.output, self.identity, [path])
+        m.write_json(path, declaration)
+        files["log"].write_text("tampered original failure\n")
+        with self.assertRaisesRegex(ValueError, "artifact changed"):
+            m.attestation(self.output, self.identity, [path])
+
+    def test_operator_acceptance_nonterminal_pass_signal_bad_timing_and_cleanup_refuse(self):
+        path, files, _ = self.operator_failure()
+        declaration = json.loads(path.read_text())
+        originals = {role: file.read_bytes() for role, file in files.items()}
+        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release"):
+            for role, content in originals.items():
+                files[role].write_bytes(content)
+            if change in ("nonterminal", "pass", "signal"):
+                data = json.loads(files["native"].read_text())
+                data.update({"session_id": 99} if change == "nonterminal" else {"exit_code": 0 if change == "pass" else 143})
+                m.write_json(files["native"], data)
+            elif change in ("timing", "transport"):
+                role = "timing" if change == "timing" else "launch"
+                data = json.loads(files[role].read_text())
+                if role == "timing":
+                    data["whole_duration_seconds"] = 0.1
+                else:
+                    data["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64
+                m.write_json(files[role], data)
+            else:
+                content = originals["log"].decode().replace("exit_code=0 vm=2", "exit_code=1 vm=2") if change == "cleanup" else originals["log"].decode().replace("E2E lease released:", "missing release:")
+                files["log"].write_text(content)
+            declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
+            m.write_json(path, declaration)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.attestation(self.output, self.identity, [path])
+
+    def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
+        path, _, _ = self.operator_failure()
+        document = m.attestation(self.output, self.identity, [path])
+        _, receipt = m.a.load_bound(self.output)
+        for name in ("verify", "p0-release-smoke"):
+            invalid = copy.deepcopy(receipt)
+            invalid["checks"][name]["status"] = "failed"
+            m.a.save(self.output, invalid)
+            with self.subTest(other_gate=name), self.assertRaises(ValueError):
+                m.attestation(self.output, self.identity, [path])
+        m.a.save(self.output, receipt)
+        for change in ("candidate", "version", "typed-target", "inventory", "core", "pass", "zero", "inherited", "cleanup", "repair", "downgrade", "other-gate"):
+            invalid = copy.deepcopy(document)
+            result = invalid["checks"]["profile:sample"]
+            decision = result["operator_acceptance"]
+            if change in ("candidate", "version"):
+                decision["target"]["candidate_id" if change == "candidate" else "version"] = "r124-a1" if change == "candidate" else "1.2.4"
+            elif change == "typed-target":
+                decision["target"]["schema_version"] = True
+            elif change == "inventory":
+                invalid["operator_acceptances"] = []
+            elif change == "core":
+                invalid["checks"]["verify"] = result
+                del invalid["checks"]["profile:sample"]
+            elif change == "pass":
+                result["status"] = "passed"
+            elif change == "zero":
+                result["exit_code"] = decision["exit_code"] = 0
+            elif change == "inherited":
+                result["execution"] = "inherited"
+            elif change == "cleanup":
+                decision["cleanup"]["release_exit_code"] = 1
+            elif change == "repair":
+                decision["decision"]["repair_reference"] = ""
+            elif change == "downgrade":
+                invalid["schema_version"] = 2
+                del invalid["operator_acceptances"]
+            else:
+                invalid["checks"]["verify"]["status"] = "failed"
+            envelope = json.loads(base64.b64decode(m.encode_attestation(invalid), validate=True))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.publish_remote(self.github, self.prepared, envelope, self.frozen)
+            self.assertIsNone(self.github.ref)
+            self.assertFalse(any(method != "GET" for _, method in self.github.calls))
 
     def deferred(self):
         receipt = json.loads((self.output / "receipt.json").read_text())
@@ -541,6 +842,35 @@ class Contracts(unittest.TestCase):
         self.assertFalse(any("dispatches" in path for path, _, _ in github.calls))
         self.assertEqual(json.loads(path.read_text())["status"], "passed")
 
+    def test_dispatch_bounds_whole_inputs_including_candidate_and_request_before_intent(self):
+        path = self.directory / "oversized-request.json"
+        state = {"request": "fixture-request", "workflow_ref": "master"}
+        inputs = {"candidate": "r123-a1", "attestation": ""}
+        overhead = len(m.canonical({**inputs, "request": state["request"]}))
+        inputs["attestation"] = "A" * (m.DISPATCH_INPUT_LIMIT - overhead)
+        class Dispatch:
+            calls = []
+            def api(self, path, method="GET", payload=None):
+                self.calls.append(payload)
+                raise ValueError("fixture lost response")
+        github = Dispatch()
+        for field in ("candidate", "attestation", "request"):
+            invalid = copy.deepcopy(inputs)
+            attempted = copy.deepcopy(state)
+            if field == "request":
+                attempted[field] += "x"
+            else:
+                invalid[field] += "x"
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "65535-character"):
+                m.dispatch(github, "release-publish.yml", invalid, attempted, path)
+            self.assertEqual(github.calls, [])
+            self.assertNotIn("dispatch_started", attempted)
+            self.assertFalse(path.exists())
+        with self.assertRaisesRegex(ValueError, "lost response"):
+            m.dispatch(github, "release-publish.yml", inputs, state, path)
+        self.assertEqual(len(m.canonical(github.calls[0]["inputs"])), m.DISPATCH_INPUT_LIMIT)
+        self.assertTrue(json.loads(path.read_text())["dispatch_started"])
+
     def test_interrupted_watch_retains_request_and_terminal_status(self):
         path = self.directory / "interrupted.json"
         state = {"request": "fixture-request", "workflow_ref": "master", "dispatch_started": True}
@@ -560,15 +890,16 @@ class Contracts(unittest.TestCase):
     def test_dispatch_lost_response_persists_intent_and_does_not_duplicate(self):
         path = self.directory / "request.json"
         state = {"request": "fixture-request", "workflow_ref": "master"}
+        inputs = {"candidate": self.identity["candidate_id"], "attestation": m.encode_attestation(self.document)}
         class Dispatch:
             def api(self, *args, **kwargs):
                 raise ValueError("fixture lost response")
         with self.assertRaisesRegex(ValueError, "lost response"):
-            m.dispatch(Dispatch(), "release.yml", {}, state, path)
+            m.dispatch(Dispatch(), "release-publish.yml", inputs, state, path)
         self.assertTrue(json.loads(path.read_text())["dispatch_started"])
         with patch.object(m, "discover", return_value=None), patch.object(m.time, "monotonic", side_effect=[0, 121]):
             with self.assertRaisesRegex(ValueError, "outcome unknown"):
-                m.dispatch(Dispatch(), "release.yml", {}, state, path)
+                m.dispatch(Dispatch(), "release-publish.yml", inputs, state, path)
 
 unittest.main()
 PY

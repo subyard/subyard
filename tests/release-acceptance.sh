@@ -232,6 +232,216 @@ class TestAcceptance(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.load_bound(second)
 
+    def test_standalone_direct_controller_keeps_optional_phases_unknown(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True)
+            old_receipt = (first / "receipt.json").read_bytes()
+            before = (second / "receipt.json").read_bytes()
+            log = Path(review["standalone"]["log"]["path"])
+            direct = ("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
+                + "sample_source_bundle_sha256=" + review["tested"]["candidate_bundle_sha256"] + " base_fingerprint=" + "a" * 64 + " lane=one\n"
+                + "".join(f"E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm={vm}\n" for vm in (1, 2))
+                + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
+                + "E2E lease released: slot=slot-002 run=sample\n")
+            for invalid in (direct.replace(" vm=2\n", " vm=1\n"),
+                            direct.replace("E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n", ""),
+                            direct.replace("E2E lease released: slot=slot-002 run=sample\n", ""),
+                            direct + "E2E_PHASE phase=fixture/sample state=end duration_seconds=1 exit_code=1\n",
+                            direct + "  [fail] phase=sample\n"):
+                log.write_text(invalid)
+                review["standalone"]["log"]["sha256"] = m.digest(log)
+                declaration.write_text(json.dumps(review))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+            log.write_text(direct)
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            result = target["checks"][name]
+            self.assertEqual(result["execution"], "inherited")
+            self.assertEqual(result["environments"][0]["vm_count"], 2)
+            self.assertIsNone(result["duration_seconds"])
+            self.assertNotIn("phases", result)
+            self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
+
+    def raw_standalone_fixture(self, directory):
+        first, second, name, declaration, review = self.transfer_fixture(directory, standalone=True)
+        launch_path = Path(review["standalone"]["launch"]["path"])
+        launch = json.loads(launch_path.read_text())
+        launch = {"cwd": launch["cwd"], "argv": launch["argv"],
+                  "started_at": "2026-01-01T00:00:00+00:00", "started_monotonic": 123.5}
+        launch_path.write_text(json.dumps(launch))
+        review["standalone"]["launch"]["sha256"] = m.digest(launch_path)
+        declaration.write_text(json.dumps(review))
+        return first, second, name, declaration, review
+
+    def test_raw_standalone_launch_binds_original_bundle_without_rewriting_evidence(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            first, second, name, declaration, review = self.raw_standalone_fixture(directory)
+            originals = {role: Path(item["path"]).read_bytes() for role, item in review["standalone"].items()}
+            receipt = (first / "receipt.json").read_bytes()
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            result = target["checks"][name]
+            self.assertEqual((result["status"], result["exit_code"], result["execution"]), ("passed", 0, "inherited"))
+            self.assertIsNone(result["duration_seconds"])
+            self.assertIsNone(result["execution_environment"])
+            self.assertEqual(result["evidence_transfer"]["launched_at_utc"], "2026-01-01T00:00:00+00:00")
+            self.assertEqual((first / "receipt.json").read_bytes(), receipt)
+            for role, original in originals.items():
+                self.assertEqual(Path(review["standalone"][role]["path"]).read_bytes(), original)
+                self.assertEqual((second / result["evidence_files"][role]).read_bytes(), original)
+            first.rename(directory / "retired-original")
+            self.assertEqual(m.load_bound(second)[1]["checks"][name], result)
+            copied = second / result["evidence_files"]["launch"]
+            data = json.loads(copied.read_text())
+            data["started_at"] = "not-a-time"
+            copied.write_text(json.dumps(data))
+            with self.assertRaises(ValueError):
+                m.load_bound(second)
+
+    def test_raw_standalone_launch_rejects_malformed_binding_time_transport_and_native(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.raw_standalone_fixture(Path(temporary))
+            files = {role: Path(item["path"]) for role, item in review["standalone"].items()}
+            launch = json.loads(files["launch"].read_text())
+            native = json.loads(files["native"].read_text())
+            before = (second / "receipt.json").read_bytes()
+            for change in ("partial-rich", "bad-source", "bad-runtime", "bad-bundle", "bad-script", "cwd", "wrapper", "hash", "path", "env", "command", "slot", "missing-time", "bad-time", "naive-time", "clock", "contradictory-time", "failed", "nonterminal"):
+                invalid_launch, invalid_native = copy.deepcopy(launch), copy.deepcopy(native)
+                if change in ("partial-rich", "bad-source", "bad-runtime", "bad-bundle", "bad-script"):
+                    if change == "partial-rich":
+                        invalid_launch["source_fingerprint"] = review["tested"]["source_fingerprint"]
+                    else:
+                        invalid_launch.update(source_fingerprint=review["tested"]["source_fingerprint"],
+                            runtime_sha256=review["tested"]["runtime_sha256"], bundle_sha256=review["tested"]["candidate_bundle_sha256"],
+                            acceptance_script_sha256=m.digest(first / "source" / launch["argv"][10]))
+                        key = {"bad-source": "source_fingerprint", "bad-runtime": "runtime_sha256", "bad-bundle": "bundle_sha256", "bad-script": "acceptance_script_sha256"}[change]
+                        invalid_launch[key] = None
+                elif change == "cwd":
+                    invalid_launch["cwd"] = str(second / "source")
+                elif change in ("wrapper", "hash", "path", "env", "command", "slot"):
+                    index, value = {"wrapper": (0, "sh"), "hash": (8, "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64),
+                        "path": (7, "SUBYARD_E2E_CANDIDATE_BUNDLE=/wrong/bundle"), "env": (6, "OTHER=/wrong"),
+                        "command": (10, "foreign.sh"), "slot": (-1, "0")}[change]
+                    invalid_launch["argv"][index] = value
+                elif change == "missing-time":
+                    del invalid_launch["started_at"]
+                elif change in ("bad-time", "naive-time", "clock", "contradictory-time"):
+                    key, value = {"bad-time": ("started_at", "not-a-time"), "naive-time": ("started_at", "2026-01-01T00:00:00"),
+                        "clock": ("started_monotonic", "unknown"), "contradictory-time": ("launched_at_utc", "2026-01-02T00:00:00+00:00")}[change]
+                    invalid_launch[key] = value
+                else:
+                    invalid_native.update({"exit_code": 1} if change == "failed" else {"session_id": 123})
+                files["launch"].write_text(json.dumps(invalid_launch))
+                files["native"].write_text(json.dumps(invalid_native))
+                for role in ("launch", "native"):
+                    review["standalone"][role]["sha256"] = m.digest(files[role])
+                declaration.write_text(json.dumps(review))
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+
+    def test_raw_standalone_launch_refuses_checksum_consistent_but_different_bundle(self):
+        for change in ("source", "mode", "runtime", "metadata", "extra"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                first, second, name, declaration, review = self.raw_standalone_fixture(directory)
+                _, receipt = m.load_bound(first)
+                bundle = first / "candidate-bundle.tar.gz"
+                replacement = directory / "changed-bundle.tar.gz"
+                selected = {"source": "config/profiles/sample/tests/e2e/acceptance.sh", "mode": "config/profiles/sample/tests/e2e/acceptance.sh",
+                    "runtime": ".subyard-acceptance/release/" + receipt["runtime_file"], "metadata": ".subyard-acceptance/candidate.json"}.get(change)
+                with tarfile.open(bundle, "r:gz") as original, tarfile.open(replacement, "w:gz") as changed:
+                    for member in original.getmembers():
+                        data = original.extractfile(member).read()
+                        member = copy.copy(member)
+                        if member.name == selected:
+                            if change == "mode":
+                                member.mode ^= 0o111
+                            else:
+                                data += b"tampered"
+                                member.size = len(data)
+                        changed.addfile(member, io.BytesIO(data))
+                    if change == "extra":
+                        member = tarfile.TarInfo("unbound-source.txt")
+                        member.mode, member.size = 0o644, 4
+                        changed.addfile(member, io.BytesIO(b"oops"))
+                replacement.replace(bundle)
+                receipt["candidate_bundle_sha256"] = m.digest(bundle)
+                m.save(first, receipt)
+                review["tested"] = m.transfer_candidate(receipt)
+                review["source_receipt_sha256"] = m.digest(first / "receipt.json")
+                launch_path = Path(review["standalone"]["launch"]["path"])
+                launch = json.loads(launch_path.read_text())
+                launch["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]
+                launch_path.write_text(json.dumps(launch))
+                review["standalone"]["launch"]["sha256"] = m.digest(launch_path)
+                declaration.write_text(json.dumps(review))
+                before = (second / "receipt.json").read_bytes()
+                with self.assertRaisesRegex(ValueError, "tested bundle"):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+
+    def test_raw_standalone_bundle_bounds_directory_members(self):
+        for change in ("ancestor", "unowned", "duplicate"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                first, second, name, declaration, review = self.raw_standalone_fixture(directory)
+                _, receipt = m.load_bound(first)
+                bundle, replacement = first / "candidate-bundle.tar.gz", directory / "changed-bundle.tar.gz"
+                directories = (["config"] if change == "ancestor" else ["config", "config"]
+                               if change == "duplicate" else [f"unowned-directory-{i}" for i in range(32)])
+                with tarfile.open(bundle, "r:gz") as original, tarfile.open(replacement, "w:gz") as changed:
+                    for path in directories:
+                        member = tarfile.TarInfo(path)
+                        member.type = tarfile.DIRTYPE
+                        changed.addfile(member)
+                    for member in original:
+                        changed.addfile(member, original.extractfile(member))
+                replacement.replace(bundle)
+                receipt["candidate_bundle_sha256"] = m.digest(bundle)
+                m.save(first, receipt)
+                review["tested"] = m.transfer_candidate(receipt)
+                review["source_receipt_sha256"] = m.digest(first / "receipt.json")
+                launch_path = Path(review["standalone"]["launch"]["path"])
+                launch = json.loads(launch_path.read_text())
+                launch["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]
+                launch_path.write_text(json.dumps(launch))
+                review["standalone"]["launch"]["sha256"] = m.digest(launch_path)
+                declaration.write_text(json.dumps(review))
+                before = (second / "receipt.json").read_bytes()
+                with patch.object(m.tarfile.TarFile, "getmembers", side_effect=AssertionError("eager archive loading")):
+                    if change == "ancestor":
+                        self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "unsafe standalone tested bundle member"):
+                            m.transfer_evidence(second, first, name, declaration)
+                        self.assertEqual((second / "receipt.json").read_bytes(), before)
+
+    def test_rich_standalone_clock_validation_without_optional_timestamp(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True)
+            source, receipt = m.load_bound(first)
+            files = {role: Path(item["path"]) for role, item in review["standalone"].items()}
+            launch = json.loads(files["launch"].read_text())
+            del launch["launched_at_utc"]
+            command = m.commands(source, "test", receipt["profiles"])[name]
+            before = (second / "receipt.json").read_bytes()
+            for clock in ("unknown", None, True, -1, float("inf"), float("nan")):
+                files["launch"].write_text(json.dumps({**launch, "started_monotonic": clock}))
+                review["standalone"]["launch"]["sha256"] = m.digest(files["launch"])
+                declaration.write_text(json.dumps(review))
+                with self.subTest(clock=clock), self.assertRaisesRegex(ValueError, "invalid standalone launch time"):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual((second / "receipt.json").read_bytes(), before)
+            for valid in (launch, {**launch, "started_monotonic": 0}, {**launch, "started_monotonic": 123.5}):
+                files["launch"].write_text(json.dumps(valid))
+                self.assertIsNone(m.standalone_result(source, receipt, name, command, files)["launched_at_utc"])
+
     def test_prepare_uses_plain_sources_and_retains_only_needed_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

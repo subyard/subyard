@@ -54,6 +54,8 @@ type IncusReader interface {
 
 type Runtime struct {
 	RepositoryRoot string
+	// SourceReader is read-only prospective desired input; nil uses normal asset policy.
+	SourceReader func(config.MaterializedAsset) ([]byte, error)
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
 	TeardownResources []ports.TeardownResource
 	TeardownArtifacts []ports.TeardownArtifact

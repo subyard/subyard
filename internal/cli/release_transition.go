@@ -120,6 +120,7 @@ func (cli *CLI) activationReconcilers(request releasetransition.ProcessRequest) 
 		},
 		artifactDigest: request.ArtifactDigest,
 		registryDigest: request.RegistryDigest,
+		sourceIngress:  request.SourceIngress != nil,
 	}
 	return slices.Insert(reconcilers, len(cli.profileRuntimeIDs()), releasetransition.V2ActivationReconciler(materialized))
 }
@@ -223,6 +224,7 @@ type activationApplicability struct {
 }
 
 type activationStageReconciler struct {
+	prospective          func(releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error)
 	id                   string
 	stage                ports.ReconcileStageID
 	inspectApplicability func(context.Context) (activationApplicability, error)
@@ -247,6 +249,20 @@ type routeConsumerActivationReconciler struct {
 }
 
 func (*routeConsumerActivationReconciler) ID() string { return "test-yard-route-consumers" }
+
+func (reconciler *routeConsumerActivationReconciler) ObserveProspective(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SettingsSnapshotView) (releasetransition.V2ActivationObservation, error) {
+	port, ok := reconciler.port.(interface {
+		Prospective(releasetransition.V2SettingsSnapshotView) (routeConsumerActivationPort, error)
+	})
+	if !ok || view == nil {
+		return reconciler.Observe(ctx, releases, links)
+	}
+	projected, err := port.Prospective(view)
+	if err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
+	return (&routeConsumerActivationReconciler{port: projected}).Observe(ctx, releases, links)
+}
 
 func (reconciler *routeConsumerActivationReconciler) Observe(
 	ctx context.Context,
@@ -338,6 +354,27 @@ type testYardRouteConsumerActivation struct {
 	options testyardmigration.Options
 }
 
+func prospectiveActivationFiles(root string, view releasetransition.V2SettingsSnapshotView) (*config.ProspectiveFiles, error) {
+	if view == nil {
+		return nil, nil
+	}
+	yards, err := view.ListYards()
+	if err != nil {
+		return nil, err
+	}
+	return &config.ProspectiveFiles{Root: root, Yards: yards, ReadSnapshot: view.ReadSnapshot}, nil
+}
+
+func (activation *testYardRouteConsumerActivation) Prospective(view releasetransition.V2SettingsSnapshotView) (routeConsumerActivationPort, error) {
+	files, err := prospectiveActivationFiles(activation.options.ConfigHome, view)
+	if err != nil {
+		return nil, err
+	}
+	projected := *activation
+	projected.options.ProspectiveFiles = files
+	return &projected, nil
+}
+
 func (activation *testYardRouteConsumerActivation) PrepareOwner(
 	ctx context.Context,
 ) (string, error) {
@@ -394,6 +431,17 @@ func (reconciler *activationStageReconciler) failure(phase string, err error) er
 }
 
 func (reconciler *activationStageReconciler) ID() string { return reconciler.id }
+
+func (reconciler *activationStageReconciler) ObserveProspective(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SettingsSnapshotView) (releasetransition.V2ActivationObservation, error) {
+	if view == nil || reconciler.prospective == nil {
+		return reconciler.Observe(ctx, releases, links)
+	}
+	projected, err := reconciler.prospective(view)
+	if err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
+	return projected.Observe(ctx, releases, links)
+}
 
 func (reconciler *activationStageReconciler) Observe(
 	ctx context.Context,
@@ -507,10 +555,23 @@ func activationStageFingerprint(value any) (releasetransition.Fingerprint, error
 func (cli *CLI) brokerActivationReconciler(
 	request releasetransition.ProcessRequest,
 ) releasetransition.V2ActivationReconciler {
+	return cli.brokerActivationWithFiles(request, nil)
+}
+
+func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessRequest, files *config.ProspectiveFiles) *activationStageReconciler {
 	options := func() (testyardmigration.Options, error) {
-		return cli.releaseTransitionTestYardOptions(request)
+		values, err := cli.releaseTransitionTestYardOptions(request)
+		values.ProspectiveFiles = files
+		return values, err
 	}
 	return &activationStageReconciler{
+		prospective: func(view releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error) {
+			projected, err := prospectiveActivationFiles(request.ConfigHome, view)
+			if err != nil {
+				return nil, err
+			}
+			return cli.brokerActivationWithFiles(request, projected), nil
+		},
 		id: "test-vm-broker", stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
 			values, err := options()
@@ -529,7 +590,7 @@ func (cli *CLI) brokerActivationReconciler(
 			}
 			loaded, err := cli.resolveReleaseTransitionContext(
 				applicability.target,
-				request.ConfigHome,
+				request.ConfigHome, files,
 			)
 			if err != nil {
 				return nil, err
@@ -702,6 +763,7 @@ type materializedConfigActivationReconciler struct {
 	goal             releasetransition.Goal
 	artifactDigest   releasetransition.Fingerprint
 	registryDigest   releasetransition.Fingerprint
+	sourceIngress    bool
 	allLocal         bool
 	scopeResolved    bool
 	integrationPlans map[string]reconcileruntime.IntegrationPlan
@@ -780,9 +842,27 @@ func (cli *CLI) releaseActivationOperation() *CLI {
 }
 
 func (reconciler *materializedConfigActivationReconciler) Observe(
-	ctx context.Context,
-	releases releasetransition.ReleasePair,
-	_ releasetransition.ReleaseLinks,
+	ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks,
+) (releasetransition.V2ActivationObservation, error) {
+	return reconciler.observe(ctx, releases, nil)
+}
+
+func (reconciler *materializedConfigActivationReconciler) ObserveProspective(
+	ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks,
+	view releasetransition.V2SettingsSnapshotView,
+) (releasetransition.V2ActivationObservation, error) {
+	if view == nil {
+		return reconciler.Observe(ctx, releases, links)
+	}
+	yards, err := view.ListYards()
+	if err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
+	return reconciler.observe(ctx, releases, &config.ProspectiveFiles{Root: reconciler.configHome, ReadSnapshot: view.ReadSnapshot, Yards: yards})
+}
+
+func (reconciler *materializedConfigActivationReconciler) observe(
+	ctx context.Context, releases releasetransition.ReleasePair, files *config.ProspectiveFiles,
 ) (releasetransition.V2ActivationObservation, error) {
 	if reconciler == nil || reconciler.cli == nil {
 		return releasetransition.V2ActivationObservation{}, errors.New("materialized config reconciler is unavailable")
@@ -801,7 +881,7 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		yard = "default"
 	}
 	operation := reconciler.operation()
-	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome)
+	loaded, err := operation.resolveReleaseTransitionContext(yard, reconciler.configHome, files)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "configuration", "config status", "inspect", reconciler.configHome}
 	}
@@ -831,6 +911,10 @@ func (reconciler *materializedConfigActivationReconciler) Observe(
 		integrationScope := ""
 		var managedPaths []string
 		platform := operation.initPlatform(target.Loaded, nil)
+		if runtime, ok := platform.(reconcileruntime.Runtime); ok && files != nil {
+			runtime.SourceReader = files.ReadAsset
+			platform = runtime
+		}
 		integration := reconcileruntime.IntegrationPlan{}
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			integrationScope, managedPaths, err = runtime.IntegrationScope()
@@ -921,7 +1005,7 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 		journal.ArtifactDigest == reconciler.artifactDigest &&
 		(reconciler.registryDigest == "" || journal.RegistryDigest == reconciler.registryDigest)
 	if matches && journal.Checkpoint == releasetransition.JournalComplete &&
-		journal.Releases.From != journal.Releases.Target {
+		(journal.Releases.From != journal.Releases.Target || journal.SourceIngress != nil) {
 		pending, err := releaseCheckpointPublicationPending(reconciler.cli.options.RepositoryRoot, store)
 		if err != nil {
 			return err
@@ -932,6 +1016,13 @@ func (reconciler *materializedConfigActivationReconciler) resolveScope(
 			reconciler.scopeResolved = true
 			return nil
 		}
+	}
+	if (reconciler.sourceIngress && !matches) ||
+		(matches && journal.SourceIngress != nil && journal.Checkpoint != releasetransition.JournalComplete) {
+		// A bootstrap can prelink its target before importing registrations.
+		// Preserve the authorized source scope until checkpoint publication.
+		reconciler.scopeResolved = true
+		return nil
 	}
 	if releases.From != releases.Target {
 		// Source migrations can rename registrations. Their authorized scope
@@ -1128,6 +1219,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 func (cli *CLI) resolveReleaseTransitionContext(
 	yard string,
 	configHome string,
+	files ...*config.ProspectiveFiles,
 ) (config.Loaded, error) {
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 	if configHome != "" {
@@ -1142,6 +1234,9 @@ func (cli *CLI) resolveReleaseTransitionContext(
 		OperatorHome: operatorHome,
 		YardName:     yard,
 		Environment:  environment,
+	}
+	if len(files) != 0 {
+		options.ProspectiveFiles = files[0]
 	}
 	loaded, err := config.Load(options)
 	if err == nil || yard != testyardmigration.LegacyYard ||

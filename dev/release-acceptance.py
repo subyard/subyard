@@ -1053,6 +1053,48 @@ def validate_evidence_transfer(document, name, command, target, log_sha256):
             raise ValueError("invalid transferred launch time") from None
 
 
+def validate_standalone_bundle(root, receipt):
+    """Bind an older raw launcher to the original frozen source and runtime bytes."""
+    bound_root, bound = load_bound(root.parent)
+    if bound_root != root or transfer_candidate(bound) != transfer_candidate(receipt):
+        raise ValueError("standalone original frozen candidate changed")
+    paths = sorted(filter(None, subprocess.check_output(["bash", "tests/helpers/source-files.sh"],
+        cwd=root, stderr=subprocess.DEVNULL).split(b"\0")))
+    paths = [raw for raw in paths if not os.fsdecode(raw).startswith(".subyard-acceptance/")]
+    extras = {".subyard-acceptance/candidate.json": digest(root / ".subyard-acceptance/candidate.json"),
+              **{".subyard-acceptance/release/" + name: sha for name, sha in receipt["release_files"].items()}}
+    expected = set(map(os.fsdecode, paths)) | set(extras)
+    directories = {str(parent) for name in expected for parent in Path(name).parents if parent != Path(".")}
+    try:
+        with tarfile.open(root.parent / "candidate-bundle.tar.gz", "r:gz") as archive:
+            members = {}
+            # Iterate headers and reject before retaining any unowned member;
+            # both our inventory and tarfile's header cache stay bounded.
+            for member in archive:
+                name = member.name.removeprefix("./")
+                if (name.startswith("/") or ".." in Path(name).parts or name in members
+                    or not (member.isfile() and name in expected or member.isdir() and name in directories)):
+                    raise ValueError("unsafe standalone tested bundle member")
+                members[name] = member
+            if {name for name, member in members.items() if member.isfile()} != expected:
+                raise ValueError("standalone tested bundle inventory differs")
+            fingerprint = hashlib.sha256()
+            for raw in paths:
+                member = members[os.fsdecode(raw)]
+                fingerprint.update(raw + b"\0")
+                fingerprint.update(f"{0o755 if member.mode & 0o111 else 0o644:o}\0".encode())
+                with archive.extractfile(member) as stream:
+                    fingerprint.update(bytes.fromhex(hashlib.file_digest(stream, "sha256").hexdigest()))
+            if fingerprint.hexdigest() != receipt["source_fingerprint"]:
+                raise ValueError("standalone tested bundle source differs")
+            for name, sha in extras.items():
+                with archive.extractfile(members[name]) as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != sha:
+                        raise ValueError("standalone tested bundle runtime or metadata differs")
+    except tarfile.TarError:
+        raise ValueError("invalid standalone tested bundle archive") from None
+
+
 def standalone_result(root, receipt, name, command, files, verify_source=True):
     """Verify existing bounded controller evidence, without inventing collector timing."""
     native = read_transfer_json(files["native"])
@@ -1062,10 +1104,14 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
         or not math.isfinite(native["wall_time_seconds"]) or native["wall_time_seconds"] < 0):
         raise ValueError("standalone native execution is not a complete PASS")
     launch = read_transfer_json(files["launch"])
-    if (not is_live(name) or launch.get("cwd") != str(root)
-        or launch.get("source_fingerprint") != receipt["source_fingerprint"]
-        or launch.get("runtime_sha256") != receipt["runtime_sha256"]
-        or launch.get("bundle_sha256") != receipt["candidate_bundle_sha256"]):
+    if not is_live(name) or launch.get("cwd") != str(root):
+        raise ValueError("standalone launcher candidate differs")
+    bindings = {"source_fingerprint", "runtime_sha256", "bundle_sha256", "acceptance_script_sha256"}
+    raw = not (bindings & set(launch))
+    if not raw and (not bindings <= set(launch)
+        or launch["source_fingerprint"] != receipt["source_fingerprint"]
+        or launch["runtime_sha256"] != receipt["runtime_sha256"]
+        or launch["bundle_sha256"] != receipt["candidate_bundle_sha256"]):
         raise ValueError("standalone launcher candidate differs")
     argv = launch.get("argv")
     if not isinstance(argv, list) or any(not isinstance(value, str) for value in argv):
@@ -1085,29 +1131,51 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
     if (actual[:len(command)] != command or len(actual) != len(command) + 2
         or actual[-2] != "--slot" or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
         raise ValueError("standalone actual check command differs")
-    if command[:1] == ["bash"] and (not re.fullmatch(r"[0-9a-f]{64}", launch.get("acceptance_script_sha256", ""))
+    if not raw and command[:1] == ["bash"] and (not isinstance(launch["acceptance_script_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", launch["acceptance_script_sha256"])
         or verify_source and launch["acceptance_script_sha256"] != digest(root / command[1])):
         raise ValueError("standalone launcher script changed")
-    environments, stages, bundle_seen, released = set(), set(), False, False
+    if "started_monotonic" in launch and (type(launch["started_monotonic"]) not in (int, float)
+        or not math.isfinite(launch["started_monotonic"]) or launch["started_monotonic"] < 0):
+        raise ValueError("invalid standalone launch time")
+    launched = launch.get("launched_at_utc", launch.get("started_at"))
+    if raw or launched is not None:
+        try:
+            if not isinstance(launched, str) or not launched or len(launched) > 64 or any(ord(c) < 32 for c in launched):
+                raise ValueError()
+            parsed = datetime.fromisoformat(launched)
+            if parsed.utcoffset() is None:
+                raise ValueError()
+            if "started_at" in launch and datetime.fromisoformat(launch["started_at"]) != parsed:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise ValueError("invalid standalone launch time") from None
+        if raw:
+            launched = parsed.astimezone(timezone.utc).isoformat()
+    if raw and verify_source:
+        validate_standalone_bundle(root, receipt)
+    # The bound source and exact launcher select a checksum-verified bundle.
+    # Direct controllers need not use run_guest's transport/guest timing wrapper.
+    environments, stages, released = set(), set(), False
     with files["log"].open("rb") as stream:
         for line in stream:
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
             if environment:
                 environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if stage:
                 if stage[2] != b"0":
                     raise ValueError("standalone controller contains a failed phase")
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
-            bundle_seen |= b"worktree bundle ready (sha256=" + receipt["candidate_bundle_sha256"].encode() + b")" in line
+            if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
+                raise ValueError("standalone controller contains a failed phase")
             released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-    if (not environments or not bundle_seen or not released or ("cleanup/release", None) not in stages
-        or any((phase, vm) not in stages for _, count, _ in environments
-               for vm in range(1, count + 1) for phase in ("transport", "guest", "guest-cleanup"))):
+    if (not environments or not released or ("cleanup/release", None) not in stages
+        or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
         raise ValueError("standalone controller evidence incomplete")
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
         "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
-    return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launch.get("launched_at_utc"),
+    return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
             "execution_environment": None, "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base}
                 for kind, count, base in sorted(environments)]}
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -2064,6 +2066,228 @@ func TestActivationStageReconcilerPreservesInapplicableRuntime(t *testing.T) {
 	}
 }
 
+type sourceRegistrationIngress struct {
+	t               *testing.T
+	path            string
+	legacy          string
+	rules           string
+	rulesContent    string
+	defaultsContent string
+	imported        bool
+	interrupt       bool
+}
+
+func (source *sourceRegistrationIngress) Inspect(context.Context, *releasetransition.V2IngressBinding) (releasetransition.V2IngressInspection, error) {
+	return releasetransition.V2IngressInspection{
+		Operations: []releasetransition.V2IngressOperation{{
+			Kind: releasetransition.V2SourceImport, Decision: releasetransition.DecisionCanonicalize,
+			Expected: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+			Desired:  releasetransition.Fingerprint(strings.Repeat("b", 64)),
+		}},
+		Prospective: source,
+	}, nil
+}
+
+func (source *sourceRegistrationIngress) ListYards() ([]string, error) {
+	return []string{"new-yard"}, nil
+}
+func (source *sourceRegistrationIngress) ReadSnapshot(path string) (config.PersistentFileSnapshot, error) {
+	if path == source.path {
+		return config.PersistentFileSnapshot{Exists: true, Content: []byte("SSH_PORT=2223\n")}, nil
+	}
+	if source.rules != "" {
+		if path == source.rules {
+			return config.PersistentFileSnapshot{Exists: true, Content: []byte(source.rulesContent)}, nil
+		}
+		if path == source.configPath() {
+			return config.PersistentFileSnapshot{Exists: true, Content: []byte(source.defaultsContent)}, nil
+		}
+	}
+	return config.ReadPersistentFileSnapshot(filepath.Dir(source.configPath()), path)
+}
+func (source *sourceRegistrationIngress) configPath() string {
+	return filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(source.path))), "config.env")
+}
+func (source *sourceRegistrationIngress) Observe(context.Context, releasetransition.V2IngressStep) (releasetransition.Fingerprint, error) {
+	if source.imported {
+		return releasetransition.Fingerprint(strings.Repeat("b", 64)), nil
+	}
+	return releasetransition.Fingerprint(strings.Repeat("a", 64)), nil
+}
+func (source *sourceRegistrationIngress) Apply(context.Context, releasetransition.V2IngressStep) error {
+	if source.legacy != "" {
+		if err := os.Rename(filepath.Dir(source.legacy), filepath.Dir(source.path)); err != nil {
+			return err
+		}
+	}
+	writeReleaseTransitionTestFile(source.t, source.path, []byte("SSH_PORT=2223\n"), 0o600)
+	if source.rules != "" {
+		writeReleaseTransitionTestFile(source.t, source.rules, []byte(source.rulesContent), 0o600)
+		writeReleaseTransitionTestFile(source.t, source.configPath(), []byte(source.defaultsContent), 0o600)
+	}
+	source.imported = true
+	if source.interrupt {
+		source.interrupt = false
+		return errors.New("interrupt source registration before checkpoint publication")
+	}
+	return nil
+}
+func (*sourceRegistrationIngress) Verify(context.Context, releasetransition.V2IngressStep) error {
+	return nil
+}
+
+func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		interrupt bool
+		rename    bool
+		defaults  bool
+		stale     string
+	}{
+		{name: "introduction"}, {name: "introduction-resume", interrupt: true},
+		{name: "rename", rename: true}, {name: "rename-resume", rename: true, interrupt: true},
+		{name: "imported-default-config", defaults: true},
+		{name: "imported-default-config-resume", defaults: true, interrupt: true},
+		{name: "stale-default-config", defaults: true, stale: "settings"},
+		{name: "stale-default-asset", defaults: true, stale: "asset"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			if err := os.MkdirAll(configHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
+			writeCLIFile(t, filepath.Join(root, "config", "release-transition.json"),
+				`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`+"\n", 0o600)
+			writeCLIFile(t, filepath.Join(root, "config", "release-checkpoint.json"),
+				`{"schemaVersion":1,"contract":"migration-history-checkpoint-v1"}`+"\n", 0o600)
+			runtimeRoot := testkit.TempDir(t)
+			if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-a"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			registry, err := os.ReadFile(filepath.Join(root, "config", "release-transition.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSealedRollbackTarget(t, runtimeRoot, "release-a", "0.19.0", registry)
+			releaseRoot := filepath.Join(runtimeRoot, "releases", "release-a")
+			capability, err := os.ReadFile(filepath.Join(root, "config", "release-checkpoint.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "config", "release-checkpoint.json"), capability, 0o600)
+			manifest, err := os.ReadFile(filepath.Join(releaseRoot, "runtime-files.sha256"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest = append(manifest, []byte(fmt.Sprintf("%x  ./config/release-checkpoint.json\n", sha256.Sum256(capability)))...)
+			writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "runtime-files.sha256"), manifest, 0o600)
+			source := &sourceRegistrationIngress{t: t, path: filepath.Join(configHome, "yards", "new-yard", "config.env"), interrupt: scenario.interrupt}
+			if scenario.rename {
+				source.legacy = filepath.Join(configHome, "yards", "legacy-yard", "config.env")
+				writeReleaseTransitionTestFile(t, source.legacy, []byte("SSH_PORT=2223\n"), 0o600)
+			}
+			if scenario.defaults {
+				source.rules = filepath.Join(configHome, "overrides", "host", "agents", "codex", "repo.rules")
+				source.rulesContent = "allow_rule()\n"
+				source.defaultsContent = "DEV_SUDO=1\nCODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='" + source.rules + "'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n"
+			}
+			request := releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+				RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: "release-a",
+				Direction:      releasetransition.DirectionActivateTarget,
+				ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))),
+				SourceIngress: &releasetransition.SourceIngressRequest{
+					SchemaVersion: 1, Kind: releasetransition.SourceIngressPreGoV1,
+					SourceRoot: filepath.Join(root, "src"), DataHome: filepath.Join(root, "data"),
+					BinDir: filepath.Join(root, "home", ".local", "bin"), RC: filepath.Join(root, "home", ".bashrc"), LoginRC: filepath.Join(root, "home", ".profile"),
+				},
+			}
+			grants := 0
+			run := func() releasetransition.ProcessResponse {
+				t.Helper()
+				fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconcilers := program.activationReconcilers(request)
+				materialized := reconcilers[slices.IndexFunc(reconcilers, func(owner releasetransition.V2ActivationReconciler) bool { return owner.ID() == "materialized-config" })]
+				response, err := executeReleaseTransitionRequest(context.Background(), root, request,
+					func(releasetransition.PlanToken, releasetransition.Authorization) bool { grants++; return true },
+					[]releasetransition.V2ActivationReconciler{materialized}, nil,
+					func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error) { return source, nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response
+			}
+			inspection := run()
+			if inspection.Inspection == nil || len(inspection.Inspection.Blockers) != 0 {
+				t.Fatalf("source inspection: %#v", inspection)
+			}
+			if scenario.stale == "settings" {
+				source.defaultsContent = "CODING_TOOL_INTEGRATIONS=\n"
+			}
+			if scenario.stale == "asset" {
+				source.rulesContent = "changed_rule()\n"
+			}
+			request.Mode = releasetransition.ProcessConverge
+			request.Execution = &releasetransition.Execution{Plan: inspection.Inspection.Plan, Authorization: "fixture-grant"}
+			completed := run()
+			if scenario.stale != "" {
+				if completed.Outcome == nil || completed.Outcome.Code != releasetransition.CodePlanStale || source.imported || grants != 0 {
+					t.Fatalf("stale source inputs accepted: outcome=%#v imported=%t grants=%d", completed.Outcome, source.imported, grants)
+				}
+				return
+			}
+			if scenario.interrupt {
+				if completed.Outcome == nil || completed.Outcome.Status != releasetransition.StatusRecovering {
+					t.Fatalf("source interruption: %#v", completed.Outcome)
+				}
+				request.Mode, request.Execution = releasetransition.ProcessInspect, nil
+				request.SourceIngress = nil
+				resume := run()
+				if resume.Inspection == nil || resume.Inspection.Resume == nil || len(resume.Inspection.Blockers) != 0 {
+					t.Fatalf("fresh source resume: %#v", resume)
+				}
+				request.Mode = releasetransition.ProcessConverge
+				request.Execution = &releasetransition.Execution{Plan: resume.Inspection.Plan}
+				completed = run()
+			}
+			if completed.Outcome == nil || completed.Outcome.Status != releasetransition.StatusReady || grants != 1 {
+				t.Fatalf("source completion: %#v grants=%d", completed, grants)
+			}
+			store, err := releasetransition.NewPOSIXV2Store(configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint, err := store.ReadMigrationCheckpoint()
+			if err != nil || !checkpoint.Exists {
+				t.Fatalf("authorized source checkpoint missing: exists=%t err=%v", checkpoint.Exists, err)
+			}
+			projection, err := store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Mode, request.Execution = releasetransition.ProcessInspect, nil
+			request.SourceIngress = nil
+			final := run()
+			if final.Inspection == nil || final.Inspection.Outcome.Status != releasetransition.StatusReady || final.Inspection.Assessment.Changed {
+				t.Fatalf("fresh source fixed point: %#v", final)
+			}
+			after, err := store.ReadLedger()
+			if err != nil || !bytes.Equal(after.Payload, projection.Payload) || after.Exists != projection.Exists {
+				t.Fatal("final inspection changed the legacy projection")
+			}
+		})
+	}
+}
+
 func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0755)
@@ -2774,4 +2998,358 @@ func writeRuntimeProfileFixture(t *testing.T, root string) {
 	}
 	writeCLIFile(t, filepath.Join(directory, "runtime.sh"), "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
 	writeCLIFile(t, filepath.Join(directory, "profile.json"), `{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh"}}`, 0o600)
+}
+
+func TestBrokerActivationProspectiveRegistrationPreservesDesired(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "config", "yards", "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(root, "config", "yards", "profiles", "test-vms.env"), "NESTED_E2E_VMS=1\n", 0o600)
+	bin := filepath.Join(root, "fake-bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(bin, "incus"), "#!/bin/sh\ncase \"$*\" in 'project list --format=json') printf '[]\\n';; *) exit 2;; esac\n", 0o700)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: newInitPlatformFixture(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{ConfigHome: configHome}
+	actor := program.brokerActivationReconciler(request).(*activationStageReconciler)
+	pair := releasetransition.ReleasePair{From: "a", Target: "a"}
+	ordinary, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configHome, "yards", testyardmigration.CurrentYard, "config.env")
+	payload := []byte("YARD_TEMPLATE=test-vms\n")
+	view := prospectiveOwnerSettingsView{snapshots: map[string]config.PersistentFileSnapshot{path: {Exists: true, Content: payload}}}
+	projected, err := actor.ObserveProspective(context.Background(), pair, releasetransition.ReleaseLinks{}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, path, payload, 0o600)
+	published, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Desired == published.Desired || projected.Desired != published.Desired {
+		t.Fatalf("registration desired scope: absent=%s prospective=%s published=%s", ordinary.Desired, projected.Desired, published.Desired)
+	}
+	for _, mode := range []os.FileMode{0o640, 0o644, 0o600 | os.ModeSetuid} {
+		t.Run(mode.String(), func(t *testing.T) {
+			testkit.WriteFile(t, path, payload, mode)
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained, normalErr := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+			prospective, projectedErr := actor.ObserveProspective(context.Background(), pair, releasetransition.ReleaseLinks{}, retainedActivationSettingsView{configHome})
+			if mode&os.ModeSetuid != 0 {
+				if normalErr == nil || projectedErr == nil {
+					t.Fatalf("special-mode current registration accepted: normal=%v prospective=%v", normalErr, projectedErr)
+				}
+			} else if normalErr != nil || projectedErr != nil || prospective.Desired != retained.Desired {
+				t.Fatalf("retained registration bridge changed desired: %v/%v", normalErr, projectedErr)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+				t.Fatal("prospective observation mutated registration")
+			}
+		})
+	}
+}
+
+type retainedActivationSettingsView struct{ root string }
+
+func (view retainedActivationSettingsView) ListYards() ([]string, error) { return nil, nil }
+func (view retainedActivationSettingsView) ReadSnapshot(path string) (config.PersistentFileSnapshot, error) {
+	return config.ReadPersistentFileSnapshot(view.root, path)
+}
+
+func TestMaterializedProspectiveActivationPreservesReadableRetainedFiles(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o644} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\n", 0o644)
+			asset := filepath.Join(configHome, "overrides", "host", "agents", "codex", "repo.rules")
+			settings := filepath.Join(configHome, "config.env")
+			writeConfigCommandFile(t, asset, "allow_rule()\n")
+			writeConfigCommandFile(t, settings, "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_RULES='"+asset+"'\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n")
+			for _, path := range []string{settings, asset} {
+				if err := os.Chmod(path, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake, Stdout: io.Discard, Stderr: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := &materializedConfigActivationReconciler{cli: program, yard: "default", configHome: configHome, scopeResolved: true}
+			pair := releasetransition.ReleasePair{From: "a", Target: "a"}
+			ordinary, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			projected, err := actor.ObserveProspective(context.Background(), pair, releasetransition.ReleaseLinks{}, retainedActivationSettingsView{configHome})
+			if err != nil || projected.Desired != ordinary.Desired {
+				t.Fatalf("retained activation desired changed: %s / %s: %v", ordinary.Desired, projected.Desired, err)
+			}
+			for _, path := range []string{settings, asset} {
+				info, err := os.Stat(path)
+				if err != nil || info.Mode().Perm() != mode {
+					t.Fatalf("retained file mode changed: %s %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
+	root := testkit.TempDir(t)
+	repository := filepath.Join(root, "candidate")
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}` + "\n")
+	writeReleaseTransitionTestFile(t, filepath.Join(repository, "config", "release-transition.json"), registry, 0o600)
+	runtimeRoot := filepath.Join(root, "runtime")
+	target := "0.19.0-ready-contract"
+	writeSealedRollbackTarget(t, runtimeRoot, target, "0.19.0", registry)
+	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	reply := filepath.Join(root, "native-inspection.json")
+	engine := []byte("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 0.19.0\\n';; _release-transition) cat >/dev/null; cat '" + reply + "';; *) exit 64;; esac\n")
+	releaseRoot := filepath.Join(runtimeRoot, "releases", target)
+	writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "bin", "yard-engine"), engine, 0o700)
+	manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256(engine), sha256.Sum256(registry)))
+	writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "runtime-files.sha256"), manifest, 0o600)
+	configHome := filepath.Join(root, "config")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(target), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))}
+	actor := &processDriftReconciler{}
+	invoke := func() releasetransition.ProcessResponse {
+		t.Helper()
+		response, err := executeReleaseTransitionRequest(context.Background(), repository, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{actor}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	initial := invoke()
+	if initial.Inspection == nil {
+		t.Fatal("missing initial inspection")
+	}
+	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: initial.Inspection.Plan, Authorization: "fixture-grant"}
+	completed := invoke()
+	if completed.Outcome == nil || completed.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("native convergence not ready: %#v", completed.Outcome)
+	}
+	request.Mode = releasetransition.ProcessInspect
+	request.Execution = nil
+	parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition", "v2", "ledger.json"), ledger, 0o600)
+	inspector := releaseruntime.NewSourceInspector(repository, io.Discard)
+	_, proofErr := inspector.InspectSourceAdmission(context.Background(), runtimeRoot, configHome)
+	inspector.Close()
+	if proofErr != nil {
+		t.Fatalf("native metadata fixture: %v", proofErr)
+	}
+	inspection := invoke()
+	if inspection.Inspection == nil || inspection.Inspection.Assessment.Changed || inspection.Inspection.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("native reinspection not ready: %#v", inspection.Inspection)
+	}
+	if len(inspection.Inspection.Decisions) != 1 || inspection.Inspection.Decisions[0].Resource != "transition.source-metadata" || inspection.Inspection.Decisions[0].Decision != releasetransition.DecisionPreserve {
+		t.Fatalf("native preservation decision missing: %#v", inspection.Inspection.Decisions)
+	}
+	wire, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, reply, wire, 0o600)
+	var output bytes.Buffer
+	runtime := releaseruntime.New(releaseruntime.Config{Inputs: releaseruntime.CaptureCommandInputs([]string{"HOME=" + root, "YARD_RUNTIME_ROOT=" + runtimeRoot}, func(string) bool { return false }), Stdout: &output, Stderr: io.Discard})
+	defer runtime.Close()
+	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, configHome, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.Changed {
+		t.Fatal("ready check proposes mutation")
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Outcome releasetransition.Outcome `json:"outcome"`
+		Domains []struct {
+			Pending []string `json:"pending"`
+		} `json:"domains"`
+		Decisions []releasetransition.RedactedDecision `json:"decisions"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome.Status != releasetransition.StatusReady || !report.Outcome.ReachedGoal || len(report.Decisions) != 1 {
+		t.Fatal("current report lost native readiness/preservation")
+	}
+	for _, domain := range report.Domains {
+		if len(domain.Pending) != 0 {
+			t.Fatal("ready report has pending migrations")
+		}
+	}
+	original := exec.Command("jq", "-e", `.outcome.status == "ready" and all(.domains[]; .pending == []) and ((.decisions // []) | length) == 0`)
+	original.Stdin = bytes.NewReader(output.Bytes())
+	original.Stdout = io.Discard
+	err = original.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("original fixture predicate did not reproduce exit1: %v", err)
+	}
+	t.Logf("original_predicate_exit=1 native_current_report=%s", bytes.TrimSpace(output.Bytes()))
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "dev", "e2e", "p0-source-upgrade.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(fixture)
+	extract := func(marker string) string {
+		t.Helper()
+		start := strings.LastIndex(source, marker)
+		if start < 0 {
+			t.Fatal("readiness fixture predicate missing")
+		}
+		tail := source[start+len(marker):]
+		end := strings.Index(tail, "' ")
+		if end < 0 {
+			t.Fatal("readiness fixture expression unterminated")
+		}
+		return tail[:end]
+	}
+	predicate := extract("  if ! jq -e '")
+	diagnostic := extract("    jq -ce '")
+	for _, scenario := range []struct {
+		name        string
+		mutate      func(map[string]any)
+		accepted    bool
+		unavailable bool
+	}{
+		{name: "native-ready-with-preservation", accepted: true},
+		{name: "native-ready-without-decisions", accepted: true, mutate: func(r map[string]any) { r["decisions"] = []any{} }},
+		{name: "native-ready-with-omitted-decisions", accepted: true, mutate: func(r map[string]any) { delete(r, "decisions") }},
+		{name: "empty-scope", accepted: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = ""
+		}},
+		{name: "nonempty-scope", mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = "synthetic-private-value"
+		}},
+		{name: "actionable-decision", mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "activation.materialized-config", "decision": "canonicalize"}}
+		}},
+		{name: "other-preservation", mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "activation.materialized-config", "decision": "preserve"}}
+		}},
+		{name: "unknown-decision", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "transition.source-metadata", "decision": "synthetic-private-value"}}
+		}},
+		{name: "unknown-resource", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "synthetic-private-value", "decision": "preserve"}}
+		}},
+		{name: "pending-domain", mutate: func(r map[string]any) { r["domains"].([]any)[0].(map[string]any)["pending"] = []any{"fixture-step"} }},
+		{name: "not-ready", mutate: func(r map[string]any) { r["outcome"].(map[string]any)["status"] = "migration-required" }},
+		{name: "nonconverged", mutate: func(r map[string]any) { r["outcome"].(map[string]any)["reachedGoal"] = false }},
+		{name: "malformed-decision", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": map[string]any{"PRIVATE_CONFIG": "synthetic-private-value"}, "decision": "preserve"}}
+		}},
+		{name: "false-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = false
+		}},
+		{name: "null-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = nil
+		}},
+		{name: "object-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = map[string]any{"PRIVATE_CONFIG": "synthetic-private-value"}
+		}},
+		{name: "newline-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string) + "\n"
+		}},
+		{name: "short-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string)[1:]
+		}},
+		{name: "long-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string) + "0"
+		}},
+		{name: "nonhex-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = "g" + decision["result"].(string)[1:]
+		}},
+		{name: "false-decisions", unavailable: true, mutate: func(r map[string]any) { r["decisions"] = false }},
+		{name: "null-decisions", unavailable: true, mutate: func(r map[string]any) { r["decisions"] = nil }},
+		{name: "object-decisions", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = map[string]any{"metadata": r["decisions"].([]any)[0]}
+		}},
+		{name: "object-domains", unavailable: true, mutate: func(r map[string]any) {
+			r["domains"] = map[string]any{"settings": r["domains"].([]any)[0]}
+		}},
+		{name: "null-domains", unavailable: true, mutate: func(r map[string]any) { r["domains"] = nil }},
+		{name: "false-pending", unavailable: true, mutate: func(r map[string]any) {
+			r["domains"].([]any)[0].(map[string]any)["pending"] = false
+		}},
+		{name: "false-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = false }},
+		{name: "null-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = nil }},
+		{name: "object-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = map[string]any{} }},
+		{name: "missing-release-binding", mutate: func(r map[string]any) {
+			delete(r, "current")
+			delete(r["outcome"].(map[string]any), "target")
+			delete(r["outcome"].(map[string]any), "active")
+		}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var value map[string]any
+			if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+				t.Fatal(err)
+			}
+			if scenario.mutate != nil {
+				scenario.mutate(value)
+			}
+			payload, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := exec.Command("jq", "-e", predicate)
+			check.Stdin = bytes.NewReader(payload)
+			check.Stdout = io.Discard
+			check.Stderr = io.Discard
+			if err := check.Run(); (err == nil) != scenario.accepted {
+				t.Fatalf("readiness predicate acceptance=%t: %v", scenario.accepted, err)
+			}
+			summary := exec.Command("jq", "-ce", diagnostic)
+			summary.Stdin = bytes.NewReader(payload)
+			redacted, err := summary.Output()
+			if (err != nil) != scenario.unavailable {
+				t.Fatalf("typed diagnostic availability=%t: %v", !scenario.unavailable, err)
+			}
+			if bytes.Contains(redacted, []byte("synthetic-private-value")) || bytes.Contains(redacted, []byte("PRIVATE_CONFIG")) {
+				t.Fatal("diagnostic exposed unknown payload")
+			}
+		})
+	}
 }

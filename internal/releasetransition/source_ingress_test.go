@@ -13,6 +13,45 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 )
 
+type prospectiveActivationFixture struct {
+	t                   *testing.T
+	path                string
+	normal, prospective int
+}
+
+func (*prospectiveActivationFixture) ID() string { return "prospective-fixture" }
+func (observer *prospectiveActivationFixture) Observe(context.Context, ReleasePair, ReleaseLinks) (V2ActivationObservation, error) {
+	observer.normal++
+	return V2ActivationObservation{Actual: digestA, Desired: digestA, Converged: true}, nil
+}
+func (observer *prospectiveActivationFixture) ObserveProspective(_ context.Context, _ ReleasePair, _ ReleaseLinks, view V2SettingsSnapshotView) (V2ActivationObservation, error) {
+	observer.prospective++
+	snapshot, err := view.ReadSnapshot(observer.path)
+	if err != nil || !snapshot.Exists || !strings.Contains(string(snapshot.Content), "YARD_TEMPLATE='test-vms'") || strings.Contains(string(snapshot.Content), "NESTED_E2E_VMS") {
+		observer.t.Fatalf("activation did not receive final planned settings: %q %v", snapshot.Content, err)
+	}
+	return V2ActivationObservation{Actual: digestA, Desired: digestA, Converged: true}, nil
+}
+func (*prospectiveActivationFixture) Reconcile(context.Context, ReleaseLinks) error { return nil }
+
+func TestV2ActivationUsesFinalProspectiveSettingsAndOrdinaryNilView(t *testing.T) {
+	transition, _, settingsPath := v2TransitionFixture(t, nil)
+	observer := &prospectiveActivationFixture{t: t, path: settingsPath}
+	transition.options.Reconcilers = []V2ActivationReconciler{observer}
+	if _, err := transition.Inspect(context.Background(), Goal{Target: "release-a", Direction: DirectionActivateTarget}); err != nil {
+		t.Fatal(err)
+	}
+	if observer.prospective == 0 || observer.normal != 0 {
+		t.Fatalf("planning dispatch: normal=%d prospective=%d", observer.normal, observer.prospective)
+	}
+	if err := transition.observeActivation(context.Background(), &v2Observation{}); err != nil {
+		t.Fatal(err)
+	}
+	if observer.normal != 1 {
+		t.Fatalf("nil view did not use ordinary observer: %d", observer.normal)
+	}
+}
+
 func TestV2SourceImportRunsBeforeProspectiveSettingsCAS(t *testing.T) {
 	transition, _, settingsPath := v2TransitionFixture(t, nil)
 	if err := os.Remove(settingsPath); err != nil {

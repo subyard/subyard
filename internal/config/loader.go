@@ -29,8 +29,9 @@ type LoadOptions struct {
 	// FileOverrides substitutes retained draft files while keeping logical paths
 	// and normal registration, precedence and resource-endpoint resolution.
 	// An empty source marks a logical file absent.
-	FileOverrides map[string]string
-	YardDirs      []string
+	FileOverrides    map[string]string
+	ProspectiveFiles *ProspectiveFiles
+	YardDirs         []string
 }
 
 const GitSettingsRelativePath = ".sync/settings"
@@ -59,6 +60,7 @@ type Loaded struct {
 	Settings              map[string]SettingTrace
 	ConfigurationLayers   []ConfigurationLayer
 	assetValidationInputs []string
+	ProspectiveFiles      *ProspectiveFiles
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -85,6 +87,7 @@ func IsRetiredYardTemplate(err error) bool {
 func Load(options LoadOptions) (Loaded, error) {
 	tracker := newSettingTracker()
 	tracker.fileOverrides = options.FileOverrides
+	tracker.prospectiveFiles = options.ProspectiveFiles
 	if options.Catalog != nil {
 		tracker.catalog = *options.Catalog
 	} else {
@@ -106,6 +109,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		Catalog: tracker.catalog, Context: ctx, Environment: environment, Settings: tracker.traces(values),
 		ConfigurationLayers: tracker.configurationLayers(), Integrations: tracker.integrations,
 		assetValidationInputs: tracker.assetValidationInputs,
+		ProspectiveFiles:      options.ProspectiveFiles,
 	}, nil
 }
 
@@ -244,7 +248,7 @@ func load(
 			}
 		}
 		if yardName != "default" && options.YardSettingsFile == "" {
-			if len(options.FileOverrides) != 0 && len(options.YardDirs) == 0 {
+			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil) && len(options.YardDirs) == 0 {
 				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
 				if resetFallback {
 					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
@@ -298,7 +302,7 @@ func load(
 		if exists {
 			yardPresent = true
 			templateSource = path
-			if err := tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), probe, ScopeYard, options.SyncSource || path == gitYard, nil); err != nil {
+			if err := tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), probe, ScopeYard, options.SyncSource || path == gitYard, nil, tracker.prospectiveReader()); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -709,6 +713,17 @@ func normalizeAgentAssetPaths(
 			return tracker.sourceError(name, "must name an absolute regular file", nil)
 		}
 		path := filepath.Clean(value)
+		if snapshot, handled, err := tracker.prospectiveFiles.snapshot(path); handled || err != nil {
+			if err != nil || !snapshot.Exists {
+				return tracker.sourceError(name, "file setting source is not openable", err)
+			}
+			tracker.assetValidationInputs = append(tracker.assetValidationInputs, path)
+			values[name] = path
+			if path != value {
+				tracker.normalize(name, path, "normalized absolute path")
+			}
+			continue
+		}
 		info, err := os.Lstat(tracker.fileSource(path))
 		if err != nil {
 			return tracker.sourceError(name, "file setting source is not openable", err)
@@ -863,7 +878,7 @@ func applyEnvFileTracked(
 ) error {
 	return applyEnvFileObserved(path, values, func(name, value string, line int) {
 		tracker.record(layer, name, value, path, line, "")
-	})
+	}, tracker.prospectiveReader())
 }
 
 type observedAssignment struct {
@@ -883,7 +898,7 @@ func applyEnvFileTrackedValidated(
 	return tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
-		})
+		}, tracker.prospectiveReader())
 }
 
 func (settings Catalog) applyEnvFileValidated(
@@ -896,12 +911,12 @@ func (settings Catalog) applyEnvFileValidated(
 	return settings.applyEnvFileValidatedFrom(path, path, values, scope, requireSyncable, observer)
 }
 
-func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver) error {
+func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
 	if err := applyEnvFileObserved(source, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}); err != nil {
+	}, readers...); err != nil {
 		var diagnostic *SourceError
 		if source != path && errors.As(err, &diagnostic) {
 			copy := *diagnostic

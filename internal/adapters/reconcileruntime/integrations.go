@@ -231,7 +231,13 @@ func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArt
 		}
 		provision := runtime.environmentValue("AGENT_" + id + "_PROVISION")
 		if provision != "" {
-			payload, err := os.ReadFile(provision)
+			var payload []byte
+			var err error
+			if runtime.SourceReader != nil {
+				payload, err = runtime.SourceReader(config.MaterializedAsset{Source: provision})
+			} else {
+				payload, err = os.ReadFile(provision)
+			}
 			if err != nil {
 				return nil, err
 			}
