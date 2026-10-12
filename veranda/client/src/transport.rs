@@ -85,6 +85,16 @@ pub struct Processes {
     stopped: AtomicBool,
 }
 impl Processes {
+    #[cfg(test)]
+    pub(crate) fn tracked_count_for_test(&self) -> usize {
+        self.children
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|child| child.lock().unwrap().is_some())
+            .count()
+    }
     pub fn stop_accepting(&self) {
         self.stopped.store(true, Ordering::Release);
     }
@@ -136,10 +146,20 @@ impl RpcClient {
         Self::open_tracked(command, expected_version, notify, None)
     }
     pub fn open_tracked(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+    ) -> Result<Self, NativeError> {
+        Self::open_tracked_attempt(command, expected_version, notify, processes, None)
+    }
+
+    pub(crate) fn open_tracked_attempt(
         mut command: Command,
         expected_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
+        attempt: Option<&Processes>,
     ) -> Result<Self, NativeError> {
         #[cfg(unix)]
         {
@@ -253,6 +273,9 @@ impl RpcClient {
         };
         if let Some(processes) = processes {
             processes.track(&client.child)?;
+        }
+        if let Some(attempt) = attempt {
+            attempt.track(&client.child)?;
         }
         let raw = client.call("rpc.negotiate", "", json!({}), Duration::from_secs(8))?;
         let negotiation: Negotiation = serde_json::from_value(raw).map_err(|_| invalid())?;

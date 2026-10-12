@@ -114,6 +114,12 @@ pub struct Launch {
     command: String,
 }
 
+impl Launch {
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+}
+
 fn owner_command(
     descriptor: &Descriptor,
     pin: Option<&ConsentedConnection>,

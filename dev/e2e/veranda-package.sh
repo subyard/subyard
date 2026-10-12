@@ -5,7 +5,7 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 die() { printf 'veranda-package: %s\n' "$*" >&2; exit 1; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run through dev/agent-e2e.sh on allocated VM1'
-[ "$#" = 2 ] || die 'expected staged baseline 0.1.0 and candidate 0.1.1 Debian packages'
+[ "$#" = 2 ] || die 'expected staged baseline and candidate Debian packages'
 for command in sudo apt-get dpkg dpkg-query dpkg-deb python3 sha256sum realpath tar; do
   command -v "$command" >/dev/null || die "$command is required"
 done
@@ -22,9 +22,15 @@ check_input() {
   files="$(dpkg-deb --fsys-tarfile "$file" | tar -tf -)"
   if printf '%s\n' "$files" | grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)'; then die 'desktop package bundles a CLI or owner runtime'; fi
 }
-check_input "$BASE" 0.1.0
-check_input "$NEXT" 0.1.1
-STATE="$(mktemp -d /var/tmp/subyard-veranda-package.XXXXXX)"
+BASE_VERSION="$(dpkg-deb -f "$BASE" Version)"
+NEXT_VERSION="$(dpkg-deb -f "$NEXT" Version)"
+for version in "$BASE_VERSION" "$NEXT_VERSION"; do
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ "${#version}" -le 64 ] || die 'package version must be stable product MAJOR.MINOR.PATCH'
+done
+dpkg --compare-versions "$BASE_VERSION" lt "$NEXT_VERSION" || die 'candidate version must be greater than baseline'
+check_input "$BASE" "$BASE_VERSION"
+check_input "$NEXT" "$NEXT_VERSION"
+STATE="$(mktemp -d /tmp/subyard-veranda-package.XXXXXX)"
 chmod 0700 "$STATE"
 MARKER="subyard-veranda-package-v1-${STATE##*.}"
 printf '%s\n' "$MARKER" > "$STATE/.marker"
@@ -61,13 +67,14 @@ cli_snapshot() {
 }
 cli_snapshot > "$STATE/cli-before"
 apt_logged apt-update.log update -qq
-apt_logged fixture-tools.log install -y xvfb desktop-file-utils
-# Separate fixture tools from normal GUI dependencies in incremental disk accounting.
+# All normal package cost stages finish before installing any fixture tools.
+# This includes GTK libraries shared with Openbox/GI/AT-SPI in ordinary GUI cost.
 dpkg-query -W -f='${binary:Package}\t${Installed-Size}\t${Status}\n' > "$STATE/packages-before-gui"
 package_metrics() {
-  python3 - "$STATE/packages-before-gui" "$1" "$STATE/apt-$2.log" "$2" <<'PYMETRICS'
-import pathlib, re, subprocess, sys
-before, archive, log, phase = sys.argv[1:]
+  dpkg-query -W -f='${binary:Package}\t${Installed-Size}\t${Status}\n' > "$STATE/packages-after-$2"
+  python3 - "$STATE/packages-before-gui" "$STATE/packages-before-$2" "$STATE/packages-after-$2" "$1" "$STATE/apt-$2-package.log" "$2" <<'PYMETRICS'
+import pathlib, re, sys
+before, phase_before, after, archive, log, phase = sys.argv[1:]
 def packages(text):
     result = {}
     for line in text.splitlines():
@@ -75,19 +82,22 @@ def packages(text):
         if status == 'install ok installed': result[name] = int(size or 0)
     return result
 baseline = packages(pathlib.Path(before).read_text())
-current = packages(subprocess.check_output(['dpkg-query', '-W', '-f=${binary:Package}\t${Installed-Size}\t${Status}\n'], text=True))
+previous = packages(pathlib.Path(phase_before).read_text())
+current = packages(pathlib.Path(after).read_text())
 app = next(size for name, size in current.items() if name.split(':')[0] == 'subyard-veranda')
 extra = {name: size for name, size in current.items() if name not in baseline and name.split(':')[0] != 'subyard-veranda'}
-print(f'PACKAGE_METRICS\t{phase}\tdebBytes={pathlib.Path(archive).stat().st_size}\tappInstalledKiB={app}\tnewOSDependencyInstalledKiB={sum(extra.values())}\tnewOSDependencyPackages={len(extra)}', flush=True)
+phase_new = {name: size for name, size in current.items() if name not in previous and name.split(':')[0] != 'subyard-veranda'}
+os_delta = sum(size for name,size in current.items() if name.split(':')[0] != 'subyard-veranda') - sum(size for name,size in previous.items() if name.split(':')[0] != 'subyard-veranda')
+print(f'PACKAGE_METRICS\t{phase}\tcontext=normal-lifecycle-before-fixture-tools\tdebBytes={pathlib.Path(archive).stat().st_size}\tappInstalledKiB={app}\tnewOSDependencyInstalledKiB={sum(extra.values())}\tnewOSDependencyPackages={len(extra)}\tphaseNewOSDependencyInstalledKiB={sum(phase_new.values())}\tphaseOSInstalledSizeDeltaKiB={os_delta}', flush=True)
 # Diagnostic apt summary only; download can be zero when the VM cache is warm.
 summaries = [line for line in pathlib.Path(log).read_text().splitlines() if re.fullmatch(r'Need to get [0-9.,/ ]+(?:[kMGT]?B)(?:/[0-9., ]+[kMGT]?B)? of archives\.', line)]
 print('APT_DOWNLOAD_SUMMARY\t' + phase + '\t' + (' | '.join(summaries) if summaries else 'No Need to get summary reported; cache/download bytes unavailable'), flush=True)
 PYMETRICS
 }
-install -d -m 0700 "$STATE/home" "$STATE/data/com.subyard.veranda" "$STATE/cache" "$STATE/config" \
+install -d -m 0700 "$STATE/home" "$STATE/data/subyard/veranda" "$STATE/cache" "$STATE/config" \
   "$STATE/runtime" "$STATE/operator" "$STATE/owner-config" "$STATE/owner-data"
-printf '%s\n' "$MARKER" > "$STATE/data/com.subyard.veranda/package-preserved.txt"
-chmod 0600 "$STATE/data/com.subyard.veranda/package-preserved.txt"
+printf '%s\n' "$MARKER" > "$STATE/data/subyard/veranda/package-preserved.txt"
+chmod 0600 "$STATE/data/subyard/veranda/package-preserved.txt"
 printf '' > "$STATE/owner-config/config.env"
 chmod 0600 "$STATE/owner-config/config.env"
 launch_installed() {
@@ -113,15 +123,51 @@ try:
         'XDG_CACHE_HOME':str(state / 'cache'), 'XDG_CONFIG_HOME':str(state / 'config'),
         'XDG_RUNTIME_DIR':str(state / 'runtime'), 'SUBYARD_OPERATOR_HOME':str(state / 'operator'),
         'SUBYARD_CONFIG_HOME':str(state / 'owner-config'), 'SUBYARD_HOME':str(state / 'owner-data'),
-        'SUBYARD_REPOSITORY_ROOT':str(root), 'VERANDA_RESOURCE_PROBE':'1'}
-    app, tree, ready = probe.launch(pathlib.Path('/usr/bin/subyard-veranda'), environment, 20)
+        'SUBYARD_REPOSITORY_ROOT':str(root)}
+    environment.update(GTK_A11Y='atspi', GDK_BACKEND='x11', GSK_RENDERER='cairo',
+                       SUBYARD_E2E_VM='1', DBUS_SESSION_BUS_ADDRESS='unix:path=' + str(state / 'session-bus'))
+    services=[]
+    app=None; tree=None
     try:
-        time.sleep(0.5)
-        if app.poll() is not None: raise RuntimeError('installed GUI exited after ready')
-        tree.sample()
-        print(f'Installed GUI ready in {ready:.3f}s (fleet or actionable error)', flush=True)
+        for command in [['dbus-daemon','--session','--nofork','--address=' + environment['DBUS_SESSION_BUS_ADDRESS']], ['openbox']]:
+            service=subprocess.Popen(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            services.append((service,probe.Tree(service.pid)))
+        deadline=time.monotonic()+5
+        while not (state / 'session-bus').is_socket():
+            if time.monotonic()>=deadline: raise RuntimeError('private session bus readiness timeout')
+            time.sleep(.05)
+        app=subprocess.Popen(['/usr/bin/subyard-veranda'],env=environment,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        tree=probe.Tree(app.pid)
+        driver=subprocess.Popen(['/usr/bin/python3',str(root / 'dev/e2e/veranda-package-ui.py'),str(app.pid)],env=environment,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+        driver_tree=probe.Tree(driver.pid)
+        try:
+            deadline=time.monotonic()+30
+            while driver.poll() is None:
+                tree.sample()
+                if time.monotonic()>=deadline: raise RuntimeError('GTK package driver deadline exceeded')
+                time.sleep(.05)
+            output=driver.communicate(timeout=2)[0]
+            if driver.returncode: raise RuntimeError('GTK package readiness/close driver failed')
+            receipt=__import__('json').loads(output)
+            if not receipt.get('natural_close_requested'): raise RuntimeError('missing GTK natural close request')
+            if app.wait(timeout=10)!=0: raise RuntimeError('GTK natural close failed')
+            deadline=time.monotonic()+3
+            while True:
+                tree.sample()
+                current=probe.processes()
+                remaining=[pid for pid,start in tree.known.items() if pid!=app.pid and pid in current and current[pid]['start']==start]
+                if not remaining: break
+                if time.monotonic()>=deadline: raise RuntimeError('observed owned GTK children survived natural close')
+                time.sleep(.05)
+            receipt['natural_close_exit_code']=0
+            receipt['observed_owned_children_cleanup']=True
+            print('PACKAGE_GTK ' + __import__('json').dumps(receipt),flush=True)
+        finally:
+            driver_tree.stop(driver)
     finally:
-        tree.stop(app)
+        if tree is not None: tree.stop(app)
+        for service,owned in reversed(services): owned.stop(service)
+        if (state / 'session-bus').exists(): (state / 'session-bus').unlink()
 finally:
     os.close(read_fd)
     server.terminate()
@@ -130,27 +176,41 @@ finally:
 PY
 }
 phase() {
-  local label="$1" file="$2" version="$3" desktop start=$SECONDS
+  local label="$1" file="$2" version="$3" mode="$4" desktop start=$SECONDS
+  if [ "$mode" = package ]; then
+    dpkg-query -W -f='${binary:Package}\t${Installed-Size}\t${Status}\n' > "$STATE/packages-before-$label"
+  fi
   installed=1
-  apt_logged "apt-$label.log" install -y --allow-downgrades "$file"
+  apt_logged "apt-$label-$mode.log" install -y --allow-downgrades "$file"
   [ "$(dpkg-query -W -f='${Status}' subyard-veranda)" = 'install ok installed' ] || die 'package was not configured'
   [ "$(dpkg-query -W -f='${Version}' subyard-veranda)" = "$version" ] || die 'installed version differs'
   desktop="$(dpkg-query -L subyard-veranda | sed -n '/\.desktop$/p')"
-  [ "$desktop" = '/usr/share/applications/Subyard Veranda.desktop' ] || die 'unexpected desktop entry'
-  desktop-file-validate "$desktop" > "$STATE/desktop-$label.log" 2>&1
+  [ "$desktop" = '/usr/share/applications/org.subyard.Veranda.desktop' ] || die 'unexpected desktop entry'
+  if [ "$mode" = gtk ]; then desktop-file-validate "$desktop" > "$STATE/desktop-$label.log" 2>&1; fi
   [ "$(sed -n 's/^Exec=//p' "$desktop")" = subyard-veranda ] || die 'desktop Exec does not name the installed client'
   if [ "$(PATH=/usr/bin:/bin command -v subyard-veranda)" != /usr/bin/subyard-veranda ] || [ ! -x /usr/bin/subyard-veranda ]; then die 'desktop executable is unavailable'; fi
   if dpkg-query -L subyard-veranda | grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)'; then die 'installed desktop package owns an owner CLI/runtime'; fi
-  [ "$(cat "$STATE/data/com.subyard.veranda/package-preserved.txt")" = "$MARKER" ] || die 'app data marker was lost'
+  [ "$(cat "$STATE/data/subyard/veranda/package-preserved.txt")" = "$MARKER" ] || die 'app data marker was lost'
   cli_snapshot > "$STATE/cli-after"
   cmp "$STATE/cli-before" "$STATE/cli-after" || die 'installed CLI files changed'
-  package_metrics "$file" "$label"
-  launch_installed > "$STATE/gui-$label.log" 2>&1
-  cat "$STATE/gui-$label.log"
-  [ "$(cat "$STATE/data/com.subyard.veranda/package-preserved.txt")" = "$MARKER" ] || die 'GUI launch lost app data marker'
-  printf 'PASS\t%s\t%s\t%s seconds\n' "$label" "$version" "$((SECONDS - start))"
+  [ "$(/usr/bin/subyard-veranda --version)" = "Subyard Veranda $version" ] || die 'installed GUI/client product version differs'
+  if [ "$mode" = package ]; then
+    package_metrics "$file" "$label"
+  else
+    launch_installed > "$STATE/gui-$label.log" 2>&1
+    cat "$STATE/gui-$label.log"
+  fi
+  [ "$(cat "$STATE/data/subyard/veranda/package-preserved.txt")" = "$MARKER" ] || die 'GUI launch lost app data marker'
+  printf 'PASS\t%s\t%s\t%s\t%s seconds\n' "$label" "$mode" "$version" "$((SECONDS - start))"
 }
-phase install "$BASE" 0.1.0
-phase upgrade "$NEXT" 0.1.1
-phase rollback "$BASE" 0.1.0
+phase install "$BASE" "$BASE_VERSION" package
+phase upgrade "$NEXT" "$NEXT_VERSION" package
+phase rollback "$BASE" "$BASE_VERSION" package
+# GTK drivers are introduced only after the normal apt lifecycle and costs are
+# recorded. The second sequence proves UI launch/close with each installed GUI;
+# its warm-cache apt logs must not be substituted for clean-machine cost logs.
+apt_logged fixture-tools.log install -y xvfb openbox xdotool dbus-x11 at-spi2-core python3-gi gir1.2-atspi-2.0 desktop-file-utils
+phase install "$BASE" "$BASE_VERSION" gtk
+phase upgrade "$NEXT" "$NEXT_VERSION" gtk
+phase rollback "$BASE" "$BASE_VERSION" gtk
 printf 'PASS\tVeranda Debian install, upgrade, rollback and isolated GUI launch\n'

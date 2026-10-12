@@ -1535,6 +1535,80 @@ fn reviewed_execution_is_explicit_and_single_use(mode: &str, confirmation: &str)
 }
 
 #[test]
+fn submission_errors_are_proven_before_any_execute_rpc_admission() {
+    let fixture = ManagerFixture::new("manager");
+    for index in 0..40 {
+        let plan = fixture.plan();
+        if index % 2 == 0 {
+            fixture
+                .client
+                .plans
+                .lock()
+                .unwrap()
+                .get_mut(&plan.plan_id)
+                .unwrap()
+                .expires = Instant::now() - Duration::from_secs(1);
+        }
+        let digest = if index % 2 == 0 {
+            plan.digest.clone()
+        } else {
+            "b".repeat(64)
+        };
+        let proof = fixture
+            .client
+            .execute_with_submission(&plan.plan_id, &digest, true)
+            .err()
+            .unwrap();
+        assert_eq!(proof.error().code, "plan_stale");
+        assert_eq!(fixture.stats()["executes"], 0);
+        assert!(fixture.client.running.lock().unwrap().is_empty());
+    }
+    let plan = fixture.plan();
+    let proof = fixture
+        .client
+        .execute_with_submission(&plan.plan_id, &plan.digest, false)
+        .err()
+        .unwrap();
+    assert_eq!(proof.error().code, "confirmation_required");
+    assert_eq!(fixture.stats()["executes"], 0);
+    fixture.client.discard(&plan.plan_id).unwrap();
+}
+
+#[test]
+fn transport_loss_after_execute_admission_is_an_unknown_event() {
+    let fixture = ManagerFixture::new("manager-transport-loss");
+    let plan = fixture.plan();
+    let started = fixture
+        .client
+        .execute_with_submission(&plan.plan_id, &plan.digest, true)
+        .unwrap();
+    assert_eq!(started.operation_id(), plan.operation_id);
+    // The owned subprocess exits without a response after receiving execute.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let event = fixture
+            .events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if event.operation_id.as_deref() == Some(plan.operation_id.as_str()) {
+            assert_eq!(event.state, "unknown");
+            break;
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(
+            fixture
+                .owner
+                .store_root()
+                .with_file_name("execute-admitted")
+        )
+        .unwrap(),
+        "1"
+    );
+    assert!(fixture.client.running.lock().unwrap().is_empty());
+}
+
+#[test]
 fn wrong_digest_consumes_review_and_discards_owner_plan_without_execution() {
     let fixture = ManagerFixture::new("manager");
     let plan = fixture.plan();
@@ -3568,4 +3642,97 @@ fn native_owner_smoke() {
         client.remove(&removal.assessment_id, true).unwrap();
         assert!(client.connections().unwrap().is_empty());
     }
+}
+
+#[test]
+fn cancelled_connection_consumes_review_and_prevents_registration() {
+    let owner = OwnerFixture::new();
+    let client = Client::new(owner.store_root(), Arc::new(|_| {}));
+    let mut store = client.store.lock().unwrap();
+    let review = store
+        .assess_test_key(
+            "user@example.test",
+            crate::ssh::HostKey {
+                key: "ssh-ed25519 AAAA".into(),
+                fingerprint: format!("SHA256:{}", "A".repeat(43)),
+            },
+            None,
+        )
+        .unwrap();
+    drop(store);
+    let attempt = ConnectionAttempt::default();
+    attempt.cancel();
+    assert_eq!(
+        client
+            .connect_attempt(&review.token, true, &review.fingerprint, &attempt)
+            .unwrap_err()
+            .code,
+        "cancelled"
+    );
+    assert!(client.connections().unwrap().is_empty());
+    assert!(client
+        .store
+        .lock()
+        .unwrap()
+        .consented_ssh_command(&review.token, true, &review.fingerprint)
+        .is_err());
+    assert!(!owner.store_root().exists());
+    let pin = synthetic_trust(&mut client.store.lock().unwrap(), None);
+    let attempt = ConnectionAttempt::default();
+    attempt.cancel();
+    assert_eq!(
+        attempt
+            .publish(|| client.commit_trust(|store| {
+                let record = store.finalize_registration(pin, "example-owner")?;
+                Ok((record.clone(), record.id))
+            }))
+            .unwrap_err()
+            .code,
+        "cancelled"
+    );
+    assert!(client.connections().unwrap().is_empty());
+    assert!(!std::fs::read_dir(owner.store_root())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".known_hosts")));
+}
+
+#[test]
+fn provisional_cancellation_reaps_negotiation_without_stopping_saved_sessions() {
+    let fixture = ManagerFixture::new("manager");
+    let attempt = Arc::new(ConnectionAttempt::default());
+    let opening_attempt = attempt.clone();
+    let command = fixture.owner.command("negotiation-blocked");
+    let opening = thread::spawn(move || {
+        RpcClient::open_tracked_attempt(
+            command,
+            product_version(),
+            Arc::new(|_| {}),
+            None,
+            Some(&opening_attempt.processes),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while attempt.processes.tracked_count_for_test() == 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    attempt.cancel();
+    assert!(opening.join().unwrap().is_err());
+    assert!(Instant::now() < deadline);
+    assert!(!fixture.session.rpc.is_closed());
+    assert_eq!(attempt.processes.tracked_count_for_test(), 0);
+    assert!(fixture.client.fleet(None).is_ok());
+}
+
+#[test]
+fn registration_winning_cancel_race_returns_its_committed_outcome_once() {
+    let attempt = ConnectionAttempt::default();
+    assert_eq!(attempt.publish(|| Ok(7)).unwrap(), 7);
+    attempt.cancel();
+    assert!(!attempt.is_cancelled());
+    assert_eq!(attempt.publish(|| Ok(8)).unwrap_err().code, "cancelled");
 }

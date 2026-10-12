@@ -1,6 +1,11 @@
 use veranda_lib::connections::{ConnectionSummary, NavigationSelection};
 use veranda_lib::local_fleet::{LocalFleetSnapshot, LocalYard, NativeError};
 
+/// Stable owner identity for native session preparation; names are display text.
+pub fn session_project(project: &veranda_lib::local_fleet::LocalProject) -> String {
+    project.id.clone()
+}
+
 pub struct Host {
     pub connection: Option<String>,
     pub label: String,
@@ -227,13 +232,46 @@ impl Model {
         } else {
             "Yards"
         };
-        if self.selection.tab != "Overview" && self.selection.tab != list_tab {
+        if self.selection.tab != "Overview"
+            && self.selection.tab != list_tab
+            && self.selection.tab != "Settings"
+            && self.selection.tab != "Diagnostics"
+            && self.selection.tab
+                != if self.selection.yard_name.is_some() {
+                    "Profiles"
+                } else {
+                    "Sync"
+                }
+        {
             self.selection.tab = "Overview".into();
         }
     }
 
     pub fn accepts_reply(&self, generation: u64, connection: &Option<String>) -> bool {
         self.generation == generation && self.selection.connection_id == *connection
+    }
+
+    pub fn connected(&mut self, connection: ConnectionSummary) {
+        if let Some(host) = self
+            .hosts
+            .iter_mut()
+            .find(|host| host.connection.as_deref() == Some(&connection.id))
+        {
+            host.label = connection.destination;
+            host.snapshot = None;
+            host.fresh = false;
+            host.failed = false;
+        } else {
+            self.hosts.push(Host {
+                connection: Some(connection.id.clone()),
+                label: connection.destination,
+                snapshot: None,
+                status: "Refreshing…".into(),
+                fresh: false,
+                failed: false,
+            });
+        }
+        self.select(Some(connection.id), None);
     }
 }
 
@@ -272,6 +310,22 @@ mod tests {
         }
     }
     #[test]
+    fn project_sessions_use_ids_even_when_labels_are_other_ids_or_unicode() {
+        let projects = [
+            LocalProject {
+                id: "project-a".into(),
+                name: "project-b".into(),
+            },
+            LocalProject {
+                id: "project-b".into(),
+                name: "庭院 Project α with spaces".into(),
+            },
+        ];
+        assert_eq!(super::session_project(&projects[0]), "project-a");
+        assert_eq!(super::session_project(&projects[1]), "project-b");
+        assert_eq!(projects[1].name, "庭院 Project α with spaces");
+    }
+    #[test]
     fn restores_available_remote_and_projects_tab() {
         let mut model = Model::new(vec![remote()]);
         model.update(&None, Ok(fleet(None)));
@@ -287,13 +341,47 @@ mod tests {
         assert_eq!(model.yard().unwrap().projects[0].name, "Project α");
     }
     #[test]
+    fn page_restoration_remains_scoped_to_host_or_yard() {
+        for (yard, tabs) in [
+            (
+                Some("default"),
+                vec![
+                    "Overview",
+                    "Projects",
+                    "Profiles",
+                    "Diagnostics",
+                    "Settings",
+                ],
+            ),
+            (
+                None,
+                vec!["Overview", "Yards", "Sync", "Diagnostics", "Settings"],
+            ),
+        ] {
+            for tab in tabs {
+                let mut model = Model::new(vec![]);
+                model.update(&None, Ok(fleet(None)));
+                model.initialize(Some(NavigationSelection {
+                    schema_version: 1,
+                    connection_id: None,
+                    yard_name: yard.map(str::to_owned),
+                    tab: tab.into(),
+                }));
+                assert_eq!(model.selection.tab, tab);
+                model.select_tab(if yard.is_some() { "Sync" } else { "Profiles" }.into());
+                assert_eq!(model.selection.tab, "Overview");
+            }
+        }
+    }
+    #[test]
     fn missing_remote_or_yard_falls_back_to_local_current_yard() {
-        for name in [None, Some("missing".into())] {
+        for (connection, name) in [("missing", None), ("remote", Some("missing".into()))] {
             let mut model = Model::new(vec![remote()]);
             model.update(&None, Ok(fleet(None)));
+            model.update(&Some("remote".into()), Ok(fleet(Some("remote".into()))));
             let saved = NavigationSelection {
                 schema_version: 1,
-                connection_id: Some("remote".into()),
+                connection_id: Some(connection.into()),
                 yard_name: name,
                 tab: "Projects".into(),
             };
@@ -302,6 +390,43 @@ mod tests {
             assert_eq!(model.selection.yard_name.as_deref(), Some("default"));
         }
     }
+    #[test]
+    fn unavailable_saved_remote_falls_back_without_removing_the_saved_owner() {
+        let mut model = Model::new(vec![remote()]);
+        model.update(&None, Ok(fleet(None)));
+        model.update(
+            &Some("remote".into()),
+            Err(NativeError::new("disconnected", "Connection lost.")),
+        );
+        model.initialize(Some(NavigationSelection {
+            schema_version: 1,
+            connection_id: Some("remote".into()),
+            yard_name: Some("default".into()),
+            tab: "Projects".into(),
+        }));
+        assert_eq!(model.selection.connection_id, None);
+        assert_eq!(model.selection.yard_name.as_deref(), Some("default"));
+        assert_eq!(model.hosts.len(), 2);
+        assert!(model.select(Some("remote".into()), None));
+        assert!(model.host().status.contains("Refreshing"));
+    }
+
+    #[test]
+    fn registration_and_repair_replace_cache_and_select_only_the_native_id() {
+        let mut model = Model::new(vec![]);
+        model.initialize(None);
+        model.connected(remote());
+        assert_eq!(model.hosts.len(), 2);
+        assert_eq!(model.selection.connection_id.as_deref(), Some("remote"));
+        let old = model.generation;
+        model.update(&Some("remote".into()), Ok(fleet(Some("remote".into()))));
+        model.connected(remote());
+        assert_eq!(model.hosts.len(), 2);
+        assert!(model.host().snapshot.is_none());
+        assert!(!model.host().fresh);
+        assert!(!model.accepts_reply(old, &Some("remote".into())));
+    }
+
     #[test]
     fn stale_scope_reply_cannot_replace_new_selection() {
         let mut model = Model::new(vec![remote()]);
