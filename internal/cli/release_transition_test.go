@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -3106,6 +3108,247 @@ func TestMaterializedProspectiveActivationPreservesReadableRetainedFiles(t *test
 				if err != nil || info.Mode().Perm() != mode {
 					t.Fatalf("retained file mode changed: %s %v", path, err)
 				}
+			}
+		})
+	}
+}
+
+func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
+	root := testkit.TempDir(t)
+	repository := filepath.Join(root, "candidate")
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}` + "\n")
+	writeReleaseTransitionTestFile(t, filepath.Join(repository, "config", "release-transition.json"), registry, 0o600)
+	runtimeRoot := filepath.Join(root, "runtime")
+	target := "0.19.0-ready-contract"
+	writeSealedRollbackTarget(t, runtimeRoot, target, "0.19.0", registry)
+	if err := os.Symlink("releases/"+target, filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	reply := filepath.Join(root, "native-inspection.json")
+	engine := []byte("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 0.19.0\\n';; _release-transition) cat >/dev/null; cat '" + reply + "';; *) exit 64;; esac\n")
+	releaseRoot := filepath.Join(runtimeRoot, "releases", target)
+	writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "bin", "yard-engine"), engine, 0o700)
+	manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256(engine), sha256.Sum256(registry)))
+	writeReleaseTransitionTestFile(t, filepath.Join(releaseRoot, "runtime-files.sha256"), manifest, 0o600)
+	configHome := filepath.Join(root, "config")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(target), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))}
+	actor := &processDriftReconciler{}
+	invoke := func() releasetransition.ProcessResponse {
+		t.Helper()
+		response, err := executeReleaseTransitionRequest(context.Background(), repository, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{actor}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	initial := invoke()
+	if initial.Inspection == nil {
+		t.Fatal("missing initial inspection")
+	}
+	request.Mode = releasetransition.ProcessConverge
+	request.Execution = &releasetransition.Execution{Plan: initial.Inspection.Plan, Authorization: "fixture-grant"}
+	completed := invoke()
+	if completed.Outcome == nil || completed.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("native convergence not ready: %#v", completed.Outcome)
+	}
+	request.Mode = releasetransition.ProcessInspect
+	request.Execution = nil
+	parsedRegistry, _, err := releasetransition.ParseRegistryV2(registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition", "v2", "ledger.json"), ledger, 0o600)
+	inspector := releaseruntime.NewSourceInspector(repository, io.Discard)
+	_, proofErr := inspector.InspectSourceAdmission(context.Background(), runtimeRoot, configHome)
+	inspector.Close()
+	if proofErr != nil {
+		t.Fatalf("native metadata fixture: %v", proofErr)
+	}
+	inspection := invoke()
+	if inspection.Inspection == nil || inspection.Inspection.Assessment.Changed || inspection.Inspection.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("native reinspection not ready: %#v", inspection.Inspection)
+	}
+	if len(inspection.Inspection.Decisions) != 1 || inspection.Inspection.Decisions[0].Resource != "transition.source-metadata" || inspection.Inspection.Decisions[0].Decision != releasetransition.DecisionPreserve {
+		t.Fatalf("native preservation decision missing: %#v", inspection.Inspection.Decisions)
+	}
+	wire, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, reply, wire, 0o600)
+	var output bytes.Buffer
+	runtime := releaseruntime.New(releaseruntime.Config{Inputs: releaseruntime.CaptureCommandInputs([]string{"HOME=" + root, "YARD_RUNTIME_ROOT=" + runtimeRoot}, func(string) bool { return false }), Stdout: &output, Stderr: io.Discard})
+	defer runtime.Close()
+	check, err := runtime.PrepareCurrentTransition(context.Background(), []string{"--check", "--json"}, configHome, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.Changed {
+		t.Fatal("ready check proposes mutation")
+	}
+	if err := check.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Outcome releasetransition.Outcome `json:"outcome"`
+		Domains []struct {
+			Pending []string `json:"pending"`
+		} `json:"domains"`
+		Decisions []releasetransition.RedactedDecision `json:"decisions"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome.Status != releasetransition.StatusReady || !report.Outcome.ReachedGoal || len(report.Decisions) != 1 {
+		t.Fatal("current report lost native readiness/preservation")
+	}
+	for _, domain := range report.Domains {
+		if len(domain.Pending) != 0 {
+			t.Fatal("ready report has pending migrations")
+		}
+	}
+	original := exec.Command("jq", "-e", `.outcome.status == "ready" and all(.domains[]; .pending == []) and ((.decisions // []) | length) == 0`)
+	original.Stdin = bytes.NewReader(output.Bytes())
+	original.Stdout = io.Discard
+	err = original.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("original fixture predicate did not reproduce exit1: %v", err)
+	}
+	t.Logf("original_predicate_exit=1 native_current_report=%s", bytes.TrimSpace(output.Bytes()))
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "dev", "e2e", "p0-source-upgrade.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(fixture)
+	extract := func(marker string) string {
+		t.Helper()
+		start := strings.LastIndex(source, marker)
+		if start < 0 {
+			t.Fatal("readiness fixture predicate missing")
+		}
+		tail := source[start+len(marker):]
+		end := strings.Index(tail, "' ")
+		if end < 0 {
+			t.Fatal("readiness fixture expression unterminated")
+		}
+		return tail[:end]
+	}
+	predicate := extract("  if ! jq -e '")
+	diagnostic := extract("    jq -ce '")
+	for _, scenario := range []struct {
+		name        string
+		mutate      func(map[string]any)
+		accepted    bool
+		unavailable bool
+	}{
+		{name: "native-ready-with-preservation", accepted: true},
+		{name: "native-ready-without-decisions", accepted: true, mutate: func(r map[string]any) { r["decisions"] = []any{} }},
+		{name: "native-ready-with-omitted-decisions", accepted: true, mutate: func(r map[string]any) { delete(r, "decisions") }},
+		{name: "empty-scope", accepted: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = ""
+		}},
+		{name: "nonempty-scope", mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = "synthetic-private-value"
+		}},
+		{name: "actionable-decision", mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "activation.materialized-config", "decision": "canonicalize"}}
+		}},
+		{name: "other-preservation", mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "activation.materialized-config", "decision": "preserve"}}
+		}},
+		{name: "unknown-decision", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "transition.source-metadata", "decision": "synthetic-private-value"}}
+		}},
+		{name: "unknown-resource", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": "synthetic-private-value", "decision": "preserve"}}
+		}},
+		{name: "pending-domain", mutate: func(r map[string]any) { r["domains"].([]any)[0].(map[string]any)["pending"] = []any{"fixture-step"} }},
+		{name: "not-ready", mutate: func(r map[string]any) { r["outcome"].(map[string]any)["status"] = "migration-required" }},
+		{name: "nonconverged", mutate: func(r map[string]any) { r["outcome"].(map[string]any)["reachedGoal"] = false }},
+		{name: "malformed-decision", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = []any{map[string]any{"resource": map[string]any{"PRIVATE_CONFIG": "synthetic-private-value"}, "decision": "preserve"}}
+		}},
+		{name: "false-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = false
+		}},
+		{name: "null-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = nil
+		}},
+		{name: "object-scope", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"].([]any)[0].(map[string]any)["scope"] = map[string]any{"PRIVATE_CONFIG": "synthetic-private-value"}
+		}},
+		{name: "newline-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string) + "\n"
+		}},
+		{name: "short-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string)[1:]
+		}},
+		{name: "long-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = decision["result"].(string) + "0"
+		}},
+		{name: "nonhex-result", mutate: func(r map[string]any) {
+			decision := r["decisions"].([]any)[0].(map[string]any)
+			decision["result"] = "g" + decision["result"].(string)[1:]
+		}},
+		{name: "false-decisions", unavailable: true, mutate: func(r map[string]any) { r["decisions"] = false }},
+		{name: "null-decisions", unavailable: true, mutate: func(r map[string]any) { r["decisions"] = nil }},
+		{name: "object-decisions", unavailable: true, mutate: func(r map[string]any) {
+			r["decisions"] = map[string]any{"metadata": r["decisions"].([]any)[0]}
+		}},
+		{name: "object-domains", unavailable: true, mutate: func(r map[string]any) {
+			r["domains"] = map[string]any{"settings": r["domains"].([]any)[0]}
+		}},
+		{name: "null-domains", unavailable: true, mutate: func(r map[string]any) { r["domains"] = nil }},
+		{name: "false-pending", unavailable: true, mutate: func(r map[string]any) {
+			r["domains"].([]any)[0].(map[string]any)["pending"] = false
+		}},
+		{name: "false-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = false }},
+		{name: "null-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = nil }},
+		{name: "object-blockers", unavailable: true, mutate: func(r map[string]any) { r["blockers"] = map[string]any{} }},
+		{name: "missing-release-binding", mutate: func(r map[string]any) {
+			delete(r, "current")
+			delete(r["outcome"].(map[string]any), "target")
+			delete(r["outcome"].(map[string]any), "active")
+		}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var value map[string]any
+			if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+				t.Fatal(err)
+			}
+			if scenario.mutate != nil {
+				scenario.mutate(value)
+			}
+			payload, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := exec.Command("jq", "-e", predicate)
+			check.Stdin = bytes.NewReader(payload)
+			check.Stdout = io.Discard
+			check.Stderr = io.Discard
+			if err := check.Run(); (err == nil) != scenario.accepted {
+				t.Fatalf("readiness predicate acceptance=%t: %v", scenario.accepted, err)
+			}
+			summary := exec.Command("jq", "-ce", diagnostic)
+			summary.Stdin = bytes.NewReader(payload)
+			redacted, err := summary.Output()
+			if (err != nil) != scenario.unavailable {
+				t.Fatalf("typed diagnostic availability=%t: %v", !scenario.unavailable, err)
+			}
+			if bytes.Contains(redacted, []byte("synthetic-private-value")) || bytes.Contains(redacted, []byte("PRIVATE_CONFIG")) {
+				t.Fatal("diagnostic exposed unknown payload")
 			}
 		})
 	}

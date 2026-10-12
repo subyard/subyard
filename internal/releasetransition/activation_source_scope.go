@@ -87,7 +87,10 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 				hasCurrentLedgerWork = true
 			}
 		}
-		if journal != nil {
+		// Completed ledger steps retain their historical readiness scope, but
+		// cannot become ledger work in a fresh activation-only repair. That
+		// repair must bind the checkpoint its zero-step journal will resume against.
+		if journal != nil && (journal.Checkpoint != JournalComplete || observation.activationFixed) {
 			for _, step := range journal.Steps {
 				hasLedgerWork = hasLedgerWork || strings.HasPrefix(step.Resource, "ledger.")
 			}

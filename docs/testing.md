@@ -348,9 +348,18 @@ controller log must retain the VM base, successful cleanup of every VM and lease
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
 for direct controllers and stays unknown; any observed failed phase rejects the transfer.
-The existing manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
+The rich manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
 `runtime_sha256`, `bundle_sha256`, `acceptance_script_sha256` and, when measured,
-`launched_at_utc`. Its actual command must be the exact check plus `--slot N`, inside the
+`launched_at_utc`. Original raw launch records containing `cwd`, `argv` and valid timezone-aware
+`started_at` are also supported. At transfer application, their original checksum-bound bundle
+must contain exactly the frozen public source and candidate metadata/complete release asset
+inventory. Archive headers are read incrementally; directory members must be unique ancestors
+of that inventory. Source bytes and executable modes, including the actual check script,
+must reproduce the original fingerprint; runtime and metadata bytes must match the verified receipt.
+No hash fields are added to the original launch. Partial, contradictory or malformed rich bindings
+are rejected. A valid raw `started_at` supplies a UTC launch time; invalid or contradictory times
+and malformed supplied monotonic clocks reject the transfer, including rich launches without
+an optional timestamp. Its actual command must be the exact check plus `--slot N`, inside the
 existing finite `timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`
 and the three declared controller/transport assignments. Other wrappers or check-scope mappings
 are rejected. Whole-run duration and independently measured execution environment remain

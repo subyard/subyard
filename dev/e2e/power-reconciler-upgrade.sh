@@ -557,7 +557,7 @@ exercise_activation_only_repair() {
   local candidate_unit="$STATE_ROOT/candidate-activation.service"
   local drift_unit="$STATE_ROOT/drifted-activation.service"
   local unconfirmed_output unconfirmed_rc interrupted_output interrupted_rc
-  local fault_count resumed_output
+  local fault_count resumed_output resumed_rc
 
   load_release_targets
   completed_transaction="$(operator_env jq -er '.transaction' "$V2_JOURNAL")" \
@@ -625,10 +625,14 @@ exercise_activation_only_repair() {
   sudo -n cmp "$candidate_unit" "$UNIT" >/dev/null \
     || die 'interrupted reconciler did not restore the exact candidate activation resource'
 
-  if ! resumed_output="$(
+  if resumed_output="$(
     operator_yard update --version "$CANDIDATE_VERSION" </dev/null 2>&1
   )"; then
-    die 'activation-only same-version update did not resume'
+    :
+  else
+    resumed_rc=$?
+    printf '%s\n' "$resumed_output" >&2
+    die "activation-only same-version update did not resume (exit=$resumed_rc)"
   fi
   ! grep -Eq 'Proceed\?|confirmation required' <<<"$resumed_output" \
     || die 'activation-only resume requested a second confirmation'

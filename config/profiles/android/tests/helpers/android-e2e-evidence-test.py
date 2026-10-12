@@ -21,6 +21,50 @@ ROOT = Path(__file__).resolve().parents[5]
 E2E = ROOT / 'config/profiles/android/tests/e2e'
 
 
+# Run the actual manifest validator against semantic output variations, not SDK
+# substitutes. Native compilation/signing remains the allocated VM's contract.
+sdk_source = (E2E / 'android-sdk-build.sh').read_text()
+manifest_validator = sdk_source.split("python3 - <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+badging = """package: versionName='1.0' name='org.subyard.acceptance' versionCode='1' compileSdkVersion='36'
+minSdkVersion:'26'
+targetSdkVersion:'36'
+application: icon='' label='Subyard SDK acceptance'
+launchable-activity: label='' name='org.subyard.acceptance.MainActivity' icon=''
+"""
+with tempfile.TemporaryDirectory(prefix='android-sdk-manifest-', dir='/tmp') as directory:
+    metadata = Path(directory, 'badging.txt')
+    for value, failure in (
+            (badging, None),
+            (badging.replace('minSdkVersion:', 'sdkVersion:'), None),
+            (badging.replace("minSdkVersion:'26'", "minSdkVersion:'25'"), 'minimum API'),
+            (badging.replace("targetSdkVersion:'36'", "targetSdkVersion:'35'"), 'target API'),
+            (badging.replace("name='org.subyard.acceptance'", "name='org.other.app'"), 'package'),
+            (badging.replace('Subyard SDK acceptance', 'wrong label'), 'resource label'),
+            (badging.replace('org.subyard.acceptance.MainActivity', 'org.other.Activity'), 'launcher Activity')):
+        metadata.write_text(value)
+        metadata.chmod(0o600)
+        result = subprocess.run([sys.executable, '-c', manifest_validator], cwd=directory,
+                                capture_output=True, text=True)
+        assert result.returncode == (0 if failure is None else 1), result.stderr
+        if failure is not None:
+            assert failure in result.stderr and 'observed' in result.stderr, result.stderr
+
+# Failed SDK assertions keep their status and bounded public diagnostics before
+# removing the marker-owned build directory.
+sdk_cleanup = sdk_source[sdk_source.index('stage=build\n'):sdk_source.index("trap 'exit 130' INT")]
+with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as directory:
+    work = Path(directory, 'build')
+    work.mkdir(mode=0o700)
+    (work / '.marker').write_text('subyard-android-sdk-build-v1\n')
+    (work / 'badging.txt').write_text('x' * 9000)
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + sdk_cleanup
+                             + '\nstage=manifest\nexit 23\n', '_', str(work)],
+                            capture_output=True, text=True)
+    assert result.returncode == 23 and not work.exists()
+    assert 'stage=manifest exit=23' in result.stderr
+    assert result.stderr.splitlines()[-1] == 'x' * 4096
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(name, E2E / (name + '.py'))
     value = importlib.util.module_from_spec(spec)
@@ -1114,17 +1158,72 @@ with tempfile.TemporaryDirectory() as directory:
     for initial, teardown, expected in ((23, 1, 23), (0, 1, 3), (0, 0, 0)):
         source = (E2E / 'android-pool-runtime.sh').read_text()
         cleanup = source[source.index('cleanup() {'):source.index('\ntrap cleanup EXIT')]
+        state = Path(directory) / f'owned-{initial}-{teardown}'
+        state.mkdir()
+        (state / '.marker').write_text('subyard-android-pool-runtime-v1\n')
         script = ('set -euo pipefail\n. "$1/android-pool-phases.sh"\n'
                   'android_fixture=runtime\nandroid_phase_begin check\n'
-                  'state="$2"; project=""; instance=""; monitor_pid=""; monitor_stop=""; monitor_host_stop="$2/stop"\n'
+                  'state="$2"; project=""; instance=""; monitor_pid=""; monitor_stop=""; monitor_host_stop="$2/stop"; lane=diagnostics\n'
                   'incus_binary=(false); hold_seconds=0; teardown_status="$3"\n'
-                  'yard() { return "$teardown_status"; }; sudo() { return 0; }\n' + cleanup +
+                  'yard() { return "$teardown_status"; }; sudo() { shift; "$@"; }\n' + cleanup +
                   '\ntrap cleanup EXIT\nexit "$4"\n')
-        result = subprocess.run(['bash', '-c', script, '_', str(E2E), directory, str(teardown), str(initial)], capture_output=True, text=True)
+        result = subprocess.run(['bash', '-c', script, '_', str(E2E), str(state), str(teardown), str(initial)], capture_output=True, text=True)
         assert result.returncode == expected, result.stderr
         assert f'exit_code={initial}' in result.stdout
         if teardown:
             assert 'exit_code=3' in result.stdout
+    for outcome, initial, expected in (('clean', 0, 0), ('clean', 23, 23),
+                                       ('instance', 0, 3), ('project', 0, 3),
+                                       ('state', 0, 3), ('user-file', 0, 3),
+                                       ('volume', 0, 3), ('inventory-error', 0, 3),
+                                       ('pool-gone', 0, 0)):
+        state = Path(directory) / f'full-{outcome}-{initial}'
+        definition = state / 'config/yards/fixture/config.env'
+        owned = definition.parent / 'projects'
+        owned.mkdir(parents=True)
+        definition.write_text('ENVIRONMENT_PROFILES=android\n')
+        definition.chmod(0o600)
+        (state / '.marker').write_text('subyard-android-pool-runtime-v1\n')
+        (state / 'config/android-acceptance-user-file').write_text('preserved')
+        binary = state / 'fixture-incus'
+        binary.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                          'assert sys.argv[1:] == ["storage","volume","list","default","--all-projects","--format=json"]\n'
+                          'print(json.dumps([dict(type="custom",name="yard-srv-fixture")] if os.environ["BACKING_OUTCOME"] == "volume" else []))\n')
+        binary.chmod(0o755)
+        script = '''set -euo pipefail
+. "$1/android-pool-phases.sh"
+android_fixture=runtime; android_phase_begin check
+state="$2"; outcome="$3"; lane=full; YARD_NAME=fixture; project=fixture
+instance=fixture; monitor_pid=''; monitor_stop=''; monitor_host_stop="$state/stop"
+SUBYARD_CONFIG_HOME="$state/config"; hold_seconds=0
+sdk_pool=default; sdk_volume=yard-srv-fixture; incus_binary=("$state/fixture-incus")
+export BACKING_OUTCOME="$outcome"
+definition_checksum="$(sha256sum "$SUBYARD_CONFIG_HOME/yards/fixture/config.env")"
+yard() {
+  [ "$*" = 'teardown --yes' ] || return 99
+  [ "$outcome" = state ] || rm -rf -- "$SUBYARD_CONFIG_HOME/yards/fixture/projects"
+  [ "$outcome" != user-file ] || printf changed > "$SUBYARD_CONFIG_HOME/android-acceptance-user-file"
+}
+incus() {
+  case "$*" in
+    'list --all-projects --format=json')
+      if [ "$outcome" = instance ]; then printf '[{"project":"fixture"}]\n'; else printf '[]\n'; fi ;;
+    'project list --format=json')
+      if [ "$outcome" = project ]; then printf '[{"name":"fixture"}]\n'; else printf '[]\n'; fi ;;
+    'storage list --format=json')
+      [ "$outcome" != inventory-error ] || return 23
+      if [ "$outcome" = pool-gone ]; then printf '[]\n'; else printf '[{"name":"default"}]\n'; fi ;;
+    *) return 99 ;;
+  esac
+}
+sudo() { shift; "$@"; }
+'''
+        result = subprocess.run(['bash', '-c', script + cleanup + '\ntrap cleanup EXIT\nexit "$4"\n',
+                                 '_', str(E2E), str(state), outcome, str(initial)],
+                                capture_output=True, text=True)
+        assert result.returncode == expected, result.stderr
+        assert not state.exists()
+        assert ('android cleanup=passed' in result.stdout) is (expected == initial)
     log = Path(directory) / 'viewer.log'
     log.write_text(secret + '\nINFO: Texture: 640x360\n')
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -1240,6 +1339,48 @@ for arguments in (['--lane'], ['--lane', 'unknown'], ['--lane', 'viewer', 'extra
 # Execute the existing mode/prelude/dispatch blocks without guest access.
 runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
 recovery_source = (E2E / 'android-pool-recovery.sh').read_text()
+# Execute the SDK-only early return with harmless transport substitutes. This
+# proves dispatch and failure propagation, not the SDK's native build behavior.
+full_start = runtime_source.index('if [ "$lane" = full ]; then\n')
+full_end = runtime_source.index('\nincus --project "$project" exec "$instance" --user', full_start)
+with tempfile.TemporaryDirectory() as directory:
+    state = Path(directory)
+    definition = state / 'config/yards/fixture/config.env'
+    definition.parent.mkdir(parents=True)
+    definition.write_text('ENVIRONMENT_PROFILES=android\n')
+    prelude = '''set -euo pipefail
+lane=full; root="$1"; state="$2"; project=fixture; instance=fixture; YARD_NAME=fixture
+SUBYARD_CONFIG_HOME="$state/config"
+incus_binary=(fixture-incus)
+android_phase_begin() { printf 'phase=%s\n' "$1"; }; android_phase_end() { :; }
+timeout() { printf 'build transport\n'; return "${BUILD_EXIT:-0}"; }
+yard() {
+  case "$*" in
+    'config show SRV_POOL') printf 'effective: default\n' ;;
+    'config show SRV_VOLUME') printf 'effective: yard-srv-fixture\n' ;;
+    *) return 2 ;;
+  esac
+}
+incus() {
+  case "$*" in
+    '--project fixture config device get fixture srv pool') printf 'default\n' ;;
+    '--project fixture config device get fixture srv source') printf 'yard-srv-fixture\n' ;;
+    '--project fixture config device get fixture srv path') printf '/srv\n' ;;
+    *) return 99 ;;
+  esac
+}
+'''
+    for build_exit in (0, 23):
+        result = subprocess.run(['bash', '-c', prelude + runtime_source[full_start:full_end]
+                                 + '\nprintf reached-diagnostics\n', '_', str(ROOT), directory],
+                                capture_output=True, text=True,
+                                env=dict(os.environ, BUILD_EXIT=str(build_exit)))
+        assert result.returncode == build_exit, result.stderr
+        assert 'reached-diagnostics' not in result.stdout
+        assert ('android_sdk_build=passed' in result.stdout) is (build_exit == 0)
+        assert result.stdout.count('build transport') == 1
+        assert all(name not in result.stdout for name in ('phone-recovery', 'prepare-images', 'projects'))
+
 mode_block = recovery_source[recovery_source.index('viewer_only=0'):recovery_source.index('root="$1"')]
 for arguments, expected in ((['r', 's', 'y', 'p', 'i'], '0 0'),
                             (['r', 's', 'y', 'p', 'i', '--viewer-only'], '1 0'),
@@ -1259,7 +1400,7 @@ images_start = remote_end
 images_end = runtime_source.index('android_phase_end 0', images_start)
 dispatch_start = runtime_source.index('viewer_args=()')
 dispatch_end = runtime_source.index('android_phase_end 0', dispatch_start)
-for lane, mode in (('full', ''), ('viewer', '--viewer-only'), ('recovery', '--recovery-only'), ('viewer-native-debug', '--viewer-native-debug'), ('sdk-images', '')):
+for lane, mode in (('diagnostics', ''), ('viewer', '--viewer-only'), ('recovery', '--recovery-only'), ('viewer-native-debug', '--viewer-native-debug'), ('sdk-images', '')):
     prelude = ('set -euo pipefail\nlane="$1"; root=/fixture; state=/fixture; YARD_NAME=fixture; project=fixture; instance=fixture\n'
                'android_phase_begin() { :; }; timeout() { printf "%s\\n" "$*"; }; yard() { printf "%s\\n" "$*"; }\n')
     result = subprocess.run(['bash', '-c', prelude + runtime_source[remote_start:remote_end], '_', lane], capture_output=True, text=True, check=True)
