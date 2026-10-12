@@ -11,8 +11,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
@@ -33,7 +36,9 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 	project := cfg.Project + "-builder"
 	upstream, fingerprint := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	var mu sync.Mutex
-	var projectExists, vmExists bool
+	var projectExists, vmExists, builderRunning bool
+	var recipeCompleted, stoppedAfterRecipe, restartedAfterRecipe, agentAfterRestart, cloudAfterRestart, toolsAfterRestart, sanitized bool
+	var validationFault string
 	var metadataAttached bool
 	var owner, buildKey string
 	var builds, publications, deletions int
@@ -52,6 +57,9 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			}
 			select {
 			case <-finishBuild:
+				mu.Lock()
+				recipeCompleted = true
+				mu.Unlock()
 				return nil, nil, nil
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
@@ -103,6 +111,9 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		case "profile device list default --project " + project:
 			return []byte("root\neth0"), nil, nil
 		case "list e2e-base-1 --project " + project + " -f csv -c s":
+			if builderRunning {
+				return []byte("RUNNING"), nil, nil
+			}
 			return []byte("STOPPED"), nil, nil
 		case "query /1.0/instances/e2e-base-1?project=" + project:
 			devices := map[string]map[string]string{}
@@ -116,6 +127,10 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		case "start e2e-base-1 --project " + project:
 			if !metadataAttached {
 				return nil, nil, errors.New("builder started without metadata")
+			}
+			builderRunning = true
+			if recipeCompleted && stoppedAfterRecipe {
+				restartedAfterRecipe = true
 			}
 			return nil, nil, nil
 		case "operation list --project " + project + " --format json", "list --all-projects --format json":
@@ -141,8 +156,12 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			}
 			builds++
 			metadataAttached = false
+			recipeCompleted, stoppedAfterRecipe, restartedAfterRecipe, agentAfterRestart, cloudAfterRestart, toolsAfterRestart, sanitized = false, false, false, false, false, false, false
 			vmExists, buildKey = true, properties()["user.subyard.base_key"]
 		case strings.HasPrefix(command, "publish e2e-base-1 "):
+			if !recipeCompleted || !restartedAfterRecipe || !agentAfterRestart || !cloudAfterRestart || !toolsAfterRestart || !sanitized || builderRunning {
+				return nil, nil, errors.New("base published without post-upgrade boot validation")
+			}
 			publications++
 			published := fingerprint
 			if publications > 1 {
@@ -165,6 +184,36 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			deletedImages = append(deletedImages, args[2])
 			delete(images, args[2])
 		case strings.HasPrefix(command, "exec e2e-base-1 "):
+			if restartedAfterRecipe && strings.HasSuffix(command, "-- true") {
+				agentAfterRestart = true
+			}
+			if restartedAfterRecipe && strings.Contains(command, "cloud-init status --wait") {
+				cloudAfterRestart = true
+				if validationFault == "registry-write" {
+					// Preserve the actual earlier image registry while making both
+					// failure-state writes fail with ENOTDIR, regardless of UID.
+					if err := os.Rename(cfg.StateDir, cfg.StateDir+".saved"); err != nil {
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, cfg.StateDir, []byte("blocked registry directory"), 0600)
+					return nil, nil, errors.New("native cloud-init readiness failure")
+				}
+				if validationFault == "cloud-init" {
+					return nil, nil, errors.New("synthetic validation failure")
+				}
+			}
+			if restartedAfterRecipe && strings.Contains(command, "command -v git") {
+				toolsAfterRestart = true
+				if validationFault == "tools" {
+					return nil, nil, errors.New("synthetic missing tool")
+				}
+			}
+			if strings.Contains(command, "cloud-init clean --logs --machine-id") {
+				if !restartedAfterRecipe || !cloudAfterRestart || !toolsAfterRestart || !strings.Contains(command, "systemctl stop incus.service incus.socket") {
+					return nil, nil, errors.New("base sanitized before validation or retained Incus state")
+				}
+				sanitized = true
+			}
 			if strings.Contains(command, "cloud-init status") {
 				return []byte(`{"status":"done","extended_status":"done"}`), nil, nil
 			}
@@ -177,10 +226,13 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			if strings.HasSuffix(command, "-- sshd -T") {
 				return []byte("passwordauthentication no"), nil, nil
 			}
+		case strings.HasPrefix(command, "stop e2e-base-1 "):
+			builderRunning = false
+			if recipeCompleted {
+				stoppedAfterRecipe = true
+			}
 		case strings.HasPrefix(command, "project set "+project+" "),
 			strings.HasPrefix(command, "profile device set default root "),
-			strings.HasPrefix(command, "start e2e-base-1 "),
-			strings.HasPrefix(command, "stop e2e-base-1 "),
 			strings.HasPrefix(command, "file push "):
 		default:
 			return nil, nil, fmt.Errorf("unexpected command %s", command)
@@ -254,8 +306,8 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry, err := reaper.imageRegistry()
-	if err != nil || registry.Build == nil {
-		t.Fatalf("active builder reservation lost: registry=%+v err=%v", registry, err)
+	if err != nil || registry.Build == nil || registry.Build.Failure == nil || registry.Build.Failure.LastProbe != "error_kind=not_observed" {
+		t.Fatalf("active builder reservation or pre-validation capture requirement lost: registry=%+v err=%v", registry, err)
 	}
 	release.Do(func() { close(finishBuild) })
 	for range grants {
@@ -287,12 +339,90 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			t.Fatalf("lost allocation reservation or base pin for %s: state=%s reserved=%v pin=%s", slot.SlotID, slot.State, slot.Reserved, slot.BaseFingerprint)
 		}
 	}
-	t.Run("successful refresh retains old base until both leases drain", func(t *testing.T) {
-		for _, grant := range grants {
-			if _, err := store.MarkHeld(grant); err != nil {
+	for _, grant := range grants {
+		if _, err := store.MarkHeld(grant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, phase := range []string{"cloud-init", "tools", "registry-write"} {
+		t.Run("failed post-upgrade "+phase+" preserves current image and held pins", func(t *testing.T) {
+			validationFault = phase
+			refresh := newRuntime()
+			refreshErr := refresh.RefreshBase(ctx, store, EnvironmentPair)
+			if refreshErr == nil {
+				t.Fatal("invalid base published")
+			}
+			if phase == "registry-write" && !errors.Is(refreshErr, syscall.ENOTDIR) {
+				t.Fatalf("actual registry write failure missing: %v", refreshErr)
+			}
+			<-building
+			if phase == "registry-write" {
+				archived, err := os.ReadFile(filepath.Join(cfg.StateDir+".saved", "images.json"))
+				if err := os.Remove(cfg.StateDir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(cfg.StateDir+".saved", cfg.StateDir); err != nil {
+					t.Fatal(err)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var persisted ImageRegistry
+				if err := json.Unmarshal(archived, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if persisted.Build == nil || persisted.Build.Failure == nil || persisted.Build.Failure.Phase != "post-upgrade-boot" || persisted.Build.IncidentID != "" {
+					t.Fatalf("write failure lost conservative capture requirement across restart: %+v", persisted.Build)
+				}
+				restarted := newRuntime()
+				recorder := EventRecorder{StateDir: t.TempDir(), Source: cfg.BrokerSource}
+				restarted.Events = &recorder
+				registry, err := restarted.imageRegistry()
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A failed receipt write cannot authorize destruction either.
+				originalPath := cfg.StateDir + ".saved"
+				if err := os.Rename(cfg.StateDir, originalPath); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, cfg.StateDir, []byte("blocked receipt directory"), 0600)
+				cleanupErr := restarted.cleanupImageBuild(ctx, store, &registry)
+				stillExists := vmExists
+				if err := os.Remove(cfg.StateDir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(originalPath, cfg.StateDir); err != nil {
+					t.Fatal(err)
+				}
+				captured, err := recorder.Export()
+				if err != nil || len(captured.Incidents) != 1 || captured.Incidents[0].Diagnostics["readiness"] == "" || !strings.Contains(captured.Incidents[0].FailureReason, "readiness outcome unavailable") {
+					t.Fatalf("missing pre-destruction incident when registry receipt failed: %+v %v", captured, err)
+				}
+				if !errors.Is(cleanupErr, syscall.ENOTDIR) || !stillExists {
+					t.Fatalf("cleanup destroyed builder without image-registry receipt: %v", cleanupErr)
+				}
+			}
+			registry, err := refresh.imageRegistry()
+			if err != nil || len(registry.Bases) != 1 || registry.Bases[0].Fingerprint != fingerprint || registry.Build == nil {
+				t.Fatalf("failed validation changed previous base or lost builder reservation: %+v %v", registry, err)
+			}
+			pool, err := store.Inspect()
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
+			for _, slot := range pool.Slots {
+				if slot.State != SlotHeld || slot.BaseFingerprint != fingerprint {
+					t.Fatal("failed validation changed held lease")
+				}
+			}
+			if publications != 1 {
+				t.Fatal("failed validation published an image")
+			}
+			validationFault = ""
+		})
+	}
+	t.Run("successful refresh retains old base until both leases drain", func(t *testing.T) {
 		refresh := newRuntime()
 		refresh.Now = func() time.Time { return now.Add(time.Hour) }
 		if err := refresh.RefreshBase(ctx, store, EnvironmentPair); err != nil {
@@ -351,8 +481,8 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 		mu.Lock()
 		gotBuilds, gotPublications, gotDeletions = builds, publications, deletions
 		mu.Unlock()
-		if gotBuilds != 2 || gotPublications != 2 || gotDeletions != 2 {
-			t.Fatalf("refresh totals: builds=%d publications=%d staging deletions=%d; want two each", gotBuilds, gotPublications, gotDeletions)
+		if gotBuilds != 5 || gotPublications != 2 || gotDeletions != 5 {
+			t.Fatalf("refresh totals: builds=%d publications=%d staging deletions=%d; want five builds/deletions and two publications", gotBuilds, gotPublications, gotDeletions)
 		}
 	})
 }

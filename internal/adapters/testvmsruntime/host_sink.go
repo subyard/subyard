@@ -354,7 +354,11 @@ func (sink *HostSink) rotateIncidents(
 		at         time.Time
 	}
 	recovered := map[string]recoveredSlot{}
+	cleanedBuilders := map[string]time.Time{}
 	for _, event := range events {
+		if event.Kind == "base_builder.cleaned" && event.IncidentID != "" {
+			cleanedBuilders[event.Source+"\x00"+event.IncidentID] = event.Timestamp
+		}
 		if event.Kind != "recovery.available" || event.SlotID == "" {
 			continue
 		}
@@ -403,9 +407,23 @@ func (sink *HostSink) rotateIncidents(
 		if err := json.Unmarshal(payload, &incident); err != nil {
 			return err
 		}
-		success, ok := recovered[incident.Source+"\x00"+incident.SlotID]
-		if !ok || success.generation <= incident.ResourceGeneration {
-			continue
+		var resource struct {
+			Kind string `json:"resource_kind"`
+		}
+		_ = json.Unmarshal([]byte(incident.Diagnostics["resource"]), &resource)
+		var closedAt time.Time
+		if resource.Kind == "base_builder" {
+			at, cleaned := cleanedBuilders[incident.Source+"\x00"+incident.IncidentID]
+			if !cleaned {
+				continue
+			}
+			closedAt = at
+		} else {
+			success, ok := recovered[incident.Source+"\x00"+incident.SlotID]
+			if !ok || success.generation <= incident.ResourceGeneration {
+				continue
+			}
+			closedAt = success.at
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -419,7 +437,7 @@ func (sink *HostSink) rotateIncidents(
 		}
 		closed = append(closed, closedIncident{
 			path: path,
-			at:   success.at,
+			at:   closedAt,
 			size: size,
 		})
 		closedBytes += size

@@ -77,7 +77,22 @@ func (runtime *Runtime) handleQuarantineLocked(
 			fmt.Errorf("remove quarantined guest keys: %w", guestKeyErr),
 		)
 	}
-	diagnostics := child.recoveryDiagnostics(ctx, "")
+	firstVM := ""
+	var readiness *readinessFailure
+	if errors.As(cause, &readiness) && (readiness.Project == "" || readiness.Project == child.Config.Project) {
+		firstVM = readiness.VM
+	}
+	diagnostics := child.recoveryDiagnostics(ctx, firstVM)
+	if readiness != nil {
+		diagnostics["readiness"] = readinessEvidence(readiness)
+		if readiness.Project != "" && readiness.Project != child.Config.Project {
+			registry, err := runtime.imageRegistry()
+			if err != nil || registry.Build == nil || registry.Build.Project != readiness.Project || registry.Build.IncidentID == "" {
+				return errors.New("failed builder incident unavailable before slot recovery")
+			}
+			diagnostics["builder_incident"] = registry.Build.IncidentID
+		}
+	}
 	artifact, err := runtime.eventRecorder().SaveIncident(slot, cause, diagnostics)
 	if err != nil {
 		return fmt.Errorf("persist emergency incident before recovery: %w", err)
@@ -480,16 +495,32 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 	if payload, err := os.ReadFile(cfg.failureLog()); err == nil {
 		diagnostics["legacy_failure_log"] = string(payload)
 	}
+	pressure, missing := pressureEvidence("/proc")
+	diagnostics["allocation_pressure"] = incidentJSON(map[string]any{
+		"scope": "broker allocation boundary, not physical owner pressure", "observed_at": time.Now().UTC(),
+		"counters": pressure, "unavailable": missing,
+	})
+	if available, err := readHostMemoryAvailable(hostMemoryPath); err == nil {
+		diagnostics["physical_memory"] = incidentJSON(map[string]any{"available_bytes": available, "observed_at": time.Now().UTC(), "source": "verified read-only physical-owner meminfo bind"})
+	} else {
+		diagnostics["physical_memory"] = "unavailable: verified physical MemAvailable"
+	}
 	// Native state, console and QMP evidence do not depend on a responsive guest agent.
 	// Give each probe its own ceiling so a stalled probe cannot consume all later evidence.
 	probe := func(section string, args ...string) {
+		if ctx.Err() != nil {
+			diagnostics[section] = "unavailable: diagnostic budget exhausted"
+			return
+		}
 		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Second)
 		defer cancelProbe()
 		value, err := runtime.incus(probeCtx, args...)
 		if err != nil {
-			diagnostics[section] = "unavailable: " + errorString(err)
+			diagnostics[section] = "unavailable: " + readinessProbeMetadata(err)
 		} else if strings.TrimSpace(value) == "" {
 			diagnostics[section] = "empty native response (no measurement)"
+		} else if strings.HasSuffix(section, "_instance") {
+			diagnostics[section] = instanceEvidence(value)
 		} else {
 			diagnostics[section] = value
 		}
@@ -514,10 +545,12 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 			cancelVerify()
 		}
 		probe(fmt.Sprintf("vm_%d_state", selector), "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "s")
-		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
 		probe(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
 		qmpPath := "/1.0/instances/" + url.PathEscape(vm) + "/logs/qemu.qmp.log?project=" + url.QueryEscape(cfg.Project)
 		probe(fmt.Sprintf("vm_%d_qmp_log", selector), "query", qmpPath)
+		instancePath := "/1.0/instances/" + url.PathEscape(vm) + "?project=" + url.QueryEscape(cfg.Project)
+		probe(fmt.Sprintf("vm_%d_instance", selector), "query", instancePath)
+		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
 	}
 	capacityCtx, cancelCapacity := context.WithTimeout(ctx, time.Second)
 	diagnostics["capacity"] = runtime.capacityEvidence(capacityCtx)
@@ -530,7 +563,7 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 		"-u", "subyard-test-vms-broker.service", "-u", "subyard-test-vms-lease-reaper.service",
 	}, nil, nil)
 	if err != nil {
-		diagnostics["service_journal"] = "unavailable: " + errorString(err)
+		diagnostics["service_journal"] = "unavailable: " + readinessProbeMetadata(err)
 	} else if len(stdout) == 0 {
 		diagnostics["service_journal"] = "empty native response (no measurement)"
 	} else {
@@ -569,4 +602,13 @@ func dueForRecovery(slot LeaseSlot, now time.Time) bool {
 	return slot.State == SlotRecovering ||
 		(slot.State == SlotQuarantined &&
 			(slot.NextRecoveryAt.IsZero() || !now.Before(slot.NextRecoveryAt)))
+}
+
+func readinessEvidence(readiness *readinessFailure) string {
+	return incidentJSON(map[string]any{
+		"project": readiness.Project, "vm": readiness.VM, "phase": readiness.Phase,
+		"started_at": readiness.StartedAt.UTC(), "observed_at": readiness.ObservedAt.UTC(),
+		"elapsed_ms": readiness.ObservedAt.Sub(readiness.StartedAt).Milliseconds(),
+		"budget_ms":  readiness.Budget.Milliseconds(), "last_probe": readiness.LastProbe,
+	})
 }

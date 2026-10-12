@@ -192,8 +192,8 @@ func TestRecoveryDiagnosticsBoundsAndReportsMissingNativeEvidence(t *testing.T) 
 			t.Fatalf("diagnostic probe %d lacks bounded deadline", index)
 		}
 	}
-	if !strings.HasPrefix(runner.calls[0][1], "list") || runner.calls[2][1] != "console" ||
-		strings.Join(runner.calls[3][1:], " ") != "query /1.0/instances/e2e-vm-1/logs/qemu.qmp.log?project=subyard-e2e-vms" {
+	if !strings.HasPrefix(runner.calls[0][1], "list") || runner.calls[1][1] != "console" ||
+		strings.Join(runner.calls[2][1:], " ") != "query /1.0/instances/e2e-vm-1/logs/qemu.qmp.log?project=subyard-e2e-vms" {
 		t.Fatalf("native state/console/QMP did not precede project/journal: %#v", runner.calls)
 	}
 }

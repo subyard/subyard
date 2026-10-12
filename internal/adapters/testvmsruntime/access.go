@@ -108,6 +108,13 @@ func (runtime *Runtime) enableAgentAccess(ctx context.Context) error {
 }
 
 func (runtime *Runtime) collectFailureDiagnostics(ctx context.Context, cause error) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	probe := func(arguments ...string) (string, error) {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Second)
+		defer cancelProbe()
+		return runtime.incus(probeCtx, arguments...)
+	}
 	cfg := runtime.Config
 	if err := runtime.ensureStateDir(); err != nil {
 		return err
@@ -115,18 +122,19 @@ func (runtime *Runtime) collectFailureDiagnostics(ctx context.Context, cause err
 	var payload strings.Builder
 	fmt.Fprintf(&payload, "timestamp_utc=%s\n", runtime.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&payload, "worker_error=%s\nproject=%s\n", oneLine(cause.Error()), cfg.Project)
-	if runtime.projectExists(ctx) {
+	projectNames, projectErr := probe("project", "list", "--format", "csv", "-c", "n")
+	if projectErr == nil && linePresent(projectNames, cfg.Project) {
 		fmt.Fprintln(&payload, "\n== project ==")
-		if value, err := runtime.incus(ctx, "project", "show", cfg.Project); err == nil {
+		if value, err := probe("project", "show", cfg.Project); err == nil {
 			payload.WriteString(value)
 		}
 		for index := 1; index <= cfg.guestCount(); index++ {
 			vm := cfg.vm(index)
-			if !runtime.vmExists(ctx, vm) {
+			if _, err := probe("info", vm, "--project", cfg.Project); err != nil {
 				continue
 			}
 			fmt.Fprintf(&payload, "\n== %s info/log ==\n", vm)
-			if value, err := runtime.incus(ctx, "info", "--show-log", vm,
+			if value, err := probe("info", "--show-log", vm,
 				"--project", cfg.Project); err == nil {
 				payload.WriteString(value)
 			}

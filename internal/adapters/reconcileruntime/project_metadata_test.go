@@ -626,7 +626,7 @@ func TestProjectMetadataDispatcherParityWithDirectorySymlinks(t *testing.T) {
 				}
 			}
 			executor := &metadataHookExecutor{metadataFileExecutor: metadataFileExecutor{root}}
-			runtime := Runtime{RepositoryRoot: "../../..", Integrations: []profile.IntegrationDefinition{}, Executor: executor, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Executor: executor, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}}
 			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false)
 			if err != nil {
 				t.Fatal(err)

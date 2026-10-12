@@ -253,6 +253,24 @@ p0_capacity_reclaim_go_module_cache() {
     "$module_before" "$module_after"
 }
 
+p0_capacity_reclaim_default_go_build_cache() {
+  local cache="${P0_CAPACITY_DEFAULT_BUILD_CACHE:?}" canonical
+  [ "${SUBYARD_E2E_VM:-}" = 1 ] \
+    || p0_capacity_die 'default Go cache reclaim requires disposable VM1' || return
+  canonical="$(realpath -m -- "$cache")" || return
+  [ "$canonical" = "$cache" ] \
+    || p0_capacity_die 'default Go cache has a symbolic-link ancestor' || return
+  case "$cache" in
+    "$HOME/.cache/go-build"|/srv/cache/go-build) ;;
+    *) p0_capacity_die 'default Go cache is outside supported disposable locations'; return ;;
+  esac
+  [ -e "$cache" ] || return 0
+  [ -d "$cache" ] && [ ! -L "$cache" ] \
+    || p0_capacity_die 'default Go cache is not a plain directory' || return
+  # Run outside the module and before -modcache, avoiding a toolchain download.
+  (cd /; GOTOOLCHAIN=local GOCACHE="$cache" go clean -cache)
+}
+
 p0_capacity_cache_bytes() {
   local path="$1"
   if [ -e "$path" ]; then

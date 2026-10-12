@@ -21,14 +21,7 @@ export YARD_INSTANCE_NAME=base INCUS_PROJECT=default INCUS_BRIDGE=incusbr0 SSH_H
 export DEV_USER=dev DEV_UID=1000 DEV_SUDO=1 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
 bash "$recipe_root/scripts/01-install-incus.sh" --upgrade-only --yes --zabbly
 incus --version >/dev/null
-# The daemon state is created independently on every working VM, never copied
-# into the base with its server certificate and database identity.
-systemctl stop incus.service incus.socket
-if [ -d /var/lib/incus ]; then
-  [ -z "$(find /var/lib/incus/containers /var/lib/incus/virtual-machines -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)" ] \
-    || { echo 'unexpected instances in base builder' >&2; exit 1; }
-  find /var/lib/incus -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-fi
+# The runtime validates a new boot, then scrubs regenerated daemon state before publish.
 getent group kvm >/dev/null || groupadd --system kvm
 usermod -aG kvm dev
 install -d -o dev -g dev /home/dev/.cache /home/dev/.cache/subyard-e2e-platform

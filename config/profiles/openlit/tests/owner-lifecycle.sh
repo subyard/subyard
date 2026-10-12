@@ -3,6 +3,8 @@
 set -euo pipefail
 export TMPDIR=/tmp
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+[ "$#" -le 1 ] || { printf 'usage: owner-lifecycle.sh [installed-runtime]\n' >&2; exit 2; }
+if [ "$#" = 1 ]; then root="$(cd "$1" && pwd)"; fi
 state="$(mktemp -d /tmp/subyard-openlit-owner.XXXXXX)"
 trap 'rm -rf -- "$state"' EXIT
 mkdir "$state/bin"
@@ -65,6 +67,14 @@ export AGENT_codex_CONFIG="$root/config/agents/codex/config.toml" AGENT_codex_CO
 export OPENLIT_HOST_PORT=22222
 export SUBYARD_PROFILE_SELECTED=0
 bash "$root/config/profiles/openlit/owner.sh" --check
+[ ! -s "$state/calls" ]
+# Provision observes installed profiles even when they are not selected.
+observation="$(ENVIRONMENT_PROFILES='' CODING_TOOL_INTEGRATIONS='' "$root/config/profiles/openlit/runtime.sh" observe)"
+python3 - "$observation" <<'PYOBSERVE'
+import json,sys
+record=json.loads(sys.argv[1])
+assert record['state']=='current' and record['actual']==record['desired']
+PYOBSERVE
 [ ! -s "$state/calls" ]
 export SUBYARD_PROFILE_SELECTED=1
 : > "$state/calls"

@@ -56,7 +56,7 @@ func TestBuilderProjectOwnershipCannotBeAdopted(t *testing.T) {
 }
 
 func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *testing.T) {
-	for _, failure := range []string{"", "other_task", "finished_publish", "marker", "publish", "operations", "stop", "delete", "reference"} {
+	for _, failure := range []string{"", "other_task", "finished_publish", "marker", "publish", "operations", "stop", "delete", "reference", "evidence", "evidence_write", "evidence_foreign", "evidence_receipt"} {
 		t.Run(failure, func(t *testing.T) {
 			cfg := fixtureConfig(t)
 			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
@@ -65,8 +65,20 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 			project := cfg.Project + "-builder"
 			owner, key, fingerprint := strings.Repeat("a", 32), strings.Repeat("b", 64), strings.Repeat("c", 64)
 			registry := ImageRegistry{SchemaVersion: 1, Owner: owner, Build: &BaseBuild{Key: key, Environment: EnvironmentPair, Project: project}}
+			if strings.HasPrefix(failure, "evidence") {
+				registry.Build.Failure = &readinessFailure{Project: project, VM: "e2e-base-1", Phase: "incus-agent", Budget: time.Second, StartedAt: time.Now(), ObservedAt: time.Now(), LastProbe: "error_kind=probe_error"}
+				registry.Build.IncidentSlot = LeaseSlot{SlotID: "slot-000"}
+			}
 			store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+			recorder := EventRecorder{StateDir: cfg.StateDir, Source: "yard-source"}
+			if failure == "evidence_write" {
+				recorder.StateDir = filepath.Join(cfg.StateDir, "blocked")
+				if err := os.WriteFile(recorder.StateDir, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			vmDeleted, imageDeleted := false, false
+			consoleCalls := 0
 			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				command := strings.Join(args, " ")
 				switch command {
@@ -98,13 +110,36 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 				case "config get e2e-base-1 user.subyard.managed --project " + project:
 					return []byte(managedMarker), nil, nil
 				case "config get e2e-base-1 user.subyard.base_owner --project " + project:
-					if failure == "marker" {
+					if failure == "marker" || failure == "evidence_foreign" {
 						return []byte("foreign"), nil, nil
 					}
 					return []byte(owner), nil, nil
 				case "config get e2e-base-1 user.subyard.base_key --project " + project:
 					return []byte(key), nil, nil
+				case "console e2e-base-1 --show-log --project " + project:
+					consoleCalls++
+					return []byte("builder boot console"), nil, nil
 				case "stop e2e-base-1 --force --project " + project:
+					if failure == "evidence" {
+						batch, err := recorder.Export()
+						if err != nil || len(batch.Incidents) != 1 {
+							t.Fatalf("destruction preceded durable capture: %#v %v", batch, err)
+						}
+						artifact := batch.Incidents[0]
+						if artifact.SlotID != "slot-000" || artifact.Source != "yard-source" || artifact.Context != nil || artifact.Diagnostics["vm_1_console_log"] != "builder boot console" || strings.Contains(artifact.Diagnostics["resource"], `"vm":"e2e-vm-1"`) || !strings.Contains(artifact.Diagnostics["resource"], project) || !strings.Contains(artifact.Diagnostics["readiness"], "incus-agent") {
+							t.Fatalf("wrong builder attribution: %#v", artifact)
+						}
+						// Retry must not retrieve the consumptive console or rewrite evidence.
+						body, _ := os.ReadFile(filepath.Join(recorder.incidentDirectory(), artifact.IncidentID+".json"))
+						retryRuntime := Runtime{Config: cfg, Events: &recorder}
+						if err := retryRuntime.captureBuilderFailure(context.Background(), &registry); err != nil {
+							t.Fatal(err)
+						}
+						later, _ := os.ReadFile(filepath.Join(recorder.incidentDirectory(), artifact.IncidentID+".json"))
+						if string(body) != string(later) || consoleCalls != 1 {
+							t.Fatal("builder incident changed on retry")
+						}
+					}
 					return nil, nil, nil
 				case "list e2e-base-1 --project " + project + " -f csv -c s":
 					if failure == "stop" {
@@ -127,6 +162,12 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 					}
 					return []byte("[]"), nil, nil
 				case "image delete " + fingerprint + " --project default":
+					if failure == "evidence_receipt" {
+						recorder.StateDir = filepath.Join(cfg.StateDir, "blocked_receipt")
+						if err := os.WriteFile(recorder.StateDir, nil, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
 					imageDeleted = true
 					return nil, nil, nil
 				case "image list local: " + fingerprint + " --project default --format json":
@@ -134,17 +175,35 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 				}
 				return nil, nil, fmt.Errorf("unexpected command %s", command)
 			}}
-			runtime := Runtime{Config: cfg, Runner: runner}
+			runtime := Runtime{Config: cfg, Runner: runner, Events: &recorder}
+			if strings.HasPrefix(failure, "evidence") {
+				if err := writeJSONAtomic(runtime.imageRegistryPath(), registry); err != nil {
+					t.Fatal(err)
+				}
+				captureErr := runtime.captureBuilderFailure(context.Background(), &registry)
+				if (failure == "evidence" || failure == "evidence_receipt") && captureErr != nil {
+					t.Fatal(captureErr)
+				}
+				if failure != "evidence" && failure != "evidence_receipt" && captureErr == nil {
+					t.Fatal("failed capture was accepted")
+				}
+				// Simulate restart: pending capture and permit must come from disk.
+				var err error
+				registry, err = runtime.imageRegistry()
+				if err != nil || registry.Build.Failure == nil {
+					t.Fatalf("pending capture lost: %v", err)
+				}
+			}
 			err := runtime.cleanupImageBuild(context.Background(), store, &registry)
-			if failure == "" || failure == "other_task" || failure == "finished_publish" {
+			if failure == "" || failure == "other_task" || failure == "finished_publish" || failure == "evidence" {
 				if err != nil || registry.Build != nil || !vmDeleted || !imageDeleted {
 					t.Fatalf("cleanup failed: err=%v build=%#v vm=%v image=%v", err, registry.Build, vmDeleted, imageDeleted)
 				}
 			} else {
-				if err == nil || registry.Build == nil || imageDeleted {
+				if err == nil || registry.Build == nil || (imageDeleted && failure != "evidence_receipt") {
 					t.Fatalf("unsafe cleanup: err=%v build=%#v image=%v", err, registry.Build, imageDeleted)
 				}
-				if (failure == "marker" || failure == "publish" || failure == "operations" || failure == "stop") && vmDeleted {
+				if (failure == "marker" || failure == "publish" || failure == "operations" || failure == "stop" || failure == "evidence_write" || failure == "evidence_foreign") && vmDeleted {
 					t.Fatal("unverified builder deleted")
 				}
 			}
@@ -548,5 +607,155 @@ func TestPruneRetainsUnusableForeignImageWithoutBlockingHealthyBase(t *testing.T
 	}
 	if len(registry.Bases) != 2 {
 		t.Fatal("foreign image evidence was discarded")
+	}
+}
+
+func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
+	for _, phase := range []string{"project-create", "init-empty", "partial-init", "init-active", "project-unavailable", "inventory-unavailable"} {
+		t.Run(phase, func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			project, owner := cfg.Project+"-builder", strings.Repeat("a", 32)
+			projectExists, vmExists := false, false
+			buildKey := ""
+			stops, deletes, consoles := 0, 0, 0
+			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				command := strings.Join(args, " ")
+				switch command {
+				case "image list images: debian/13/cloud type=virtual-machine --format json":
+					return []byte(`[{"fingerprint":"` + strings.Repeat("b", 64) + `","architecture":"` + imageArchitecture() + `","type":"virtual-machine","aliases":[{"name":"debian/13/cloud"}]}]`), nil, nil
+				case "query /1.0/storage-pools/default/resources":
+					return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
+				case "project list --format csv -c n":
+					if phase == "project-unavailable" {
+						return nil, nil, errors.New("native project inventory unavailable")
+					}
+					if projectExists {
+						return []byte(project), nil, nil
+					}
+					return nil, nil, nil
+				case "project get " + project + " user.subyard.managed", "config get e2e-base-1 user.subyard.managed --project " + project:
+					return []byte(managedMarker), nil, nil
+				case "project get " + project + " user.subyard.base_owner", "config get e2e-base-1 user.subyard.base_owner --project " + project:
+					return []byte(owner), nil, nil
+				case "config get e2e-base-1 user.subyard.base_key --project " + project:
+					return []byte(buildKey), nil, nil
+				case "project get " + project + " limits.cpu", "project get " + project + " limits.memory":
+					return nil, nil, nil
+				case "profile device list default --project " + project:
+					return []byte("root\neth0"), nil, nil
+				case "info e2e-base-1 --project " + project:
+					return nil, nil, errors.New("instance absent before init")
+				case "operation list --project " + project + " --format json":
+					if phase == "init-active" {
+						return []byte(`[{"class":"task","description":"Creating instance","status_code":103}]`), nil, nil
+					}
+					return []byte("[]"), nil, nil
+				case "list --project " + project + " -f csv -c n":
+					if phase == "inventory-unavailable" {
+						return nil, nil, errors.New("native instance inventory unavailable")
+					}
+					if vmExists {
+						return []byte("e2e-base-1"), nil, nil
+					}
+					return nil, nil, nil
+				case "list e2e-base-1 --project " + project + " -f csv -c s":
+					return []byte("STOPPED"), nil, nil
+				case "console e2e-base-1 --show-log --project " + project:
+					consoles++
+					return []byte("partial init stopped console"), nil, nil
+				case "stop e2e-base-1 --force --project " + project:
+					batch, err := (EventRecorder{StateDir: cfg.StateDir}).Export()
+					if err != nil || len(batch.Incidents) != 1 {
+						t.Fatalf("stop preceded durable partial-init capture: %+v %v", batch, err)
+					}
+					stops++
+					return nil, nil, nil
+				case "delete e2e-base-1 --project " + project:
+					deletes++
+					vmExists = false
+					return nil, nil, nil
+				case "list --all-projects --format json":
+					return []byte("[]"), nil, nil
+				}
+				switch {
+				case strings.HasPrefix(command, "project create "+project+" "):
+					if phase == "project-create" {
+						return nil, nil, errors.New("native project creation failed")
+					}
+					projectExists = true
+					return nil, nil, nil
+				case strings.HasPrefix(command, "init images:"):
+					for _, arg := range args {
+						if value, ok := strings.CutPrefix(arg, "user.subyard.base_key="); ok {
+							buildKey = value
+						}
+					}
+					vmExists = phase == "partial-init"
+					return nil, nil, errors.New("native init failed")
+				case strings.HasPrefix(command, "project set "+project+" "), strings.HasPrefix(command, "profile device set default root "):
+					return nil, nil, nil
+				case strings.HasPrefix(command, "image list local: user.subyard.build_key="):
+					return []byte("[]"), nil, nil
+				}
+				return nil, nil, fmt.Errorf("unexpected native command %s", command)
+			}}
+			runtime := Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard, Now: time.Now,
+				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 64 << 30}, nil },
+				diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
+				cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
+			runtime.prepareDefaults()
+			spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := LeaseStore{Path: cfg.leaseState(), SlotCount: cfg.SlotCount}
+			registry := ImageRegistry{SchemaVersion: 1, Owner: owner}
+			failedStep := "native init failed"
+			if phase == "project-create" {
+				failedStep = "native project creation failed"
+			} else if phase == "project-unavailable" {
+				failedStep = "native project inventory unavailable"
+			} else if phase == "inventory-unavailable" {
+				failedStep = "native instance inventory unavailable"
+			}
+			if _, err := runtime.buildBase(context.Background(), store, LeaseGrant{Environment: &spec}, &registry, "recipe"); err == nil || !strings.Contains(err.Error(), failedStep) {
+				t.Fatalf("native pre-creation/init failure missing: %v", err)
+			}
+			// Drop all in-memory build state before cleanup.
+			restarted := Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard, Now: time.Now}
+			registry, err = restarted.imageRegistry()
+			if err != nil || registry.Build == nil || registry.Build.Failure == nil {
+				t.Fatalf("pending native failure lost: %+v %v", registry, err)
+			}
+			err = restarted.cleanupImageBuild(context.Background(), store, &registry)
+			uncertain := phase == "init-active" || phase == "project-unavailable" || phase == "inventory-unavailable"
+			if uncertain {
+				if err == nil || registry.Build == nil || stops != 0 || deletes != 0 {
+					t.Fatalf("uncertain native state treated as absent: %v %+v", err, registry.Build)
+				}
+				return
+			}
+			if err != nil || registry.Build != nil {
+				t.Fatalf("confirmed pre-creation/init failure blocks future work: %v %+v", err, registry.Build)
+			}
+			batch, err := restarted.eventRecorder().Export()
+			if err != nil || len(batch.Incidents) != 1 || len(batch.Events) != 1 || batch.Events[0].Kind != "base_builder.cleaned" || batch.Events[0].IncidentID != batch.Incidents[0].IncidentID {
+				t.Fatalf("missing cleanup evidence/receipt: %+v %v", batch, err)
+			}
+			if phase == "partial-init" {
+				if consoles != 1 || stops != 1 || deletes != 1 || batch.Incidents[0].Diagnostics["vm_1_console_log"] != "partial init stopped console" {
+					t.Fatal("partial init skipped native capture")
+				}
+			} else if consoles != 0 || stops != 0 || deletes != 0 || batch.Incidents[0].Diagnostics["builder_inventory"] != "verified_absent" {
+				t.Fatal("absent builder probed or destructively touched")
+			}
+			persisted, err := restarted.imageRegistry()
+			if err != nil || persisted.Build != nil {
+				t.Fatalf("restart retained cleared builder reservation: %+v %v", persisted.Build, err)
+			}
+		})
 	}
 }

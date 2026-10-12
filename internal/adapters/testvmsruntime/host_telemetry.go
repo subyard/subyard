@@ -14,13 +14,14 @@ import (
 )
 
 type hostMemoryEvidence struct {
-	ObservedAt time.Time        `json:"observed_at"`
-	Timing     string           `json:"timing"`
-	OuterState string           `json:"outer_state"`
-	Host       *MemoryCapacity  `json:"host_memory,omitempty"`
-	Allocation *MemoryCapacity  `json:"allocation_memory,omitempty"`
-	KernelOOM  []kernelOOMEvent `json:"kernel_oom"`
-	Missing    []string         `json:"unavailable,omitempty"`
+	ObservedAt time.Time                            `json:"observed_at"`
+	Timing     string                               `json:"timing"`
+	OuterState string                               `json:"outer_state"`
+	Pressure   map[string]map[string]pressureSample `json:"host_pressure,omitempty"`
+	Host       *MemoryCapacity                      `json:"host_memory,omitempty"`
+	Allocation *MemoryCapacity                      `json:"allocation_memory,omitempty"`
+	KernelOOM  []kernelOOMEvent                     `json:"kernel_oom"`
+	Missing    []string                             `json:"unavailable,omitempty"`
 }
 
 type kernelOOMEvent struct {
@@ -93,6 +94,11 @@ func (sink *HostSink) saveHostEvidence(ctx context.Context, instance outerBroker
 		now = sink.Now().UTC()
 	}
 	evidence := hostMemoryEvidence{ObservedAt: now, Timing: "after incident, at host spool collection; kernel window is the preceding 15 minutes", OuterState: strings.ToLower(instance.Status), KernelOOM: []kernelOOMEvent{}}
+	pressure, pressureMissing := pressureEvidence("/proc")
+	evidence.Pressure = pressure
+	for _, resource := range pressureMissing {
+		evidence.Missing = append(evidence.Missing, "host_pressure_"+resource)
+	}
 	if memory, err := memoryCapacity("/proc", "/sys/fs/cgroup"); err == nil {
 		memory.OuterHostEvidence = "collected by physical-owner host sink"
 		evidence.Host = &memory

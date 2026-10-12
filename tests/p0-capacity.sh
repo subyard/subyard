@@ -29,6 +29,10 @@ printf '%s\n' \
   'case "$*" in' \
   '  "env GOCACHE") printf "%s/.cache/go-build\n" "$HOME" ;;' \
   '  "env GOMODCACHE") printf "%s/go/pkg/mod\n" "$HOME" ;;' \
+  '  "clean -cache")' \
+  '    printf "%s\n" "$*" >> "$P0_FAKE_GO_LOG"' \
+  '    [ ! -e "$GOCACHE" ] || find "$GOCACHE" -depth -delete' \
+  '    ;;' \
   '  "clean -modcache")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_GO_LOG"' \
   '    [ ! -e "$P0_CAPACITY_MODULE_CACHE" ] || find "$P0_CAPACITY_MODULE_CACHE" -depth -delete' \
@@ -121,6 +125,23 @@ grep -Fxq '120 incus storage show default --project default' "$P0_FAKE_TIMEOUT_L
 ) || fail "P0 applied its own disk admission threshold"
 
 install -d -m 0755 "$P0_CAPACITY_MODULE_CACHE/cache/download"
+install -d -m 0755 "$P0_CAPACITY_DEFAULT_BUILD_CACHE"
+printf 'cached build\n' > "$P0_CAPACITY_DEFAULT_BUILD_CACHE/fixture"
+if SUBYARD_E2E_VM=0 p0_capacity_reclaim_default_go_build_cache >/dev/null 2>&1; then
+  fail 'default cache reclaim accepted a non-VM caller'
+fi
+SUBYARD_E2E_VM=1 p0_capacity_reclaim_default_go_build_cache
+[ ! -e "$P0_CAPACITY_DEFAULT_BUILD_CACHE" ] || fail 'default Go build cache was retained'
+grep -Fxq 'clean -cache' "$P0_FAKE_GO_LOG" || fail 'default cache reclaim skipped native Go cleanup'
+if (P0_CAPACITY_DEFAULT_BUILD_CACHE="$TMP/foreign" SUBYARD_E2E_VM=1 p0_capacity_reclaim_default_go_build_cache) >/dev/null 2>&1; then
+  fail 'default cache reclaim accepted a foreign location'
+fi
+install -d -m 0700 "$TMP/foreign"
+ln -s "$TMP/foreign" "$P0_CAPACITY_DEFAULT_BUILD_CACHE"
+if (SUBYARD_E2E_VM=1 p0_capacity_reclaim_default_go_build_cache) >/dev/null 2>&1; then
+  fail 'default cache reclaim accepted a symbolic link'
+fi
+rm -- "$P0_CAPACITY_DEFAULT_BUILD_CACHE"
 printf 'module\n' > "$P0_CAPACITY_MODULE_CACHE/cache/download/fixture"
 : > "$P0_FAKE_GO_LOG"
 : > "$P0_FAKE_SUDO_LOG"

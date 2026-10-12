@@ -652,3 +652,152 @@ func TestEventRecorderKeepsRecentQMPRecordsAfterFullRedaction(t *testing.T) {
 		}
 	}
 }
+
+func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
+	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	recorder := EventRecorder{StateDir: t.TempDir(), Source: "test-yard", Now: func() time.Time { return created }}
+	builder, err := recorder.SaveIncident(LeaseSlot{SlotID: "slot-000"}, errors.New("builder not ready"), map[string]string{"resource": `{"resource_kind":"base_builder","project":"test-builder","vm":"e2e-base-1"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := recorder.SaveIncident(LeaseSlot{SlotID: "slot-001"}, errors.New("ordinary failure"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := recorder.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := HostSink{DataHome: t.TempDir(), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
+	if err := sink.Ingest(batch); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sink.DataHome, "logs", "test-vms-broker-incidents", builder.IncidentID+".json")
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if builder.Context != nil || builder.ResourceGeneration != 0 || builder.LeaseEpoch != 0 || builder.Source != "test-yard" {
+		t.Fatalf("fictional allocation: %#v", builder)
+	}
+	if err := sink.Ingest(batch); err != nil {
+		t.Fatal(err)
+	}
+	later, err := os.ReadFile(path)
+	if err != nil || string(first) != string(later) {
+		t.Fatalf("open builder retry changed evidence: %v", err)
+	}
+	sink.Runner = &fakeRunner{handler: func(_ string, _ []string, _ []string, _ io.Reader) ([]byte, []byte, error) {
+		return nil, nil, errors.New("unavailable")
+	}}
+	instance := outerBrokerInstance{Name: "broker", Project: "test", Status: "RUNNING"}
+	if err := sink.saveHostEvidence(context.Background(), instance, []IncidentArtifact{builder}); err != nil {
+		t.Fatal(err)
+	}
+	hostPath := filepath.Join(filepath.Dir(path), "host", filepath.Base(path))
+	host, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.saveHostEvidence(context.Background(), instance, []IncidentArtifact{builder}); err != nil {
+		t.Fatal(err)
+	}
+	hostRetry, err := os.ReadFile(hostPath)
+	if err != nil || string(host) != string(hostRetry) {
+		t.Fatal("builder host retry changed evidence")
+	}
+	// A receipt for another source or another kind cannot close this builder.
+	otherRecorder := recorder
+	otherRecorder.StateDir, otherRecorder.Source = t.TempDir(), "other-yard"
+	wrong, err := otherRecorder.Record(BrokerEvent{Kind: "base_builder.cleaned", IncidentID: builder.IncidentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Ingest(SpoolBatch{SchemaVersion: BrokerSpoolSchemaVersion, Events: []BrokerEvent{wrong}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("foreign receipt closed builder")
+	}
+	for _, id := range []string{builder.IncidentID, ordinary.IncidentID} {
+		if _, err := recorder.Record(BrokerEvent{Kind: "base_builder.cleaned", IncidentID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closed, err := recorder.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Ingest(closed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleaned builder retained: %v", err)
+	}
+	if _, err := os.Stat(hostPath); !os.IsNotExist(err) {
+		t.Fatalf("closed builder host observation retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), ordinary.IncidentID+".json")); err != nil {
+		t.Fatal("builder receipt closed ordinary incident")
+	}
+}
+
+func TestHostSinkRealSlotBuilderSurvivesSlotRecoveryUntilExactCleanup(t *testing.T) {
+	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	recorder := EventRecorder{StateDir: t.TempDir(), Source: "test-yard", Now: func() time.Time { return created }}
+	slot := LeaseSlot{SlotID: "slot-001", ResourceGeneration: 4, LeaseEpoch: 7}
+	builder, err := recorder.SaveIncident(slot, errors.New("builder not ready"), map[string]string{"resource": `{"resource_kind":"base_builder","project":"test-builder","vm":"e2e-base-1"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := recorder.SaveIncident(slot, errors.New("slot not ready"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := recorder.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := HostSink{DataHome: t.TempDir(), Now: func() time.Time { return created.Add(31 * 24 * time.Hour) }, OperatorGID: -1}
+	if err := sink.Ingest(batch); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(sink.DataHome, "logs", "test-vms-broker-incidents")
+	path := filepath.Join(directory, builder.IncidentID+".json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range []uint64{5, 9} {
+		if _, err := recorder.Record(BrokerEvent{Kind: "recovery.available", SlotID: slot.SlotID, ResourceGeneration: generation, IncidentID: ordinary.IncidentID}); err != nil {
+			t.Fatal(err)
+		}
+		batch, err = recorder.Export()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Ingest(batch); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(before) != string(after) {
+			t.Fatalf("slot generation %d recovery closed staged builder: %v", generation, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, ordinary.IncidentID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("ordinary slot recovery retention changed: %v", err)
+	}
+	if _, err := recorder.Record(BrokerEvent{Kind: "base_builder.cleaned", IncidentID: builder.IncidentID}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err = recorder.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Ingest(batch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("exact builder cleanup did not close evidence: %v", err)
+	}
+}

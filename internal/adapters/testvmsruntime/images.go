@@ -23,6 +23,8 @@ const baseMaxAge = 7 * 24 * time.Hour
 
 var imageFingerprint = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+const baseValidationRevision = "post-upgrade-boot-v1"
+
 var errBaseMismatch = errors.New("image ownership or immutable recipe mismatch")
 
 type BaseImage struct {
@@ -40,11 +42,14 @@ type BaseImage struct {
 }
 
 type BaseBuild struct {
-	Key         string `json:"key"`
-	Environment string `json:"environment"`
-	Project     string `json:"project"`
-	Memory      uint64 `json:"memory_bytes"`
-	Disk        uint64 `json:"disk_peak_bytes"`
+	Key          string            `json:"key"`
+	Environment  string            `json:"environment"`
+	Project      string            `json:"project"`
+	Memory       uint64            `json:"memory_bytes"`
+	Disk         uint64            `json:"disk_peak_bytes"`
+	Failure      *readinessFailure `json:"readiness_failure,omitempty"`
+	IncidentID   string            `json:"incident_id,omitempty"`
+	IncidentSlot LeaseSlot         `json:"incident_slot,omitempty"`
 }
 
 type ImageRegistry struct {
@@ -158,7 +163,7 @@ func (rt *Runtime) recipeDigest(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return imageKey(name, rt.Config.Image, string(body), guestDependencyRevision), nil
+	return imageKey(name, rt.Config.Image, string(body), guestDependencyRevision, baseValidationRevision), nil
 }
 
 func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, grant LeaseGrant, child *Runtime) (LeaseGrant, error) {
@@ -369,8 +374,7 @@ func (rt *Runtime) cachedBaseUsable(ctx context.Context, owner string, base Base
 	return err == nil, err
 }
 
-func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseGrant, registry *ImageRegistry, recipe string) (BaseImage, error) {
-	var result BaseImage
+func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseGrant, registry *ImageRegistry, recipe string) (result BaseImage, buildErr error) {
 	upstream, source, err := rt.upstreamImage(ctx)
 	if err != nil {
 		return result, err
@@ -392,17 +396,44 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 	if err := rt.admitBuild(ctx, store, grant, buildRAM, buildDisk, registry); err != nil {
 		return result, err
 	}
-	registry.Build = &BaseBuild{Key: buildKey, Environment: spec.Name, Project: cfg.Project, Memory: buildRAM, Disk: buildDisk}
+	vm := cfg.vm(1)
+	slot := LeaseSlot{SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration, LeaseEpoch: grant.LeaseEpoch}
+	if slot.SlotID == "" {
+		slot.SlotID = "slot-000"
+	} // Private builder; never an allocation.
+	// Conservatively require evidence before cleanup until validation is durable.
+	// A failure-state write can fail too; the earlier staging record must protect
+	// an interrupted builder even when no observed readiness outcome survives.
+	registry.Build = &BaseBuild{Key: buildKey, Environment: spec.Name, Project: cfg.Project, Memory: buildRAM, Disk: buildDisk, IncidentSlot: slot,
+		Failure: &readinessFailure{Label: "base builder validation incomplete", Project: cfg.Project, VM: vm, Phase: "builder-preparation", Budget: cfg.BootTimeout, StartedAt: rt.Now(), LastProbe: "error_kind=not_observed"}}
 	if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
 		return result, err
 	}
+	// Replace pending metadata with the observed failure when possible. If this
+	// write fails, the earlier staging record still protects cleanup after restart.
+	defer func() {
+		var failure *readinessFailure
+		if registry.Build == nil || !errors.As(buildErr, &failure) {
+			return
+		}
+		failure.Project = cfg.Project
+		registry.Build.Failure = failure
+		if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
+			buildErr = errors.Join(buildErr, fmt.Errorf("persist pending builder evidence: %w", err))
+			return
+		}
+		captureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := rt.captureBuilderFailure(captureCtx, registry); err != nil {
+			buildErr = errors.Join(buildErr, err)
+		}
+	}()
 	if err := builder.ensureBuilderProject(ctx, registry.Owner); err != nil {
 		return result, err
 	}
 	if err := builder.ensureProject(ctx); err != nil {
 		return result, err
 	}
-	vm := cfg.vm(1)
 	if builder.vmExists(ctx, vm) {
 		return result, errors.New("builder instance exists without current staging verification")
 	}
@@ -450,9 +481,48 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 		"timeout", "--kill-after=10", "1800", "bash", "/opt/subyard-base-recipe/scripts/e2e-lab/base.sh"); err != nil {
 		return result, err
 	}
+	// Validate a fresh boot of the upgraded OS before publishing it. A failure
+	// leaves the previous selection and existing allocation pins untouched.
+	registry.Build.Failure.Phase = "post-upgrade-boot"
+	registry.Build.Failure.StartedAt = rt.Now()
+	if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
+		return result, err
+	}
+	if err := builder.stopRunningVM(ctx, vm); err != nil {
+		return result, err
+	}
+	if err := builder.startVM(ctx, vm); err != nil {
+		return result, err
+	}
+	if err := builder.waitAgent(ctx, vm); err != nil {
+		return result, err
+	}
+	validationStarted := builder.Now()
+	validationCtx, cancelValidation := context.WithTimeout(ctx, cfg.BootTimeout)
+	validationErr := builder.checkGuestTools(validationCtx, vm)
+	if validationErr == nil {
+		_, validationErr = builder.guest(validationCtx, vm, nil, "sh", "-eu", "-c",
+			`incus --version >/dev/null; test -d "/lib/modules/$(uname -r)"`)
+	}
+	if validationErr == nil {
+		validationErr = validationCtx.Err()
+	}
+	cancelValidation()
+	if ctx.Err() != nil {
+		return result, context.Cause(ctx)
+	}
+	if validationErr != nil {
+		return result, &readinessFailure{Label: "post-upgrade base tool validation", VM: vm, Phase: "base-tools", Budget: cfg.BootTimeout, StartedAt: validationStarted, ObservedAt: builder.Now(), LastProbe: readinessProbeMetadata(validationErr)}
+	}
 	manifest, err := builder.guest(ctx, vm, nil, "cat", "/var/lib/subyard/base-manifest.sha256")
 	if err != nil || !imageFingerprint.MatchString(strings.TrimSpace(manifest)) {
 		return result, errors.New("verified base dependency manifest missing")
+	}
+	pendingCapture := registry.Build.Failure
+	registry.Build.Failure = nil
+	if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
+		registry.Build.Failure = pendingCapture
+		return result, err
 	}
 	result = BaseImage{Environment: spec.Name, Recipe: recipe, Upstream: upstream.Fingerprint, Architecture: upstream.Architecture,
 		Manifest: strings.TrimSpace(manifest), CreatedAt: rt.Now(), LastUsedAt: rt.Now()}
@@ -460,6 +530,12 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 	// The builder never had lease keys or a checkout. Remove generated machine
 	// identities only after every dependency check, immediately before shutdown.
 	const sanitize = `set -eu
+# The validation boot can recreate Incus database/certificate identity.
+systemctl stop incus.service incus.socket
+if [ -d /var/lib/incus ]; then
+  [ -z "$(find /var/lib/incus/containers /var/lib/incus/virtual-machines -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)" ] || exit 1
+  find /var/lib/incus -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+fi
 cloud-init clean --logs --machine-id
 rm -f /etc/ssh/ssh_host_* /var/lib/dbus/machine-id
 find /root /home/dev -maxdepth 2 -type d -name .ssh -exec rm -rf -- {} +
@@ -474,7 +550,8 @@ sync`
 	}
 	if _, err := builder.incus(ctx, "publish", vm, "--project", cfg.Project,
 		"user.subyard.base_owner="+registry.Owner, "user.subyard.base_key="+result.Key,
-		"user.subyard.base_recipe="+recipe, "user.subyard.build_key="+buildKey); err != nil {
+		"user.subyard.base_recipe="+recipe, "user.subyard.build_key="+buildKey,
+		"user.subyard.base_validation="+baseValidationRevision); err != nil {
 		return result, err
 	}
 	images, err := rt.listImages(ctx, "local:", "user.subyard.base_key="+result.Key, "--project", "default")
@@ -593,14 +670,16 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 	if build.Project != rt.Config.Project+"-builder" || !imageFingerprint.MatchString(build.Key) {
 		return errors.New("unrecognized builder staging")
 	}
-	cfg := rt.Config
-	cfg.Project = build.Project
-	cfg.Prefix = "e2e-base"
-	builder := &Runtime{Config: cfg, Runner: rt.Runner, Stdout: rt.Stdout, Stderr: rt.Stderr, Now: rt.Now, Sleep: rt.Sleep}
+	builder, err := rt.builderRuntime(build)
+	if err != nil {
+		return err
+	}
+	cfg := builder.Config
 	exists, err := builder.projectPresence(ctx)
 	if err != nil {
 		return err
 	}
+	instanceAbsent := !exists
 	if exists {
 		if err := builder.requireProjectMarker(ctx); err != nil {
 			return err
@@ -632,19 +711,28 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 		if err != nil {
 			return err
 		}
+		if err := verifyBuilderInstances(ctx, builder, registry, names); err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			// A failed init client can leave a server-side creation task. Empty
+			// inventory proves absence only after native operations have ended.
+			for _, operation := range operations {
+				if operation.StatusCode < 200 {
+					return errors.New("builder operation still in progress")
+				}
+			}
+			instanceAbsent = true
+		}
+		if build.Failure != nil && build.IncidentID == "" && !instanceAbsent {
+			if len(names) != 1 {
+				return errors.New("failed builder evidence target ambiguous")
+			}
+			if err := rt.saveBuilderIncident(ctx, builder, registry, false); err != nil {
+				return err
+			}
+		}
 		for _, name := range names {
-			if name != cfg.vm(1) {
-				return errors.New("foreign builder instance")
-			}
-			for property, want := range map[string]string{"user.subyard.managed": managedMarker, "user.subyard.base_owner": registry.Owner, "user.subyard.base_key": build.Key} {
-				got, err := builder.incus(ctx, "config", "get", name, property, "--project", cfg.Project)
-				if err != nil {
-					return err
-				}
-				if strings.TrimSpace(got) != want {
-					return errors.New("builder ownership mismatch")
-				}
-			}
 			_, stopErr := builder.incus(ctx, "stop", name, "--force", "--project", cfg.Project)
 			state, stateErr := builder.incus(ctx, "list", name, "--project", cfg.Project, "-f", "csv", "-c", "s")
 			if stateErr != nil {
@@ -664,6 +752,14 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 		}
 		if len(remaining) != 0 {
 			return errors.New("builder instances remain after cleanup")
+		}
+	}
+	if build.Failure != nil && build.IncidentID == "" {
+		if !instanceAbsent {
+			return errors.New("failed builder evidence unavailable before cleanup")
+		}
+		if err := rt.saveBuilderIncident(ctx, builder, registry, true); err != nil {
+			return err
 		}
 	}
 	// A crash after publish but before the registry commit can leave a complete
@@ -692,6 +788,11 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 		}
 		if err := rt.deleteImageAndVerify(ctx, image.Fingerprint); err != nil {
 			return err
+		}
+	}
+	if build.IncidentID != "" {
+		if _, err := rt.eventRecorder().Record(BrokerEvent{Kind: "base_builder.cleaned", SlotID: build.IncidentSlot.SlotID, ResourceGeneration: build.IncidentSlot.ResourceGeneration, LeaseEpoch: build.IncidentSlot.LeaseEpoch, IncidentID: build.IncidentID}); err != nil {
+			return fmt.Errorf("persist builder cleanup receipt: %w", err)
 		}
 	}
 	registry.Build = nil
@@ -902,4 +1003,102 @@ func (rt *Runtime) ReapImages(ctx context.Context, store LeaseStore) error {
 		}
 	}
 	return rt.pruneImages(ctx, store, &registry, false)
+}
+
+// builderRuntime projects the persisted staging identity, never the slot's VMs.
+func (rt *Runtime) builderRuntime(build *BaseBuild) (*Runtime, error) {
+	if build.Project != rt.Config.Project+"-builder" || !imageFingerprint.MatchString(build.Key) {
+		return nil, errors.New("unrecognized builder staging")
+	}
+	spec, err := rt.Config.EnvironmentSpec(build.Environment)
+	if err != nil {
+		return nil, err
+	}
+	spec.Count = 1
+	cfg := rt.Config.withEnvironment(spec)
+	cfg.Project, cfg.Prefix = build.Project, "e2e-base"
+	return &Runtime{Config: cfg, Runner: rt.Runner, Stdout: rt.Stdout, Stderr: rt.Stderr, Now: rt.Now, Sleep: rt.Sleep}, nil
+}
+
+func verifyBuilderInstances(ctx context.Context, builder *Runtime, registry *ImageRegistry, names []string) error {
+	for _, name := range names {
+		if name != builder.Config.vm(1) {
+			return errors.New("foreign builder instance")
+		}
+		for property, want := range map[string]string{"user.subyard.managed": managedMarker, "user.subyard.base_owner": registry.Owner, "user.subyard.base_key": registry.Build.Key} {
+			got, err := builder.incus(ctx, "config", "get", name, property, "--project", builder.Config.Project)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(got) != want {
+				return errors.New("builder ownership mismatch")
+			}
+		}
+	}
+	return nil
+}
+
+func (rt *Runtime) captureBuilderFailure(ctx context.Context, registry *ImageRegistry) error {
+	build := registry.Build
+	if build == nil || build.Failure == nil || build.IncidentID != "" {
+		return nil
+	}
+	builder, err := rt.builderRuntime(build)
+	if err != nil {
+		return err
+	}
+	if err := builder.requireProjectMarker(ctx); err != nil {
+		return err
+	}
+	owner, err := builder.incus(ctx, "project", "get", build.Project, "user.subyard.base_owner")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) != registry.Owner {
+		return errors.New("foreign builder project")
+	}
+	names, err := builder.projectInstances(ctx)
+	if err != nil {
+		return err
+	}
+	if len(names) != 1 {
+		return errors.New("failed builder evidence target missing")
+	}
+	if err := verifyBuilderInstances(ctx, builder, registry, names); err != nil {
+		return err
+	}
+	return rt.saveBuilderIncident(ctx, builder, registry, false)
+}
+
+func (rt *Runtime) saveBuilderIncident(ctx context.Context, builder *Runtime, registry *ImageRegistry, instanceAbsent bool) error {
+	build := registry.Build
+	if build.Failure.Project != build.Project || build.Failure.VM != builder.Config.vm(1) || !brokerSlotID.MatchString(build.IncidentSlot.SlotID) {
+		return errors.New("invalid failed builder evidence identity")
+	}
+	if build.Failure.LastProbe == "error_kind=not_observed" {
+		build.Failure.ObservedAt = time.Now()
+		if rt.Now != nil {
+			build.Failure.ObservedAt = rt.Now()
+		}
+	}
+	diagnostics := map[string]string{"builder_inventory": "verified_absent"}
+	if !instanceAbsent {
+		diagnostics = builder.recoveryDiagnostics(ctx, build.Failure.VM)
+	}
+	diagnostics["readiness"] = readinessEvidence(build.Failure)
+	diagnostics["resource"] = incidentJSON(map[string]string{
+		"resource_kind": "base_builder", "project": build.Project, "vm": build.Failure.VM, "build_key": build.Key,
+	})
+	artifact, err := rt.eventRecorder().SaveIncident(build.IncidentSlot, build.Failure, diagnostics)
+	if err != nil {
+		return fmt.Errorf("persist builder incident before cleanup: %w", err)
+	}
+	build.IncidentID = artifact.IncidentID
+	if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
+		// The immutable artifact remains; a retry may make another incident,
+		// but must not treat this in-memory receipt as a durable cleanup permit.
+		build.IncidentID = ""
+		return fmt.Errorf("persist builder incident receipt: %w", err)
+	}
+	return nil
 }

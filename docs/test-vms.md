@@ -497,6 +497,83 @@ dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \
   bash dev/e2e/incus-group-reexec.sh
 ```
 
+The staging reliability fixture uses one Android VM for its 40 GiB disk, creates a marked
+broker owner, and cold-builds one base with post-upgrade boot validation. It observes the
+first boot of one small nested singleton and one stop/start under the same lease. It keeps
+the normal 300-second boot budget and admission reserves. The first unexpected failure ends the
+attempt; it never reacquires or injects a timeout. The two-hour controller cap includes cold
+preparation; TERM has a two-minute cleanup grace.
+
+Its owner preparation uses the product's project and instance adapters, then
+`testvmsruntime.Backend.Apply` and native readiness verification from the installed
+candidate. Cloud-init creates only the disposable owner's user and SSH prerequisite;
+user, Python and SSH service checks precede broker setup. The product backend owns
+Incus/QEMU installation, the live physical-memory bind, worker, recipes, controller
+route and systemd resource limits. Generic Docker and development-tool provisioning
+is omitted. This fixture proves the broker boot scenario, not whole-yard initialization.
+Evidence export precedes native broker drain and exact marker-owned owner cleanup.
+After both boots and a successful ordinary release, a fresh sequential singleton uses
+the same owner and validated cached base. An existing one-shot Incus inventory fault
+returns exit 1 for the exact project-list command during release, then delegates every
+other command to real Incus. It exercises native fencing, quarantine and immutable
+incident capture without a timeout, extra owner or concurrent guest. Physical-owner
+host capture and immutable sink replay must pass before exact broker configuration
+restoration and native reaper recovery. Recovery must advance one generation, preserve
+the incident timeline and leave no allocation instances or root volumes. Its existing
+6000-second recovery bound remains inside the unchanged 7200-second controller cap;
+the cap can leave this gate incomplete. The controlled inventory failure proves this
+boundary separately and does not explain an earlier boot stall.
+Fault staging has an exact fixture marker and canonical nonsymlink files; backup and
+current configuration content, mode and ownership are checked before restoration.
+Cleanup restores the fault before restarting recovery or retiring the owner. A guard
+refusal retains the owner and reports cleanup failure; shared cleanup cannot bypass it.
+The fixture removes its owned runtime reaper mask, but refuses to restart the timer
+against configuration that could not be safely restored.
+
+The 40 GiB virtual disk does not guarantee 35 GiB of usable free space after filesystem,
+base-image and owner provisioning costs. The nested directory pool shares that physical
+backing. After compilation and controller preparation, the fixture reclaims its marked
+Go build cache, supported default Go build cache and the disposable VM's Go module cache
+through guarded helpers. It also cleans the verified owner container's downloaded APT
+archives and removes only package staging created by this run after installed-worker
+verification. Installed runtimes, release caches, recipes, images and pins remain intact.
+Once owner installation is complete, it also removes reproducible downloaded APT
+indexes only inside the verified disposable owner. Nonblocking native POSIX APT/dpkg
+locks exclude concurrent package activity; complete ownership and nonsymlink checks
+precede deletion. Package databases, sources, directories and lock inodes are retained.
+Existing before/after categories report owner APT index bytes; reclaiming them still
+requires a fresh physical-capacity admission result.
+Fixed numeric categories cover caches and staging in both the allocated guest and its
+owner container; missing measurements are explicit. The owner provisioner copies the
+compiled broker rather than building it inside the container.
+After reclamation, fixed numeric disk-footprint categories also locate retained system,
+source, fixture and Incus storage costs in both scopes. Parent and child categories
+overlap and must not be summed; symlinked, inaccessible or timed-out paths report null.
+These read-only measurements do not authorize deletion of installed or cached content.
+It records numeric backing capacity and broker telemetry before and after reclamation,
+before refusing insufficient or unknown capacity. The cold builder still requires 30 GiB
+plus the normal 5 GiB physical reserve; reclamation does not guarantee admission.
+
+Run the fixture with:
+
+```sh
+timeout --signal=TERM --kill-after=120 7200 dev/agent-e2e.sh \
+  --slot "$slot" --type android-test --purpose staging-reliability --vm 1 -- \
+  bash dev/e2e/staging-reliability.sh
+```
+
+The fixture emits source/installed-engine identities, installed Incus/QEMU/package versions,
+guest kernel/agent identities when reachable, and five-second measurements of marker-verified
+QEMU PID/start time, task state, wait channel, scheduler counters, PSI and cgroup counters.
+It projects early and late RESET/SHUTDOWN/RESUME and system_reset/cont/quit records from existing
+QMP log files, including the rotated first-boot log. Default runtime/log paths are checked;
+missing measurements remain explicit. It never connects to Incus's QMP socket or consumes its
+console ring buffer during a lifecycle operation. Console capture follows native completion.
+Durable emergency incidents, host observations and boot samples are printed before marker-owned
+cleanup. The reaper is restored even on failure; restoration failures change the fixture result.
+Successful boots produce `causal_result=inconclusive_no_stall_observed`. This fixture does not
+establish release acceptance or identify the cause of an intermittent kernel/agent stall.
+
 The physical-memory regression creates a marked broker yard on VM1. It checks the live
 read-only owner meminfo bind, rejects missing and ordinary-file sources, repairs a removed
 device without restarting the yard, and verifies boot persistence. It holds a small nested
@@ -948,6 +1025,16 @@ values come from the runner's validated actual environment grant, including conf
 resource overrides. These exports do not extend the lease marker schema or provide
 independent lease authentication.
 
+Base publication requires recipe completion, a guarded stop/start of the builder, and
+agent/cloud-init plus read-only tool readiness on the new boot. Validation includes the
+Incus client and modules for the running kernel. The package manifest describes installed
+packages; it is distinct from the fresh-boot validation marker. After validation, the builder
+stops the Incus service/socket and removes regenerated daemon state before clearing machine
+identities and publishing. A validation failure preserves the previous base and held pins.
+The validation revision participates in recipe identity, so older cached bases cannot bypass
+this gate. Validation is one attempt within existing deadlines; it does not promise to prevent
+an intermittent kernel or agent stall.
+
 ## Lifecycle and fencing
 
 Acquire atomically reserves an `available` slot as `provisioning` with the requested type and
@@ -1054,17 +1141,30 @@ fingerprints, keys, guest command payloads or agent output. Full bounded evidenc
 immutable JSON artifact under `$SUBYARD_HOME/logs/test-vms-broker-incidents/` and referenced by
 `incident_id`.
 
+Readiness polling passes a child context with the configured boot budget to each native
+agent, host-key and SSH/sudo probe. Expired budgets do not start another probe, and late
+success is rejected. The parent request remains available for cleanup after a local timeout.
+Incident readiness fields retain only phase, timestamps, budget and classified latest-probe
+metadata; they exclude probe arguments and output.
+
 Local incident collection has a five-second budget with one-second native probes. It prioritizes
-VM state, QEMU information/logs and the guest console log, which can retain kernel suspend or
-panic output, plus QEMU's QMP control log, without a responsive guest agent. Project and bounded
+the failed VM state, one guest console log read after lifecycle completion and QMP logs,
+without a responsive guest agent. Console output can retain kernel suspend or panic evidence. Project and bounded
 service journal observations follow. Empty responses, probe failures and exhausted budgets are recorded as missing measurements;
 the existing artifact redaction and size limits apply. QMP sections retain the latest 64 KiB after
 redacting the complete log, with an explicit truncation marker; other sections retain their existing
 limits. Force-stop events link the fresh incident
 and report the graceful command and forced-stop durations when available.
+Expanded instance metadata is projected to architecture, base fingerprint, CPU/RAM/root-disk
+limits, explicit Secure Boot state and a known policy identifier or unknown-policy digest.
+Raw configuration, cloud-init, device sources and QEMU configuration are excluded.
+Local parsed CPU, I/O and memory PSI counters describe the broker allocation boundary;
+verified physical-owner MemAvailable comes from the existing read-only bind. Missing
+measurements are explicit, including unknown effective defaults.
 
 The host sink also saves a bounded observation in `test-vms-broker-incidents/host/<incident_id>.json`:
-visible host/allocation cgroup memory limits, current/peak values, OOM counters, outer instance state,
+visible host/allocation cgroup memory limits, current/peak values, OOM counters, parsed physical-host
+CPU/I/O/memory PSI, outer instance state,
 and classified kernel OOM events from the preceding 15 minutes. Collection has a five-second
 budget and records missing measurements explicitly. Its timestamp is the collection time, not a
 claim to have measured the failure's peak. Kernel messages and private cgroup paths are not copied.
@@ -1103,3 +1203,17 @@ installed sink, broker engine and facade status without revoking held leases. A 
 or never-initialized broker is not started as an update side effect; its next explicit `yard init`
 performs the ordinary convergence. During the one-time owner migration, a running legacy fixed-VM
 backend that predates the broker service is treated as its active predecessor.
+
+A private base builder persists its capture requirement before boot/readiness begins and clears
+it only after successful validation is durable. An interrupted build retains its phase even when
+later failure-state writes fail; an unavailable readiness outcome is explicit. Before destructive
+staging cleanup, the builder records its actual project/name in the existing incident spool.
+Its pending capture and immutable incident receipt survive in the image registry; an evidence
+or registry-receipt write failure preserves staging for retry.
+Manual refresh has no allocation lease and uses the reserved incident identity `slot-000`, with
+zero generation/epoch and no lease attribution; it never creates a pool slot. Builder incidents
+retain the producing yard source and identify `resource_kind=base_builder` in diagnostics.
+Verified builder cleanup emits an exact-incident `base_builder.cleaned` receipt. Host retention
+uses that receipt only for the matching source and builder artifact, including builders created
+for real allocation slots. Ordinary slot recovery/reuse cannot close builder evidence. The receipt
+creates no allocation recovery transition. An unpersisted cleanup receipt leaves the observation open.

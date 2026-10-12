@@ -130,7 +130,7 @@ owner_cleanup() {
         || cleanup_failed=1
     fi
     if incus project show "subyard-$yard" >/dev/null 2>&1; then
-      if [ "$rc" -ne 0 ] && [ "$yard" = test-yard ]; then
+      if [ "$rc" -ne 0 ] && [ "$yard" = test-yard ] && [ "${OWNER_DIAGNOSTIC_CONSOLE_CAPTURED:-0}" != 1 ]; then
         for vm in e2e-vm-1 e2e-vm-2; do
           timeout 15 incus exec "yard-$yard" --project "subyard-$yard" -- \
             incus --project subyard-e2e-vms-slot-1 console "$vm" --show-log 2>&1 \
@@ -246,9 +246,10 @@ require_broker_fixture_capacity() {
     || die 'nested broker acceptance requires an allocated host with at least 16GiB RAM; the default 4GiB pair VM is too small'
 }
 
-write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
-  local yard="$1" template="$2" port="$3" slots="${4:-2}" registration
+write_owner_registration() { # <yard> <template> <ssh-port> [slot-count] [vm-cpu]
+  local yard="$1" template="$2" port="$3" slots="${4:-2}" cpu="${5:-1}" registration
   local selection='AGENTS=none'
+  [[ "$cpu" =~ ^[1-9][0-9]{0,2}$ ]] || die "invalid diagnostic CPU count"
   [[ "$slots" =~ ^[1-9][0-9]{0,2}$ ]] \
     || die "invalid diagnostic slot count $slots"
   registration="$OWNER_YARD_DIR/$yard.env"
@@ -263,8 +264,8 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count]
       && grep -Fqx "# $MARKER" "$registration" \
       || die "refusing to replace unrelated registration $registration"
   fi
-  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=1\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
-    "$MARKER" "$template" "$port" "$selection" "$OWNER_DIAGNOSTIC_DEV_UID" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
+  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=%s\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
+    "$MARKER" "$template" "$port" "$selection" "$OWNER_DIAGNOSTIC_DEV_UID" "$cpu" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
     > "$registration"

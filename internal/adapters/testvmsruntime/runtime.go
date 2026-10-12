@@ -862,6 +862,8 @@ func (runtime *Runtime) progress(ctx context.Context, label string, operation fu
 			fmt.Fprintf(runtime.Stdout, "  [ .. ] %s (still working, %ds elapsed)\n",
 				label, int(runtime.Now().Sub(started)/time.Second))
 		case <-ctx.Done():
+			// Reap the native operation before allowing diagnostics or recovery.
+			<-done
 			return context.Cause(ctx)
 		}
 	}
@@ -870,43 +872,97 @@ func (runtime *Runtime) progress(ctx context.Context, label string, operation fu
 func (runtime *Runtime) waitFor(
 	ctx context.Context,
 	label string,
-	probe func() error,
+	probe func(context.Context) error,
 ) error {
-	deadline := runtime.Now().Add(runtime.Config.BootTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, runtime.Config.BootTimeout)
+	defer cancel()
 	started := runtime.Now()
+	deadline := started.Add(runtime.Config.BootTimeout)
 	nextReport := started.Add(10 * time.Second)
+	lastFailure := "error_kind=not_probed"
 	fmt.Fprintf(runtime.Stdout, "  [ .. ] %s\n", label)
 	for {
-		probeErr := probe()
-		if probeErr == nil {
-			return nil
-		}
-		// Probe argv and output can contain credentials; retain only typed metadata.
-		lastFailure := "error_kind=probe_error"
-		var commandError *CommandError
-		switch {
-		case errors.As(probeErr, &commandError) && commandError != nil:
-			lastFailure = fmt.Sprintf("error_kind=command_error exit_code=%d duration=%s",
-				commandError.ExitCode, commandError.Duration)
-		case errors.Is(probeErr, context.DeadlineExceeded):
-			lastFailure = "error_kind=context_deadline_exceeded"
-		case errors.Is(probeErr, context.Canceled):
-			lastFailure = "error_kind=context_canceled"
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
 		}
 		now := runtime.Now()
-		if !now.Before(deadline) {
-			return fmt.Errorf("%s did not become ready within %s; last readiness probe: %s",
-				label, runtime.Config.BootTimeout, lastFailure)
+		if !now.Before(deadline) || waitCtx.Err() != nil {
+			return &readinessFailure{Label: label, Budget: runtime.Config.BootTimeout,
+				StartedAt: started, ObservedAt: now, LastProbe: lastFailure}
+		}
+		probeErr := probe(waitCtx)
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		now = runtime.Now()
+		if probeErr == nil && waitCtx.Err() == nil && now.Before(deadline) {
+			return nil
+		}
+		if probeErr == nil {
+			probeErr = context.DeadlineExceeded
+		}
+		lastFailure = readinessProbeMetadata(probeErr)
+		if !now.Before(deadline) || waitCtx.Err() != nil {
+			continue
 		}
 		if !now.Before(nextReport) {
 			fmt.Fprintf(runtime.Stdout, "  [ .. ] %s (%ds elapsed)\n",
 				label, int(now.Sub(started)/time.Second))
 			nextReport = now.Add(10 * time.Second)
 		}
-		if err := runtime.Sleep(ctx, 2*time.Second); err != nil {
+		if err := runtime.Sleep(waitCtx, min(2*time.Second, deadline.Sub(now))); err != nil {
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			if waitCtx.Err() != nil {
+				continue
+			}
 			return err
 		}
 	}
+}
+
+func readinessProbeMetadata(err error) string {
+	var commandError *CommandError
+	switch {
+	case errors.As(err, &commandError) && commandError != nil:
+		return fmt.Sprintf("error_kind=command_error exit_code=%d duration=%s", commandError.ExitCode, commandError.Duration)
+	case errors.Is(err, context.DeadlineExceeded):
+		return "error_kind=context_deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "error_kind=context_canceled"
+	default:
+		return "error_kind=probe_error"
+	}
+}
+
+// Readiness failures retain only classified probe metadata, never argv or output.
+// VM and phase are assigned by the owning guest operation before crossing recovery.
+type readinessFailure struct {
+	Label      string
+	Project    string
+	VM         string
+	Phase      string
+	Budget     time.Duration
+	StartedAt  time.Time
+	ObservedAt time.Time
+	LastProbe  string
+}
+
+func (failure *readinessFailure) Error() string {
+	if failure.LastProbe == "error_kind=not_observed" {
+		return failure.Label + "; readiness outcome unavailable"
+	}
+	return fmt.Sprintf("%s did not become ready within %s; last readiness probe: %s",
+		failure.Label, failure.Budget, failure.LastProbe)
+}
+
+func guestReadinessFailure(err error, vm, phase string) error {
+	var failure *readinessFailure
+	if errors.As(err, &failure) {
+		failure.VM, failure.Phase = vm, phase
+	}
+	return err
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

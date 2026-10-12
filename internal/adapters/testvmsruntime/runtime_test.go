@@ -2061,9 +2061,9 @@ func TestWaitForTimeoutReportsOnlyLatestProbeMetadata(t *testing.T) {
 				},
 			}
 			probes := 0
-			err := runtime.waitFor(context.Background(), "fixture readiness", func() error {
+			err := runtime.waitFor(context.Background(), "fixture readiness", func(context.Context) error {
 				probes++
-				if probes < 4 {
+				if probes < 3 {
 					return &CommandError{ExitCode: 99, Duration: 99 * time.Second, Message: "earlier failure"}
 				}
 				return test.err
@@ -2072,8 +2072,8 @@ func TestWaitForTimeoutReportsOnlyLatestProbeMetadata(t *testing.T) {
 			if err == nil || err.Error() != want {
 				t.Fatalf("readiness timeout = %v, want %q", err, want)
 			}
-			if probes != 4 || now.Sub(started) != 6*time.Second ||
-				!reflect.DeepEqual(delays, []time.Duration{2 * time.Second, 2 * time.Second, 2 * time.Second}) {
+			if probes != 3 || now.Sub(started) != 5*time.Second ||
+				!reflect.DeepEqual(delays, []time.Duration{2 * time.Second, 2 * time.Second, time.Second}) {
 				t.Fatalf("polling changed: probes=%d elapsed=%s delays=%v", probes, now.Sub(started), delays)
 			}
 			var commandError *CommandError
@@ -2084,7 +2084,7 @@ func TestWaitForTimeoutReportsOnlyLatestProbeMetadata(t *testing.T) {
 	}
 }
 
-func TestWaitForSuccessAfterFailureAtDeadline(t *testing.T) {
+func TestWaitForDoesNotProbeAtDeadline(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	runtime := Runtime{
 		Config: Config{BootTimeout: 2 * time.Second}, Stdout: io.Discard,
@@ -2095,15 +2095,15 @@ func TestWaitForSuccessAfterFailureAtDeadline(t *testing.T) {
 		},
 	}
 	probes := 0
-	err := runtime.waitFor(context.Background(), "fixture readiness", func() error {
+	err := runtime.waitFor(context.Background(), "fixture readiness", func(context.Context) error {
 		probes++
 		if probes == 1 {
 			return &CommandError{ExitCode: 1, Message: "temporary failure"}
 		}
 		return nil
 	})
-	if err != nil || probes != 2 {
-		t.Fatalf("readiness after transient failure: err=%v probes=%d", err, probes)
+	if err == nil || probes != 1 {
+		t.Fatalf("readiness accepted probe at deadline: err=%v probes=%d", err, probes)
 	}
 }
 
@@ -2117,14 +2117,14 @@ func TestWaitForPreservesSleepCancellation(t *testing.T) {
 		Now: func() time.Time { return time.Unix(1_800_000_000, 0) },
 		Sleep: func(got context.Context, delay time.Duration) error {
 			sleeps++
-			if got != ctx || delay != 2*time.Second {
-				t.Fatal("readiness sleep changed context or interval")
+			if got == ctx || got.Err() != nil || delay != 2*time.Second {
+				t.Fatal("readiness sleep did not receive the live child context or interval")
 			}
 			cancel(cause)
 			return context.Cause(got)
 		},
 	}
-	err := runtime.waitFor(ctx, "fixture readiness", func() error {
+	err := runtime.waitFor(ctx, "fixture readiness", func(context.Context) error {
 		probes++
 		return &CommandError{ExitCode: 1, Message: "probe failed"}
 	})
@@ -2147,14 +2147,15 @@ func TestWaitForTimeoutPersistsSafeIncident(t *testing.T) {
 			"ssh-ed25519 " + secrets[6],
 	}
 	var progress bytes.Buffer
+	now := time.Unix(1_800_000_000, 0)
 	runtime := Runtime{
-		Stdout: &progress, Now: func() time.Time { return time.Unix(1_800_000_000, 0) },
+		Config: Config{BootTimeout: time.Second}, Stdout: &progress, Now: func() time.Time { return now },
 		Sleep: func(context.Context, time.Duration) error {
-			t.Fatal("zero timeout unexpectedly slept")
+			t.Fatal("expired probe unexpectedly slept")
 			return nil
 		},
 	}
-	err := runtime.waitFor(context.Background(), "fixture readiness", func() error { return probeErr })
+	err := runtime.waitFor(context.Background(), "fixture readiness", func(context.Context) error { now = now.Add(time.Second); return probeErr })
 	if err == nil {
 		t.Fatal("failed probe became ready")
 	}

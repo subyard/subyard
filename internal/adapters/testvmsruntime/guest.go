@@ -49,46 +49,55 @@ users:
 }
 
 func (runtime *Runtime) waitAgent(ctx context.Context, vm string) error {
-	if err := runtime.waitFor(ctx, "waiting for "+vm+" Incus agent", func() error {
+	if err := runtime.waitFor(ctx, "waiting for "+vm+" Incus agent", func(ctx context.Context) error {
 		_, err := runtime.guest(ctx, vm, nil, "true")
 		return err
 	}); err != nil {
-		return err
+		return guestReadinessFailure(err, vm, "incus-agent")
 	}
 	fmt.Fprintf(runtime.Stdout, "  [ ok ] %s Incus agent is ready\n", vm)
-	if err := runtime.progress(ctx, "waiting for "+vm+" cloud-init", func() error {
-		// A disabled datasource can exit zero. Require both native success and
-		// positive structured completion before any guest package installation.
-		body, err := runtime.guest(ctx, vm, nil, "timeout",
-			fmt.Sprintf("%d", int(runtime.Config.BootTimeout.Seconds())),
-			"cloud-init", "status", "--wait", "--format", "json")
-		if err != nil {
-			if context.Cause(ctx) != nil {
-				return context.Cause(ctx)
-			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			var native *CommandError
-			if errors.As(err, &native) {
-				return &CommandError{Name: "cloud-init", ExitCode: native.ExitCode,
-					Duration: native.Duration, Message: "status command failed"}
-			}
-			return fmt.Errorf("%s cloud-init command failed", vm)
+	// Reap the native command before returning: diagnostics must not compete
+	// with an active instance operation. The parent remains usable for recovery.
+	started := runtime.Now()
+	cloudCtx, cancel := context.WithTimeout(ctx, runtime.Config.BootTimeout)
+	defer cancel()
+	fmt.Fprintf(runtime.Stdout, "  [ .. ] waiting for %s cloud-init\n", vm)
+	body, err := runtime.guest(cloudCtx, vm, nil, "timeout", "--kill-after=10",
+		fmt.Sprint(max(1, int((runtime.Config.BootTimeout+time.Second-1)/time.Second))),
+		"cloud-init", "status", "--wait", "--format", "json")
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if err != nil {
+		// Preserve native exit and cancellation identity without command output.
+		var native *CommandError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Context errors are safe to retain as the readiness cause.
+		} else if errors.As(err, &native) {
+			err = &CommandError{Name: "cloud-init", ExitCode: native.ExitCode,
+				Duration: native.Duration, Message: "status command failed"}
+		} else {
+			err = fmt.Errorf("%s cloud-init command failed", vm)
 		}
+	} else {
+		// A disabled datasource can exit zero. Require positive completion
+		// before any guest package installation or post-upgrade publication.
 		var status struct {
 			Status         string `json:"status"`
 			ExtendedStatus string `json:"extended_status"`
 		}
 		if len(body) > 64<<10 || json.Unmarshal([]byte(body), &status) != nil {
-			return fmt.Errorf("%s cloud-init status is invalid", vm)
+			err = fmt.Errorf("%s cloud-init status is invalid", vm)
+		} else if status.Status != "done" || (status.ExtendedStatus != "" && status.ExtendedStatus != "done") {
+			err = fmt.Errorf("%s cloud-init did not complete successfully", vm)
 		}
-		if status.Status != "done" || (status.ExtendedStatus != "" && status.ExtendedStatus != "done") {
-			return fmt.Errorf("%s cloud-init did not complete successfully", vm)
+	}
+	if err != nil || cloudCtx.Err() != nil || !runtime.Now().Before(started.Add(runtime.Config.BootTimeout)) {
+		if err == nil {
+			err = context.DeadlineExceeded
 		}
-		return nil
-	}); err != nil {
-		return err
+		return errors.Join(&readinessFailure{Label: "waiting for " + vm + " cloud-init", VM: vm, Phase: "cloud-init",
+			Budget: runtime.Config.BootTimeout, StartedAt: started, ObservedAt: runtime.Now(), LastProbe: readinessProbeMetadata(err)}, err)
 	}
 	return nil
 }
@@ -166,7 +175,7 @@ systemctl reload ssh`
 	return nil
 }
 
-func (runtime *Runtime) ensureGuestTools(ctx context.Context, vm string) error {
+func (runtime *Runtime) checkGuestTools(ctx context.Context, vm string) error {
 	const check = `test "$(cat /var/lib/subyard/e2e-dependencies.revision 2>/dev/null)" = "$DEPENDENCY_REVISION" &&
 command -v git >/dev/null &&
 command -v curl >/dev/null &&
@@ -178,8 +187,13 @@ command -v shellcheck >/dev/null &&
 command -v sshd >/dev/null &&
 command -v sudo >/dev/null &&
 command -v zsh >/dev/null`
+	_, err := runtime.guest(ctx, vm, []string{"DEPENDENCY_REVISION=" + guestDependencyRevision}, "sh", "-c", check)
+	return err
+}
+
+func (runtime *Runtime) ensureGuestTools(ctx context.Context, vm string) error {
 	dependencyEnvironment := []string{"DEPENDENCY_REVISION=" + guestDependencyRevision}
-	if _, err := runtime.guest(ctx, vm, dependencyEnvironment, "sh", "-c", check); err != nil {
+	if err := runtime.checkGuestTools(ctx, vm); err != nil {
 		if err := runtime.progress(ctx, "installing test toolchain in "+vm, func() error {
 			const install = `export DEBIAN_FRONTEND=noninteractive
 apt_options='Acquire::Retries=3'
@@ -363,7 +377,7 @@ func (runtime *Runtime) recordHostKey(ctx context.Context, vm string) error {
 		return fmt.Errorf("%s has no IPv4 address on its default-route interface: %w", vm, err)
 	}
 	var scanned string
-	if err := runtime.waitFor(ctx, "waiting for "+vm+" SSH host key ("+address+")", func() error {
+	if err := runtime.waitFor(ctx, "waiting for "+vm+" SSH host key ("+address+")", func(ctx context.Context) error {
 		stdout, _, runErr := runtime.Runner.Run(ctx, "ssh-keyscan",
 			[]string{"-T", "3", address}, nil, nil)
 		if runErr == nil && len(strings.TrimSpace(string(stdout))) == 0 {
@@ -374,7 +388,7 @@ func (runtime *Runtime) recordHostKey(ctx context.Context, vm string) error {
 		}
 		return runErr
 	}); err != nil {
-		return err
+		return guestReadinessFailure(err, vm, "ssh-host-key")
 	}
 	file, err := os.OpenFile(runtime.Config.knownHosts(), os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -402,11 +416,11 @@ func (runtime *Runtime) sshSmoke(ctx context.Context, vm string) error {
 		"-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + runtime.Config.knownHosts(),
 		"-o", "ConnectTimeout=8", "dev@" + address, "--", "sudo", "-n", "true",
 	}
-	if err := runtime.waitFor(ctx, "verifying "+vm+" SSH and passwordless sudo", func() error {
+	if err := runtime.waitFor(ctx, "verifying "+vm+" SSH and passwordless sudo", func(ctx context.Context) error {
 		_, _, runErr := runtime.Runner.Run(ctx, "ssh", arguments, nil, nil)
 		return runErr
 	}); err != nil {
-		return err
+		return guestReadinessFailure(err, vm, "ssh-sudo")
 	}
 	fmt.Fprintf(runtime.Stdout, "  [ ok ] %s SSH and passwordless sudo verified\n", vm)
 	return nil
