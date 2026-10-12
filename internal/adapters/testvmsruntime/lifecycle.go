@@ -59,6 +59,9 @@ func (runtime *Runtime) acquireSlotLocked(
 	if err != nil {
 		return grant, err
 	}
+	if agentLogClientID.MatchString(stored.ClientID) {
+		child.agentLogOwner = capabilityDigest(stored.ClientID)
+	}
 	if stored.LegacyRetained {
 		exists, err := child.projectPresence(ctx)
 		if err != nil {
@@ -179,6 +182,7 @@ func (runtime *Runtime) ReleaseSlot(
 				FromState:          SlotHeld,
 				ToState:            SlotDraining,
 				Context:            leaseContextFromSlot(slot),
+				agentClientID:      slot.ClientID,
 			})
 			return runtime.completeDrain(ctx, store, slot)
 		},
@@ -278,6 +282,7 @@ func (runtime *Runtime) finishDrainingSlot(
 		FromState:          fromState,
 		ToState:            SlotDraining,
 		Context:            leaseContextFromSlot(slot),
+		agentClientID:      slot.ClientID,
 	})
 	number, err := slotNumber(slot.SlotID, runtime.Config.SlotCount)
 	if err != nil {
@@ -303,6 +308,7 @@ func (runtime *Runtime) finishDrainingSlot(
 			FromState:          SlotDraining,
 			ToState:            SlotAvailable,
 			Context:            leaseContextFromSlot(slot),
+			agentClientID:      slot.ClientID,
 		})
 		return nil
 	}
@@ -315,6 +321,7 @@ func (runtime *Runtime) finishDrainingSlot(
 		ToState:            SlotQuarantined,
 		Error:              stopErr.Error(),
 		Context:            leaseContextFromSlot(slot),
+		agentClientID:      slot.ClientID,
 	})
 	incidentErr := runtime.handleQuarantineLocked(ctx, store, slot.SlotID, stopErr)
 	return errors.Join(finishErr, incidentErr, stopErr)
@@ -713,6 +720,7 @@ func (runtime *Runtime) recordStopOutcome(
 			LeaseEpoch:         slot.LeaseEpoch,
 			Error:              errorStringOrEmpty(cause),
 			Context:            leaseContextFromSlot(slot),
+			agentClientID:      slot.ClientID,
 		})
 	}
 	if stopErr == nil {
@@ -722,6 +730,7 @@ func (runtime *Runtime) recordStopOutcome(
 			ResourceGeneration: slot.ResourceGeneration,
 			LeaseEpoch:         slot.LeaseEpoch,
 			Context:            leaseContextFromSlot(slot),
+			agentClientID:      slot.ClientID,
 		})
 	}
 }
@@ -742,6 +751,10 @@ func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 }
 
 func (runtime *Runtime) useLeaseSlot(slot LeaseSlot) {
+	runtime.agentLogOwner = ""
+	if agentLogClientID.MatchString(slot.ClientID) {
+		runtime.agentLogOwner = capabilityDigest(slot.ClientID)
+	}
 	if slot.Environment == nil {
 		return
 	}

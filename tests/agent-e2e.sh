@@ -18,6 +18,51 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
+# Diagnostic reads use the existing controller capability and never allocate.
+(
+  STATE_ROOT="$TMP/log-client"
+  install -d -m 0700 "$STATE_ROOT"
+  printf '%032d\n' 1 > "$STATE_ROOT/client-id"
+  chmod 0600 "$STATE_ROOT/client-id"
+  log_client="$(cat "$STATE_ROOT/client-id")"
+  incident_id=00000000000000000001-0123456789abcdef
+  facade_request() {
+    printf '%s\n' "${1%% *}" >> "$TMP/log-requests"
+    case "$1" in
+      status) printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":["lease-logs-v1"]}' ;;
+      "logs-v1 $log_client slot-002 2")
+        printf '%s\n' '{"schema_version":1,"status":"ok","events":[{"kind":"fixture.first"},{"kind":"fixture.last"}]}' ;;
+      "logs-v1 $log_client - 50") printf '%s\n' '{"schema_version":1,"status":"ok","events":[]}' ;;
+      "incident-v1 $log_client $incident_id")
+        printf '%s\n' '{"schema_version":1,"status":"ok","incident":{"failure_reason":"fixture failure"}}' ;;
+      *) fail 'unexpected diagnostic facade request' ;;
+    esac
+  }
+  configure_yard_scope() { :; }
+  output="$(main --logs --slot 2 -n 2)"
+  [ "$(wc -l <<<"$output")" = 2 ] && grep -Fq 'fixture.last' <<<"$output" \
+    || fail 'lease log rendering lost events'
+  LEASE_REQUESTED_SLOT=''
+  [ "$(main --logs --json)" = '[]' ] || fail 'empty lease history is not valid JSON'
+  [ -z "$(main --logs)" ] || fail 'empty lease history failed or printed output'
+  grep -Fq 'fixture failure' <<<"$(main --incident "$incident_id")" \
+    || fail 'incident rendering lost diagnostics'
+  ! grep -Eq '^(acquire|renew|release)' "$TMP/log-requests" \
+    || fail 'diagnostic read changed lease lifecycle'
+  for args in '--logs -n 0' '--logs -n 201' '--logs -- true' '--logs --ssh 1' \
+    '--logs --incident bad-id' '--incident ../bad' '--logs --purpose test' '--logs --vm-count 1'; do
+    rc=0
+    # shellcheck disable=SC2086
+    (main $args) > "$TMP/log-invalid" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid diagnostic selection accepted: $args"
+  done
+  facade_request() { printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":[]}'; }
+  rc=0
+  (main --logs) > "$TMP/log-old-broker" 2>&1 || rc=$?
+  [ "$rc" = 2 ] && grep -Fq 'lease-logs-v1' "$TMP/log-old-broker" \
+    || fail 'older broker diagnostic capability was silently ignored'
+) || fail 'controller lease log contract failed'
+
 # Globals below are consumed by the extracted P0 functions.
 # shellcheck disable=SC2034
 (
@@ -3294,7 +3339,7 @@ while IFS=: read -r caller_path caller_line caller_source; do
   case "$caller_kind" in
     runner)
       case "$caller_source" in
-        *--slot*|*--prepare*|*--status*|*--help*) ;;
+        *--slot*|*--prepare*|*--status*|*--logs*|*--incident*|*--help*) ;;
         *) slotless_public_callers+="${caller_path}:${caller_line}:${caller_source}"$'\n' ;;
       esac
       ;;

@@ -34,6 +34,8 @@ type facadeResponse struct {
 	Pool          *LeasePool          `json:"pool,omitempty"`
 	Grant         *LeaseGrant         `json:"grant,omitempty"`
 	ExpiresAt     *time.Time          `json:"expires_at,omitempty"`
+	Events        *[]BrokerEvent      `json:"events,omitempty"`
+	Incident      *IncidentArtifact   `json:"incident,omitempty"`
 }
 
 func (facade Facade) Run(originalCommand string) error {
@@ -61,8 +63,34 @@ func (facade Facade) Run(originalCommand string) error {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1", "lease-logs-v1"}, Pool: &pool, Resources: resources,
 		})
+	case "logs-v1", "incident-v1":
+		if facade.Events == nil {
+			return facade.writeError("unavailable", "agent logs are unavailable")
+		}
+		if fields[0] == "incident-v1" {
+			if len(fields) != 3 || !agentLogClientID.MatchString(fields[1]) || !brokerRecordID.MatchString(fields[2]) {
+				return facade.writeError("invalid_request", "incident-v1 requires client_id incident_id")
+			}
+			incident, err := facade.Events.readAgentIncident(fields[1], fields[2])
+			if err != nil {
+				return facade.writeError("unavailable", "incident is unavailable for this controller")
+			}
+			return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Incident: incident})
+		}
+		if len(fields) != 4 || !agentLogClientID.MatchString(fields[1]) {
+			return facade.writeError("invalid_request", "logs-v1 requires client_id slot_id|- count")
+		}
+		count, err := strconv.Atoi(fields[3])
+		if err != nil || count < 1 || count > maxAgentLogEvents || (fields[2] != "-" && !brokerSlotID.MatchString(fields[2])) {
+			return facade.writeError("invalid_request", "invalid agent log selection")
+		}
+		events, err := facade.Events.readAgentEvents(fields[1], fields[2], count)
+		if err != nil {
+			return facade.writeError("unavailable", "agent logs are unavailable")
+		}
+		return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Events: &events})
 	case "acquire", "acquire-v2":
 		return facade.writeAcquireError("invalid_request", "unsupported_acquire", "use acquire-v3 with an explicit environment type")
 	case "acquire-v3":
@@ -240,6 +268,7 @@ func (facade Facade) recordSlotSnapshot(
 		Error:              errorStringOrEmpty(cause),
 		IncidentID:         slot.IncidentID,
 		Context:            leaseContextFromSlot(slot),
+		agentClientID:      slot.ClientID,
 	})
 	return err
 }

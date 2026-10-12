@@ -100,6 +100,8 @@ usage() {
 Usage:
   dev/agent-e2e.sh [--yard NAME] --prepare
   dev/agent-e2e.sh [--yard NAME] --status [--json]
+  dev/agent-e2e.sh [--yard NAME] --logs [--slot N] [-n 1..200] [--json]
+  dev/agent-e2e.sh [--yard NAME] --incident ID
   dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
   dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
   dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh-stdin 1|2 -- COMMAND [ARG...]
@@ -126,6 +128,10 @@ selection includes every requested VM. e2e-vm-1 and e2e-vm-2 are
 lease-relative selectors, not physical slot names. Every invocation acquires a new lease; use one
 script or one interactive SSH session when several steps must share mutable guest state. Every
 lease-taking mode requires --slot N, atomically requests that broker slot and never falls back.
+--logs reads only this controller's lease events, including failed acquisition and released leases.
+--incident reads the diagnostic artifact referenced by an event. Neither command acquires a lease.
+The private client-id authorizes reads; keep it private. Broker diagnostics are retained for up to
+30 days, subject to a 512 MiB archive cap. Older brokers need an operator runtime update first.
 EOF
 }
 
@@ -315,6 +321,9 @@ render_client_config() {
 ensure_client_id() {
   local path="$STATE_ROOT/client-id" temp value
   ensure_state_root
+  # Parallel controllers must retain the same private diagnostic read capability.
+  (
+  flock -x 9
   if [ -r "$path" ]; then
     read -r value < "$path"
   else
@@ -326,6 +335,40 @@ ensure_client_id() {
   fi
   [[ "$value" =~ ^[0-9a-f]{32}$ ]] || die "invalid persistent E2E client id"
   printf '%s\n' "$value"
+  ) 9>"$STATE_ROOT/.client-id.lock"
+}
+
+read_agent_logs() {
+  local mode="$1" count="$2" json_output="$3" incident_id="$4" client response request status
+  command -v jq >/dev/null 2>&1 || die 'jq is required'
+  # A read must not manufacture a new identity with no ownership history.
+  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] \
+    || die 'no controller lease history; acquire a lease with this controller first'
+  read -r client < "$STATE_ROOT/client-id"
+  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || die 'invalid persistent E2E client id'
+  status="$(facade_request status)" || die 'test environment unavailable'
+  jq -e '.schema_version == 1 and .status == "ok" and
+    ((.capabilities // []) | index("lease-logs-v1") != null)' <<<"$status" >/dev/null 2>&1 \
+    || die 'broker does not support lease logs (lease-logs-v1); operator runtime update required'
+  if [ "$mode" = incident ]; then
+    request="incident-v1 $client $incident_id"
+  else
+    request="logs-v1 $client ${LEASE_REQUESTED_SLOT:--} $count"
+  fi
+  response="$(facade_request "$request")" || die 'test environment unavailable'
+  jq -e '.schema_version == 1 and .status == "ok"' <<<"$response" >/dev/null 2>&1 \
+    || die 'diagnostics are unavailable for this controller'
+  if [ "$mode" = incident ]; then
+    jq -e '.incident | type == "object"' <<<"$response" >/dev/null \
+      || die 'invalid incident response'
+    jq '.incident' <<<"$response"
+  elif [ "$json_output" = 1 ]; then
+    jq -ce '.events | select(type == "array")' <<<"$response" \
+      || die 'invalid lease log response'
+  else
+    jq -ce '.events | select(type == "array") | .[]' <<<"$response" \
+      || { [ "$(jq -c '.events' <<<"$response")" = '[]' ] || die 'invalid lease log response'; }
+  fi
 }
 
 bounded_context_label() {
@@ -1148,6 +1191,10 @@ cleanup_on_exit() {
   release_lease || cleanup_failed=1
   [ "$cleanup_failed" = 0 ] || rc=3
   phase_marker cleanup/release end "$((SECONDS - started))" "$((cleanup_failed * 3))"
+  if [ "$rc" != 0 ] && [ -n "$LEASE_REQUESTED_SLOT" ]; then
+    printf 'agent-e2e: inspect own broker diagnostics: dev/agent-e2e.sh --yard %s --logs --slot %s -n 50\n' \
+      "$E2E_YARD" "$((10#${LEASE_REQUESTED_SLOT#slot-}))" >&2
+  fi
   exit "$rc"
 }
 
@@ -1307,6 +1354,7 @@ set_requested_slot() {
 main() {
   local selector=all root bundle bundle_hash vm run_failed=0 cleanup_failed=0
   local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0 slot_value=''
+  local log_count=50 log_count_set=0 incident_id='' diagnostic_mode=''
   local status_response
   local -a selected=() command=()
   while [ "$#" -gt 0 ]; do
@@ -1337,6 +1385,20 @@ main() {
         shift 2
         ;;
       --status) mode=status; shift ;;
+      --logs)
+        [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
+        mode=logs; diagnostic_mode=logs; shift ;;
+      --incident)
+        [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
+        [ "$#" -ge 2 ] || die '--incident needs an incident ID'
+        incident_id="$2"
+        [[ "$incident_id" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || die 'invalid incident ID'
+        mode=incident; diagnostic_mode=incident; shift 2 ;;
+      -n)
+        [ "$#" -ge 2 ] || die '-n needs a number from 1 to 200'
+        [[ "$2" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$2))" -ge 1 ] && [ "$((10#$2))" -le 200 ] \
+          || die '-n needs a number from 1 to 200'
+        log_count="$((10#$2))"; log_count_set=1; shift 2 ;;
       --json) status_json=1; shift ;;
       --purpose)
         [ "$#" -ge 2 ] || die "--purpose needs a safe label"
@@ -1376,7 +1438,18 @@ main() {
       || die 'one-VM allocation has only VM 1; selectors 2 and both are invalid'
   fi
   configure_yard_scope
-  [ "$status_json" = 0 ] || [ "$mode" = status ] || die "--json is valid only with --status"
+  [ -z "$diagnostic_mode" ] || [ "$diagnostic_mode" = "$mode" ] || die 'diagnostic reads cannot be combined with another mode'
+  [ "$status_json" = 0 ] || [ "$mode" = status ] || [ "$mode" = logs ] || die "--json is valid only with --status or --logs"
+  [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || die '-n is valid only with --logs'
+  [ -z "$incident_id" ] || [ "$mode" = incident ] || die '--incident cannot be combined with another mode'
+  if [ "$mode" = logs ] || [ "$mode" = incident ]; then
+    [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
+      || die 'diagnostic reads do not accept allocation options'
+    [ "$mode" != incident ] || [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot is not valid with --incident'
+    [ "${#command[@]}" -eq 0 ] || die 'diagnostic reads take no guest command'
+    read_agent_logs "$mode" "$log_count" "$status_json" "$incident_id"
+    return
+  fi
   [ -z "$purpose_override" ] || [ "$mode" != status ] || die "--purpose is not valid with --status"
   [ -z "$LEASE_REQUESTED_SLOT" ] || {
     [ "$mode" != status ] && [ "$mode" != prepare ] \

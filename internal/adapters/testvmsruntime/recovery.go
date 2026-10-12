@@ -92,6 +92,7 @@ func (runtime *Runtime) handleQuarantineLocked(
 		Error:              errorString(cause),
 		IncidentID:         artifact.IncidentID,
 		Context:            leaseContextFromSlot(slot),
+		agentClientID:      slot.ClientID,
 	})
 	if err != nil {
 		return fmt.Errorf("persist quarantine event: %w", err)
@@ -106,6 +107,7 @@ func (runtime *Runtime) handleQuarantineLocked(
 		LeaseEpoch:         slot.LeaseEpoch,
 		IncidentID:         artifact.IncidentID,
 		Context:            leaseContextFromSlot(slot),
+		agentClientID:      slot.ClientID,
 	})
 	runtime.startRecoveryService(ctx)
 	return nil
@@ -234,6 +236,7 @@ func (runtime *Runtime) completeRecovery(
 		RecoveryAttempt:    startedSlot.RecoveryAttempt,
 		IncidentID:         startedSlot.IncidentID,
 		Context:            leaseContextFromSlot(startedSlot),
+		agentClientID:      startedSlot.ClientID,
 	}); err != nil {
 		_, finishErr := store.FinishRecovery(slotID, err, "", "")
 		return errors.Join(fmt.Errorf("persist recovery start: %w", err), finishErr)
@@ -259,6 +262,7 @@ func (runtime *Runtime) completeRecovery(
 				DurationMS:         duration.Milliseconds(),
 				IncidentID:         finished.IncidentID,
 				Context:            leaseContextFromSlot(startedSlot),
+				agentClientID:      startedSlot.ClientID,
 			})
 			return eventErr
 		}
@@ -279,6 +283,7 @@ func (runtime *Runtime) completeRecovery(
 		Error:              errorString(rebuildErr),
 		IncidentID:         current.IncidentID,
 		Context:            leaseContextFromSlot(current),
+		agentClientID:      current.ClientID,
 	})
 	if eventErr != nil {
 		_, finishErr := store.FinishRecovery(slotID, rebuildErr, "", "")
@@ -304,6 +309,7 @@ func (runtime *Runtime) completeRecovery(
 		Error:              errorString(rebuildErr),
 		IncidentID:         finished.IncidentID,
 		Context:            leaseContextFromSlot(finished),
+		agentClientID:      finished.ClientID,
 	})
 	return errors.Join(rebuildErr, scheduleErr)
 }
@@ -363,7 +369,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 	event := BrokerEvent{
 		Kind: "vm.force_stop_planned", SlotID: slot.SlotID, ResourceGeneration: slot.ResourceGeneration,
 		LeaseEpoch: slot.LeaseEpoch, RecoveryAttempt: slot.RecoveryAttempt, IncidentID: artifact.IncidentID,
-		Error: errorString(gracefulErr), Context: leaseContextFromSlot(*slot),
+		Error: errorString(gracefulErr), Context: leaseContextFromSlot(*slot), agentClientID: slot.ClientID,
 	}
 	if artifact.Command != nil {
 		event.DurationMS = artifact.Command.DurationMS
@@ -497,6 +503,16 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 	}
 	for _, selector := range selectors {
 		vm := cfg.vm(selector)
+		if runtime.agentLogOwner != "" && runtime.allocation != nil {
+			verifyCtx, cancelVerify := context.WithTimeout(ctx, time.Second)
+			if runtime.requireProjectMarker(verifyCtx) == nil && runtime.requireAllocationMarker(verifyCtx, vm) == nil {
+				owner, err := runtime.incus(verifyCtx, "config", "get", vm, agentLogOwnerMarker, "--project", cfg.Project)
+				if err == nil && strings.TrimSpace(owner) == runtime.agentLogOwner {
+					diagnostics[fmt.Sprintf("vm_%d_allocation_verified", selector)] = "true"
+				}
+			}
+			cancelVerify()
+		}
 		probe(fmt.Sprintf("vm_%d_state", selector), "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "s")
 		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
 		probe(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
