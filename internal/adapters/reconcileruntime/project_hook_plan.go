@@ -19,20 +19,22 @@ import (
 // ProjectHookPlan binds the guest's dispatcher inputs without exposing private
 // metadata or hook payloads in the public operation plan.
 type ProjectHookPlan struct {
-	approved         hookObservation
-	current          hookObservation
-	conditional      bool
-	allowedHooks     []string
-	source           string
-	ownerProjects    []domain.ProjectRecord
-	resolvedProjects string
-	executionWiring  string
-	hookBindings     map[string]string
-	unavailable      bool
-	integrationScope string
-	provisionedHooks hookObservation
-	completed        bool
-	stopped          bool
+	approved          hookObservation
+	current           hookObservation
+	conditional       bool
+	allowedHooks      []string
+	source            string
+	ownerProjects     []domain.ProjectRecord
+	resolvedProjects  string
+	executionWiring   string
+	hookBindings      map[string]string
+	unavailable       bool
+	integrationScope  string
+	provisionedHooks  hookObservation
+	completed         bool
+	stopped           bool
+	metadata          *projectMetadataPlan
+	metadataCompleted bool
 }
 
 type hookObservation struct {
@@ -259,7 +261,8 @@ func (plan *ProjectHookPlan) Binding() string {
 		Owners           []domain.ProjectRecord
 		HookBindings     map[string]string
 		IntegrationScope string
-	}{plan.approved, plan.conditional, plan.stopped, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings, plan.integrationScope})
+		Metadata         *projectMetadataPlan
+	}{plan.approved, plan.conditional, plan.stopped, plan.allowedHooks, plan.source, plan.ownerProjects, plan.hookBindings, plan.integrationScope, plan.metadata})
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }
 

@@ -8,8 +8,10 @@ Framework research and comparative measurements are complete; the
 [native framework comparison](../docs/veranda/native-framework-comparison.md) preserves the alternatives.
 Native UI implementation and desktop packages are in progress. The historical GTK measurement
 used a C frontend with a Rust bridge; it does not establish the final gtk4-rs footprint.
-The initial [GTK desktop shell](desktop/) provides read-only fleet navigation and Refresh;
-its build instructions describe the implemented scope and remaining checks.
+The [GTK desktop](desktop/README.md) implements supported Host/Yard pages,
+Connect/trust, typed sessions, owner exact-plan review and nonsecret persistent drafts.
+Its implementation notes describe the precise scope and remaining checks; native
+UI delivery and acceptance remain incomplete.
 
 ## Native client checks
 

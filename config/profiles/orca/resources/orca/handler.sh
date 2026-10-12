@@ -752,6 +752,11 @@ render_registration_observer() {
     jq -Rs . "$RESOURCE_DIR/registration/$name.py" || return 1
     printf ',"%s.py","exec"),module.__dict__)\n' "$name"
   done
+  if [ -n "${ORCA_METADATA_PROJECTION:-}" ]; then
+    printf 'sys.modules["discovery"].metadata_projection=__import__("json").loads('
+    printf '%s' "$ORCA_METADATA_PROJECTION" | jq -Rs . || return 1
+    printf ')\n'
+  fi
   printf '%s\n' 'sys.argv=["main.py","status","--host-name",sys.argv[1]]' \
     'raise SystemExit(sys.modules["main"].main())'
 }
@@ -1312,6 +1317,11 @@ if [ "$sub" = _runtime-contract ]; then
   case "${1:-}" in
     observe)
       [ "$#" -eq 1 ] || die "usage: _runtime-contract observe"
+      ORCA_METADATA_PROJECTION="$(cat)"
+      if [ -n "$ORCA_METADATA_PROJECTION" ]; then
+        jq -e '.schema == 1 and (.missingMetadata | type == "array")' <<<"$ORCA_METADATA_PROJECTION" >/dev/null \
+          || die 'invalid native metadata projection'
+      fi
       observation="$(observe_registration_contract)"
       hook_binding=""
       if [ "$(incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null)" = RUNNING ] &&

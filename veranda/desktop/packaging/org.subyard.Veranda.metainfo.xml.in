@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.subyard.Veranda</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Subyard Veranda</name>
+  <summary>Manage Subyard owners and yards</summary>
+  <description>
+    <p>Veranda connects to local Linux owners and remote Linux owners through system SSH. It displays owner facts and reviews exact owner plans before execution.</p>
+    <p>Install the same product version of Yard and Veranda. The graphical client is installed separately from the Yard engine and runtime.</p>
+  </description>
+  <launchable type="desktop-id">org.subyard.Veranda.desktop</launchable>
+  <provides><binary>subyard-veranda</binary></provides>
+  <developer id="org.subyard"><name>Subyard</name></developer>
+  <url type="homepage">https://github.com/Subyard/Subyard</url>
+  <url type="bugtracker">https://github.com/Subyard/Subyard/issues</url>
+  <categories><category>Development</category></categories>
+  <releases><release version="@VERSION@" date="@DATE@"/></releases>
+</component>

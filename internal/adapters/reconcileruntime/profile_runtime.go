@@ -241,6 +241,9 @@ func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile
 		command.Env = append(command.Environ(), "SUBYARD_REPOSITORY_ROOT="+parentRoot)
 	}
 	command.Stdin = nil
+	if action == "observe" && len(runtime.projectMetadataProjection) != 0 {
+		command.Stdin = bytes.NewReader(runtime.projectMetadataProjection)
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {

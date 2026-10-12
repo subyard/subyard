@@ -29,6 +29,7 @@ func vmSleepPolicy(architecture string) (lowlevel, rawQEMU string) {
 
 type Runtime struct {
 	allocation        *LeaseIdentity
+	agentLogOwner     string
 	memoryProbe       func() (MemoryCapacity, error)
 	brokerMemoryProbe func() (BrokerMemoryCapacity, error)
 	usageProbe        func(context.Context, LeaseSlot) allocationUsage
@@ -582,6 +583,9 @@ func (runtime *Runtime) initVM(ctx context.Context, vm string) error {
 		if runtime.allocation != nil {
 			args = append(args, "-c", "user.subyard.generation="+strconv.FormatUint(runtime.allocation.ResourceGeneration, 10),
 				"-c", "user.subyard.lease-epoch="+strconv.FormatUint(runtime.allocation.LeaseEpoch, 10))
+		}
+		if runtime.agentLogOwner != "" {
+			args = append(args, "-c", agentLogOwnerMarker+"="+runtime.agentLogOwner)
 		}
 		if _, rawQEMU := vmSleepPolicy(imageArchitecture()); rawQEMU != "" {
 			args = append(args, "-c", "raw.qemu.conf="+rawQEMU)

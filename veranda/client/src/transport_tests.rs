@@ -137,6 +137,12 @@ while True:
             continue
         if method == 'operation.execute':
             execute_count += 1
+            if mode == 'manager-transport-loss':
+                marker = os.path.join(os.path.dirname(pid_file), 'execute-admitted')
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as output:
+                    output.write(str(execute_count))
+                os._exit(0)
             if mode == 'manager-cancel':
                 held_requests[operation] = request
                 continue

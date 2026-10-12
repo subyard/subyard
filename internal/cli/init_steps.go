@@ -145,6 +145,9 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 	// Hooks and final power may become observable only after approved stages.
 	// They stay in the original step set even if those stages converge meanwhile.
 	if execution.hookPlan != nil {
+		if metadata := execution.hookPlan.MetadataOperationStep(target); metadata != nil {
+			steps = append(steps, *metadata)
+		}
 		steps = append(steps, execution.hookPlan.OperationStep(target))
 	} else {
 		appendStep("init.project-hooks", target, "retry installed project hooks for the captured project set",

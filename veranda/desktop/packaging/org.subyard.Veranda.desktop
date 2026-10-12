@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Subyard Veranda
+Comment=Manage Subyard owners and yards
+Exec=subyard-veranda
+Icon=org.subyard.Veranda
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=org.subyard.Veranda

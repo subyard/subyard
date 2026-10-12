@@ -37,6 +37,7 @@ var (
 )
 
 type BrokerEvent struct {
+	agentClientID      string
 	SchemaVersion      int           `json:"schema_version"`
 	Timestamp          time.Time     `json:"timestamp"`
 	EventID            string        `json:"event_id"`
@@ -153,6 +154,9 @@ func (recorder EventRecorder) Record(event BrokerEvent) (BrokerEvent, error) {
 	if err := writeImmutableDurable(path, payload, 0o600); err != nil {
 		return BrokerEvent{}, err
 	}
+	if err := recorder.archiveAgentRecord(event.agentClientID, "events", event.EventID, payload); err != nil {
+		return BrokerEvent{}, err
+	}
 	return event, nil
 }
 
@@ -214,6 +218,15 @@ func (recorder EventRecorder) SaveIncident(
 	path := filepath.Join(recorder.incidentDirectory(), artifact.IncidentID+".json")
 	if err := writeImmutableDurable(path, payload, 0o600); err != nil {
 		return IncidentArtifact{}, err
+	}
+	if agentLogClientID.MatchString(slot.ClientID) {
+		agentPayload, err := json.Marshal(agentIncident(artifact, slot.ClientID))
+		if err != nil {
+			return IncidentArtifact{}, err
+		}
+		if err := recorder.archiveAgentRecord(slot.ClientID, "incidents", artifact.IncidentID, agentPayload); err != nil {
+			return IncidentArtifact{}, err
+		}
 	}
 	return artifact, nil
 }
@@ -294,6 +307,15 @@ exportRecords:
 }
 
 func (recorder EventRecorder) Ack(eventIDs, incidentIDs []string) error {
+	return withFileLock(filepath.Join(recorder.archiveRoot(), ".lock"), func() error {
+		if err := recorder.acknowledgeSpool(eventIDs, incidentIDs); err != nil {
+			return err
+		}
+		return recorder.pruneAgentLogs()
+	})
+}
+
+func (recorder EventRecorder) acknowledgeSpool(eventIDs, incidentIDs []string) error {
 	for _, group := range []struct {
 		directory string
 		ids       []string

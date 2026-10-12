@@ -529,6 +529,9 @@ func (cli *CLI) prepareInitExecution(
 		}
 		execution.hookPlan.CaptureOwnerProjects(execution.hookProjects)
 		runtime.HookPlan = execution.hookPlan
+		if err := runtime.PrepareProjectMetadata(ctx); err != nil {
+			return nil, err
+		}
 		execution.platform = runtime
 	}
 	if execution.plan.Pending() != 0 || bootstrap != nil {
@@ -547,7 +550,7 @@ func (cli *CLI) prepareInitExecution(
 
 func (execution *initExecution) consequences() []string {
 	if execution.hooksOnly() {
-		return []string{"retry installed project hooks once for active resources"}
+		return []string{"restore missing registered project metadata and retry installed project hooks once for active resources"}
 	}
 	hostIDConsequences := execution.profileProvisionConsequences()
 	hostIDConsequences = append(hostIDConsequences, integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)...)

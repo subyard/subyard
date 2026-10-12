@@ -15,6 +15,8 @@ const ASSESSMENT_LIMIT: usize = 32;
 const ASSESSMENT_TTL: Duration = Duration::from_secs(120);
 const STORE_FILE: &str = "connections.json";
 const NAVIGATION_FILE: &str = "navigation.json";
+const DESKTOP_FILE: &str = "desktop.json";
+const DESKTOP_LIMIT: usize = 128 * 1024;
 
 /// Reversible UI preferences have their own file and never change trust revisions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +247,39 @@ impl Drop for ConsentedConnection {
 }
 
 impl ConnectionStore {
+    /// Presentation-owned nonsecret drafts and interrupted-result metadata.
+    /// Reuse the native protected store and lock, without changing trust revision.
+    pub fn desktop_document(&self) -> Result<Vec<u8>, NativeError> {
+        self.read()?;
+        let mut file = match open_private_read(&self.root.join(DESKTOP_FILE)) {
+            Ok(file) => file,
+            Err(error) if error.code == "store_missing" => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((DESKTOP_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| store_io())?;
+        if bytes.len() > DESKTOP_LIMIT {
+            return Err(invalid_store());
+        }
+        Ok(bytes)
+    }
+
+    pub fn save_desktop_document(&self, baseline: &[u8], bytes: &[u8]) -> Result<(), NativeError> {
+        if bytes.len() > DESKTOP_LIMIT
+            || serde_json::from_slice::<serde_json::Value>(bytes).is_err()
+        {
+            return Err(invalid_store());
+        }
+        ensure_private_root(&self.root)?;
+        let _lock = StoreLock::acquire(&self.root)?;
+        if self.desktop_document()? != baseline {
+            return Err(NativeError::new("desktop_state_changed", "Veranda drafts changed in another process. Reopen the application before saving or executing an operation."));
+        }
+        atomic_private_replace(&self.root.join(DESKTOP_FILE), bytes)
+    }
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -2290,6 +2325,74 @@ mod tests {
         drop(lock);
         assert!(StoreLock::acquire(&fixture.store.root).is_ok());
     }
+    #[cfg(unix)]
+    #[test]
+    fn desktop_document_is_private_atomic_and_stale_guarded_without_changing_trust() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fixture = Fixture::new();
+        fixture.register();
+        let before = fixture.store.read().unwrap().0;
+        assert!(fixture.store.desktop_document().unwrap().is_empty());
+        let first = br#"{"drafts":[],"schema":1}"#;
+        fixture.store.save_desktop_document(&[], first).unwrap();
+        let file = fixture.store.root.join(DESKTOP_FILE);
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&fixture.store.root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(fixture.store.read().unwrap().0, before);
+        let reopened = ConnectionStore::new(fixture.store.root.clone());
+        assert_eq!(reopened.desktop_document().unwrap(), first);
+        reopened.save_desktop_document(first, b"{}").unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .save_desktop_document(first, b"{\"stale\":true}")
+                .unwrap_err()
+                .code,
+            "desktop_state_changed"
+        );
+        assert_eq!(reopened.desktop_document().unwrap(), b"{}");
+        assert!(reopened.save_desktop_document(b"{}", b"invalid").is_err());
+        assert!(reopened
+            .save_desktop_document(b"{}", &vec![b' '; DESKTOP_LIMIT + 1])
+            .is_err());
+        assert_eq!(reopened.desktop_document().unwrap(), b"{}");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn desktop_document_refuses_public_hardlinked_or_symlinked_state() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let fixture = Fixture::new();
+        fixture.store.save_desktop_document(&[], b"{}").unwrap();
+        let file = fixture.store.root.join(DESKTOP_FILE);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            fixture.store.desktop_document().unwrap_err().code,
+            "unsafe_connection_store"
+        );
+        assert!(fixture.store.save_desktop_document(b"{}", b"{}").is_err());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = fixture.parent.join("hardlink");
+        fs::hard_link(&file, &alias).unwrap();
+        assert!(fixture.store.desktop_document().is_err());
+        fs::remove_file(alias).unwrap();
+        let target = fixture.parent.join("target");
+        fs::rename(&file, &target).unwrap();
+        symlink(&target, &file).unwrap();
+        assert!(fixture.store.desktop_document().is_err());
+        assert!(fixture.store.save_desktop_document(b"{}", b"{}").is_err());
+        assert_eq!(fs::read(target).unwrap(), b"{}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_hardlinks_and_public_permissions_are_refused() {

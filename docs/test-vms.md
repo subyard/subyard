@@ -249,7 +249,7 @@ separate ephemeral guest key.
 
 A standard caller reaches the outer yard through the provisioned yard-to-yard route. Any valid
 Ed25519 controller key is admitted only to the versioned forced facade
-(`status/acquire-v3/renew/release`). It never receives an L1 shell, PTY, file transfer, arbitrary
+(`status/acquire-v3/renew/release/logs-v1/incident-v1`). It never receives an L1 shell, PTY, file transfer, arbitrary
 forwarding or Incus access.
 
 Inspect the redacted pool without acquiring:
@@ -961,6 +961,37 @@ yard -Y test-yard test-vms recover --slot "$slot"
 ```
 
 ## Broker diagnostics
+
+Agents can read their own lease diagnostics through the existing restricted SSH facade:
+
+```sh
+dev/agent-e2e.sh --logs --slot 1 -n 50
+dev/agent-e2e.sh --logs --json
+dev/agent-e2e.sh --incident <incident_id>
+```
+
+These reads never acquire, renew, release or recover a lease. The private random controller
+`client-id` is a diagnostic read capability; keep it private along with the controller identity.
+The broker stamps each archived record with its captured private controller identity when writing
+the record, starting before provisioning. Slot, resource generation and lease epoch remain
+diagnostic metadata; reused counters do not transfer access to another controller.
+Public yard/project/run labels, controller fingerprints and slot numbers do not authorize reads.
+Only leases acquired by this controller after the broker gained `lease-logs-v1` are readable,
+including failed acquisitions without a returned grant and released or expired leases. Another
+holder's reuse of the same slot does not expose that holder's logs. Losing the private client ID
+loses access to its history; reading never creates a replacement identity.
+
+`--logs` returns up to 200 events (50 by default), bounded to 1 MiB of event JSON. Without
+`--json` it prints one JSON object per line; `--json` returns an array. `--slot` optionally narrows
+the controller's own history. `--incident` returns the referenced redacted diagnostic artifact,
+including VM state, QEMU, console and QMP logs when collection verifies the project, allocation
+and controller ownership markers on that VM. Unverified VM evidence, shared service journals,
+legacy failure logs, unknown diagnostic sections and physical-owner artifacts are excluded from
+agent responses. The root-private local archive survives host-sink acknowledgement. Acknowledgement
+prunes old records and trims the archive to 512 MiB. Reads reject each record 30 days after creation,
+even if acknowledgement is delayed. Reads require the
+outer yard and broker to remain reachable. An older broker reports the missing capability and
+requires the operator's normal runtime update or `yard init`; agents cannot update the outer yard.
 
 Broker and reaper lifecycle events from every `test-vms` pool on one physical owner host are
 collected in:

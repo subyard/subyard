@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from contextlib import contextmanager
 from itertools import chain
 from types import SimpleNamespace
@@ -18,6 +19,27 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.workspaces = Path(self.tmp.name) / "workspaces"
         self.root = project(self.workspaces)
+
+    def test_missing_metadata_projection_matches_published_scope_without_writes(self):
+        import discovery
+        metadata = self.root.parent / ".subyard-meta.json"
+        payload = metadata.read_text()
+        metadata.unlink()
+        self.assertEqual([], self.discover(self.workspaces).projects)
+        projection = {"schema": 1, "missingMetadata": [
+            {"root": str(self.root.parent), "payload": payload}]}
+        with mock.patch.object(discovery, "metadata_projection", projection):
+            projected = self.discover(self.workspaces)
+        self.assertFalse(metadata.exists())
+        metadata.write_text(payload)
+        actual = self.discover(self.workspaces)
+        self.assertEqual(projected.projects, actual.projects)
+        self.assertEqual([], projected.errors)
+        # Real metadata is authoritative; projected data never replaces it.
+        projection["missingMetadata"][0]["payload"] = json.dumps(
+            {"schema": 1, "projectId": self.root.parent.name, "name": "Other"})
+        with mock.patch.object(discovery, "metadata_projection", projection):
+            self.assertEqual(actual.projects, self.discover(self.workspaces).projects)
 
     def test_folder_root_and_nested_checkout_names_include_ignored_hidden_deep_directories(self):
         init_git(self.root / "private")

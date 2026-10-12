@@ -97,6 +97,61 @@ pub struct Client {
     processes: Processes,
 }
 
+/// A single provisional trust connection. Cancellation and registration share
+/// one publication lock: once cancellation wins, no metadata can be registered.
+/// Call cancel off the UI thread because it reaps the provisional SSH child.
+#[derive(Default)]
+pub struct ConnectionAttempt {
+    state: Mutex<AttemptState>,
+    processes: Processes,
+}
+
+#[derive(Default)]
+enum AttemptState {
+    #[default]
+    Active,
+    Cancelled,
+    Finished,
+}
+
+impl ConnectionAttempt {
+    pub fn cancel(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if matches!(*state, AttemptState::Active) {
+                *state = AttemptState::Cancelled;
+                self.processes.stop_accepting();
+            }
+        }
+        self.processes.shutdown();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| matches!(*state, AttemptState::Cancelled))
+    }
+
+    fn publish<T>(
+        &self,
+        change: impl FnOnce() -> Result<T, NativeError>,
+    ) -> Result<T, NativeError> {
+        let mut state = self.state.lock().map_err(|_| unavailable())?;
+        if !matches!(*state, AttemptState::Active) {
+            return Err(connection_cancelled());
+        }
+        let result = change();
+        *state = AttemptState::Finished;
+        result
+    }
+}
+
+fn connection_cancelled() -> NativeError {
+    NativeError::new(
+        "cancelled",
+        "The connection was cancelled. No host was registered.",
+    )
+}
+
 impl Client {
     pub fn new(root: PathBuf, emit: Emit) -> Arc<Self> {
         let (wake, receiver) = mpsc::sync_channel(1);
@@ -121,6 +176,18 @@ impl Client {
 
     pub fn connections(&self) -> Result<Vec<ConnectionSummary>, NativeError> {
         self.store.lock().map_err(|_| unavailable())?.list()
+    }
+    pub fn desktop_document(&self) -> Result<Vec<u8>, NativeError> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .desktop_document()
+    }
+    pub fn save_desktop_document(&self, baseline: &[u8], bytes: &[u8]) -> Result<(), NativeError> {
+        self.store
+            .lock()
+            .map_err(|_| unavailable())?
+            .save_desktop_document(baseline, bytes)
     }
     pub fn navigation_selection(&self) -> Result<Option<NavigationSelection>, NativeError> {
         self.store
@@ -163,6 +230,20 @@ impl Client {
         confirmed: bool,
         fingerprint: &str,
     ) -> Result<ConnectionSummary, NativeError> {
+        self.connect_attempt(token, confirmed, fingerprint, &ConnectionAttempt::default())
+    }
+
+    pub fn connect_attempt(
+        &self,
+        token: &str,
+        confirmed: bool,
+        fingerprint: &str,
+        attempt: &ConnectionAttempt,
+    ) -> Result<ConnectionSummary, NativeError> {
+        if attempt.is_cancelled() {
+            self.cancel_assessment(token)?;
+            return Err(connection_cancelled());
+        }
         if self.stopped.load(Ordering::Acquire) {
             return Err(unavailable());
         }
@@ -172,11 +253,12 @@ impl Client {
             .map_err(|_| unavailable())?
             .consented_ssh_command(token, confirmed, fingerprint)?;
         crate::ssh::require_agent()?;
-        let rpc = RpcClient::open_tracked(
+        let rpc = RpcClient::open_tracked_attempt(
             pin.command(None)?,
             product_version(),
             Arc::new(|_| {}),
             Some(&self.processes),
+            Some(&attempt.processes),
         )?;
         let inventory: OwnerInventory =
             decode(rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?)?;
@@ -188,9 +270,11 @@ impl Client {
         if self.stopped.load(Ordering::Acquire) {
             return Err(unavailable());
         }
-        self.commit_trust(move |store| {
-            let record = store.finalize_registration(pin, &snapshot.owner.id)?;
-            Ok((record.clone(), record.id))
+        attempt.publish(|| {
+            self.commit_trust(move |store| {
+                let record = store.finalize_registration(pin, &snapshot.owner.id)?;
+                Ok((record.clone(), record.id))
+            })
         })
     }
     pub fn assess_removal(&self, id: &str) -> Result<Removal, NativeError> {
@@ -783,8 +867,21 @@ impl Client {
         digest: &str,
         confirmed: bool,
     ) -> Result<Started, NativeError> {
-        let result = self.execute_reviewed(id, digest, confirmed);
-        // Rejected executions also release a held plan before waking the monitor.
+        self.execute_with_submission(id, digest, confirmed)
+            .map_err(ExecutionNotSubmitted::into_error)
+    }
+    pub fn execute_with_submission(
+        self: &Arc<Self>,
+        id: &str,
+        digest: &str,
+        confirmed: bool,
+    ) -> Result<Started, ExecutionNotSubmitted> {
+        // Every error in execute_reviewed precedes successful RpcClient::begin
+        // admission. RpcClient::send returns Err only if no request was queued;
+        // all subsequent failures are reported by the execution waiter as events.
+        let result = self
+            .execute_reviewed(id, digest, confirmed)
+            .map_err(|error| ExecutionNotSubmitted { error });
         let _ = self.wake.try_send(());
         result
     }
@@ -1266,6 +1363,26 @@ impl From<TrustAssessment> for Assessment {
         }
     }
 }
+impl Assessment {
+    pub fn id(&self) -> &str {
+        &self.assessment_id
+    }
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+    pub fn previous_fingerprint(&self) -> Option<&str> {
+        self.previous_fingerprint.as_deref()
+    }
+    pub fn confirmation(&self) -> &str {
+        &self.confirmation
+    }
+    pub fn consequences(&self) -> &[String] {
+        &self.consequences
+    }
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Removal {
@@ -1301,7 +1418,7 @@ impl CurrentContext {
     }
 }
 #[derive(Clone, Deserialize, Serialize)]
-struct Provenance {
+pub struct Provenance {
     scope: String,
     role: String,
     status: String,
@@ -1309,13 +1426,13 @@ struct Provenance {
     value: Option<String>,
 }
 #[derive(Deserialize, Serialize)]
-struct Selection {
+pub struct Selection {
     value: String,
     provenance: Vec<Provenance>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Profile {
+pub struct Profile {
     name: String,
     #[serde(default)]
     has_yard_preset: bool,
@@ -1377,7 +1494,7 @@ impl ProfileList {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Setting {
+pub struct Setting {
     name: String,
     kind: String,
     #[serde(rename = "type")]
@@ -1604,7 +1721,7 @@ impl YardStatus {
     }
 }
 #[derive(Serialize)]
-struct Fact {
+pub struct Fact {
     label: String,
     value: String,
 }
@@ -1627,7 +1744,7 @@ pub struct HostDetails {
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SyncGit {
+pub struct SyncGit {
     branch: String,
     upstream: String,
     head: String,
@@ -1645,7 +1762,7 @@ struct SyncGit {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SyncPeer {
+pub struct SyncPeer {
     name: String,
     role: String,
     manual_only: bool,
@@ -1657,7 +1774,7 @@ struct SyncPeer {
     failed: bool,
 }
 #[derive(Deserialize, Serialize)]
-struct SyncCredentials {
+pub struct SyncCredentials {
     state: String,
     records: u64,
     conflicts: u64,
@@ -1665,7 +1782,7 @@ struct SyncCredentials {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct HostSyncStatus {
+pub struct HostSyncStatus {
     schema_version: u32,
     host_id: String,
     host_id_pending: bool,
@@ -1832,6 +1949,21 @@ pub struct OperationPlan {
     expires_at: String,
     steps: Vec<Step>,
 }
+/// Returned only before an execute request is admitted to the ordered RPC writer.
+/// Once admitted, an uncertain owner/transport outcome arrives as an Unknown event.
+#[derive(Debug)]
+pub struct ExecutionNotSubmitted {
+    error: NativeError,
+}
+impl ExecutionNotSubmitted {
+    pub fn error(&self) -> &NativeError {
+        &self.error
+    }
+    pub fn into_error(self) -> NativeError {
+        self.error
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Started {
@@ -1949,3 +2081,312 @@ mod tests {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod client_tests;
+
+// Read-only presentation access to native validated DTOs.
+impl Provenance {
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+}
+impl Selection {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    pub fn provenance(&self) -> &[Provenance] {
+        &self.provenance
+    }
+}
+impl Profile {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn has_yard_preset(&self) -> bool {
+        self.has_yard_preset
+    }
+    pub fn selected(&self) -> bool {
+        self.selected
+    }
+    pub fn provisionable(&self) -> bool {
+        self.provisionable
+    }
+    pub fn provision_scope(&self) -> &str {
+        &self.provision_scope
+    }
+    pub fn eligible(&self) -> bool {
+        self.eligible
+    }
+    pub fn eligibility(&self) -> &str {
+        &self.eligibility
+    }
+    pub fn convergence(&self) -> &str {
+        &self.convergence
+    }
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
+    }
+    pub fn resources(&self) -> &[String] {
+        &self.resources
+    }
+}
+impl Setting {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    pub fn value_type(&self) -> &str {
+        &self.value_type
+    }
+    pub fn default(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+    pub fn value_available(&self) -> bool {
+        self.value_available
+    }
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+    pub fn application(&self) -> &str {
+        &self.application
+    }
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+    pub fn choices(&self) -> &[String] {
+        &self.choices
+    }
+    pub fn minimum(&self) -> i64 {
+        self.minimum
+    }
+    pub fn maximum(&self) -> i64 {
+        self.maximum
+    }
+    pub fn optional(&self) -> bool {
+        self.optional
+    }
+    pub fn editable(&self) -> bool {
+        self.editable
+    }
+    pub fn provenance(&self) -> &[Provenance] {
+        &self.provenance
+    }
+}
+impl Fact {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+impl YardDetails {
+    pub fn profiles(&self) -> &[Profile] {
+        &self.profiles
+    }
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+    pub fn settings(&self) -> &[Setting] {
+        &self.settings
+    }
+    pub fn diagnostics(&self) -> &[Fact] {
+        &self.diagnostics
+    }
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+}
+impl HostDetails {
+    pub fn profiles(&self) -> &[Profile] {
+        &self.profiles
+    }
+    pub fn settings(&self) -> &[Setting] {
+        &self.settings
+    }
+    pub fn diagnostics(&self) -> &[Fact] {
+        &self.diagnostics
+    }
+    pub fn sync(&self) -> &HostSyncStatus {
+        &self.sync
+    }
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+}
+impl HostSyncStatus {
+    pub fn host_id(&self) -> &str {
+        &self.host_id
+    }
+    pub fn registration(&self) -> &str {
+        &self.registration
+    }
+    pub fn host_id_pending(&self) -> bool {
+        self.host_id_pending
+    }
+    pub fn recovery_required(&self) -> bool {
+        self.recovery_required
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn applied_commit(&self) -> &str {
+        &self.applied_commit
+    }
+    pub fn git(&self) -> Option<&SyncGit> {
+        self.git.as_ref()
+    }
+    pub fn credentials(&self) -> &SyncCredentials {
+        &self.credentials
+    }
+}
+impl SyncGit {
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+    pub fn upstream(&self) -> &str {
+        &self.upstream
+    }
+    pub fn head(&self) -> &str {
+        &self.head
+    }
+    pub fn relation(&self) -> &str {
+        &self.relation
+    }
+    pub fn worktree(&self) -> &str {
+        &self.worktree
+    }
+    pub fn remote(&self) -> &str {
+        &self.remote
+    }
+    pub fn available(&self) -> bool {
+        self.available
+    }
+    pub fn staged(&self) -> u64 {
+        self.staged
+    }
+    pub fn unstaged(&self) -> u64 {
+        self.unstaged
+    }
+    pub fn untracked(&self) -> u64 {
+        self.untracked
+    }
+    pub fn conflicts(&self) -> u64 {
+        self.conflicts
+    }
+    pub fn ahead(&self) -> u64 {
+        self.ahead
+    }
+    pub fn behind(&self) -> u64 {
+        self.behind
+    }
+    pub fn last_fetch(&self) -> &str {
+        &self.last_fetch
+    }
+}
+impl SyncCredentials {
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+    pub fn records(&self) -> u64 {
+        self.records
+    }
+    pub fn conflicts(&self) -> u64 {
+        self.conflicts
+    }
+    pub fn peers(&self) -> &[SyncPeer] {
+        &self.peers
+    }
+}
+impl SyncPeer {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+    pub fn manual_only(&self) -> bool {
+        self.manual_only
+    }
+    pub fn trusted(&self) -> bool {
+        self.trusted
+    }
+    pub fn last_attempt(&self) -> i64 {
+        self.last_attempt
+    }
+    pub fn last_success(&self) -> i64 {
+        self.last_success
+    }
+    pub fn consecutive_failures(&self) -> u64 {
+        self.consecutive_failures
+    }
+    pub fn next_retry(&self) -> i64 {
+        self.next_retry
+    }
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+}
+impl Step {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn observed(&self) -> &str {
+        &self.observed
+    }
+    pub fn desired(&self) -> &str {
+        &self.desired
+    }
+    pub fn decision(&self) -> &str {
+        &self.decision
+    }
+    pub fn preconditions(&self) -> &[String] {
+        &self.preconditions
+    }
+    pub fn depends_on(&self) -> &[String] {
+        &self.depends_on
+    }
+    pub fn verify(&self) -> &str {
+        &self.verify
+    }
+    pub fn consequence(&self) -> Option<&str> {
+        self.consequence.as_deref()
+    }
+}
+impl OperationPlan {
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+    pub fn confirmation(&self) -> &str {
+        &self.confirmation
+    }
+    pub fn consequences(&self) -> &[String] {
+        &self.consequences
+    }
+    pub fn expires_at(&self) -> &str {
+        &self.expires_at
+    }
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+}
+impl Started {
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+}

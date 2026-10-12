@@ -13,6 +13,9 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resourceendpoint"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -361,5 +364,49 @@ func TestResourceBootstrapRejectsSelectionDriftBeforeInit(t *testing.T) {
 	}
 	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
 		t.Fatalf("stale bootstrap reached resource: %v", err)
+	}
+}
+
+func TestResourceBootstrapRetainsPendingMetadataRepairAndPreservesReadyNoOp(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		digest := strings.Repeat("b", 64)
+		metadata := "[[],\"matching metadata fingerprint\"]"
+		if pending {
+			metadata = "null"
+		}
+		incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}, ExecSteps: []testkit.IncusExecStep{
+			{Result: ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + digest + `","wiring":"` + digest + `","roots":["/srv/workspaces/sample"]}`)}},
+			{Result: ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + digest + `","expected":[{"metadata":` + metadata + `}]}`)}},
+		}}
+		runtime := reconcileruntime.Runtime{RepositoryRoot: "../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: incus, Executor: incus, Yard: domain.Context{YardName: "selected"}}
+		hooks, err := runtime.PrepareProjectHooks(context.Background(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hooks.CaptureOwnerProjects([]domain.ProjectRecord{{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}})
+		runtime.HookPlan = hooks
+		if err := runtime.PrepareProjectMetadata(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		execution := &initExecution{mode: initReconcile, hookPlan: hooks}
+		bootstrap := &profileBootstrap{}
+		if execution.needsResourceInit() {
+			bootstrap.init = execution
+		}
+		assessment := bootstrap.augment(domain.ActionAssessment{Changed: false})
+		if assessment.Changed != pending {
+			t.Fatalf("pending=%t resource changed=%t", pending, assessment.Changed)
+		}
+		if pending {
+			found := false
+			for _, step := range bootstrap.operationSteps() {
+				if strings.HasSuffix(step.ID, "init.project-metadata") {
+					found = step.Decision == domain.StepApply
+				}
+			}
+			if !found {
+				t.Fatal("pending metadata repair omitted from combined resource plan")
+			}
+		}
 	}
 }
