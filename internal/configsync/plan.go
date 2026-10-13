@@ -75,14 +75,28 @@ func BuildPlan(options Options) (Plan, error) {
 			return Plan{}, errors.New("config sync manifest contains an unknown file setting")
 		}
 	}
-	if err := validateCandidate(options, source, previous, catalog); err != nil {
+	var legacyContexts []config.Loaded
+	inspection := options
+	inspection.inspectionOnly = true
+	if err := validateCandidate(inspection, source, previous, catalog, &legacyContexts); err != nil {
 		return Plan{}, fmt.Errorf("candidate configuration: %w", err)
+	}
+	localDesired, overrides, cleanup, err := prepareLocalSSHPorts(options, &source, previous, legacyContexts)
+	if err != nil {
+		return Plan{}, err
+	}
+	defer cleanup()
+	validation := options
+	validation.validationOverrides = overrides
+	if err := validateCandidate(validation, source, previous, catalog); err != nil {
+		return Plan{}, fmt.Errorf("local SSH port migration candidate: %w", err)
 	}
 	plan := Plan{
 		SourceRoot: source.root, SourceID: source.id, SourceCommit: source.commit,
 		SourceDigest: source.digest, HostID: hostID, InitializeHostID: initializeHostID,
 		PreviousGeneration: previous.Generation, Generation: previous.Generation + 1,
 		Adopt: options.Adopt, options: options, desired: source.files, previous: previous,
+		localDesired: localDesired,
 	}
 	plan.localInputs, err = observeLocalInputs(options.ConfigHome, source, previous)
 	if err != nil {
@@ -100,6 +114,10 @@ func BuildPlan(options Options) (Plan, error) {
 	}
 	if previous.SchemaVersion == 1 {
 		for _, file := range previous.Files {
+			if _, pinned := localDesired[file.Path]; pinned {
+				delete(previousFiles, file.Path)
+				continue
+			}
 			delete(previousFiles, file.Path)
 			live, err := observeLocalInput(options.ConfigHome, file.Path)
 			if err != nil {
@@ -191,6 +209,16 @@ func BuildPlan(options Options) (Plan, error) {
 		}
 	}
 	removed := make([]string, 0, len(previousFiles))
+	for path, desired := range localDesired {
+		live, exists, err := inspectLiveFile(options.ConfigHome, filepath.Join(options.ConfigHome, filepath.FromSlash(path)), true)
+		if err != nil {
+			return Plan{}, err
+		}
+		if !exists || live.Digest != desired.Digest || live.Mode != desired.Mode {
+			plan.Changes = append(plan.Changes, Change{Path: path, Action: "localize-ssh-port", BeforeDigest: live.Digest, AfterDigest: desired.Digest, Mode: desired.Mode,
+				Applications: []config.SettingApplication{config.SettingNextCommand}, Detail: "preserve the existing effective SSH port in local yard settings; remove legacy SSH_PORT from owned Git cache"})
+		}
+	}
 	for path := range previousFiles {
 		removed = append(removed, path)
 	}
@@ -267,6 +295,9 @@ func validateCandidate(
 	}
 	selectLocal := func(target string) (string, error) {
 		path := filepath.Join(options.ConfigHome, filepath.FromSlash(target))
+		if _, overridden := options.validationOverrides[path]; overridden {
+			return path, nil
+		}
 		if excluded[path] {
 			return "", nil
 		}
@@ -335,7 +366,7 @@ func validateCandidate(
 			continue
 		}
 		sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
-		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, DisablePrivate: true, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, SyncSource: true}); err != nil {
+		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, DisablePrivate: true, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, FileOverrides: options.validationOverrides, SyncSource: true}); err != nil {
 			return fmt.Errorf("yard %s retained source: %w", name, err)
 		}
 	}
@@ -344,7 +375,7 @@ func validateCandidate(
 		loaded, err := config.Load(config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
 			YardName: name, Environment: environment, DisablePrivate: true,
-			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths,
+			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
 		})
 		if err != nil {
 			return fmt.Errorf("yard %s: %w", name, err)
@@ -367,8 +398,10 @@ func validateCandidate(
 			return err
 		}
 	}
-	if err := validateInventory(contexts); err != nil {
-		return err
+	if !options.inspectionOnly {
+		if err := validateInventory(contexts); err != nil {
+			return err
+		}
 	}
 	if len(capture) != 0 {
 		*capture[0] = contexts
@@ -433,7 +466,7 @@ type liveFile struct {
 	Mode   uint32
 }
 
-func inspectLiveFile(configHome, path string) (liveFile, bool, error) {
+func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, error) {
 	if !pathWithin(path, configHome) {
 		return liveFile{}, false, errors.New("live target escaped configuration root")
 	}
@@ -460,7 +493,7 @@ func inspectLiveFile(configHome, path string) (liveFile, bool, error) {
 	maximum := int64(maxAssetBytes)
 	if filepath.Base(path) == "config.env" {
 		maximum = maxConfigBytes
-		if info.Mode().Perm() != 0o600 {
+		if info.Mode().Perm() != 0o600 && !(len(local) != 0 && local[0]) {
 			return liveFile{}, false, fmt.Errorf("live config.env mode must be 0600: %s", path)
 		}
 	}

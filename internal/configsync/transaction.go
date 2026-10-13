@@ -105,7 +105,7 @@ func applyLocked(plan Plan) (returnErr error) {
 			continue
 		}
 		target := filepath.Join(plan.options.ConfigHome, filepath.FromSlash(change.Path))
-		live, exists, err := inspectLiveFile(plan.options.ConfigHome, target)
+		live, exists, err := inspectLiveFile(plan.options.ConfigHome, target, change.Action == "localize-ssh-port")
 		if err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func applyLocked(plan Plan) (returnErr error) {
 			AfterDigest: change.AfterDigest, AfterMode: change.Mode,
 		}
 		if exists {
-			content, mode, err := readLiveContent(plan.options.ConfigHome, target)
+			content, mode, err := readLiveContent(plan.options.ConfigHome, target, change.Action == "localize-ssh-port")
 			if err != nil {
 				return err
 			}
@@ -128,7 +128,7 @@ func applyLocked(plan Plan) (returnErr error) {
 			}
 		}
 		if change.Action != "delete" {
-			candidate, ok := plan.desired[change.Path]
+			candidate, ok := plan.candidate(change.Path)
 			if !ok {
 				return fmt.Errorf("planned candidate disappeared for %s", change.Path)
 			}
@@ -180,7 +180,7 @@ func applyLocked(plan Plan) (returnErr error) {
 				return err
 			}
 		} else {
-			candidate := plan.desired[entry.Path]
+			candidate, _ := plan.candidate(entry.Path)
 			if err := writeFileDurable(
 				plan.options.ConfigHome, target, candidate.Content, os.FileMode(candidate.Mode),
 			); err != nil {
@@ -275,7 +275,7 @@ func transactionEntryApplied(
 	journalApplied bool,
 ) (bool, error) {
 	target := filepath.Join(configHome, filepath.FromSlash(entry.Path))
-	live, exists, err := inspectLiveFile(configHome, target)
+	live, exists, err := inspectLiveFile(configHome, target, entry.Action == "localize-ssh-port")
 	if err != nil {
 		return false, fmt.Errorf("inspect recovery target %s: %w", entry.Path, err)
 	}
@@ -415,7 +415,7 @@ func readTransaction(configHome string) (transaction, bool, error) {
 
 func transactionAction(action string) bool {
 	switch action {
-	case "add", "adopt-update", "update", "restore-missing", "restore-drift", "delete":
+	case "add", "adopt-update", "update", "restore-missing", "restore-drift", "localize-ssh-port", "delete":
 		return true
 	default:
 		return false
@@ -609,8 +609,8 @@ func writeFileDurable(
 	return syncDirectory(directory)
 }
 
-func readLiveContent(configHome, path string) ([]byte, uint32, error) {
-	_, exists, err := inspectLiveFile(configHome, path)
+func readLiveContent(configHome, path string, local ...bool) ([]byte, uint32, error) {
+	_, exists, err := inspectLiveFile(configHome, path, local...)
 	if err != nil {
 		return nil, 0, err
 	}

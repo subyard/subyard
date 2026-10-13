@@ -29,6 +29,7 @@ type currentReport struct {
 	Domains       []currentDomainReport                `json:"domains,omitempty"`
 	Journal       *currentJournalReport                `json:"journal,omitempty"`
 	Decisions     []releasetransition.RedactedDecision `json:"decisions,omitempty"`
+	Consequences  []string                             `json:"consequences,omitempty"`
 	Blockers      []releasetransition.Blocker          `json:"blockers,omitempty"`
 	MetadataIssue string                               `json:"metadataIssue,omitempty"`
 	Next          string                               `json:"next,omitempty"`
@@ -180,7 +181,8 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		}
 		return Prepared{}, transitionOutcomeError(outcome)
 	}
-	report := currentReport{Current: current, Owner: owner.candidate.release, Outcome: *inspection.Outcome, Decisions: inspection.Decisions, Blockers: inspection.Blockers}
+	report := currentReport{Current: current, Owner: owner.candidate.release, Outcome: *inspection.Outcome,
+		Decisions: inspection.Decisions, Consequences: slices.Clone(inspection.Assessment.Consequences), Blockers: inspection.Blockers}
 	if protected != nil {
 		journal := protected.journal
 		report.Journal = &currentJournalReport{Transaction: journal.Transaction, Checkpoint: journal.Checkpoint, From: journal.Releases.From, Target: journal.Goal.Target, Steps: []currentStepReport{}}
@@ -437,6 +439,9 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 		}
 		for _, decision := range report.Decisions {
 			fmt.Fprintf(&output, "Action: %s\n", releaseDecisionConsequence(decision))
+		}
+		for _, consequence := range report.Consequences {
+			fmt.Fprintf(&output, "Consequence: %s\n", consequence)
 		}
 		for _, blocker := range report.Blockers {
 			if blocker.Resource != "" {

@@ -41,6 +41,7 @@ type settingsV2Plan struct {
 }
 
 type settingsV2FilePlan struct {
+	LocalSSHPort        bool
 	Yard                string
 	Path                string
 	Expected            config.PersistentFileSnapshot
@@ -571,7 +572,7 @@ func settingsV2ResourceFingerprint(
 }
 
 func (plan settingsV2FilePlan) validate() error {
-	if !domain.SafeName(plan.Yard) || !filepath.IsAbs(plan.Path) || !plan.Expected.Exists ||
+	if !domain.SafeName(plan.Yard) || !filepath.IsAbs(plan.Path) || (!plan.Expected.Exists && !plan.LocalSSHPort) ||
 		len(plan.Desired) == 0 || !validFingerprint(plan.ExpectedFingerprint) ||
 		!validFingerprint(plan.DesiredFingerprint) || !validFingerprint(plan.Inheritance) ||
 		plan.ExpectedFingerprint == plan.DesiredFingerprint ||

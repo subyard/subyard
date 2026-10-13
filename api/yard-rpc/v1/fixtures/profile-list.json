@@ -13,6 +13,13 @@
           "role": "local",
           "status": "effective"
         }
+      ],
+      "present": true,
+      "requested": [
+        "sample"
+      ],
+      "effective": [
+        "sample"
       ]
     },
     "profiles": [
@@ -26,7 +33,11 @@
         "eligibility": "allowed",
         "convergence": "current",
         "resources": [],
-        "hasYardPreset": false
+        "hasYardPreset": false,
+        "requested": true,
+        "effective": true,
+        "reason": "explicit-selection",
+        "sourceGroup": "local overrides"
       },
       {
         "name": "resource-only",
@@ -39,7 +50,11 @@
         "resources": [
           "sample-view"
         ],
-        "hasYardPreset": true
+        "hasYardPreset": true,
+        "requested": false,
+        "effective": false,
+        "reason": "excluded-by-replace-list",
+        "sourceGroup": "local overrides"
       }
     ]
   }

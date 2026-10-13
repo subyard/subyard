@@ -9,15 +9,105 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 type currentNoNetwork struct{ t *testing.T }
+
+func TestCurrentTransitionCheckPreservesValidatedOwnerConsequences(t *testing.T) {
+	consequences := []string{
+		"yard default: requested coding integrations [fixture], effective [fixture], from Git settings (host scope)",
+		"yard named: requested coding integrations [], effective [], from local overrides (yard scope)",
+	}
+	for _, asJSON := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", asJSON), func(t *testing.T) {
+			fixture := newCurrentProcessFixture(t)
+			calls := filepath.Join(filepath.Dir(fixture.runtimeRoot), "inspection-requests.jsonl")
+			response := releasetransition.ProcessResponse{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, ActivationReconciliationOwned: true,
+				Inspection: &releasetransition.Inspection{
+					Plan: releasetransition.PlanToken("plan-v1-" + strings.Repeat("c", 64)),
+					Assessment: domain.ActionAssessment{Action: "release.transition.v2", Effect: domain.ActionMutation,
+						Changed: true, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime},
+						Recovery: domain.RecoveryReversible, Consequences: consequences},
+					Outcome: &releasetransition.Outcome{Status: releasetransition.StatusMigrationRequired,
+						Active: fixture.candidate.release, Target: fixture.candidate.release,
+						Code: releasetransition.CodeTransitionRequired, Message: "configuration activation requires confirmation",
+						Retry: "confirm the inspected migration plan"},
+				},
+			}
+			payload, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine 0.11.2\\n' ;;\n _release-transition) cat >> %q; printf '%%s\\n' %q ;;\n *) exit 64 ;;\nesac\n", calls, payload)
+			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "bin/yard-engine"), []byte(engine), 0o700)
+			manifest := fmt.Sprintf("%s  ./bin/yard-engine\n%s  ./config/release-transition.json\n", v0111FixtureFingerprintBytes([]byte(engine)), v0111FixtureFingerprintBytes(fixture.registry))
+			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
+			environment := fixture.environment()
+			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+			var stdout, stderr bytes.Buffer
+			runtime := New(Config{Inputs: fixtureCommandInputs(environment), Installer: "/missing-installer",
+				Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: currentNoNetwork{t}}})
+			defer runtime.Close()
+			before, err := runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			arguments := []string{"--check"}
+			if asJSON {
+				arguments = append(arguments, "--json")
+			}
+			prepared, err := runtime.PrepareCurrentTransition(context.Background(), arguments, fixture.configHome, "recovery-yard")
+			if err != nil {
+				t.Fatalf("synthetic owner check: %v (cause: %v)", err, errors.Unwrap(err))
+			}
+			if prepared.Action != "migrate.check" || prepared.Changed {
+				t.Fatalf("check became an executing transition: %#v", prepared)
+			}
+			if err := prepared.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			after, err := runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
+			if err != nil || !sameCurrentSnapshot(before, after) || stderr.Len() != 0 {
+				t.Fatalf("check changed links/history or emitted stderr: %v %q", err, stderr.String())
+			}
+			if string(mustReadFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"))) != manifest ||
+				string(mustReadFile(t, filepath.Join(fixture.candidate.root, "bin/yard-engine"))) != engine {
+				t.Fatal("check changed sealed source")
+			}
+			requests := mustReadFile(t, calls)
+			var request releasetransition.ProcessRequest
+			if err := json.Unmarshal(requests, &request); err != nil || request.Mode != releasetransition.ProcessInspect || request.Execution != nil {
+				t.Fatalf("check did not invoke exactly one read-only owner inspection: %v", err)
+			}
+			if asJSON {
+				var report struct {
+					SchemaVersion int                       `json:"schemaVersion"`
+					Consequences  []string                  `json:"consequences"`
+					Outcome       releasetransition.Outcome `json:"outcome"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.SchemaVersion != 1 ||
+					report.Outcome.Status != releasetransition.StatusMigrationRequired || !reflect.DeepEqual(report.Consequences, consequences) {
+					t.Fatalf("validated owner consequences lost: %s (%v)", stdout.String(), err)
+				}
+			} else {
+				for _, consequence := range consequences {
+					if strings.Count(stdout.String(), consequence) != 1 {
+						t.Fatalf("validated owner consequence missing or repeated: %q in %q", consequence, stdout.String())
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestCurrentReportPreservesDiagnosticsInHumanAndJSONOutput(t *testing.T) {
 	for _, asJSON := range []bool{false, true} {
@@ -47,6 +137,45 @@ func TestCurrentReportPreservesDiagnosticsInHumanAndJSONOutput(t *testing.T) {
 				if !strings.Contains(stdout.String(), expected) {
 					t.Fatalf("missing %q in %q", expected, stdout.String())
 				}
+			}
+		}
+	}
+}
+
+func TestCurrentReportDoesNotInventConsequences(t *testing.T) {
+	for _, status := range []releasetransition.PublicStatus{releasetransition.StatusReady, releasetransition.StatusMigrationRequired} {
+		for _, consequences := range [][]string{nil, {"the verified owner's bounded consequence"}} {
+			for _, asJSON := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/present=%t/json=%t", status, len(consequences) != 0, asJSON), func(t *testing.T) {
+					var stdout bytes.Buffer
+					runtime := New(Config{Stdout: &stdout})
+					report := currentReport{Current: "release-b", Outcome: releasetransition.Outcome{Status: status}, Consequences: consequences}
+					if err := runtime.prepareCurrentReport(currentOptions{json: asJSON}, report).Execute(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+					if asJSON {
+						var decoded map[string]json.RawMessage
+						if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+							t.Fatal(err)
+						}
+						field, present := decoded["consequences"]
+						if present != (len(consequences) != 0) {
+							t.Fatalf("unexpected consequences field: %s", stdout.String())
+						}
+						if present {
+							var got []string
+							if err := json.Unmarshal(field, &got); err != nil || !reflect.DeepEqual(got, consequences) {
+								t.Fatalf("consequences changed: %s (%v)", field, err)
+							}
+						}
+					} else if len(consequences) == 0 {
+						if strings.Contains(stdout.String(), "Consequence:") {
+							t.Fatalf("invented consequence: %q", stdout.String())
+						}
+					} else if strings.Count(stdout.String(), consequences[0]) != 1 {
+						t.Fatalf("owner consequence lost or repeated: %q", stdout.String())
+					}
+				})
 			}
 		}
 	}

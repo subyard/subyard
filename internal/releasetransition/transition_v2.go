@@ -68,6 +68,7 @@ func assessV2BlockedRollback(policy *domain.ActionRegistry) (domain.ActionAssess
 
 type V2Options struct {
 	ConfigHome                string
+	OperatorHome              string
 	CandidateConfigDir        string
 	MigrationCheckpoint       bool
 	SourceMigrationCheckpoint bool
@@ -178,6 +179,7 @@ type v2ActivationScope struct {
 
 type settingsRecoveryV1 struct {
 	SchemaVersion int                     `json:"schemaVersion"`
+	Kind          string                  `json:"kind,omitempty"`
 	Transaction   TransactionID           `json:"transaction"`
 	Step          string                  `json:"step"`
 	Migration     string                  `json:"migration"`
@@ -226,6 +228,7 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	if err != nil {
 		return nil, err
 	}
+	catalog := BuiltinCapabilityCatalog()
 	journalSnapshot, err := store.ReadCurrentJournal()
 	if err != nil {
 		return nil, err
@@ -239,6 +242,11 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 			return nil, err
 		}
 		if options.Replacement == nil && journal.Checkpoint != JournalComplete {
+			if journal.RegistryDigest == fingerprintPayload(options.RegistryPayload) && journal.ArtifactDigest == options.ArtifactDigest {
+				if original, supported := SupportedBuiltinCatalog(journal.CatalogDigest); supported {
+					catalog = original
+				}
+			}
 			// The protected journal owns the immutable release pair while it is
 			// unfinished. Completed journals are history; a later activation-only
 			// repair uses the currently observed release pair.
@@ -261,7 +269,6 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 	if err := validateFingerprint(options.ArtifactDigest, "artifact digest"); err != nil {
 		return nil, err
 	}
-	catalog := BuiltinCapabilityCatalog()
 	registry, registryDigest, err := ParseRegistryV2(options.RegistryPayload, catalog)
 	if err != nil {
 		return nil, err
@@ -1724,6 +1731,25 @@ func (transition *V2Transition) observeFresh(
 			})
 			observation.activationConsequences = append(observation.activationConsequences,
 				"preserve exact optional publication state; rollback to an epoch-1 power reader becomes unavailable")
+		case localSSHPortMigration:
+			plan, inspectErr := transition.inspectLocalSSHPorts(settingsView)
+			if inspectErr != nil {
+				return inspectErr
+			}
+			observation.decisions = append(observation.decisions, plan.Decisions...)
+			observation.blockers = append(observation.blockers, plan.Blockers...)
+			for index := range plan.Files {
+				file := plan.Files[index]
+				if err := file.validate(); err != nil {
+					return err
+				}
+				intent := settingsIntent(migration, file)
+				observation.intents = append(observation.intents, intent)
+				observation.observations = append(observation.observations, ResourceObservation{Resource: "yard." + file.Yard, Class: "local-ssh-port-settings-v1", Fingerprint: file.ExpectedFingerprint})
+				copy := file
+				observation.work = append(observation.work, v2Work{kind: v2SettingsWork, intent: intent, migration: migration, file: &copy})
+			}
+			settingsView = settingsViewAfterPlan(transition.options.ConfigHome, settingsView, plan.Files)
 		case "test-vms-settings-v1-to-v2":
 			capability := newTestVMSettingsV2Capability(
 				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
@@ -1873,33 +1899,33 @@ func (transition *V2Transition) observeResume(
 		}
 		observation.blockers = append(observation.blockers, ingressPlan.Blockers...)
 	}
-	var capabilityPlan settingsV2Plan
-	for _, step := range journal.Steps {
-		migration, exists := transition.migration(step.Migration)
-		if exists && migration.Kind == "test-vms-settings-v1-to-v2" {
-			// Ledger-only steps retain migration scope; activation-only repair
-			// must not reopen completed settings migration history.
-			capability := newTestVMSettingsV2Capability(
-				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
-				ingressPlan.Prospective,
-			)
+	ownerSettingsView := ingressPlan.Prospective
+	planned := map[string]settingsV2FilePlan{}
+	for _, migration := range transition.registry.Migrations {
+		if !slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID }) {
+			continue
+		}
+		var capabilityPlan settingsV2Plan
+		switch migration.Kind {
+		case "test-vms-settings-v1-to-v2":
+			capability := newTestVMSettingsV2Capability(transition.options.ConfigHome, transition.options.InheritedSettingIDs, ownerSettingsView)
 			capability.candidateConfigDir = transition.options.CandidateConfigDir
 			capabilityPlan, err = capability.Inspect()
-			if err != nil {
-				return err
-			}
-			break
+		case localSSHPortMigration:
+			capabilityPlan, err = transition.inspectLocalSSHPorts(ownerSettingsView)
+		default:
+			continue
 		}
+		if err != nil {
+			return err
+		}
+		observation.blockers = append(observation.blockers, capabilityPlan.Blockers...)
+		for _, file := range capabilityPlan.Files {
+			planned[migration.ID+":"+file.Yard] = file
+		}
+		ownerSettingsView = settingsViewAfterPlan(transition.options.ConfigHome, ownerSettingsView, capabilityPlan.Files)
 	}
-	observation.blockers = append(observation.blockers, capabilityPlan.Blockers...)
-	ownerSettingsView := settingsViewAfterPlan(
-		transition.options.ConfigHome, ingressPlan.Prospective, capabilityPlan.Files,
-	)
 	observation.prospectiveSettings = ownerSettingsView
-	planned := make(map[string]settingsV2FilePlan, len(capabilityPlan.Files))
-	for _, file := range capabilityPlan.Files {
-		planned[file.Yard] = file
-	}
 	journalSettings := make(map[string]struct{})
 	plannedIngress := make(map[V2IngressOperationKind]V2IngressOperation, len(ingressPlan.Operations))
 	for _, operation := range ingressPlan.Operations {
@@ -2060,12 +2086,12 @@ func (transition *V2Transition) observeResume(
 			})
 			continue
 		}
-		if migration.Kind != "test-vms-settings-v1-to-v2" {
+		if migration.Kind != "test-vms-settings-v1-to-v2" && migration.Kind != localSSHPortMigration {
 			return invalid("journal references unsupported migration kind %q", migration.Kind)
 		}
-		journalSettings[step.Resource] = struct{}{}
+		journalSettings[migration.ID+":"+step.Resource] = struct{}{}
 		var file *settingsV2FilePlan
-		if plannedFile, ok := planned[step.Resource]; ok {
+		if plannedFile, ok := planned[migration.ID+":"+step.Resource]; ok {
 			copy := plannedFile
 			file = &copy
 		}
@@ -2087,7 +2113,7 @@ func (transition *V2Transition) observeResume(
 		if deferred {
 			actual = step.Expected
 		} else if observeErr == nil {
-			_, _, actual, observeErr = transition.observeSettingsWork(step.Resource)
+			_, _, actual, observeErr = transition.observeJournalSettingsWork(*journal, step, migration)
 		}
 		if observeErr != nil {
 			observation.blockers = append(observation.blockers, Blocker{
@@ -2227,7 +2253,7 @@ func (transition *V2Transition) convergeStep(
 		}
 	}
 	if step.Checkpoint == StepEvidence {
-		actual, err := transition.workFingerprint(ctx, work)
+		actual, err := transition.workFingerprint(ctx, work, *journal)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -2240,8 +2266,8 @@ func (transition *V2Transition) convergeStep(
 						"the expected settings recipe cannot be reconstructed",
 						"run yard update --check"), nil
 				}
-				expected, path, observed, observeErr := transition.observeSettingsWork(
-					work.intent.Resource,
+				expected, path, observed, observeErr := transition.observeSettingsMigrationWork(
+					work.migration, work.intent.Resource,
 				)
 				if observeErr != nil || path != work.file.Path ||
 					observed != step.Expected {
@@ -2250,10 +2276,11 @@ func (transition *V2Transition) convergeStep(
 						"the settings resource changed before its protected update",
 						"run yard update --check"), nil
 				}
-				if err := config.CompareAndSwapPersistentFile(
-					transition.options.ConfigHome, work.file.Path,
-					expected, work.file.Desired,
-				); err != nil && !errors.Is(err, config.ErrPersistentTargetStale) {
+				publish := config.CompareAndSwapPersistentFile
+				if work.migration.Kind == localSSHPortMigration {
+					publish = config.CompareAndSwapLocalSettingsFile
+				}
+				if err := publish(transition.options.ConfigHome, work.file.Path, expected, work.file.Desired); err != nil && !errors.Is(err, config.ErrPersistentTargetStale) {
 					return Outcome{}, err
 				}
 				if err := transition.inject("after-settings-cas"); err != nil {
@@ -2333,7 +2360,7 @@ func (transition *V2Transition) convergeStep(
 				}
 			}
 		}
-		actual, err = transition.workFingerprint(ctx, work)
+		actual, err = transition.workFingerprint(ctx, work, *journal)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -2358,7 +2385,7 @@ func (transition *V2Transition) convergeStep(
 		}
 	}
 	if step.Checkpoint == StepApplied {
-		actual, err := transition.workFingerprint(ctx, work)
+		actual, err := transition.workFingerprint(ctx, work, *journal)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -2376,7 +2403,7 @@ func (transition *V2Transition) convergeStep(
 			if err := transition.options.Ingress.Verify(ctx, stepRequest); err != nil {
 				return Outcome{}, err
 			}
-			actual, err = transition.workFingerprint(ctx, work)
+			actual, err = transition.workFingerprint(ctx, work, *journal)
 			if err != nil {
 				return Outcome{}, err
 			}
@@ -2548,6 +2575,9 @@ func (transition *V2Transition) ensureRecovery(
 		if err := validateSettingsRecovery(recovery, journal, step); err != nil {
 			return "", err
 		}
+		if work.migration.Kind == localSSHPortMigration && recovery.Kind != localSSHPortMigration || work.migration.Kind != localSSHPortMigration && recovery.Kind != "" {
+			return "", invalid("settings recovery kind differs from its compiled migration")
+		}
 		if work.file != nil && !slices.Equal(recovery.Before, work.file.Before) {
 			return "", invalid("typed settings recovery does not match the inspected before state")
 		}
@@ -2561,6 +2591,9 @@ func (transition *V2Transition) ensureRecovery(
 		Step: step.ID, Migration: step.Migration, Yard: step.Resource,
 		Expected: step.Expected,
 		Before:   slices.Clone(work.file.Before),
+	}
+	if work.migration.Kind == localSSHPortMigration {
+		recovery.SchemaVersion, recovery.Kind = 2, localSSHPortMigration
 	}
 	if err := validateSettingsRecovery(recovery, journal, step); err != nil {
 		return "", err
@@ -2678,7 +2711,11 @@ func validateSettingsRecovery(
 	journal JournalRecord,
 	step JournalStep,
 ) error {
-	if recovery.SchemaVersion != 1 || recovery.Transaction != journal.Transaction ||
+	localSSH := recovery.SchemaVersion == 2 && recovery.Kind == localSSHPortMigration
+	if localSSH && len(recovery.Before) != 1 {
+		return invalid("typed SSH port recovery must capture one setting")
+	}
+	if (!localSSH && (recovery.SchemaVersion != 1 || recovery.Kind != "")) || recovery.Transaction != journal.Transaction ||
 		recovery.Step != step.ID || recovery.Migration != step.Migration ||
 		recovery.Yard != step.Resource || recovery.Expected != step.Expected ||
 		!domain.SafeName(recovery.Yard) || len(recovery.Before) > 2 {
@@ -2686,7 +2723,7 @@ func validateSettingsRecovery(
 	}
 	seen := make(map[string]struct{}, len(recovery.Before))
 	for _, value := range recovery.Before {
-		if !affectedSettingsV2ID(value.Setting) {
+		if (!localSSH && !affectedSettingsV2ID(value.Setting)) || (localSSH && value.Setting != "SSH_PORT") {
 			return invalid("typed settings recovery references an unknown setting")
 		}
 		if _, duplicate := seen[value.Setting]; duplicate {
@@ -2703,6 +2740,10 @@ func validateSettingsRecovery(
 				if value.Value != "0" && value.Value != "1" {
 					return invalid("typed settings recovery contains an unsupported boolean")
 				}
+			case "SSH_PORT":
+				if err := config.ValidateSetting(config.ScopeYard, "SSH_PORT", value.Value, false); err != nil {
+					return invalid("typed SSH port recovery has an invalid value")
+				}
 			}
 		} else if value.Value != "" {
 			return invalid("absent typed settings recovery has a value")
@@ -2714,6 +2755,7 @@ func validateSettingsRecovery(
 func (transition *V2Transition) workFingerprint(
 	ctx context.Context,
 	work v2Work,
+	journal JournalRecord,
 ) (Fingerprint, error) {
 	switch work.kind {
 	case v2IngressWork:
@@ -2730,7 +2772,11 @@ func (transition *V2Transition) workFingerprint(
 		}
 		return actual, nil
 	case v2SettingsWork:
-		_, _, actual, err := transition.observeSettingsWork(work.intent.Resource)
+		index := slices.IndexFunc(journal.Steps, func(step JournalStep) bool { return step.ID == work.intent.ID })
+		if index < 0 {
+			return "", invalid("settings work has no authorized journal step")
+		}
+		_, _, actual, err := transition.observeJournalSettingsWork(journal, journal.Steps[index], work.migration)
 		if err != nil {
 			return "", err
 		}

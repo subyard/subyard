@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -37,6 +38,7 @@ type preparedConfigSyncPush struct {
 	createdCommit     bool
 	pushRequired      bool
 	repairPermissions bool
+	sshCleanupPaths   []string
 }
 
 func (cli *CLI) runConfigSyncPush(
@@ -196,45 +198,54 @@ func (cli *CLI) prepareConfigSyncPush(
 	candidateOptions := options
 	candidateOptions.SourceRoot = repository.checkout
 	candidateOptions.SourceIdentityRoot = record.Checkout
+	// Validate every source boundary before a writer touches the isolated candidate.
+	if _, err := configsync.BuildPlan(candidateOptions); err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, fmt.Errorf("validate configuration before source change: %w", err)
+	}
+	paths, err := sanitizeLegacySSHSource(repository.checkout, syncState.HostID)
+	if err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)
+	}
+	prepared.sshCleanupPaths = slices.Clone(paths)
 	if request.authoring != nil {
-		// Validate source boundaries before any writer can follow a tracked
-		// symlink in the isolated checkout outside that checkout.
-		if _, err := configsync.BuildPlan(candidateOptions); err != nil {
-			prepared.cleanup(cli, ctx)
-			return nil, fmt.Errorf("validate configuration before selected change: %w", err)
-		}
-		paths, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, *request.authoring, request.content)
+		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, *request.authoring, request.content)
 		if err != nil {
 			prepared.cleanup(cli, ctx)
 			return nil, fmt.Errorf("prepare selected configuration change: %w", err)
 		}
-		if err := hardenConfigCandidate(repository.checkout); err != nil {
+		paths = append(paths, selected...)
+	}
+	if err := hardenConfigCandidate(repository.checkout); err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, err
+	}
+	if len(paths) != 0 {
+		if err := cli.configGitRun(ctx, repository.checkout, append([]string{"add", "--all", "--"}, paths...)...); err != nil {
 			prepared.cleanup(cli, ctx)
-			return nil, err
+			return nil, fmt.Errorf("stage configuration change: %w", err)
 		}
-		if len(paths) != 0 {
-			if err := cli.configGitRun(ctx, repository.checkout, append([]string{"add", "--all", "--"}, paths...)...); err != nil {
-				prepared.cleanup(cli, ctx)
-				return nil, fmt.Errorf("stage selected configuration change: %w", err)
-			}
-		}
-		staged, err := cli.configGitOutput(ctx, repository.checkout, "diff", "--cached", "--name-only")
-		if err != nil {
+	}
+	staged, err := cli.configGitOutput(ctx, repository.checkout, "diff", "--cached", "--name-only")
+	if err != nil {
+		prepared.cleanup(cli, ctx)
+		return nil, err
+	}
+	if strings.TrimSpace(staged) != "" {
+		if _, err := cli.configGitInspectOutput(ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT"); err != nil {
 			prepared.cleanup(cli, ctx)
-			return nil, err
+			return nil, errors.New("Git author identity is not configured; set user.name and user.email for the operator account")
 		}
-		if strings.TrimSpace(staged) != "" {
-			if _, err := cli.configGitInspectOutput(ctx, record.Checkout, "var", "GIT_AUTHOR_IDENT"); err != nil {
-				prepared.cleanup(cli, ctx)
-				return nil, errors.New("Git author identity is not configured; set user.name and user.email for the operator account")
-			}
-			if err := cli.configGitRun(ctx, repository.checkout, "commit", "--quiet", "-m", request.message); err != nil {
-				prepared.cleanup(cli, ctx)
-				return nil, fmt.Errorf("create configuration commit: %w", err)
-			}
-			prepared.createdCommit = true
-			prepared.pushRequired = true
+		message := request.message
+		if message == "" {
+			message = "Remove owner-local SSH ports from versioned settings"
 		}
+		if err := cli.configGitRun(ctx, repository.checkout, "commit", "--quiet", "-m", message); err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, fmt.Errorf("create configuration commit: %w", err)
+		}
+		prepared.createdCommit, prepared.pushRequired = true, true
 	}
 	prepared.candidate, err = cli.configGitOutput(
 		ctx, repository.checkout, "rev-parse", "--verify", "HEAD",

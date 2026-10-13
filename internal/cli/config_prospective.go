@@ -196,6 +196,16 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		if err != nil {
 			return "", "", fmt.Errorf("yard %s: %w", name, err)
 		}
+		if draft && plan.request.action == "selection-repair" {
+			before, err := config.Load(config.LoadOptions{RepositoryRoot: plan.cli.options.RepositoryRoot,
+				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
+			if err != nil {
+				return "", "", err
+			}
+			if err := plan.cli.checkSelectionReduction(before, loaded, plan.request.name); err != nil {
+				return "", "", err
+			}
+		}
 		contexts = append(contexts, loaded)
 		for _, path := range loaded.AssetValidationInputs() {
 			if err := observe(path); err != nil {

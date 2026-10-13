@@ -280,6 +280,19 @@ func newV0111ProcessFixture(t *testing.T) (v0111ProcessFixture, v0111FixtureBind
 		candidateTx: "tx-recovery-v0112",
 	}
 	fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
+	var retainedRegistry releasetransition.RegistryV2
+	if err := json.Unmarshal(fixture.registry, &retainedRegistry); err != nil {
+		t.Fatal(err)
+	}
+	retainedRegistry.CurrentEpochs["settings"] = 2
+	retainedRegistry.CurrentEpochs["power-metadata"] = 1
+	retainedRegistry.Migrations = retainedRegistry.Migrations[:2]
+	retainedPayload, err := json.Marshal(retainedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.registry = retainedPayload
 	if err := os.MkdirAll(filepath.Join(fixture.runtimeRoot, "releases", string(fixture.previous)), 0o700); err != nil {
 		t.Fatal(err)
 	}

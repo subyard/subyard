@@ -17,8 +17,8 @@ import (
 func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
 	fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 	fixture.writeSource(
 		"hosts/owner-a/yards/demo/overrides/agents/codex/rules/repo.rules",
 		"allow\n",
@@ -52,13 +52,13 @@ func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, "host-id"), "owner-a\n", 0o600)
-	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2233\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2233\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "overrides", "shared", "config.env"),
 		"YARD_IMAGE=images:debian/13\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards", "demo", "config.env"),
-		"SSH_PORT=2234\n", 0o600)
+		"DEV_UID=2234\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards", "demo", "overrides", "agents", "codex", "rules", "repo.rules"),
 		"allow\n", 0o644)
@@ -94,7 +94,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 		fixture := newSyncFixture(t, "owner-a")
 		fixture.commit("manifest only")
 		writeSyncTestFile(
-			t, filepath.Join(fixture.configHome, "config.env"), "SSH_PORT=2299\n", 0o600,
+			t, filepath.Join(fixture.configHome, "config.env"), "DEV_UID=2299\n", 0o600,
 		)
 
 		plan, err := BuildPlan(fixture.options(false))
@@ -108,7 +108,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 			t.Fatal(err)
 		}
 		assertSyncTestFile(
-			t, filepath.Join(fixture.configHome, "config.env"), "SSH_PORT=2299\n", 0o600,
+			t, filepath.Join(fixture.configHome, "config.env"), "DEV_UID=2299\n", 0o600,
 		)
 		assertSyncTestFile(t, HostIDPath(fixture.configHome), "owner-a\n", 0o600)
 	})
@@ -141,7 +141,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 			"hosts/owner-a/overrides/agents/codex/rules/repo.rules", "allow\n",
 		)
 		fixture.writeSource(
-			"hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n",
+			"hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n",
 		)
 		fixture.commit("host overlays without host config")
 
@@ -165,15 +165,15 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 		)
 		assertSyncTestFile(
 			t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards", "demo", "config.env"),
-			"SSH_PORT=2234\n", 0o600,
+			"DEV_UID=2234\n", 0o600,
 		)
 	})
 
 	t.Run("other host is neither applied nor inspected", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-b/config.env", "SSH_PORT=3233\n")
+		fixture.writeSource("hosts/owner-b/config.env", "DEV_UID=3233\n")
 		fixture.commit("other host only")
-		fixture.writeSource("hosts/owner-b/config.env", "SSH_PORT=3299\n")
+		fixture.writeSource("hosts/owner-b/config.env", "DEV_UID=3299\n")
 
 		plan, err := BuildPlan(fixture.options(false))
 		if err != nil {
@@ -195,7 +195,7 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 
 func TestVersionedConfigSyncPreservesUnmanagedDefaultYardSettings(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 	fixture.commit("host setting")
 	defaultSettings := filepath.Join(fixture.configHome, "yards", "default", "config.env")
 	writeSyncTestFile(t, defaultSettings, "ENVIRONMENT_PROFILES=synthetic\n", 0o600)
@@ -289,7 +289,7 @@ func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T)
 		{
 			name: "selected host has an unknown child",
 			write: func(fixture *syncFixture) {
-				fixture.writeSource("hosts/owner-a/unknown.env", "SSH_PORT=2233\n")
+				fixture.writeSource("hosts/owner-a/unknown.env", "DEV_UID=2233\n")
 			},
 			want: "unexpected source path",
 		},
@@ -318,7 +318,7 @@ func TestVersionedConfigSyncKeepsOptionalScopeValidationFailClosed(t *testing.T)
 	t.Run("untracked selected host appearance", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
 		fixture.commit("manifest only")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
 			!strings.Contains(err.Error(), "changes in managed paths") {
 			t.Fatalf("untracked selected host was accepted: %v", err)
@@ -341,7 +341,7 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 	for _, test := range []struct {
 		name, content, want string
 	}{
-		{"unknown", "TYPO_SSH_PORT=2233\n", "unknown setting"},
+		{"unknown", "TYPO_DEV_UID=2233\n", "unknown setting"},
 		{"secret-like", "YARD_IMAGE=password=not-config\n", "secret material"},
 		{"local-only", "STORAGE_PATH=/srv/private\n", "local-only"},
 	} {
@@ -357,9 +357,9 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 	}
 
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 	fixture.commit("clean")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2234\n")
 	if _, err := BuildPlan(fixture.options(false)); err == nil ||
 		!strings.Contains(err.Error(), "changes in managed paths") {
 		t.Fatalf("dirty source was accepted: %v", err)
@@ -380,9 +380,9 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 
 func TestVersionedConfigSyncRequiresCacheAdoptionAndRestoresCacheDrift(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 	fixture.commit("initial")
-	writeSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2233\n", 0o600)
+	writeSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2233\n", 0o600)
 
 	if _, err := BuildPlan(fixture.options(false)); err == nil ||
 		!strings.Contains(err.Error(), "--adopt") {
@@ -398,7 +398,7 @@ func TestVersionedConfigSyncRequiresCacheAdoptionAndRestoresCacheDrift(t *testin
 	if err := Apply(adopted); err != nil {
 		t.Fatal(err)
 	}
-	writeSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2299\n", 0o600)
+	writeSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2299\n", 0o600)
 	drift, err := BuildPlan(fixture.options(false))
 	if err != nil {
 		t.Fatal(err)
@@ -409,15 +409,15 @@ func TestVersionedConfigSyncRequiresCacheAdoptionAndRestoresCacheDrift(t *testin
 	if err := Apply(drift); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2233\n", 0o600)
+	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2233\n", 0o600)
 }
 
 func TestVersionedConfigSyncGuardsYardDeletionAndKeepsSameNameHostScoped(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
-	fixture.writeSource("hosts/owner-b/config.env", "SSH_PORT=3233\n")
-	fixture.writeSource("hosts/owner-b/yards/demo/config.env", "SSH_PORT=3234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
+	fixture.writeSource("hosts/owner-b/config.env", "DEV_UID=3233\n")
+	fixture.writeSource("hosts/owner-b/yards/demo/config.env", "DEV_UID=3234\n")
 	fixture.commit("two hosts")
 	ownerA, err := BuildPlan(fixture.options(false))
 	if err != nil {
@@ -432,6 +432,7 @@ func TestVersionedConfigSyncGuardsYardDeletionAndKeepsSameNameHostScoped(t *test
 	second.ConfigHome = secondHome
 	second.Environment = map[string]string{
 		"SUBYARD_CONFIG_HOME": secondHome,
+		"SUBYARD_CONFIG_DIR":  fixture.configDir,
 		"SUBYARD_HOME":        filepath.Join(filepath.Dir(secondHome), "data"),
 		"SUBYARD_HOST_ID":     "owner-b",
 	}
@@ -447,10 +448,10 @@ func TestVersionedConfigSyncGuardsYardDeletionAndKeepsSameNameHostScoped(t *test
 	}
 	assertSyncTestFile(t,
 		filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards", "demo", "config.env"),
-		"SSH_PORT=2234\n", 0o600)
+		"DEV_UID=2234\n", 0o600)
 	assertSyncTestFile(t,
 		filepath.Join(secondHome, config.GitSettingsRelativePath, "yards", "demo", "config.env"),
-		"SSH_PORT=3234\n", 0o600)
+		"DEV_UID=3234\n", 0o600)
 
 	if err := os.Remove(filepath.Join(fixture.source, "hosts", "owner-a", "yards", "demo", "config.env")); err != nil {
 		t.Fatal(err)
@@ -489,8 +490,8 @@ func TestVersionedConfigSyncGuardsYardDeletionAndKeepsSameNameHostScoped(t *test
 func TestVersionedConfigSyncSafelyRemovesSelectedHostSubtree(t *testing.T) {
 	t.Run("managed host and yard paths", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-		fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+		fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 		fixture.commit("selected host")
 		initial, err := BuildPlan(fixture.options(false))
 		if err != nil {
@@ -541,7 +542,7 @@ func TestVersionedConfigSyncSafelyRemovesSelectedHostSubtree(t *testing.T) {
 
 	t.Run("managed local drift", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		fixture.commit("selected host")
 		initial, err := BuildPlan(fixture.options(false))
 		if err != nil {
@@ -551,7 +552,7 @@ func TestVersionedConfigSyncSafelyRemovesSelectedHostSubtree(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeSyncTestFile(
-			t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2299\n", 0o600,
+			t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "config.env"), "DEV_UID=2299\n", 0o600,
 		)
 		if err := os.RemoveAll(filepath.Join(fixture.source, "hosts", "owner-a")); err != nil {
 			t.Fatal(err)
@@ -566,8 +567,8 @@ func TestVersionedConfigSyncSafelyRemovesSelectedHostSubtree(t *testing.T) {
 
 func TestVersionedConfigSyncGuardsMissingManagedYardDefinition(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 	fixture.commit("initial")
 	initial, err := BuildPlan(fixture.options(false))
 	if err != nil {
@@ -615,21 +616,21 @@ func TestVersionedConfigSyncRecoversInterruptedApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(configHome, "config.env")
-	writeSyncTestFile(t, target, "SSH_PORT=2299\n", 0o600)
+	writeSyncTestFile(t, target, "DEV_UID=2299\n", 0o600)
 	tx := transaction{
 		SchemaVersion: 1, ID: "1-aaaaaaaaaaaaaaaa", Phase: "applying",
 		PlanDigest: strings.Repeat("a", 64), NewManifestDigest: strings.Repeat("b", 64),
 		Applied: 1, Entries: []transactionEntry{{
 			Path: "config.env", Action: "update", Existed: true,
-			BeforeDigest: digestBytes([]byte("SSH_PORT=2233\n")),
-			AfterDigest:  digestBytes([]byte("SSH_PORT=2299\n")),
+			BeforeDigest: digestBytes([]byte("DEV_UID=2233\n")),
+			AfterDigest:  digestBytes([]byte("DEV_UID=2299\n")),
 			BeforeMode:   0o600, AfterMode: 0o600,
 		}},
 	}
 	backup := filepath.Join(
 		configHome, ".sync", "transactions", tx.ID, "backup", "config.env",
 	)
-	if err := writeFileDurable(configHome, backup, []byte("SSH_PORT=2233\n"), 0o600); err != nil {
+	if err := writeFileDurable(configHome, backup, []byte("DEV_UID=2233\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeTransaction(configHome, tx); err != nil {
@@ -638,7 +639,7 @@ func TestVersionedConfigSyncRecoversInterruptedApply(t *testing.T) {
 	if err := Recover(configHome); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, target, "SSH_PORT=2233\n", 0o600)
+	assertSyncTestFile(t, target, "DEV_UID=2233\n", 0o600)
 	if _, err := os.Lstat(TransactionPath(configHome)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("transaction journal survived recovery: %v", err)
 	}
@@ -646,13 +647,13 @@ func TestVersionedConfigSyncRecoversInterruptedApply(t *testing.T) {
 
 func TestVersionedConfigSyncRejectsStaleSourcePlan(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 	fixture.commit("initial")
 	plan, err := BuildPlan(fixture.options(false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2234\n")
 	fixture.commit("change after preview")
 	if err := Apply(plan); !errors.Is(err, ErrPlanStale) {
 		t.Fatalf("stale source plan was not identified: %v", err)
@@ -669,7 +670,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
 		external := filepath.Join(t.TempDir(), "config.env")
-		writeSyncTestFile(t, external, "SSH_PORT=2233\n", 0o600)
+		writeSyncTestFile(t, external, "DEV_UID=2233\n", 0o600)
 		target := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			t.Fatal(err)
@@ -688,7 +689,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 	t.Run("hardlink", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
 		external := filepath.Join(t.TempDir(), "config.env")
-		writeSyncTestFile(t, external, "SSH_PORT=2233\n", 0o600)
+		writeSyncTestFile(t, external, "DEV_UID=2233\n", 0o600)
 		target := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			t.Fatal(err)
@@ -705,7 +706,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 	t.Run("executable", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		path := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.Chmod(path, 0o700); err != nil {
 			t.Fatal(err)
@@ -719,7 +720,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 	t.Run("group-writable", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		fixture.commit("initial")
 		path := filepath.Join(fixture.source, "hosts", "owner-a", "config.env")
 		if err := os.Chmod(path, 0o620); err != nil {
@@ -733,10 +734,10 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 	t.Run("ignored-untracked", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		fixture.writeSource(".gitignore", "hosts/owner-a/ignored.env\n")
 		fixture.commit("ignore rule")
-		fixture.writeSource("hosts/owner-a/ignored.env", "SSH_PORT=2299\n")
+		fixture.writeSource("hosts/owner-a/ignored.env", "DEV_UID=2299\n")
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
 			!strings.Contains(err.Error(), "ignored untracked") {
 			t.Fatalf("ignored managed-path source was accepted: %v", err)
@@ -745,7 +746,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 
 	t.Run("forbidden-role", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 		fixture.writeSource("projects/runtime.json", "{}\n")
 		fixture.commit("forbidden role")
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
@@ -758,7 +759,7 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 func TestVersionedConfigSyncRejectsLiveSymlinkAncestor(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
 	fixture.writeSource("shared/config.env", "YARD_IMAGE=images:debian/13\n")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 	fixture.commit("initial")
 	if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
 		t.Fatal(err)
@@ -782,13 +783,13 @@ func TestVersionedConfigSyncRecoveryDoesNotOverwriteExternalChange(t *testing.T)
 		t.Fatal(err)
 	}
 	target := filepath.Join(configHome, "config.env")
-	writeSyncTestFile(t, target, "SSH_PORT=2299\n", 0o600)
+	writeSyncTestFile(t, target, "DEV_UID=2299\n", 0o600)
 	tx := transaction{
 		SchemaVersion: 1, ID: "1-bbbbbbbbbbbbbbbb", Phase: "applying",
 		PlanDigest: strings.Repeat("a", 64), NewManifestDigest: strings.Repeat("b", 64),
 		Applied: 0, Entries: []transactionEntry{{
 			Path: "config.env", Action: "add", Existed: false,
-			AfterDigest: digestBytes([]byte("SSH_PORT=2233\n")), AfterMode: 0o600,
+			AfterDigest: digestBytes([]byte("DEV_UID=2233\n")), AfterMode: 0o600,
 		}},
 	}
 	if err := writeTransaction(configHome, tx); err != nil {
@@ -798,7 +799,7 @@ func TestVersionedConfigSyncRecoveryDoesNotOverwriteExternalChange(t *testing.T)
 		!strings.Contains(err.Error(), "refusing to overwrite") {
 		t.Fatalf("recovery overwrote an external edit or returned the wrong error: %v", err)
 	}
-	assertSyncTestFile(t, target, "SSH_PORT=2299\n", 0o600)
+	assertSyncTestFile(t, target, "DEV_UID=2299\n", 0o600)
 	if _, err := os.Lstat(TransactionPath(configHome)); err != nil {
 		t.Fatalf("failed recovery discarded its journal: %v", err)
 	}
@@ -1048,6 +1049,7 @@ type syncFixture struct {
 	configHome   string
 	operatorHome string
 	hostID       string
+	configDir    string
 	fileSettings []config.FileSettingMapping
 }
 
@@ -1055,7 +1057,34 @@ func newSyncFixture(t *testing.T, hostID string) *syncFixture {
 	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
-	base := t.TempDir()
+	base := testkit.TempDir(t)
+	// A shipped fixture template supplies distinct transport defaults without
+	// creating a local yard definition. Source-only deletion remains covered.
+	fixtureConfig := filepath.Join(base, "config")
+	if err := os.MkdirAll(filepath.Join(fixtureConfig, "yards", "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "yards" {
+			if err := os.Symlink(filepath.Join(root, "config", entry.Name()), filepath.Join(fixtureConfig, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	templates, err := os.ReadDir(filepath.Join(root, "config", "yards", "profiles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range templates {
+		if err := os.Symlink(filepath.Join(root, "config", "yards", "profiles", entry.Name()), filepath.Join(fixtureConfig, "yards", "profiles", entry.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSyncTestFile(t, filepath.Join(fixtureConfig, "yards", "profiles", "sync-fixture.env"), "SSH_PORT=2234\n", 0o600)
 	source := filepath.Join(base, "source")
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatal(err)
@@ -1079,13 +1108,16 @@ func newSyncFixture(t *testing.T, hostID string) *syncFixture {
 	}
 	return &syncFixture{
 		t: t, root: root, source: source, configHome: configHome,
-		operatorHome: operatorHome, hostID: hostID,
+		operatorHome: operatorHome, hostID: hostID, configDir: fixtureConfig,
 		fileSettings: config.SyncableFileMappings(loaded),
 	}
 }
 
 func (fixture *syncFixture) writeSource(relative, content string) {
 	fixture.t.Helper()
+	if strings.Contains(relative, "/yards/") && filepath.Base(relative) == "config.env" && strings.Contains(content, "DEV_UID=") && !strings.Contains(content, "YARD_TEMPLATE=") {
+		content += "YARD_TEMPLATE=sync-fixture\n"
+	}
 	writeSyncTestFile(fixture.t, filepath.Join(fixture.source, relative), content, 0o600)
 }
 
@@ -1103,6 +1135,7 @@ func (fixture *syncFixture) options(adopt bool) Options {
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
 		Environment: map[string]string{
 			"SUBYARD_CONFIG_HOME": fixture.configHome,
+			"SUBYARD_CONFIG_DIR":  fixture.configDir,
 			"SUBYARD_HOME":        filepath.Join(fixture.operatorHome, ".subyard"),
 			"SUBYARD_HOST_ID":     fixture.hostID,
 		},
@@ -1132,6 +1165,9 @@ func assertSyncTestFile(t *testing.T, path, expected string, mode os.FileMode) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "YARD_TEMPLATE=sync-fixture\n") && !strings.Contains(expected, "YARD_TEMPLATE=") {
+		expected += "YARD_TEMPLATE=sync-fixture\n"
 	}
 	if string(content) != expected {
 		t.Fatalf("%s content=%q want=%q", path, content, expected)

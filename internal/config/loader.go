@@ -960,7 +960,24 @@ func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values en
 		delete(probe, legacy)
 	}
 	for _, assignment := range assignments {
-		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable); err != nil {
+		syncable := requireSyncable
+		if syncable && assignment.name == "SSH_PORT" {
+			var content []byte
+			var err error
+			if len(readers) != 0 && readers[0] != nil {
+				content, err = readers[0](source)
+			} else {
+				content, err = os.ReadFile(source)
+			}
+			if err == nil {
+				err = LegacyGitSSHPort(path, content)
+			}
+			if err != nil {
+				return sourceContext(path, assignment.line, "SSH_PORT", "scalar settings", err)
+			}
+			syncable = false
+		}
+		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, syncable); err != nil {
 			return sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err)
 		}
 	}

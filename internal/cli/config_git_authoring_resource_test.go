@@ -37,9 +37,10 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 	environment = append(environment, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	checkout := filepath.Join(f.home, ".local/share/subyard-config")
 	source := filepath.Join(checkout, "hosts/owner-a/yards/demo/config.env")
-	old := "YARD_KIND=vm\nSSH_PORT=2300\nENVIRONMENT_PROFILES=sample\n"
+	old := "YARD_KIND=vm\nDEV_UID=2300\nENVIRONMENT_PROFILES=sample\n"
 	writeConfigCommandFile(t, source, old, 0o600)
 	commitConfigSource(t, checkout, "Select sample profile")
+	writeConfigCommandFile(t, filepath.Join(f.configHome, "yards/demo/config.env"), "SSH_PORT=2300\n", 0o600)
 	plan, err := configsync.BuildPlan(configsync.Options{
 		SourceRoot: checkout, ConfigHome: f.configHome, RepositoryRoot: root,
 		OperatorHome: f.home, Environment: environmentMap(environment), Adopt: true,
@@ -52,7 +53,7 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 	}
 	// The requested change already exists in Git, while an earlier failed apply
 	// left the active resource selected in the cached effective settings.
-	writeConfigCommandFile(t, source, "YARD_KIND=vm\nSSH_PORT=2300\nENVIRONMENT_PROFILES=''\n", 0o600)
+	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_UID=2300\nENVIRONMENT_PROFILES=''\n", 0o600)
 	commitConfigSource(t, checkout, "Deselect sample profile")
 	cache := filepath.Join(f.configHome, config.GitSettingsRelativePath, "yards/demo/config.env")
 	cacheBefore, err := os.ReadFile(cache)

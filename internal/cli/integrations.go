@@ -307,8 +307,14 @@ type integrationStatus struct {
 	Selection     config.IntegrationSelection `json:"selection"`
 	Observed      string                      `json:"observed"`
 	ObservedScope string                      `json:"observed_scope"`
+	Inventory     []integrationInventoryEntry `json:"inventory"`
 	Detail        string                      `json:"detail,omitempty"`
 	Health        map[string]string           `json:"health,omitempty"`
+}
+
+type integrationInventoryEntry struct {
+	config.ComponentSelection
+	Observed string `json:"observed"`
 }
 
 func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded, id string) (integrationStatus, error) {
@@ -324,6 +330,9 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		return session.integrationStatus(ctx, loaded.Context, cli.ensureOperationID(), id)
 	}
 	status := integrationStatus{Yard: loaded.Context.YardName, ID: id, Selection: loaded.Integrations, Observed: "unknown", ObservedScope: "yard"}
+	for _, component := range loaded.IntegrationInventory() {
+		status.Inventory = append(status.Inventory, integrationInventoryEntry{ComponentSelection: component, Observed: "not-inspected"})
+	}
 	if id != "" {
 		if _, err := config.ResolveIntegrationSelection(loaded.Environment, []string{id}); err != nil {
 			return status, err
@@ -376,6 +385,12 @@ func (cli *CLI) queryIntegrationStatus(ctx context.Context, loaded config.Loaded
 		}
 	}
 	status.Health = (statusruntime.Runtime{Environment: healthEnvironment, Executor: executor}).ReadIntegrationHealth(ctx, loaded.Context, true)
+	for index := range status.Inventory {
+		entry := &status.Inventory[index]
+		if state, exists := status.Health[entry.ID]; exists {
+			entry.Observed = state
+		}
+	}
 	return status, nil
 }
 func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool) {
@@ -390,6 +405,14 @@ func (cli *CLI) printIntegrationStatus(status integrationStatus, jsonOutput bool
 		requested = "<empty>"
 	}
 	fmt.Fprintf(cli.options.Stdout, "Yard: %s\nRequested: %s\nEffective: %s\nSource: %s (%s)\nObserved (yard): %s\n", status.Yard, requested, strings.Join(status.Selection.Effective, " "), status.Selection.Provenance.Path, status.Selection.Provenance.Scope, status.Observed)
+	for _, entry := range status.Inventory {
+		fmt.Fprintf(cli.options.Stdout, "  %s: requested=%t effective=%t eligible=%t reason=%s; %s (%s, %s:%d); runtime=%s\n", entry.ID, entry.Requested, entry.Effective, entry.Eligible, entry.Reason, entry.SourceGroup, entry.Source.Scope, entry.Source.Path, entry.Source.Line, entry.Observed)
+	}
+	if len(status.Inventory) != 0 {
+		for _, source := range status.Inventory[0].Overridden {
+			fmt.Fprintf(cli.options.Stdout, "  overridden: %s (%s scope, %s:%d)\n", source.Status, source.Scope, source.Path, source.Line)
+		}
+	}
 	if status.ID != "" {
 		fmt.Fprintf(cli.options.Stdout, "%s: requested=%t effective=%t required-by=%s\n", status.ID, slices.Contains(status.Selection.Requested, status.ID), slices.Contains(status.Selection.Effective, status.ID), strings.Join(status.Selection.DependencyReasons[status.ID], ", "))
 	}

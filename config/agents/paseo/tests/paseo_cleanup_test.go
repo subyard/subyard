@@ -1,4 +1,4 @@
-package reconcileruntime
+package paseo_test
 
 import (
 	"encoding/json"
@@ -32,7 +32,7 @@ func newPaseoCleanupFixture(t *testing.T) paseoCleanupFixture {
 		t.Fatal("Paseo cleanup tests require python3")
 	}
 	root := testkit.TempDir(t)
-	source, err := os.ReadFile("../../../config/agents/paseo/cleanup.sh")
+	source, err := os.ReadFile("../cleanup.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,9 +84,7 @@ esac
 
 func (f paseoCleanupFixture) write(path, content string) {
 	f.t.Helper()
-	if err := os.WriteFile(filepath.Join(f.root, path), []byte(content), 0o600); err != nil {
-		f.t.Fatal(err)
-	}
+	testkit.WriteFile(f.t, filepath.Join(f.root, path), []byte(content), 0o600)
 }
 
 func (f paseoCleanupFixture) read(path string) string {
@@ -199,7 +197,7 @@ func TestPaseoCleanupRejectsChangedStateBeforeMutation(t *testing.T) {
 }
 
 func TestPaseoCleanupRefusesUnsafeFiles(t *testing.T) {
-	for _, unsafe := range []string{"symlink", "directory", "parent-symlink", "backup"} {
+	for _, unsafe := range []string{"symlink", "directory", "parent-symlink"} {
 		t.Run(unsafe, func(t *testing.T) {
 			f := newPaseoCleanupFixture(t)
 			path := f.root + "/etc/systemd/system/paseo.service"
@@ -227,9 +225,6 @@ func TestPaseoCleanupRefusesUnsafeFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 				code = "cleanup_unsafe_path"
-			case "backup":
-				f.write("etc/systemd/system/paseo.service.subyard-retired", "existing backup")
-				code = "cleanup_backup_exists"
 			}
 			f.run("observe", "", code)
 			f.run("apply", strings.Repeat("0", 64), code)

@@ -71,7 +71,7 @@ printf 'changed=%s\n' "$changed"
 				if cleanupRetry != "" {
 					retry = cleanupRetry
 				}
-				return "", false, integrationOwnershipError{message: "integration paseo is not selected in CODING_TOOL_INTEGRATIONS, but /etc/systemd/system/paseo.service remains and ownership cannot be verified using /var/lib/subyard/paseo-ownership; service preserved (releases before 0.15 did not create this receipt)", retry: retry, detail: detail}
+				return "", false, integrationOwnershipError{message: "integration paseo is not selected in CODING_TOOL_INTEGRATIONS, but /etc/systemd/system/paseo.service remains and ownership cannot be verified using /var/lib/subyard/paseo-ownership; service preserved (releases before 0.15 did not create this receipt)", retry: retry, detail: detail, cleanupTarget: runtime.integrationCleanupTarget("paseo")}
 			case "subyard-integration-conflict:ccusage":
 				return "", false, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry}
 			}
@@ -79,6 +79,17 @@ printf 'changed=%s\n' "$changed"
 		return "", false, errors.New("integration service or utility ownership is unknown or changed")
 	}
 	return string(result.Stdout), strings.Contains(string(result.Stdout), "changed=1"), nil
+}
+
+func (runtime Runtime) integrationCleanupTarget(id string) string {
+	path := runtime.environmentValue("AGENT_" + id + "_CLEANUP")
+	if path == "" {
+		return ""
+	}
+	if _, err := (guestConfigFile{source: path}).readSource(); err != nil {
+		return ""
+	}
+	return id
 }
 
 func (runtime Runtime) integrationCleanupDiagnostic(id string) (string, string) {

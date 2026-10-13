@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -171,6 +172,39 @@ func (fixture *sourceScopeFixture) journal() releasetransition.JournalRecord {
 	return journal
 }
 
+func TestMaterializedActivationPlanExplainsEachYardsInheritedAndEmptySelection(t *testing.T) {
+	fixture := newSourceScopeFixture(t)
+	writeConfigCommandFile(t, filepath.Join(fixture.configHome, "config.env"),
+		"AGENT_claude_CONFIG='"+filepath.Join(fixture.configHome, "overrides/host/agents/claude/settings.json")+"'\nAGENT_claude_CONFIG_DEST=.claude/settings.json\n")
+	writeConfigCommandFile(t, filepath.Join(fixture.configHome, ".sync/settings/config.env"), "CODING_TOOL_INTEGRATIONS=claude\n")
+	writeConfigCommandFile(t, filepath.Join(fixture.configHome, "yards/named/config.env"), "SSH_PORT=2233\nCODING_TOOL_INTEGRATIONS=''\n")
+	reconciler := fixture.reconciler(false)
+	reconciler.allLocal, reconciler.scopeResolved = true, true
+	observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{From: "release-a", Target: "release-b"}, releasetransition.ReleaseLinks{Active: "release-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consequences := strings.Join(observation.Consequences, "\n")
+	inspection := fixture.execute(releasetransition.ProcessInspect, "", reconciler).Inspection
+	if inspection == nil || !inspection.Assessment.Changed {
+		t.Fatalf("materialized activation lost its assessment: %#v", inspection)
+	}
+	for _, explanation := range []string{
+		"yard default: requested coding integrations [claude], effective [claude], from Git settings (host scope",
+		"yard named: requested coding integrations [], effective [], from local overrides (yard scope",
+	} {
+		if !strings.Contains(consequences, explanation) {
+			t.Fatalf("missing per-yard source explanation %q: %s", explanation, consequences)
+		}
+		if !strings.Contains(strings.Join(inspection.Assessment.Consequences, "\n"), explanation) {
+			t.Fatalf("materialized actor explanation lost from owner assessment: %q", explanation)
+		}
+	}
+	if len(fixture.boundary.applied) != 0 {
+		t.Fatal("inspection applied materialized configuration")
+	}
+}
+
 func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 	for _, interrupt := range []bool{false, true} {
 		t.Run(map[bool]string{false: "complete", true: "resume"}[interrupt], func(t *testing.T) {
@@ -193,6 +227,7 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 				"canonicalize-test-vms-settings-v2":    "settings",
 				"canonicalize-test-yard-owner-v2":      "owner-registration",
 				"introduce-owner-publication-state-v1": "power-metadata",
+				"localize-ssh-port-settings-v3":        "settings",
 			}
 			if len(journal.Steps) != len(ledgerMigrations) {
 				t.Fatalf("expected only shipped ledger steps: %#v", journal.Steps)
@@ -213,9 +248,13 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			if err := json.Unmarshal(ledgerSnapshot.Payload, &ledger); err != nil {
 				t.Fatal(err)
 			}
-			for migration, domain := range ledgerMigrations {
+			for domain, expected := range map[string]releasetransition.DomainLedgerV2{
+				"settings":           {Epoch: 3, Applied: []string{"canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"}},
+				"owner-registration": {Epoch: 2, Applied: []string{"canonicalize-test-yard-owner-v2"}},
+				"power-metadata":     {Epoch: 2, Applied: []string{"introduce-owner-publication-state-v1"}},
+			} {
 				state := ledger.Domains[domain]
-				if state.Epoch != 2 || !reflect.DeepEqual(state.Applied, []string{migration}) {
+				if !reflect.DeepEqual(state, expected) {
 					t.Fatalf("ledger domain %s = %#v", domain, state)
 				}
 			}
@@ -295,4 +334,161 @@ func TestLedgerOnlyWideResumeRejectsChangedNamedConfig(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before.Payload, after.Payload) || len(fixture.boundary.applied) != 0 {
 		t.Fatal("stale scope inspection changed authorized state")
 	}
+}
+
+func newSSHPinSourceScopeFixture(t *testing.T) *sourceScopeFixture {
+	t.Helper()
+	f := newSourceScopeFixture(t)
+	writeConfigCommandFile(t, filepath.Join(f.configHome, "yards/named/config.env"),
+		"AGENT_claude_CONFIG='"+f.namedAsset+"'\n")
+	writeConfigCommandFile(t, filepath.Join(f.configHome, config.GitSettingsRelativePath, "config.env"), "SSH_PORT=2240\n")
+	writeConfigCommandFile(t, filepath.Join(f.configHome, config.GitSettingsRelativePath, "yards/named/config.env"), "SSH_PORT=2241\n")
+	payload := mustReadConfigFixture(t, filepath.Join(f.root, "config/release-transition.json"))
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := releasetransition.BaselineLedgerV2(registry)
+	for _, migration := range registry.Migrations {
+		if migration.Kind == "local-ssh-port-settings-v2-to-v3" {
+			break
+		}
+		ledger, err = ledger.Advance(registry, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	encoded, _, err := releasetransition.MarshalLedgerV2(ledger, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(f.configHome, "release-transition/v2/ledger.json"), encoded, 0o600)
+	return f
+}
+
+func assertNativeSSHPins(t *testing.T, f *sourceScopeFixture) {
+	t.Helper()
+	for yard, port := range map[string]string{"default": "2240", "named": "2241"} {
+		path := filepath.Join(f.configHome, "yards", yard, "config.env")
+		values, err := config.ReadAssignments(path)
+		info, statErr := os.Stat(path)
+		if err != nil || statErr != nil || values["SSH_PORT"] != port || info.Mode().Perm() != 0o600 {
+			t.Fatalf("actual native SSH pin CAS missing for yard %s: err=%v stat=%v", yard, err, statErr)
+		}
+	}
+	journal := f.journal()
+	if len(journal.Steps) != 3 {
+		t.Fatalf("expected two actual pin CAS steps and one ledger CAS: steps=%d", len(journal.Steps))
+	}
+	for _, step := range journal.Steps {
+		if step.Checkpoint != releasetransition.StepVerified {
+			t.Fatalf("native migration step not verified: resource=%s checkpoint=%s", step.Resource, step.Checkpoint)
+		}
+	}
+}
+
+func TestSSHPinForwardActivationBindsBothYardsAndFinalInspectionReady(t *testing.T) {
+	f := newSSHPinSourceScopeFixture(t)
+	initial := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+	if initial.Inspection == nil || len(initial.Inspection.Blockers) != 0 {
+		t.Fatalf("initial inspection unavailable: %#v", initial)
+	}
+	t.Logf("initial activation decisions=%v", initial.Inspection.Decisions)
+	writeConfigCommandFile(t, f.namedAsset, `{"env":{"SCOPE":"named-v2"}}`)
+	changed := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+	if changed.Inspection == nil {
+		t.Fatal("changed named inspection unavailable")
+	}
+	if changed.Inspection.Plan == initial.Inspection.Plan {
+		t.Error("original SSH-pin forward grant did not bind named desired asset")
+	}
+	writeConfigCommandFile(t, f.namedAsset, `{"env":{"SCOPE":"named-v1"}}`)
+	result := f.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, f.reconciler(false))
+	if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("original authorized convergence failed: %#v", result)
+	}
+	assertNativeSSHPins(t, f)
+	if !reflect.DeepEqual(f.boundary.applied, []string{"default", "named"}) {
+		t.Errorf("original SSH-pin grant did not apply both materialized targets: applied=%v", f.boundary.applied)
+	}
+	final := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+	if final.Inspection == nil || final.Inspection.Outcome == nil {
+		t.Fatal("fresh final inspection missing")
+	}
+	t.Logf("fresh final status=%s code=%s message=%s activation decisions=%v", final.Inspection.Outcome.Status, final.Inspection.Outcome.Code, final.Inspection.Outcome.Message, final.Inspection.Decisions)
+	if final.Inspection.Outcome.Status != releasetransition.StatusReady {
+		t.Errorf("completed SSH-pin forward activation needs fresh activation consent: status=%s decisions=%v", final.Inspection.Outcome.Status, final.Inspection.Decisions)
+	}
+}
+
+func TestSSHPinWideResumeRetainsBoundNamedInputs(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		t.Run(map[bool]string{false: "resume", true: "named-drift"}[drift], func(t *testing.T) {
+			f := newSSHPinSourceScopeFixture(t)
+			initial := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+			if initial.Inspection == nil || len(initial.Inspection.Blockers) != 0 {
+				t.Fatal("initial SSH pin plan unavailable")
+			}
+			interrupted := f.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, f.reconciler(true))
+			if interrupted.Outcome == nil || interrupted.Outcome.Status != releasetransition.StatusRecovering || len(f.boundary.applied) != 0 {
+				t.Fatal("SSH pin interruption did not precede materialized application")
+			}
+			original := f.journal()
+			assertNativeSSHPins(t, f)
+			if drift {
+				writeConfigCommandFile(t, f.namedAsset, `{"env":{"SCOPE":"named-drift"}}`)
+			}
+			resume := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+			if resume.Inspection == nil {
+				t.Fatal("SSH pin resume inspection missing")
+			}
+			if drift {
+				if len(resume.Inspection.Blockers) == 0 || len(f.boundary.applied) != 0 {
+					t.Fatal("named desired drift expanded the original SSH pin grant")
+				}
+			} else {
+				if resume.Inspection.Resume == nil || resume.Inspection.Plan != original.ResumePlan {
+					t.Fatal("SSH pin wide resume lost its original grant")
+				}
+				result := f.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, f.reconciler(false))
+				if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusReady || !reflect.DeepEqual(f.boundary.applied, []string{"default", "named"}) {
+					t.Fatalf("SSH pin wide resume failed: applied=%v result=%#v", f.boundary.applied, result.Outcome)
+				}
+			}
+			after := f.journal()
+			if after.Transaction != original.Transaction || after.AuthorizationPlan != original.AuthorizationPlan || after.ObservationScope != original.ObservationScope {
+				t.Fatal("SSH pin resume rewrote sealed history or observation scope")
+			}
+		})
+	}
+}
+
+func TestSSHPinHistoricalNarrowGrantRetainsScope(t *testing.T) {
+	f := newSSHPinSourceScopeFixture(t)
+	historical := func(interrupt bool) releasetransition.V2ActivationReconciler {
+		return sourceScopeHistoricalReconciler{f.reconciler(interrupt)}
+	}
+	initial := f.execute(releasetransition.ProcessInspect, "", historical(false))
+	if initial.Inspection == nil {
+		t.Fatal("historical initial inspection missing")
+	}
+	interrupted := f.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, historical(true))
+	if interrupted.Outcome == nil || interrupted.Outcome.Status != releasetransition.StatusRecovering {
+		t.Fatalf("historical interruption missing: %#v", interrupted)
+	}
+	original := f.journal()
+	resume := f.execute(releasetransition.ProcessInspect, "", f.reconciler(false))
+	if resume.Inspection == nil || resume.Inspection.Resume == nil || resume.Inspection.Plan != original.ResumePlan {
+		t.Fatal("historical resume grant changed")
+	}
+	result := f.execute(releasetransition.ProcessConverge, resume.Inspection.Plan, f.reconciler(false))
+	assertNativeSSHPins(t, f)
+	if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusReady || !reflect.DeepEqual(f.boundary.applied, []string{"default"}) || f.boundary.converged["subyard-named/yard-named"] {
+		t.Fatalf("historical narrow consent expanded: applied=%v outcome=%#v", f.boundary.applied, result.Outcome)
+	}
+	completed := f.journal()
+	if completed.Transaction != original.Transaction || completed.AuthorizationPlan != original.AuthorizationPlan || completed.ObservationScope != original.ObservationScope {
+		t.Fatal("historical sealed authorization rewritten")
+	}
+	t.Logf("historical narrow grant retained: applied=%v steps=%d scope=%s", f.boundary.applied, len(completed.Steps), strings.TrimSpace(string(completed.ObservationScope)))
 }

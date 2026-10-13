@@ -16,10 +16,12 @@
       "go:application",
       "go:migration",
       "go:adapters/reconcileruntime",
+      "go:ownerpublication",
       "go:systemdunit",
       "shell:lib-power-network",
       "shell:power-reconciler-systemd-255-launch",
       "shell:power-reconciler-systemd",
+      "shell:proxy-address-boot-controller",
       "p0:power-systemd",
       "p0:reboot-verify"
     ],
@@ -814,6 +816,13 @@
       "pattern": "^internal/ownerroute/.*$",
       "check_sets": ["host-free-core"],
       "risk_domains": ["profile-resource"]
+    },
+    {
+      "id": "internal-ownerpublication",
+      "priority": 564,
+      "pattern": "^internal/ownerpublication/.*$",
+      "check_sets": ["boot-power"],
+      "risk_domains": ["boot-lifecycle", "profile-resource", "migration"]
     },
     {
       "id": "internal-resource",

@@ -318,10 +318,10 @@ Usage: yard integration enable|disable <id> | cleanup <id> [--check] | status [i
 
 ## profile
 
-enable, disable or configure one profile without yard init.
+list profiles or manage one profile without yard init.
 
 ```text
-Usage: yard profile enable|disable|setup|status <id> [--yes] [--json]
+Usage: yard profile list [--json] | enable|disable|setup|status <id> [--yes] [--json]
 Manage a profile that declares an owner service, without general yard initialization.
 Enable and disable require an existing running yard; only that profile's owner/guest hook runs.
 Enable offers missing setup interactively. Setup prepares the owner connection separately, even while the yard is stopped.
@@ -334,11 +334,12 @@ Disable preserves shared credentials. Status reports selection, connection and o
 inspect, author, sync and reconcile Subyard settings.
 
 ```text
-Usage: yard config fields [SETTING] | show [SETTING] | paths | validate [--all-local] [--json] | repair-alias SETTING VALUE ... --scope <scope> --local [--check] [--yes] | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>
+Usage: yard config fields [SETTING] | show [SETTING] | paths | validate [--all-local] [--json] | repair-alias SETTING VALUE ... --scope <scope> --local [--check] [--yes] | reduce-selection SETTING VALUE --scope <scope> --local [--check] [--yes] | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>
   fields  list the typed public settings contract (read-only)
   show    explain effective Subyard settings and their sources (read-only)
   paths   list configuration sources and storage roles (read-only)
   validate  check selected or all local configuration schemas without a successful base load (read-only)
+  reduce-selection  during unfinished activation, store only a reduced persistent optional selection; sealed-owner recovery requires separate consent
   repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment
   set     save a typed scalar locally (default/--local) or commit/push it (--git)
   unset   remove a local scalar override or a Git assignment (--git)

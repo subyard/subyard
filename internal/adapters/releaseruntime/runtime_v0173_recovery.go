@@ -24,12 +24,13 @@ func isV0173ActivationOnlyBlocker(protected *protectedTransitionInspection) bool
 		return false
 	}
 	journal, inspection := protected.journal, protected.inspection
+	_, supportedCatalog := releasetransition.SupportedBuiltinCatalog(journal.CatalogDigest)
 	return journal.Checkpoint == releasetransition.JournalReconciling &&
 		journal.Releases.From == journal.Releases.Target &&
 		journal.Releases.Target == journal.Goal.Target &&
 		journal.Goal.Direction == releasetransition.DirectionActivateTarget &&
 		journal.SourceIngress == nil && len(journal.Steps) == 0 &&
-		journal.CatalogDigest == releasetransition.BuiltinCapabilityCatalog().Digest() &&
+		supportedCatalog &&
 		inspection.Resume != nil && *inspection.Resume == journal.Transaction &&
 		inspection.Plan == journal.ResumePlan && inspection.Outcome != nil &&
 		inspection.Outcome.Active == journal.Goal.Target &&

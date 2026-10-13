@@ -4088,6 +4088,7 @@ run_activation_repair_contract() (
   V2_LEDGER="$V2_STATE_ROOT/ledger.json"
   V2_JOURNAL="$V2_STATE_ROOT/journal.json"
   CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+  local candidate_runtime="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET"
   OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
   CANDIDATE_VERSION=candidate
   OPERATOR='fixture-operator'
@@ -4102,9 +4103,19 @@ run_activation_repair_contract() (
   export OPERATOR RECONCILER UNIT V2_JOURNAL V2_LEDGER
 
   mkdir -p "$STATE_ROOT" "$ROOT/config/systemd" "$OPERATOR_HOME/.local/bin" \
-    "$V2_STATE_ROOT" "$RELEASE_ROOT"
+    "$V2_STATE_ROOT" "$RELEASE_ROOT" "$candidate_runtime/config/systemd" \
+    "$candidate_runtime/bin"
   printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=candidate\n' \
     > "$ROOT/config/systemd/subyard-power-reconcile.service.in"
+  cp "$ROOT/config/systemd/subyard-power-reconcile.service.in" \
+    "$candidate_runtime/config/systemd/subyard-power-reconcile.service.in"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    '[ "$#" = 1 ] && [ "$1" = _publication-contracts ] || exit 64' \
+    'printf "eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n"' \
+    > "$candidate_runtime/bin/yard-engine"
+  chmod 0755 "$candidate_runtime/bin/yard-engine"
   printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.8\n' > "$OLD_UNIT_FIXTURE"
   printf '{"ledger":"stable"}\n' > "$V2_LEDGER"
   printf '%s\n' \
@@ -4278,7 +4289,7 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
     schemaVersion: 2,
     domains: {
       "owner-registration": {epoch: 2, applied: ["canonicalize-test-yard-owner-v2"]},
-      "power-metadata": {epoch: 1, applied: []},
+      "power-metadata": {epoch: 2, applied: ["introduce-owner-publication-state-v1"]},
       "project-state": {epoch: 1, applied: []},
       settings: {epoch: 2, applied: ["canonicalize-test-vms-settings-v2"]}
     }

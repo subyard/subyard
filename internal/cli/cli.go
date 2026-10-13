@@ -121,6 +121,7 @@ type CLI struct {
 	resourceSessionTransport     string
 	resourceWire                 string
 	profileInitRepair            *configApplyRepairPermit
+	integrationCleanupRepair     *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -173,6 +174,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.releaseTransitionChild = true
 	operation.configApplyRepair = nil
 	operation.profileInitRepair = nil
+	operation.integrationCleanupRepair = nil
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -483,6 +485,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@config" {
 		if action, rest := configEarlyInvocation(commandArguments); action == "repair-alias" {
 			return cli.runConfigAliasRepair(ctx, yard, rest, yes)
+		} else if action == "reduce-selection" {
+			return cli.runSelectionSourceRepair(ctx, yard, rest, yes)
 		} else if action == "validate" {
 			return cli.runConfigValidate(yard, rest)
 		}
@@ -550,7 +554,23 @@ func (cli *CLI) Run(ctx context.Context) int {
 				outcome = nil
 			}
 		}
+		if outcome != nil && core && definition.Handler == "@integration" {
+			permit, err := cli.prepareIntegrationCleanupRecovery(ctx, yard, commandArguments, *outcome)
+			if err != nil {
+				cli.errorf("integration cleanup recovery: %v", err)
+				return 1
+			}
+			cli.integrationCleanupRepair = permit
+			if permit != nil {
+				outcome = nil
+			}
+		}
 		if outcome != nil {
+			if core {
+				if handled, code := cli.runActivationSelectionRepair(ctx, yard, definition.Handler, commandArguments, yes, *outcome); handled {
+					return code
+				}
+			}
 			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(
 				publicMutationGateOutcome(*outcome),
 			); encodeErr != nil {
@@ -888,7 +908,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s integration enable|disable <id> | cleanup <id> [--check] | status [id] [--json]\n", cli.options.Program)
 		return 0
 	case "@profile":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s profile enable|disable|setup|status <id> [--yes] [--json]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s profile list [--json] | enable|disable|setup|status <id> [--yes] [--json]\n", cli.options.Program)
 		fmt.Fprintln(cli.options.Stdout, "Manage a profile that declares an owner service, without general yard initialization.")
 		fmt.Fprintln(cli.options.Stdout, "Enable and disable require an existing running yard; only that profile's owner/guest hook runs.")
 		fmt.Fprintln(cli.options.Stdout, "Enable offers missing setup interactively. Setup prepares the owner connection separately, even while the yard is stopped.")

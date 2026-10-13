@@ -85,8 +85,18 @@ def observe():
              [('unit', UNIT), ('backup', BACKUP), ('receipt', RECEIPT)]}
     live = files['unit']['file'] is not None
     backup = files['backup']['file'] is not None
+    destination = BACKUP
     if live and backup:
-        fail('cleanup_backup_exists', 'Paseo service and retirement backup both exist; resolve the backup before cleanup.')
+        # A later explicit enable can recreate the unit while preserving an
+        # earlier cleanup backup. Keep both generations without overwriting.
+        for generation in range(1, 33):
+            destination = BACKUP + '.' + str(generation)
+            candidate = file_state(destination)
+            files['destination'] = candidate
+            if candidate['file'] is None:
+                break
+        else:
+            fail('cleanup_backup_exists', 'Paseo retirement backup capacity is exhausted; preserve existing backups and resolve them before cleanup.')
     service = {}
     steps = []
     if live or backup:
@@ -107,12 +117,12 @@ def observe():
             steps = [
                 'Stop and disable paseo.service (active=' + service['ActiveState'] +
                 ', enabled=' + (service['UnitFileState'] or 'unknown') + ').',
-                'Preserve /etc/systemd/system/paseo.service as /etc/systemd/system/paseo.service.subyard-retired without overwriting a backup.',
+                'Preserve /etc/systemd/system/paseo.service as ' + destination + ' without overwriting a backup.',
                 'Reload systemd; preserve Paseo binaries, configuration, authentication and history.',
             ]
         elif service['NeedDaemonReload'] == 'yes':
             steps = ['Finish interrupted Paseo cleanup by reloading systemd; preserve the retirement backup and all Paseo data.']
-    state = {'files': files, 'service': service, 'developer': sys.argv[2:4]}
+    state = {'files': files, 'service': service, 'destination': destination, 'developer': sys.argv[2:4]}
     fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return state, {'fingerprint': fingerprint, 'changed': bool(steps), 'steps': steps}
 
@@ -140,10 +150,13 @@ def main():
                 for name, path in [('unit', UNIT), ('backup', BACKUP), ('receipt', RECEIPT)]:
                     if file_state(path) != state['files'][name]:
                         fail('cleanup_stale', 'Paseo cleanup state changed; inspect a fresh plan.')
+                if (state['destination'] != BACKUP
+                        and file_state(state['destination']) != state['files']['destination']):
+                    fail('cleanup_stale', 'Paseo cleanup destination changed; inspect a fresh plan.')
                 # Linux renameat2 is atomic and refuses an existing destination.
                 libc = ctypes.CDLL(None, use_errno=True)
                 if libc.renameat2(directory, b'paseo.service', directory,
-                                  b'paseo.service.subyard-retired', 1):
+                                  os.path.basename(state['destination']).encode(), 1):
                     fail('cleanup_backup_failed', 'Paseo unit backup could not be created; the original unit is preserved.')
                 os.fsync(directory)
             if result['changed']:

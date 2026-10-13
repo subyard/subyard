@@ -63,10 +63,11 @@ type Plan struct {
 	Digest             string
 	Adopt              bool
 
-	options     Options
-	desired     map[string]candidateFile
-	previous    Manifest
-	localInputs []localInputObservation
+	options      Options
+	desired      map[string]candidateFile
+	localDesired map[string]candidateFile
+	previous     Manifest
+	localInputs  []localInputObservation
 }
 
 func (plan Plan) NeedsApply() bool {
@@ -80,16 +81,26 @@ func (plan Plan) NeedsConfirmation() bool {
 type YardUseProbe func(name string) (reason string, inUse bool, err error)
 
 type Options struct {
-	SourceRoot         string
-	SourceIdentityRoot string
-	ConfigHome         string
-	RepositoryRoot     string
-	OperatorHome       string
-	Environment        map[string]string
-	FileSettings       []config.FileSettingMapping
-	Adopt              bool
-	ConfigLocked       bool
-	YardInUse          YardUseProbe
+	SourceRoot          string
+	SourceIdentityRoot  string
+	ConfigHome          string
+	RepositoryRoot      string
+	OperatorHome        string
+	Environment         map[string]string
+	FileSettings        []config.FileSettingMapping
+	Adopt               bool
+	ConfigLocked        bool
+	YardInUse           YardUseProbe
+	validationOverrides map[string]string
+	inspectionOnly      bool
+}
+
+func (plan Plan) candidate(path string) (candidateFile, bool) {
+	if file, found := plan.desired[path]; found {
+		return file, true
+	}
+	file, found := plan.localDesired[path]
+	return file, found
 }
 
 type Status struct {

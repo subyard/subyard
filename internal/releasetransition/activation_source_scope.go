@@ -4,11 +4,13 @@ import (
 	"context"
 	"slices"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // V2SourceStableActivationReconciler can assess release-wide activation when
-// the prepared source work changes only the ledger, not configuration or
-// registration. The returned function restores its historical scope.
+// prepared source work changes only the ledger or pins existing effective SSH
+// ports. The returned function restores its historical scope.
 type V2SourceStableActivationReconciler interface {
 	UseSourceStableActivationScope() func()
 }
@@ -27,17 +29,45 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 			return false
 		}
 		for _, step := range journal.Steps {
-			if !strings.HasPrefix(step.Resource, "ledger.") {
+			if !strings.HasPrefix(step.Resource, "ledger.") && !transition.localSSHPortScopeStable(PlannerStepIntent{
+				ID: step.ID, Migration: step.Migration, Resource: step.Resource,
+				Decision: step.Decision, Expected: step.Expected, Desired: step.Desired,
+			}) {
 				return false
 			}
 		}
 	}
 	for _, work := range observation.work {
-		if work.kind != v2LedgerWork {
+		if work.kind == v2LedgerWork {
+			continue
+		}
+		if work.kind != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
+			!transition.localSSHPortScopeStable(work.intent) {
+			return false
+		}
+		if work.file != nil {
+			if !work.file.LocalSSHPort || work.file.validate() != nil || settingsIntent(work.migration, *work.file) != work.intent {
+				return false
+			}
+		} else if observation.journal == nil || !slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool {
+			return step.ID == work.intent.ID && step.Migration == work.intent.Migration && step.Resource == work.intent.Resource &&
+				step.Decision == work.intent.Decision && step.Expected == work.intent.Expected && step.Desired == work.intent.Desired
+		}) {
+			// Completed CAS work may no longer have a fresh file plan. Its exact
+			// durable step was already checked by protected recovery observation.
 			return false
 		}
 	}
 	return true
+}
+
+func (transition *V2Transition) localSSHPortScopeStable(intent PlannerStepIntent) bool {
+	migration, known := transition.migration(intent.Migration)
+	return known && migration.Kind == localSSHPortMigration && migration.Domain == "settings" &&
+		migration.FromEpoch == 2 && migration.ToEpoch == 3 && transition.catalog.Supports(localSSHPortMigration, "settings") &&
+		domain.SafeName(intent.Resource) && intent.ID == migration.ID+"."+intent.Resource &&
+		intent.Decision == DecisionCanonicalize && validFingerprint(intent.Expected) && validFingerprint(intent.Desired) &&
+		intent.Expected != intent.Desired
 }
 
 func (transition *V2Transition) prepareSourceStableActivationScope() []func() {
@@ -55,7 +85,8 @@ func (transition *V2Transition) prepareSourceStableActivationScope() []func() {
 func (transition *V2Transition) observeActivationScope(ctx context.Context, observation *v2Observation) error {
 	stable := transition.sourceWorkStable(*observation)
 	journal := observation.journal
-	resume := journal != nil && journal.Checkpoint != JournalComplete
+	resume := journal != nil && (journal.Checkpoint != JournalComplete ||
+		(transition.options.MigrationCheckpoint && observation.migrationLedgerSnapshot.RequiresCheckpointPublication()))
 	if stable && !resume {
 		// Include every affected target in the original assessment and grant.
 		transition.prepareSourceStableActivationScope()
@@ -68,7 +99,9 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 	if journal != nil {
 		baseScope, scopeErr := transition.bindObservationScope(observation.activationScope)
 		oldScope := scopeErr == nil && journal.ObservationScope == baseScope
-		if resume || !oldScope {
+		// Bound activation-scope replay does not make a completed unmarked
+		// journal authorize checkpoint conversion against its old ledger.
+		if journal.Checkpoint != JournalComplete || !oldScope {
 			for _, step := range journal.Steps {
 				if strings.HasPrefix(step.Resource, "ledger.") {
 					checkpointSource = step.Expected

@@ -612,8 +612,8 @@ grep -Fxq '# retained' "$SUBYARD_CONFIG_HOME/yards/hermes/config.env" \
   || fail 'planned v2 canonicalize/reset did not reach its declared result'
 ledger="$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json"
 journal="$SUBYARD_CONFIG_HOME/release-transition/v2/journal.json"
-jq -e '.schemaVersion == 2 and .domains.settings.epoch == 2 and
-  .domains.settings.applied == ["canonicalize-test-vms-settings-v2"]' "$ledger" >/dev/null \
+jq -e '.schemaVersion == 2 and .domains.settings.epoch == 3 and
+  .domains.settings.applied == ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]' "$ledger" >/dev/null \
   && jq -e '.schemaVersion == 2 and .checkpoint == "complete"' "$journal" >/dev/null \
   || fail 'v2 transition did not record a completed per-domain fixed point'
 [ ! -e "$SUBYARD_CONFIG_HOME/migrations/state.json" ] \
@@ -663,13 +663,13 @@ recovery_older_source_bundle="$recovery_release/subyard-0.11.0-linux-amd64.tar.g
 recovery_source_bundle="$recovery_release/subyard-0.11.1-linux-amd64.tar.gz"
 recovery_candidate_bundle="$recovery_release/subyard-0.11.2-linux-amd64.tar.gz"
 # Pin the historical persisted-state contract in this disposable source copy.
-# The exact two-step recovery journal predates optional publication metadata;
+# The exact two-step recovery journal predates publication metadata and SSH localization;
 # current bootstrap and transition checks above keep the current registry.
 (
 cp "$ROOT/config/release-transition.json" "$TMP/release-transition.current.json"
 trap 'cp "$TMP/release-transition.current.json" "$ROOT/config/release-transition.json"' EXIT
-jq '.currentEpochs["power-metadata"] = 1 |
-  .migrations |= map(select(.kind != "owner-publication-state-v1"))' \
+jq '.currentEpochs["power-metadata"] = 1 | .currentEpochs.settings = 2 |
+  .migrations |= map(select(.kind != "owner-publication-state-v1" and .kind != "local-ssh-port-settings-v2-to-v3"))' \
   "$TMP/release-transition.current.json" > "$TMP/release-transition.historical.json"
 cp "$TMP/release-transition.historical.json" "$ROOT/config/release-transition.json"
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.9.1 >/dev/null

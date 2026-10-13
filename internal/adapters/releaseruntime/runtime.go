@@ -158,6 +158,19 @@ func (runtime *Runtime) InspectMutationGate(
 	configHome string,
 	yard string,
 ) (*releasetransition.Outcome, error) {
+	inspection, err := runtime.InspectMutationGateInspection(ctx, runtimeRoot, configHome, yard)
+	if err != nil || inspection == nil || inspection.Outcome.Status == releasetransition.StatusReady {
+		return nil, err
+	}
+	outcome := *inspection.Outcome
+	return &outcome, nil
+}
+
+// InspectMutationGateInspection retains the verified owner's structured blockers
+// for bounded local recovery admission. It confers no execution authority.
+func (runtime *Runtime) InspectMutationGateInspection(
+	ctx context.Context, runtimeRoot, configHome, yard string,
+) (*releasetransition.Inspection, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
 	inspection, err := runtime.inspectProtectedTransition(
 		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
@@ -165,7 +178,7 @@ func (runtime *Runtime) InspectMutationGate(
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
-			return &public.outcome, nil
+			return &releasetransition.Inspection{Outcome: &public.outcome}, nil
 		}
 		return nil, redactReleaseInspectionError(err)
 	}
@@ -182,11 +195,7 @@ func (runtime *Runtime) InspectMutationGate(
 			return nil, redactReleaseInspectionError(err)
 		}
 	}
-	outcome := *inspection.inspection.Outcome
-	if outcome.Status == releasetransition.StatusReady {
-		return nil, nil
-	}
-	return &outcome, nil
+	return &inspection.inspection, nil
 }
 
 func (runtime *Runtime) inspectProtectedTransition(

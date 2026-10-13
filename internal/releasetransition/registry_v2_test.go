@@ -254,11 +254,11 @@ func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if registry.MinimumEpochs["settings"] != 1 || registry.CurrentEpochs["settings"] != 2 ||
+	if registry.MinimumEpochs["settings"] != 1 || registry.CurrentEpochs["settings"] != 3 ||
 		registry.MinimumEpochs["owner-registration"] != 1 ||
-		registry.CurrentEpochs["owner-registration"] != 2 || len(registry.Migrations) != 3 ||
+		registry.CurrentEpochs["owner-registration"] != 2 || len(registry.Migrations) != 4 ||
 		registry.Migrations[0].ID != "canonicalize-test-vms-settings-v2" ||
-		registry.Migrations[1].ID != "canonicalize-test-yard-owner-v2" {
+		registry.Migrations[1].ID != "canonicalize-test-yard-owner-v2" || registry.Migrations[3].Kind != localSSHPortMigration {
 		t.Fatalf("published registry = %#v", registry)
 	}
 	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 2 || registry.Migrations[2].Kind != "owner-publication-state-v1" {

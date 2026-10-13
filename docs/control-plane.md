@@ -426,6 +426,26 @@ journals keep their recorded scope; a reconstructed all-local scope may resume o
 when its complete observation binding matches that journal exactly. Config
 reconciliation leaves stopped or absent yards untouched.
 
+Activation plans explain each affected yard's optional selection from that yard's loaded resolver
+snapshot, including inherited host Git selection and local empty overrides. Read-only component
+inventory uses the same snapshot; yard convergence and component health have separate scopes.
+
+The compiled `local-ssh-port-settings-v2-to-v3` migration advances the settings epoch to 3 and
+pins persistent Git-derived SSH ports into local yard settings. It does not modify source Git or
+managed cache. Local publication binds exact bytes, ownership, modes and parent directories;
+absent targets use no-replace publication with durable private parent creation. Explicit sync
+owns cache sanitation and prepared Git source cleanup. The new epoch has no legacy rollback
+compatibility policy. Recognized retained owners keep their exact previous compiled catalog,
+registry and journal identity; unknown catalog digests remain blocked.
+
+An original activation-only reconciling journal with a complete ledger can admit an independently
+consented local optional-selection reduction. Source admission verifies sealed assets and the
+original owner's schema-2 recovery capability without performing activation or rewriting history.
+Source publication rechecks protected metadata, tooling, all affected registrations and scalar
+inputs under their existing locks. Recovery then needs fresh sealed-owner consent bound to the
+changed inputs. Migration steps, source ingress, successor recovery histories and ordinary
+configuration apply do not enter this source-reduction boundary.
+
 Current route-consumer activation uses each managed yard's effective host-access policy.
 Yards that forbid host access do not receive or probe the shared E2E route mount; a missing
 mount on such a yard is converged. Native device ownership checks still apply to every
@@ -491,8 +511,10 @@ are preserved byte for byte; unknown, dynamic or duplicate template assignments 
 
 `yard migrate --check` reports readiness of the exact installed `current` release: per-domain
 recorded and required epochs, applied and pending migration IDs, transaction/step checkpoints,
-runtime reconciliation actions and blockers. Add `--json` for the versioned machine-readable
-report. A successful inspection exits 0 even when work remains; inspect `outcome.status` for
+runtime reconciliation actions, the verified owner's consequences (including per-yard selection
+and source explanations), and blockers. Add `--json` for the versioned machine-readable report;
+its optional `consequences` field preserves those explanations when the owner supplies them.
+A successful inspection exits 0 even when work remains; inspect `outcome.status` for
 readiness. Unavailable or unsupported inspection never means ready.
 
 Migration history has a separate schema 1 compact representation at

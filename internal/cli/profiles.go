@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerapi"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -45,6 +46,10 @@ func parseProfileArguments(arguments []string) (profileRequest, error) {
 			positional = append(positional, argument)
 		}
 	}
+	if len(positional) == 1 && positional[0] == "list" {
+		request.verb = "list"
+		return request, nil
+	}
 	if len(positional) != 2 || !slices.Contains([]string{"enable", "disable", "setup", "status"}, positional[0]) || !domain.SafeName(positional[1]) || request.json && positional[0] != "status" {
 		return request, errors.New("usage: profile enable|disable|setup|status <id> [--yes] [--json]")
 	}
@@ -54,7 +59,7 @@ func parseProfileArguments(arguments []string) (profileRequest, error) {
 
 func profileReadOnlyInvocation(arguments []string) bool {
 	request, err := parseProfileArguments(arguments)
-	return err == nil && request.verb == "status"
+	return err == nil && (request.verb == "status" || request.verb == "list")
 }
 
 func (cli *CLI) profileRuntime(loaded config.Loaded) ProfileServiceRuntime {
@@ -188,6 +193,31 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return errors.New("profile commands require the owner host; setup uses a protected owner-local credential file")
+	}
+	if request.verb == "list" {
+		list, err := (&rpcHandler{cli: cli, loaded: loaded}).ownerQueries().ProfileList(ctx)
+		if err != nil {
+			return err
+		}
+		source, overridden, group := config.ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
+		prepared.displayOnly = func() {
+			if request.json {
+				_ = json.NewEncoder(cli.options.Stdout).Encode(struct {
+					ownerapi.ProfileList
+					Source     config.SettingResolution   `json:"source"`
+					Overridden []config.SettingResolution `json:"overridden"`
+				}{list, source, overridden})
+				return
+			}
+			fmt.Fprintf(cli.options.Stdout, "Yard: %s\nEnvironment profiles (%s, %s scope, %s:%d):\n", loaded.Context.YardName, group, source.Scope, source.Path, source.Line)
+			for _, entry := range list.Profiles {
+				fmt.Fprintf(cli.options.Stdout, "  %s: requested=%t effective=%t eligible=%t reason=%s; runtime=%s (%s)\n", entry.Name, entry.Requested, entry.Effective, entry.Eligible, entry.Reason, entry.Convergence, entry.Diagnostic)
+			}
+			for _, entry := range overridden {
+				fmt.Fprintf(cli.options.Stdout, "  overridden: %s (%s scope, %s:%d)\n", entry.Status, entry.Scope, entry.Path, entry.Line)
+			}
+		}
+		return nil
 	}
 	definitions, err := profile.Load(cli.options.RepositoryRoot)
 	if err != nil {

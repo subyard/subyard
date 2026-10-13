@@ -44,18 +44,18 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 		t.Run(state, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
 			asset := "overrides/host/agents/codex/rules/repo.rules"
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 			fixture.writeSource("hosts/owner-a/overrides/agents/codex/rules/repo.rules", "old rule\n")
 			fixture.commit("legacy source")
 			installLegacySync(t, fixture)
 			scalar := filepath.Join(fixture.configHome, "config.env")
 			localAsset := filepath.Join(fixture.configHome, asset)
 			retained := state == "edited" || state == "mode-changed"
-			scalarContent, assetContent := "SSH_PORT=2233\n", "old rule\n"
+			scalarContent, assetContent := "DEV_UID=2233\n", "old rule\n"
 			scalarMode, assetMode := os.FileMode(0o600), os.FileMode(0o644)
 			switch state {
 			case "edited":
-				scalarContent, assetContent = "# operator choice\nSSH_PORT=2299\n", "operator rule\n"
+				scalarContent, assetContent = "# operator choice\nDEV_UID=2299\n", "operator rule\n"
 				writeSyncTestFile(t, scalar, scalarContent, scalarMode)
 				writeSyncTestFile(t, localAsset, assetContent, assetMode)
 			case "mode-changed":
@@ -74,7 +74,7 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 					t.Fatal(err)
 				}
 			}
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2235\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2235\n")
 			fixture.writeSource("hosts/owner-a/overrides/agents/codex/rules/repo.rules", "Git rule\n")
 			fixture.commit("new source")
 			plan, err := BuildPlan(fixture.options(false))
@@ -95,7 +95,7 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 				assertSyncTestFile(t, scalar, scalarContent, scalarMode)
 				assertSyncTestFile(t, localAsset, assetContent, assetMode)
 			}
-			assertSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "SSH_PORT=2235\n", 0o600)
+			assertSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "DEV_UID=2235\n", 0o600)
 			assertSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath(asset)), "Git rule\n", 0o644)
 			manifest, err := readManifest(fixture.configHome)
 			if err != nil || manifest.SchemaVersion != 2 || manifest.Generation != 8 {
@@ -116,8 +116,8 @@ func TestConfigSyncMigratesLegacySettingsWithoutLosingLocalChanges(t *testing.T)
 
 func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 	fixture.writeSource("hosts/owner-a/overrides/agents/codex/rules/repo.rules", "Git rule\n")
 	fixture.commit("initial")
 	local := filepath.Join(fixture.configHome, "config.env")
@@ -125,7 +125,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	writeSyncTestFile(t, local, "CODING_TOOL_INTEGRATIONS=''\n", 0o640)
 	writeSyncTestFile(t, asset, "operator rule\n", 0o640)
 	for _, port := range []string{"2233", "2235"} {
-		fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT="+port+"\n")
+		fixture.writeSource("hosts/owner-a/config.env", "DEV_UID="+port+"\n")
 		if port == "2235" {
 			fixture.commit("change Git setting")
 		}
@@ -146,8 +146,8 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
 		Environment: fixture.options(false).Environment, DisablePrivate: true,
 	})
-	if err != nil || loaded.Context.SSHPort != 2235 || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "" {
-		t.Fatalf("offline fallback/local empty resolution: port=%d err=%v", loaded.Context.SSHPort, err)
+	if err != nil || loaded.Environment["DEV_UID"] != "2235" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "" {
+		t.Fatalf("offline fallback/local empty resolution: value=%s err=%v", loaded.Environment["DEV_UID"], err)
 	}
 	if loaded.Environment["AGENT_codex_RULES"] != asset {
 		t.Fatal("local file override did not win over the cached Git file")
@@ -156,8 +156,8 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome, YardName: "demo",
 		Environment: fixture.options(false).Environment, DisablePrivate: true,
 	})
-	if err != nil || demo.Context.SSHPort != 2234 {
-		t.Fatalf("offline Git-only yard: port=%d err=%v", demo.Context.SSHPort, err)
+	if err != nil || demo.Environment["DEV_UID"] != "2234" {
+		t.Fatalf("offline Git-only yard: value=%s err=%v", demo.Environment["DEV_UID"], err)
 	}
 	if err := os.Remove(asset); err != nil {
 		t.Fatal(err)
@@ -175,15 +175,15 @@ func TestConfigSyncRejectsChangesToObservedLocalInputs(t *testing.T) {
 	for _, test := range []struct {
 		name, path, before, after string
 	}{
-		{"scalar-created", "config.env", "", "SSH_PORT=2299\n"},
-		{"scalar-edited", "config.env", "SSH_PORT=2298\n", "SSH_PORT=2299\n"},
-		{"scalar-inode-replaced", "config.env", "SSH_PORT=2299\n", "SSH_PORT=2299\n"},
+		{"scalar-created", "config.env", "", "DEV_UID=2299\n"},
+		{"scalar-edited", "config.env", "DEV_UID=2298\n", "DEV_UID=2299\n"},
+		{"scalar-inode-replaced", "config.env", "DEV_UID=2299\n", "DEV_UID=2299\n"},
 		{"asset-created", "overrides/host/agents/codex/rules/repo.rules", "", "operator rule\n"},
 		{"asset-edited", "overrides/host/agents/codex/rules/repo.rules", "old rule\n", "new rule\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 			fixture.commit("initial")
 			path := filepath.Join(fixture.configHome, test.path)
 			if test.before != "" {
@@ -211,8 +211,8 @@ func TestConfigSyncRejectsChangesToObservedLocalInputs(t *testing.T) {
 
 func TestConfigSyncKeepsLocalYardWhenGitDefinitionIsRemoved(t *testing.T) {
 	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 	fixture.commit("initial")
 	plan, err := BuildPlan(fixture.options(false))
 	if err != nil {
@@ -222,7 +222,7 @@ func TestConfigSyncKeepsLocalYardWhenGitDefinitionIsRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := filepath.Join(fixture.configHome, "yards/demo/config.env")
-	writeSyncTestFile(t, local, "SSH_PORT=2299\n", 0o600)
+	writeSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
 	if err := os.RemoveAll(filepath.Join(fixture.source, "hosts/owner-a/yards/demo")); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestConfigSyncKeepsLocalYardWhenGitDefinitionIsRemoved(t *testing.T) {
 	if err := Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	assertSyncTestFile(t, local, "SSH_PORT=2299\n", 0o600)
+	assertSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
 }
 
 func TestConfigSyncMigrationRecoveryUsesManifestCommitPoint(t *testing.T) {
@@ -250,7 +250,7 @@ func TestConfigSyncMigrationRecoveryUsesManifestCommitPoint(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 			fixture.commit("initial")
 			legacy := installLegacySync(t, fixture)
 			plan, err := BuildPlan(fixture.options(false))
@@ -270,8 +270,8 @@ func TestConfigSyncMigrationRecoveryUsesManifestCommitPoint(t *testing.T) {
 				},
 			}
 			backup := filepath.Join(fixture.configHome, ".sync", "transactions", tx.ID, "backup", "config.env")
-			writeSyncTestFile(t, backup, "SSH_PORT=2233\n", 0o600)
-			writeSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "SSH_PORT=2233\n", 0o600)
+			writeSyncTestFile(t, backup, "DEV_UID=2233\n", 0o600)
+			writeSyncTestFile(t, filepath.Join(fixture.configHome, gitSettingsPath("config.env")), "DEV_UID=2233\n", 0o600)
 			if err := os.Remove(filepath.Join(fixture.configHome, "config.env")); err != nil {
 				t.Fatal(err)
 			}
@@ -288,7 +288,7 @@ func TestConfigSyncMigrationRecoveryUsesManifestCommitPoint(t *testing.T) {
 			if published {
 				present, absent = absent, present
 			}
-			assertSyncTestFile(t, filepath.Join(fixture.configHome, present), "SSH_PORT=2233\n", 0o600)
+			assertSyncTestFile(t, filepath.Join(fixture.configHome, present), "DEV_UID=2233\n", 0o600)
 			if _, err := os.Lstat(filepath.Join(fixture.configHome, absent)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("recovery retained wrong storage layer: %v", err)
 			}
@@ -300,8 +300,8 @@ func TestConfigSyncLegacyYardDeletionRequiresRemainingDefinition(t *testing.T) {
 	for _, state := range []string{"unchanged", "missing", "edited"} {
 		t.Run(state, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
-			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "SSH_PORT=2234\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
 			fixture.commit("legacy source")
 			installLegacySync(t, fixture)
 			local := filepath.Join(fixture.configHome, "yards/demo/config.env")
@@ -310,7 +310,7 @@ func TestConfigSyncLegacyYardDeletionRequiresRemainingDefinition(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else if state == "edited" {
-				writeSyncTestFile(t, local, "SSH_PORT=2299\n", 0o600)
+				writeSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
 			}
 			if err := os.RemoveAll(filepath.Join(fixture.source, "hosts/owner-a/yards/demo")); err != nil {
 				t.Fatal(err)
@@ -328,7 +328,7 @@ func TestConfigSyncLegacyYardDeletionRequiresRemainingDefinition(t *testing.T) {
 				if err := Apply(plan); err != nil {
 					t.Fatal(err)
 				}
-				assertSyncTestFile(t, local, "SSH_PORT=2299\n", 0o600)
+				assertSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
 			} else if err == nil || !strings.Contains(err.Error(), "managed yard exists") {
 				t.Fatalf("legacy in-use yard deletion was accepted: %v", err)
 			}
@@ -354,7 +354,7 @@ func TestConfigSyncManifestCannotOwnOtherStorageRoles(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
-			fixture.writeSource("hosts/owner-a/config.env", "SSH_PORT=2233\n")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
 			fixture.commit("source")
 			manifest := installLegacySync(t, fixture)
 			manifest.SchemaVersion = test.schema
@@ -367,7 +367,7 @@ func TestConfigSyncManifestCannotOwnOtherStorageRoles(t *testing.T) {
 			if _, err := BuildPlan(fixture.options(false)); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("manifest gained ownership of unrelated storage: %v", err)
 			}
-			assertSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "SSH_PORT=2233\n", 0o600)
+			assertSyncTestFile(t, filepath.Join(fixture.configHome, "config.env"), "DEV_UID=2233\n", 0o600)
 			assertSyncTestFile(t, HostIDPath(fixture.configHome), "owner-a\n", 0o600)
 		})
 	}

@@ -127,11 +127,12 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 	}
 	if len(arguments) == 0 || commandHelpRequested(arguments) {
 		fmt.Fprintf(cli.options.Stdout,
-			"Usage: %s config fields [SETTING] | show [SETTING] | paths | validate [--all-local] [--json] | repair-alias SETTING VALUE ... --scope <scope> --local [--check] [--yes] | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>\n"+
+			"Usage: %s config fields [SETTING] | show [SETTING] | paths | validate [--all-local] [--json] | repair-alias SETTING VALUE ... --scope <scope> --local [--check] [--yes] | reduce-selection SETTING VALUE --scope <scope> --local [--check] [--yes] | set|unset|import|edit ... --scope <scope> [--local|--git] | status [--all-local] | apply [--all-local] [--yes] | sync <command>\n"+
 				"  fields  list the typed public settings contract (read-only)\n"+
 				"  show    explain effective Subyard settings and their sources (read-only)\n"+
 				"  paths   list configuration sources and storage roles (read-only)\n"+
 				"  validate  check selected or all local configuration schemas without a successful base load (read-only)\n"+
+				"  reduce-selection  during unfinished activation, store only a reduced persistent optional selection; sealed-owner recovery requires separate consent\n"+
 				"  repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment\n"+
 				"  set     save a typed scalar locally (default/--local) or commit/push it (--git)\n"+
 				"  unset   remove a local scalar override or a Git assignment (--git)\n"+

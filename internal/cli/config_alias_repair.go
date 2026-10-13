@@ -28,7 +28,7 @@ func configEarlyInvocation(arguments []string) (string, []string) {
 		return "", nil
 	}
 	rest := arguments[1:]
-	if yes && arguments[0] == "repair-alias" {
+	if yes && (arguments[0] == "repair-alias" || arguments[0] == "reduce-selection") {
 		rest = append(slices.Clone(rest), "--yes")
 	}
 	return arguments[0], rest
@@ -59,6 +59,7 @@ type configAliasRepairRequest struct {
 	scope             config.SettingScope
 	choices           []configAliasChoice
 	check, yes, local bool
+	selection         bool
 }
 
 func parseConfigAliasRepair(arguments []string) (configAliasRepairRequest, error) {
@@ -168,8 +169,16 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 		cli.errorf("config repair-alias: %v", err)
 		return 2
 	}
+	return cli.runConfigSourceRepair(ctx, yard, request, assumeYes)
+}
+
+func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request configAliasRepairRequest, assumeYes bool) int {
+	label := "config repair-alias"
+	if request.selection {
+		label = "config reduce-selection"
+	}
 	if !domain.SafeName(yard) {
-		cli.errorf("config repair-alias requires a plain local yard name")
+		cli.errorf("%s", label+" requires a plain local yard name")
 		return 2
 	}
 	values := cli.configSourceEnvironment()
@@ -177,43 +186,48 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 	defer runtime.Close()
 	options, available, optionsErr := cli.mutationGateReleaseOptions()
 	if optionsErr != nil || !available {
-		cli.errorf("config repair-alias requires verified installed release metadata")
+		cli.errorf("%s", label+" requires verified installed release metadata")
 		return 1
 	}
 	shipped, toolingBinding, err := runtime.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
 	if err != nil {
-		cli.errorf("config repair-alias: %v", err)
+		cli.errorf(label+": %v", err)
 		return 1
 	}
 	if selected := values["SUBYARD_CONFIG_DIR"]; selected != "" && filepath.Clean(selected) != shipped {
-		cli.errorf("config repair-alias requires the sealed executing candidate's shipped configuration assets")
+		cli.errorf("%s", label+" requires the sealed executing candidate's shipped configuration assets")
 		return 2
 	}
 	values["SUBYARD_CONFIG_DIR"] = shipped
 	configHome, err := config.ResolveConfigHome(values["SUBYARD_OPERATOR_HOME"], values)
 	if err != nil {
-		cli.errorf("config repair-alias: local configuration root is unavailable")
+		cli.errorf("%s", label+": local configuration root is unavailable")
 		return 1
 	}
 	loaded := config.Loaded{Context: domain.Context{YardName: yard, Paths: domain.RuntimePaths{ConfigHome: configHome}}}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {
-		cli.errorf("config repair-alias: explicit local scope is required")
+		cli.errorf("%s", label+": explicit local scope is required")
 		return 2
 	}
 	baseline, err := config.ReadPersistentFileSnapshot(configHome, path)
-	if err != nil || !baseline.Exists {
-		cli.errorf("config repair-alias: selected local scalar source is unavailable or unsafe")
+	if err != nil || !baseline.Exists && !request.selection {
+		cli.errorf("%s", label+": selected local scalar source is unavailable or unsafe")
 		return 1
 	}
-	content, err := cli.aliasRepairContent(path, baseline.Content, request)
+	var content []byte
+	if request.selection {
+		content, err = cli.selectionRepairContent(yard, path, baseline.Content, request)
+	} else {
+		content, err = cli.aliasRepairContent(path, baseline.Content, request)
+	}
 	if err != nil {
-		cli.errorf("config repair-alias: %v", configProspectiveError{configHome, err})
+		cli.errorf(label+": %v", configProspectiveError{configHome, err})
 		return 1
 	}
 	file, err := os.CreateTemp("/tmp", "subyard-alias-repair-*")
 	if err != nil {
-		cli.errorf("config repair-alias: retained draft is unavailable")
+		cli.errorf("%s", label+": retained draft is unavailable")
 		return 1
 	}
 	draft := file.Name()
@@ -230,22 +244,30 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 		loaded, err = config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: values["SUBYARD_OPERATOR_HOME"], YardName: yard, Environment: values, FileOverrides: map[string]string{path: draft}})
 	}
 	if err != nil {
-		cli.errorf("config repair-alias: %v", configProspectiveError{configHome, err})
+		cli.errorf(label+": %v", configProspectiveError{configHome, err})
 		return 1
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {
-		cli.errorf("config repair-alias must run on the local source owner")
+		cli.errorf("%s", label+" must run on the local source owner")
 		return 2
 	}
-	prospective, err := cli.prepareConfigProspective(loaded, configAuthoringRequest{scope: request.scope}, path, config.PersistentFileSnapshot{Exists: true, Content: content})
+	action := ""
+	if request.selection {
+		action = "selection-repair"
+	}
+	prospective, err := cli.prepareConfigProspective(loaded, configAuthoringRequest{action: action, scope: request.scope, name: request.choices[0].name}, path, config.PersistentFileSnapshot{Exists: true, Content: content})
 	if err != nil {
-		cli.errorf("config repair-alias: %v", err)
+		cli.errorf(label+": %v", err)
 		return 1
 	}
 	defer prospective.close()
 	before, err := cli.inspectConfigSourceAdmission(ctx, runtime)
 	if err != nil {
-		cli.errorf("config repair-alias: %v", err)
+		cli.errorf(label+": %v", err)
+		return 1
+	}
+	if request.selection && (before.Metadata.Journal == nil || before.Metadata.Journal.Checkpoint != releasetransition.JournalReconciling) {
+		cli.errorf("selection source repair requires an interrupted activation-only transaction")
 		return 1
 	}
 	var keys []string
@@ -253,6 +275,9 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 		keys = append(keys, choice.name)
 	}
 	consequence := fmt.Sprintf("Canonicalize explicitly selected %s settings in %s scope; preserve release history.", strings.Join(keys, ", "), request.scope)
+	if request.selection {
+		consequence = fmt.Sprintf("Store reduced %s selection in local %s settings; preserve interrupted release history. Review a fresh activation recovery plan with yard migrate.", strings.Join(keys, ", "), request.scope)
+	}
 	fmt.Fprintln(cli.options.Stdout, consequence)
 	if request.check {
 		fmt.Fprintln(cli.options.Stdout, "Prospective scoped configuration is valid; source repair has not been applied.")
@@ -260,13 +285,17 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 	}
 	changed := !bytes.Equal(baseline.Content, content)
 	cli.ensureOperationID()
-	if !cli.planConfigAction(ctx, loaded, "repair-alias", assumeYes || request.yes || cli.env["ASSUME_YES"] == "1", !changed, consequence) {
+	operation := "repair-alias"
+	if request.selection {
+		operation = "reduce-selection"
+	}
+	if !cli.planConfigAction(ctx, loaded, operation, assumeYes || request.yes || cli.env["ASSUME_YES"] == "1", !changed, consequence) {
 		return 1
 	}
 	store, _ := releasetransition.NewPOSIXV2Store(configHome)
 	unlock, err := store.Lock()
 	if err != nil {
-		cli.errorf("config repair-alias: protected release lock is unavailable")
+		cli.errorf("%s", label+": protected release lock is unavailable")
 		return 1
 	}
 	defer unlock()
@@ -305,10 +334,14 @@ func (cli *CLI) runConfigAliasRepair(ctx context.Context, yard string, arguments
 		if errors.Is(err, config.ErrPersistentTargetStale) {
 			err = domain.ErrPlanStale
 		}
-		cli.errorf("config repair-alias: %v", err)
+		cli.errorf(label+": %v", err)
 		return 1
 	}
-	fmt.Fprintln(cli.options.Stdout, "Configuration source is canonical and schema-valid. Assess runtime readiness separately with the sealed owner.")
+	if request.selection {
+		fmt.Fprintln(cli.options.Stdout, "Reduced persistent selection stored. The interrupted activation remains pending; inspect a fresh sealed-owner migrate plan and consent before recovery.")
+	} else {
+		fmt.Fprintln(cli.options.Stdout, "Configuration source is canonical and schema-valid. Assess runtime readiness separately with the sealed owner.")
+	}
 	return 0
 }
 

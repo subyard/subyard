@@ -39,9 +39,16 @@ type configApplyRepairPermit struct {
 	selectedTargetNames []string
 	selectedRuntimes    map[string]ports.RuntimeObservation
 	profileInit         bool
+	cleanupID           string
+	sourceBinding       string
+	toolingBinding      string
+	cleanupPlanBinding  string
 }
 
 type configApplyRepairFacts struct {
+	CleanupSource    string                        `json:"cleanup_source,omitempty"`
+	CleanupTooling   string                        `json:"cleanup_tooling,omitempty"`
+	CleanupPlan      string                        `json:"cleanup_plan,omitempty"`
 	Journal          releasetransition.Fingerprint `json:"journal"`
 	Ledger           releasetransition.Fingerprint `json:"ledger"`
 	Target           releasetransition.ReleaseID   `json:"target"`
@@ -98,11 +105,18 @@ func (cli *CLI) prepareActivationRepairMode(
 	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
 	requireDrift bool, selectedNames []string, profileInit bool,
 ) (*configApplyRepairPermit, error) {
+	return cli.prepareActivationRepair(ctx, yard, allLocal, outcome, requireDrift, selectedNames, profileInit, "")
+}
+
+func (cli *CLI) prepareActivationRepair(
+	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
+	requireDrift bool, selectedNames []string, profileInit bool, cleanupID string,
+) (*configApplyRepairPermit, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil {
 		return nil, err
 	}
-	if !available || !configApplyRepairGateShape(outcome) {
+	if !available || cleanupID == "" && !configApplyRepairGateShape(outcome) {
 		return nil, nil
 	}
 	// A V2 drift outcome can mask unfinished legacy migration metadata in the
@@ -123,6 +137,13 @@ func (cli *CLI) prepareActivationRepairMode(
 	if err != nil || !configApplyRepairJournalMatches(journal, outcome) &&
 		!(profileInit && profileInitRepairRollbackJournalMatches(journal, outcome)) {
 		return nil, nil
+	}
+	var sourceBinding, toolingBinding string
+	if cleanupID != "" {
+		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, yard, cleanupID, outcome, journal)
+		if err != nil {
+			return nil, nil
+		}
 	}
 	observedGate, err := cli.inspectMutationGate(ctx, yard)
 	if err != nil || observedGate != nil && !sameConfigApplyGate(outcome, *observedGate) ||
@@ -181,7 +202,8 @@ func (cli *CLI) prepareActivationRepairMode(
 	}
 	facts := configApplyRepairFacts{
 		Journal: snapshot.Fingerprint, Ledger: ledgerSnapshot.Fingerprint, Target: journal.Goal.Target,
-		Direction: journal.Goal.Direction,
+		Direction:     journal.Goal.Direction,
+		CleanupSource: sourceBinding, CleanupTooling: toolingBinding,
 	}
 	var driftedNames []string
 	requestedDesired := make(map[string]string, len(requested))
@@ -196,6 +218,31 @@ func (cli *CLI) prepareActivationRepairMode(
 		})
 		if _, selected := requested[target.Name]; selected {
 			requestedDesired[target.Name] = assessment.DesiredFingerprint
+		}
+		if cleanupID != "" {
+			runtime := cli.integrationRuntime(target.Loaded)
+			plan, planErr := runtime.IntegrationPlan(ctx)
+			if target.Name != yard {
+				if planErr != nil || plan.Changed {
+					return nil, nil
+				}
+			} else {
+				var conflict interface{ IntegrationCleanupTarget() string }
+				if planErr == nil || !errors.As(planErr, &conflict) || conflict.IntegrationCleanupTarget() != cleanupID ||
+					!target.Loaded.Integrations.Present || slices.Contains(target.Loaded.Integrations.Effective, cleanupID) ||
+					target.Loaded.Environment["AGENT_"+cleanupID+"_CLEANUP"] == "" {
+					return nil, nil
+				}
+				cleanup, ok := runtime.(IntegrationCleanupRuntime)
+				if !ok {
+					return nil, nil
+				}
+				cleanupPlan, err := cleanup.IntegrationCleanupPlan(ctx, cleanupID)
+				if err != nil {
+					return nil, nil
+				}
+				facts.CleanupPlan = cleanupPlan.StateBinding()
+			}
 		}
 		changed := assessment.Changed
 		if profileInit {
@@ -311,6 +358,8 @@ func (cli *CLI) prepareActivationRepairMode(
 		selectedTargetNames: slices.Clone(selectedNames),
 		selectedRuntimes:    selectedRuntimes,
 		profileInit:         profileInit,
+		cleanupID:           cleanupID, sourceBinding: sourceBinding, toolingBinding: toolingBinding,
+		cleanupPlanBinding: facts.CleanupPlan,
 	}, nil
 }
 
@@ -372,8 +421,8 @@ func (cli *CLI) lockConfigApplyRepair(
 	if err != nil {
 		return nil, err
 	}
-	refreshed, err := cli.prepareActivationRepairMode(
-		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.profileInit,
+	refreshed, err := cli.prepareActivationRepair(
+		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.profileInit, permit.cleanupID,
 	)
 	if err != nil || refreshed == nil ||
 		refreshed.factsFingerprint != permit.factsFingerprint ||

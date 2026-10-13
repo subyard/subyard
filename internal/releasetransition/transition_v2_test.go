@@ -4276,14 +4276,16 @@ func v2RegistryPayload(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// These retained-caller fixtures intentionally exercise the original epoch-1
-	// power contract. The publication boundary has its own current-registry tests.
+	// Retained-caller fixtures keep the original power and settings contracts.
+	// Publication and SSH localization have their own current-registry tests.
 	var registry RegistryV2
 	if err := json.Unmarshal(payload, &registry); err != nil {
 		t.Fatal(err)
 	}
 	registry.CurrentEpochs["power-metadata"] = 1
 	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool { return m.Kind == "owner-publication-state-v1" })
+	registry.CurrentEpochs["settings"] = 2
+	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool { return m.Kind == localSSHPortMigration })
 	payload, err = json.Marshal(registry)
 	if err != nil {
 		t.Fatal(err)
@@ -4298,4 +4300,42 @@ func v2TestRegistry(t *testing.T) RegistryV2 {
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func TestSupportedBuiltinCatalogRetainsIndependentIntroductions(t *testing.T) {
+	previous := PreviousBuiltinCapabilityCatalog()
+	if len(previous.descriptors) != 2 {
+		t.Fatal("sealed historical catalog acquired a later implementation")
+	}
+	for _, kinds := range [][]string{
+		nil,
+		{localSSHPortMigration},
+		{"owner-publication-state-v1"},
+		{localSSHPortMigration, "owner-publication-state-v1"},
+	} {
+		descriptors := slices.Clone(previous.descriptors)
+		for _, kind := range kinds {
+			descriptor, ok := BuiltinCapabilityCatalog().descriptor(kind)
+			if !ok {
+				t.Fatalf("current catalog lost %s", kind)
+			}
+			descriptors = append(descriptors, descriptor)
+		}
+		catalog, err := NewCapabilityCatalog(descriptors)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retained, supported := SupportedBuiltinCatalog(catalog.Digest())
+		if !supported || retained.Digest() != catalog.Digest() || !catalog.supportsV0111PostActivationRecovery("49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2") {
+			t.Fatalf("exact historical catalog not retained: %v", kinds)
+		}
+		descriptors[0].Version++
+		changed, err := NewCapabilityCatalog(descriptors)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, supported := SupportedBuiltinCatalog(changed.Digest()); supported || changed.supportsV0111PostActivationRecovery("49e4c86efea0f1be557a43569728d9eb7f9df519379b0bdf45edd91ac5c93cf2") {
+			t.Fatal("changed implementation acquired historical recovery authority")
+		}
+	}
 }

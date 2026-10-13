@@ -10,7 +10,7 @@
     "owner-registration": 2,
     "power-metadata": 2,
     "project-state": 1,
-    "settings": 2
+    "settings": 3
   },
   "migrations": [
     {
@@ -36,6 +36,14 @@
       "fromEpoch": 1,
       "toEpoch": 2,
       "kind": "owner-publication-state-v1"
+    },
+    {
+      "id": "localize-ssh-port-settings-v3",
+      "domain": "settings",
+      "fromEpoch": 2,
+      "toEpoch": 3,
+      "kind": "local-ssh-port-settings-v2-to-v3",
+      "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]
     }
   ]
 }

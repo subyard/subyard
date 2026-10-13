@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 
@@ -19,9 +21,10 @@ func (plan Plan) ScopeDigest() string {
 		SourceID, Commit, SourceDigest, HostID, ConfigHome string
 		Adopt                                              bool
 		Desired                                            map[string]candidateFile
+		LocalDesired                                       map[string]candidateFile
 		LocalInputs                                        []localInputObservation
 	}{plan.SourceID, plan.SourceCommit, plan.SourceDigest, plan.HostID, plan.options.ConfigHome,
-		plan.Adopt, plan.desired, plan.localInputs})
+		plan.Adopt, plan.desired, plan.localDesired, plan.localInputs})
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
 }
@@ -109,7 +112,7 @@ func (plan Plan) OperationSteps(approved Plan) []domain.OperationStep {
 	var steps []domain.OperationStep
 	for index, path := range names {
 		desired := "absent"
-		if file, exists := approved.desired[path]; exists {
+		if file, exists := approved.candidate(path); exists {
 			desired = "fingerprint:" + file.Digest + fmt.Sprintf("; mode:%o", file.Mode)
 		}
 		for _, change := range approved.Changes {
@@ -177,8 +180,42 @@ func (plan Plan) CandidateConfigs() ([]config.Loaded, error) {
 	if source.digest != plan.SourceDigest || source.commit != plan.SourceCommit || source.id != plan.SourceID {
 		return nil, ErrPlanStale
 	}
+	temporary, err := os.MkdirTemp("/tmp", "subyard-sync-candidate-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(temporary)
+	options := plan.options
+	options.validationOverrides = map[string]string{}
+	for path, candidate := range plan.desired {
+		source.files[path] = candidate
+	}
+	for _, candidates := range []map[string]candidateFile{plan.desired, plan.localDesired} {
+		for path, candidate := range candidates {
+			logical := candidate.SourcePath
+			if logical == "" {
+				logical = filepath.Join(plan.options.ConfigHome, filepath.FromSlash(path))
+			}
+			draft, err := os.CreateTemp(temporary, "input-*")
+			if err != nil {
+				return nil, err
+			}
+			err = draft.Chmod(0o600)
+			if err == nil {
+				_, err = draft.Write(candidate.Content)
+			}
+			closeErr := draft.Close()
+			if err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				return nil, err
+			}
+			options.validationOverrides[logical] = draft.Name()
+		}
+	}
 	var contexts []config.Loaded
-	if err := validateCandidate(plan.options, source, plan.previous, catalog, &contexts); err != nil {
+	if err := validateCandidate(options, source, plan.previous, catalog, &contexts); err != nil {
 		return nil, err
 	}
 	return contexts, nil

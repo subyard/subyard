@@ -166,8 +166,10 @@ func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, config
 	if err != nil {
 		return proof, err
 	}
-	if journal != nil && journal.CatalogDigest != releasetransition.BuiltinCapabilityCatalog().Digest() {
-		return proof, errors.New("unsupported original catalog")
+	if journal != nil {
+		if _, supported := releasetransition.SupportedBuiltinCatalog(journal.CatalogDigest); !supported {
+			return proof, errors.New("unsupported original catalog")
+		}
 	}
 	phase = "protected metadata"
 	proof.Metadata, err = store.InspectSourceMetadata(registry, digest)

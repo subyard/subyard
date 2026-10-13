@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -202,6 +204,68 @@ func TestSourceStableActivationScopeExcludesActualSourceMutations(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+func TestSSHPinSourceStabilityRequiresCompiledTypedWork(t *testing.T) {
+	for _, scenario := range []string{"pin", "non-pin", "invalid-file", "unknown-migration", "wrong-epoch", "unsupported-catalog", "resource-spelling", "fresh-without-file", "mixed-settings", "mixed-owner", "mixed-ingress", "source-ingress"} {
+		t.Run(scenario, func(t *testing.T) {
+			transition := sourceScopeTransitionFixture(t, &sourceScopeReconciler{})
+			root, err := filepath.Abs(filepath.Join("..", ".."))
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := os.ReadFile(filepath.Join(root, "config/release-transition.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition.registry, _, err = ParseRegistryV2(payload, transition.catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var migration MigrationDefinitionV2
+			for _, candidate := range transition.registry.Migrations {
+				if candidate.Kind == localSSHPortMigration {
+					migration = candidate
+				}
+			}
+			file := settingsV2FilePlan{LocalSSHPort: true, Yard: "default", Path: filepath.Join(transition.options.ConfigHome, "yards/default/config.env"),
+				Expected: config.PersistentFileSnapshot{Exists: true}, Desired: []byte("SSH_PORT=2224\n"), Inheritance: digestC,
+				ExpectedFingerprint: digestA, DesiredFingerprint: digestB, Decision: DecisionCanonicalize}
+			work := v2Work{kind: v2SettingsWork, migration: migration, file: &file, intent: settingsIntent(migration, file)}
+			observation := v2Observation{work: []v2Work{{kind: v2LedgerWork}, work}}
+			switch scenario {
+			case "non-pin":
+				file.LocalSSHPort = false
+			case "invalid-file":
+				file.Desired = nil
+			case "unknown-migration":
+				observation.work[1].intent.Migration = "uncompiled-pin"
+			case "wrong-epoch":
+				for i := range transition.registry.Migrations {
+					if transition.registry.Migrations[i].Kind == localSSHPortMigration {
+						transition.registry.Migrations[i].FromEpoch = 7
+					}
+				}
+			case "unsupported-catalog":
+				transition.catalog = PreviousBuiltinCapabilityCatalog()
+			case "resource-spelling":
+				observation.work[1].intent.Resource = "ledger.settings"
+			case "fresh-without-file":
+				observation.work[1].file = nil
+			case "mixed-settings":
+				observation.work = append(observation.work, v2Work{kind: v2SettingsWork})
+			case "mixed-owner":
+				observation.work = append(observation.work, v2Work{kind: v2OwnerWork})
+			case "mixed-ingress":
+				observation.work = append(observation.work, v2Work{kind: v2IngressWork})
+			case "source-ingress":
+				transition.options.SourceIngress = &SourceIngressRequest{}
+			}
+			if stable := transition.sourceWorkStable(observation); stable != (scenario == "pin") {
+				t.Fatalf("scope stability accepted unsupported work: scenario=%s stable=%t", scenario, stable)
+			}
+		})
 	}
 }
 

@@ -271,6 +271,14 @@ func TestIntegrationStatusSeparatesHealthFromConvergence(t *testing.T) {
 	if err != nil || len(status.Health) != 0 || len(incus.ExecCalls) != calls {
 		t.Fatalf("status probed an unselected integration: %#v, %v", status, err)
 	}
+	if status.ObservedScope != "yard" || len(status.Inventory) != 2 {
+		t.Fatalf("status lost the full catalog or yard observation scope: %#v", status)
+	}
+	for _, entry := range status.Inventory {
+		if entry.ID == "other" && (entry.Effective || entry.Requested || entry.Observed != "not-inspected") {
+			t.Fatalf("unselected component inherited yard readiness: %#v", entry)
+		}
+	}
 }
 
 func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {

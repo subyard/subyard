@@ -25,11 +25,16 @@ var integrationInventoryProgram string
 // Only validated, source-owned destinations and fixed diagnostic text may cross
 // the release boundary. Guest stderr and file contents remain private.
 type integrationOwnershipError struct {
-	message string
-	retry   string
+	message       string
+	retry         string
+	cleanupTarget string
 	// Extra public-safe detail is for direct status, outside the bounded release diagnostic.
 	detail string
 }
+
+// IntegrationCleanupTarget identifies a usable explicit cleanup contract, never
+// authority to retire unknown state during ordinary integration reconciliation.
+func (err integrationOwnershipError) IntegrationCleanupTarget() string { return err.cleanupTarget }
 
 func (err integrationOwnershipError) Error() string {
 	if err.detail != "" {

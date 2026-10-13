@@ -183,7 +183,7 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"SSH_HOST": scalar("yard-identity", SettingName, SettingNextCommand, false,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"SSH_PORT": scalar("host-network", SettingPort, SettingNextCommand, true,
+	"SSH_PORT": scalar("host-network", SettingPort, SettingNextCommand, false,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(1, 65535), hostListener()),
 	"STORAGE_PATH": scalar("host-storage", SettingAbsolutePath, SettingYardInit, false,
 		scopes(ScopeShipped, ScopeHost, ScopeCommand)),

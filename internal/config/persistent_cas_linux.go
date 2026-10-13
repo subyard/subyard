@@ -22,7 +22,13 @@ func CompareAndSwapPersistentFile(
 ) error {
 	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error {
 		return checkLocalSettingsTargetWritable(configHome, path)
-	}, nil)
+	}, nil, false)
+}
+
+// CompareAndSwapLocalSettingsFile preserves an existing local file's mode and
+// can create an exactly absent target without replacing a concurrent file.
+func CompareAndSwapLocalSettingsFile(configHome, path string, expected PersistentFileSnapshot, desired []byte) error {
+	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error { return checkLocalSettingsTargetWritable(configHome, path) }, nil, true)
 }
 
 func compareAndSwapPersistentFile(
@@ -32,7 +38,7 @@ func compareAndSwapPersistentFile(
 	desired []byte,
 	fault func(string) error,
 ) error {
-	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, nil, fault)
+	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, nil, fault, false)
 }
 
 func compareAndSwapPersistentFileGuarded(
@@ -41,14 +47,16 @@ func compareAndSwapPersistentFileGuarded(
 	desired []byte,
 	guard func() error,
 	fault func(string) error,
+	localOptions ...bool,
 ) (result error) {
+	local := len(localOptions) != 0 && localOptions[0]
 	defer func() {
 		var source *SourceError
 		if errors.As(result, &source) && source.Path == "" {
 			result = sourceContext(path, 0, "", source.Role, result)
 		}
 	}()
-	if !expected.Exists || expected.Identity == (PersistentFileIdentity{}) {
+	if expected.Exists && expected.Identity == (PersistentFileIdentity{}) || !expected.Exists && (!local || expected.Identity != (PersistentFileIdentity{}) || len(expected.Content) != 0) {
 		return errors.New("protected persistent CAS requires an exact existing snapshot")
 	}
 	if len(desired) > 8<<20 {
@@ -68,6 +76,11 @@ func compareAndSwapPersistentFileGuarded(
 	}
 	defer unix.Close(root)
 	current := root
+	defer func() {
+		if current != root {
+			_ = unix.Close(current)
+		}
+	}()
 	currentPath := filepath.Clean(configHome)
 	if err := validatePersistentDirectoryFD(current); err != nil {
 		return sourceContext(currentPath, 0, "", "persistent settings directory", err)
@@ -82,23 +95,39 @@ func compareAndSwapPersistentFileGuarded(
 		}
 	}
 	for _, part := range parts[:len(parts)-1] {
+		createdParent := false
 		next, openErr := unix.Openat(
 			current, part,
 			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
 			0,
 		)
-		if openErr != nil {
-			if current != root {
-				_ = unix.Close(current)
+		if local && !expected.Exists && errors.Is(openErr, unix.ENOENT) {
+			if err := unix.Mkdirat(current, part, 0o700); err == nil {
+				createdParent = true
+			} else if !errors.Is(err, unix.EEXIST) {
+				return err
 			}
+			if err := unix.Fsync(current); err != nil {
+				return err
+			}
+			next, openErr = unix.Openat(current, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		}
+		if openErr != nil {
 			return sourceAccessError(filepath.Join(currentPath, part), "persistent settings directory", openErr)
+		}
+		if createdParent {
+			if err := unix.Fchmod(next, 0o700); err != nil {
+				unix.Close(next)
+				return err
+			}
+			if err := unix.Fsync(next); err != nil {
+				unix.Close(next)
+				return err
+			}
 		}
 		nextPath := filepath.Join(currentPath, part)
 		if err := validatePersistentDirectoryFD(next); err != nil {
 			_ = unix.Close(next)
-			if current != root {
-				_ = unix.Close(current)
-			}
 			return sourceContext(nextPath, 0, "", "persistent settings directory", err)
 		}
 		if current != root {
@@ -106,9 +135,11 @@ func compareAndSwapPersistentFileGuarded(
 		}
 		current = next
 		currentPath = nextPath
-	}
-	if current != root {
-		defer unix.Close(current)
+		if createdParent && fault != nil {
+			if err := fault("after-parent-create"); err != nil {
+				return err
+			}
+		}
 	}
 	name := parts[len(parts)-1]
 	observed, err := readPersistentSnapshotAt(current, name)
@@ -119,7 +150,11 @@ func compareAndSwapPersistentFileGuarded(
 		return ErrPersistentTargetStale
 	}
 	pending := "." + name + ".release-transition.pending"
-	if err := preparePersistentPendingAt(current, pending, desired); err != nil {
+	mode := uint32(0o600)
+	if local && expected.Exists {
+		mode = expected.Identity.Mode & 0o777
+	}
+	if err := preparePersistentPendingAt(current, pending, desired, mode); err != nil {
 		return err
 	}
 	if fault != nil {
@@ -139,7 +174,14 @@ func compareAndSwapPersistentFileGuarded(
 			return err
 		}
 	}
-	if err := unix.Renameat(current, pending, current, name); err != nil {
+	if local && !expected.Exists {
+		if err := unix.Renameat2(current, pending, current, name, unix.RENAME_NOREPLACE); err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				return ErrPersistentTargetStale
+			}
+			return err
+		}
+	} else if err := unix.Renameat(current, pending, current, name); err != nil {
 		return err
 	}
 	if fault != nil {
@@ -232,7 +274,11 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 	}, nil
 }
 
-func preparePersistentPendingAt(parent int, name string, desired []byte) error {
+func preparePersistentPendingAt(parent int, name string, desired []byte, modes ...uint32) error {
+	mode := uint32(0o600)
+	if len(modes) != 0 {
+		mode = modes[0]
+	}
 	fd, err := unix.Openat(
 		parent, name,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
@@ -243,7 +289,7 @@ func preparePersistentPendingAt(parent int, name string, desired []byte) error {
 		if readErr != nil {
 			return readErr
 		}
-		if !pending.Exists || !bytes.Equal(pending.Content, desired) {
+		if !pending.Exists || (!bytes.Equal(pending.Content, desired) || pending.Identity.Mode&0o777 != mode) {
 			return ErrPersistentTargetStale
 		}
 		return nil
@@ -257,7 +303,7 @@ func preparePersistentPendingAt(parent int, name string, desired []byte) error {
 			_ = unix.Close(fd)
 		}
 	}()
-	if err := unix.Fchmod(fd, 0o600); err != nil {
+	if err := unix.Fchmod(fd, mode); err != nil {
 		return err
 	}
 	for remaining := desired; len(remaining) > 0; {

@@ -285,6 +285,11 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 		configSyncMetadata("permissions", "configuration checkout permissions", "native permission baseline", "operator-owned protected files", "remove group/world write permissions from the registered configuration checkout", native.repairPermissions),
 		configSyncMetadata("upstream", "registered configuration upstream", "fingerprint:"+operationStateDigest(native.expectedRemote), "fingerprint:"+operationStateDigest(native.candidate), "push HEAD to exact upstream without force", native.pushRequired),
 	}}
+	if len(native.sshCleanupPaths) != 0 {
+		execution.metadata = append(execution.metadata, configSyncMetadata("legacy-ssh", "selected owner's versioned SSH settings",
+			"legacy SSH_PORT assignments", "local-only SSH_PORT; tracked definitions retained",
+			"remove SSH_PORT from "+strings.Join(native.sshCleanupPaths, ", ")+"; preserve local ports, unrelated settings and other owners", true))
+	}
 	guard, err := cli.configRegistrationGuard(loaded)
 	if err != nil {
 		return err

@@ -26,10 +26,10 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root, home, configHome, environment := configCommandFixture(t)
 			localPath := filepath.Join(configHome, "config.env")
-			localContent := "SSH_PORT='2299'\n"
+			localContent := "DEV_UID='2299'\n"
 			writeConfigCommandFile(t, localPath, localContent)
 			cachePath := filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")
-			remote, publisher := configBareSourceRepository(t, "owner-a", "SSH_PORT='2295'\n")
+			remote, publisher := configBareSourceRepository(t, "owner-a", "DEV_UID='2295'\n")
 			checkout := filepath.Join(home, ".local", "share", "subyard-config")
 			run := func(arguments []string, prompt *testkit.Prompt) (int, string, string) {
 				t.Helper()
@@ -52,9 +52,9 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 			}
 			runConfigSyncGit(t, checkout, "config", "user.name", "Subyard Test")
 			runConfigSyncGit(t, checkout, "config", "user.email", "test@invalid")
-			content := "SSH_PORT='2295'\n"
+			content := "DEV_UID='2295'\n"
 			if test.externalUpdate {
-				content = "SSH_PORT='2296'\n"
+				content = "DEV_UID='2296'\n"
 				writeConfigCommandFile(t, filepath.Join(publisher, "hosts", "owner-a", "config.env"), content)
 				commitConfigSource(t, publisher, "update configuration")
 				runConfigSyncGit(t, publisher, "push", "-q")
@@ -84,7 +84,7 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 			if !reflect.DeepEqual(before, snapshotConfigCheckoutRaw(t, checkout)) {
 				t.Fatal("declined permission repair changed the checkout")
 			}
-			if cached, err := os.ReadFile(cachePath); err != nil || string(cached) != "SSH_PORT='2295'\n" {
+			if cached, err := os.ReadFile(cachePath); err != nil || string(cached) != "DEV_UID='2295'\n" {
 				t.Fatalf("declined permission repair changed Git fallback: %q %v", cached, err)
 			}
 			if local, err := os.ReadFile(localPath); err != nil || string(local) != localContent {
@@ -112,8 +112,8 @@ func TestConfigSyncRepairsRegisteredCheckoutPermissions(t *testing.T) {
 			if local, err := os.ReadFile(localPath); err != nil || string(local) != localContent {
 				t.Fatalf("permission repair changed local configuration: %q %v", local, err)
 			}
-			if loaded := loadConfigCommandContext(t, root, environment, "default"); loaded.Environment["SSH_PORT"] != "2299" {
-				t.Fatalf("permission repair changed effective local setting: %q", loaded.Environment["SSH_PORT"])
+			if loaded := loadConfigCommandContext(t, root, environment, "default"); loaded.Environment["DEV_UID"] != "2299" {
+				t.Fatalf("permission repair changed effective local setting: %q", loaded.Environment["DEV_UID"])
 			}
 			if head := strings.TrimSpace(configSourceGitOutput(t, checkout, "rev-parse", "HEAD")); head != sourceCommit {
 				t.Fatal("permission repair created or advanced a configuration commit")

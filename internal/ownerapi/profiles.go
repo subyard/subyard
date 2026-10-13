@@ -17,6 +17,9 @@ import (
 
 type ProfileSelection struct {
 	Value      string              `json:"value"`
+	Present    bool                `json:"present"`
+	Requested  []string            `json:"requested"`
+	Effective  []string            `json:"effective"`
 	Provenance []SettingProvenance `json:"provenance"`
 }
 
@@ -25,6 +28,10 @@ type Profile struct {
 	HasYardPreset     bool     `json:"hasYardPreset"`
 	DescriptorVersion *int     `json:"descriptorVersion,omitempty"`
 	Selected          bool     `json:"selected"`
+	Requested         bool     `json:"requested"`
+	Effective         bool     `json:"effective"`
+	Reason            string   `json:"reason"`
+	SourceGroup       string   `json:"sourceGroup"`
 	Provisionable     bool     `json:"provisionable"`
 	ProvisionScope    string   `json:"provisionScope"`
 	Eligible          bool     `json:"eligible"`
@@ -60,6 +67,9 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 	}
 	declarations := loaded.Catalog.Profiles()
 	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"]
+	result.Selection.Present = explicit
+	result.Selection.Requested, result.Selection.Effective = []string{}, []string{}
+	_, _, sourceGroup := config.ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
 	for _, directory := range entries {
 		name := directory.Name()
 		if !directory.IsDir() || !domain.SafeName(name) {
@@ -81,7 +91,7 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 				entry.Selected = declaration.Selected(loaded.Context.YardName, loaded.Environment)
 			}
 		}
-		if !explicit && entry.DescriptorVersion == nil {
+		if selection == "" && entry.DescriptorVersion == nil {
 			entry.Selected = entry.Provisionable
 		}
 		exclusive := loaded.Environment["EXCLUSIVE_ENVIRONMENT_PROFILE"]
@@ -89,6 +99,37 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 			entry.Eligible, entry.Eligibility = false, "exclusive-role"
 		} else if scope == "dedicated" && (exclusive != name || loaded.Context.YardName == "default") {
 			entry.Eligible, entry.Eligibility = false, "dedicated-role-required"
+		}
+		entry.Requested = slices.Contains(strings.Fields(selection), name)
+		if !explicit {
+			entry.Requested = entry.Selected
+		}
+		entry.Effective, entry.SourceGroup = entry.Selected && entry.Eligible, sourceGroup
+		switch {
+		case !entry.Eligible:
+			entry.Reason = "role-restricted"
+		case entry.Requested && !entry.Selected:
+			entry.Reason = "policy-disabled"
+		case entry.Selected && !explicit:
+			entry.Reason = "implicit-provision-default"
+		case entry.Selected && !entry.Requested && entry.DescriptorVersion == nil:
+			entry.Reason = "legacy-provision-fallback"
+		case entry.Selected && sourceGroup == "shipped defaults":
+			entry.Reason = "inherited-default"
+		case entry.Selected && sourceGroup == "Git settings":
+			entry.Reason = "Git-fallback"
+		case entry.Selected:
+			entry.Reason = "explicit-selection"
+		case !explicit:
+			entry.Reason = "selection-absent"
+		default:
+			entry.Reason = "excluded-by-replace-list"
+		}
+		if entry.Requested {
+			result.Selection.Requested = append(result.Selection.Requested, name)
+		}
+		if entry.Effective {
+			result.Selection.Effective = append(result.Selection.Effective, name)
 		}
 		for _, resource := range service.Resources.Definitions() {
 			if resource.Profile == name {

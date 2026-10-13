@@ -17,14 +17,16 @@ import (
 )
 
 type configAuthoringRequest struct {
-	action    string
-	name      string
-	value     string
-	inputPath string
-	scope     config.SettingScope
-	assumeYes bool
-	git       bool
-	storage   string
+	action        string
+	name          string
+	value         string
+	inputPath     string
+	scope         config.SettingScope
+	assumeYes     bool
+	git           bool
+	storage       string
+	sourceBinding string
+	sourceGuard   func() error
 }
 
 func (cli *CLI) runConfigAuthoring(

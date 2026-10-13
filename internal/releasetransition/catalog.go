@@ -84,6 +84,21 @@ func NewCapabilityCatalog(descriptors []CapabilityDescriptor) (CapabilityCatalog
 }
 
 func BuiltinCapabilityCatalog() CapabilityCatalog {
+	previous := PreviousBuiltinCapabilityCatalog()
+	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
+		CapabilityDescriptor{Kind: "local-ssh-port-settings-v2-to-v3", Domain: "settings", Version: 1},
+		// Epoch-1 owners cannot honor detached optional listener state.
+		// No backward-compatible policy means their rollback is forbidden.
+		CapabilityDescriptor{Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1},
+	))
+	if err != nil {
+		panic(err)
+	}
+	return catalog
+}
+
+// Retained sealed owners keep their exact compiled catalog identity.
+func PreviousBuiltinCapabilityCatalog() CapabilityCatalog {
 	catalog, err := NewCapabilityCatalog([]CapabilityDescriptor{
 		{
 			Kind: "test-vms-settings-v1-to-v2", Domain: "settings", Version: 1,
@@ -95,16 +110,32 @@ func BuiltinCapabilityCatalog() CapabilityCatalog {
 			RollbackCompatibility: RollbackCompatibilityBackwardCompatibleNoOp,
 			LegacyMinimumVersion:  "0.8.0",
 		},
-		{
-			Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1,
-			// Epoch-1 owners cannot honor detached optional listener state.
-			// The absence of a backward-compatible policy forbids their rollback.
-		},
 	})
 	if err != nil {
 		panic(err)
 	}
 	return catalog
+}
+
+func SupportedBuiltinCatalog(digest Fingerprint) (CapabilityCatalog, bool) {
+	current, previous := BuiltinCapabilityCatalog(), PreviousBuiltinCapabilityCatalog()
+	catalogs := []CapabilityCatalog{current, previous}
+	// Both independently introduced implementations may own sealed journals.
+	// Recognize only their exact compiled catalogs, never arbitrary subsets.
+	for _, kind := range []string{"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1"} {
+		descriptor, _ := current.descriptor(kind)
+		catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors), descriptor))
+		if err != nil {
+			return CapabilityCatalog{}, false
+		}
+		catalogs = append(catalogs, catalog)
+	}
+	for _, catalog := range catalogs {
+		if catalog.Digest() == digest {
+			return catalog, true
+		}
+	}
+	return CapabilityCatalog{}, false
 }
 
 func (catalog CapabilityCatalog) descriptor(kind string) (CapabilityDescriptor, bool) {
@@ -131,12 +162,15 @@ func (catalog CapabilityCatalog) supportsV0111PostActivationRecovery(source Fing
 	if source != publishedV0111 {
 		return false
 	}
-	var descriptors []CapabilityDescriptor
-	for _, descriptor := range catalog.descriptors {
-		if descriptor == (CapabilityDescriptor{Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1}) {
-			continue // Only this exact new implementation is outside the historical catalog.
+	if _, known := SupportedBuiltinCatalog(catalog.Digest()); !known {
+		return false
+	}
+	descriptors := slices.Clone(PreviousBuiltinCapabilityCatalog().descriptors)
+	for _, descriptor := range descriptors {
+		current, ok := catalog.descriptor(descriptor.Kind)
+		if !ok || current != descriptor {
+			return false
 		}
-		descriptors = append(descriptors, descriptor)
 	}
 	for index := range descriptors {
 		descriptors[index].RollbackCompatibility = ""

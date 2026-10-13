@@ -42,8 +42,14 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 		if err != nil || !bytes.Equal(canonical, snapshot.Payload) {
 			return proof, errors.New("source repair requires a canonical protected journal")
 		}
-		if journal.RegistryDigest != digest || journal.CatalogDigest != BuiltinCapabilityCatalog().Digest() || journal.SourceIngress != nil {
+		originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
+		if journal.RegistryDigest != digest || !supportedCatalog || journal.SourceIngress != nil {
 			return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
+		}
+		for _, migration := range registry.Migrations {
+			if !originalCatalog.Supports(migration.Kind, migration.Domain) {
+				return proof, errors.New("source repair registry exceeds the original compiled catalog")
+			}
 		}
 		if journal.Checkpoint != JournalComplete && (journal.Checkpoint != JournalReconciling || journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 0 || IsRecoveryTransaction(journal.Transaction)) {
 			return proof, errors.New("source repair requires completed history or an original activation-only reconciling journal")
@@ -163,7 +169,17 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 }
 
 func (store *POSIXV2Store) sourceTerminalEvidence(journal JournalRecord, registry RegistryV2, state MigrationLedgerSnapshot) error {
-	return store.sourceTerminalBindings(journal, registry, state.ProjectionSnapshot.Fingerprint)
+	terminal := state.ProjectionSnapshot.Fingerprint
+	if state.Checkpointed {
+		// Steps bind the validated ledger view; the compatibility projection
+		// remains pinned at its epoch before checkpoint-authority migrations.
+		_, fingerprint, err := MarshalLedgerV2(state.Ledger, registry)
+		if err != nil {
+			return err
+		}
+		terminal = fingerprint
+	}
+	return store.sourceTerminalBindings(journal, registry, terminal)
 }
 
 func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registry RegistryV2, projection Fingerprint) error {
@@ -219,6 +235,7 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 			last = step.Desired
 		} else {
 			supported := edge.migration.Kind == "test-vms-settings-v1-to-v2" && domain.SafeName(step.Resource) && step.ID == edge.migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
+			supported = supported || edge.migration.Kind == localSSHPortMigration && domain.SafeName(step.Resource) && step.ID == edge.migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
 			supported = supported || edge.migration.Kind == "test-yard-owner-v1-to-v2" && step.Resource == ownerRegistrationResource && step.ID == edge.migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
 			if !supported {
 				return errors.New("source repair requires a supported original terminal step grammar")
@@ -364,13 +381,16 @@ func (store *POSIXV2Store) sourceTypedRecovery(journal JournalRecord, step Journ
 	}
 	var canonical []byte
 	switch migration.Kind {
-	case "test-vms-settings-v1-to-v2":
+	case "test-vms-settings-v1-to-v2", localSSHPortMigration:
 		var recovery settingsRecoveryV1
 		if err := decodeBoundedRecord(snapshot.Payload, 4096, &recovery); err != nil {
 			return err
 		}
 		if err := validateSettingsRecovery(recovery, journal, step); err != nil {
 			return err
+		}
+		if migration.Kind == localSSHPortMigration && recovery.Kind != localSSHPortMigration || migration.Kind != localSSHPortMigration && recovery.Kind != "" {
+			return errors.New("terminal settings recovery kind differs from its migration")
 		}
 		canonical, err = json.Marshal(recovery)
 	case "test-yard-owner-v1-to-v2":

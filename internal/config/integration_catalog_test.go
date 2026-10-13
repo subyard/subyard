@@ -97,13 +97,13 @@ func TestIntegrationImmutableInputsIgnoreConfigDirectoryDefaults(t *testing.T) {
 
 func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
-	retired := filepath.Join(root, "config/retired-integrations/obsolete")
+	retired := filepath.Join(root, "config/retired-integrations/retired-widget")
 	if err := os.MkdirAll(retired, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(retired, "integration.json"), []byte(`{"schema_version":1,"retired":true,"retired_settings":["OBSOLETE_PORT"],"lifecycle":{"handler":"retire.sh"}}`), 0o600)
 	testkit.WriteFile(t, filepath.Join(retired, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
-	for _, selection := range []string{"sample obsolete", "obsolete", ""} {
+	for _, selection := range []string{"sample retired-widget", "retired-widget", ""} {
 		home, configHome := testkit.TempDir(t), testkit.TempDir(t)
 		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=${UNUSED_PORT:=12345}\n"
 		path := filepath.Join(configHome, "config.env")
@@ -113,11 +113,35 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 			t.Fatal(err)
 		}
 		expected := ""
-		if selection == "sample obsolete" {
+		if selection == "sample retired-widget" {
 			expected = "sample"
 		}
 		if loaded.Environment["CODING_TOOL_INTEGRATIONS"] != expected || !loaded.Integrations.Present {
 			t.Fatalf("selection lost: %#v", loaded.Integrations)
+		}
+		for _, allowed := range []bool{true, false} {
+			snapshot := loaded
+			snapshot.Integrations.AllowsCodingTools = allowed
+			if !allowed {
+				snapshot.Integrations.Effective = nil
+			}
+			inventory := snapshot.IntegrationInventory()
+			if len(inventory) != 2 || inventory[0].ID != "retired-widget" || inventory[1].ID != "sample" {
+				t.Fatalf("catalog entries lost: %#v", inventory)
+			}
+			entry := inventory[0]
+			if entry.Requested || entry.Effective || entry.Eligible || entry.Reason != "retired" {
+				t.Fatalf("retired inventory entry: %#v", entry)
+			}
+			entry = inventory[1]
+			if entry.Eligible != allowed || entry.Requested != (expected == "sample") || entry.Effective != (allowed && expected == "sample") || (!allowed && entry.Reason != "role-restricted") {
+				t.Fatalf("live inventory selection or role changed: %#v", entry)
+			}
+			for _, entry := range inventory {
+				if !entry.Present || entry.SourceGroup != "local overrides" || entry.Source.Scope != "host" || entry.Source.Path != path || entry.Source.Value != selection {
+					t.Fatalf("inventory source authority lost: %#v", entry)
+				}
+			}
 		}
 		if _, ok := loaded.Environment["OBSOLETE_PORT"]; ok {
 			t.Fatal("retired setting remains effective")

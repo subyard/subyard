@@ -52,6 +52,43 @@ func cleanupObservation(fingerprint string, changed bool, steps ...string) ports
 		map[bool]string{true: "true", false: "false"}[changed] + `,"steps":` + consequences + `}`)}
 }
 
+func TestIntegrationCleanupTargetRequiresUsableDeclaredHandler(t *testing.T) {
+	for _, scenario := range []string{"usable", "absent", "missing", "symlink", "directory"} {
+		t.Run(scenario, func(t *testing.T) {
+			runtime, _, hook := cleanupRuntimeFixture(t, nil)
+			switch scenario {
+			case "absent":
+				runtime.Environment = nil
+			case "missing":
+				if err := os.Remove(hook); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				link := hook + ".link"
+				if err := os.Symlink(hook, link); err != nil {
+					t.Fatal(err)
+				}
+				runtime.Environment = []string{"AGENT_widget_CLEANUP=" + link}
+			case "directory":
+				if err := os.Remove(hook); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(hook, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := runtime.integrationCleanupTarget("widget")
+			if (got == "widget") != (scenario == "usable") {
+				t.Fatalf("cleanup target admitted without usable handler: %q", got)
+			}
+			var target interface{ IntegrationCleanupTarget() string }
+			if !errors.As(integrationOwnershipError{cleanupTarget: got}, &target) || target.IntegrationCleanupTarget() != got {
+				t.Fatal("typed ownership target lost")
+			}
+		})
+	}
+}
+
 func TestIntegrationCleanupRejectsInvalidReportsWithoutRawStderr(t *testing.T) {
 	secret := "private-cleanup-stderr-token"
 	for _, test := range []struct {

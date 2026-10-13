@@ -221,6 +221,6 @@ run_install_case timeout 146 3
 run_install_case integrity 42 1
 run_install_case lifecycle 7 1
 
-(cd "$ROOT" && TMPDIR=/tmp go test ./config/agents/paseo/tests)
+(umask 0022; cd "$ROOT" && TMPDIR=/tmp go test -race -count=1 ./config/agents/paseo/tests)
 
 printf 'PASS: Paseo remains an opt-in generic agent package\n'

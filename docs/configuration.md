@@ -284,6 +284,14 @@ without `--check` to review and confirm its consequences. Cleanup refuses integr
 still selected, including dependencies of selected integrations. Hooks must keep cleanup bounded
 and reversible, preserve user data, and support safe retries after interruption.
 
+On the local owner CLI, a completed release whose sole readiness blocker is the matching
+integration ownership conflict can admit this explicit cleanup after verifying the sealed
+owner, protected history and other activation contracts. The confirmed native cleanup plan
+is rechecked under the protected release lock. It preserves selection and history; remaining
+materialized configuration drift still needs a separately authorized migration. Unfinished
+release history and unrelated blockers continue to require their original recovery path.
+This recovery admission is unavailable through RPC operation planning.
+
 When an update is blocked before activation, its diagnostic names the downloaded candidate's
 `bin/yard-engine` directly. Use that printed command on the owner host: the active older `yard`
 may not support cleanup yet. After cleanup, repeat the update.
@@ -301,6 +309,17 @@ Integration enable/disable saves the requested selection locally, including when
 registered. `config sync --apply` refreshes file consumers and does not replace the integration
 lifecycle. To publish the selection, use `config set CODING_TOOL_INTEGRATIONS "<requested tools>"
 --scope yard --git`; a pre-existing local selection remains effective until it is unset.
+
+`integration status [--json]` lists the whole coding-integration catalog for the selected yard.
+Each row explains requested and effective selection, dependencies, role suppression and the
+winning and overridden sources. Component health is inspected only for selected components;
+the top-level `observed` field describes yard convergence (`observed_scope: "yard"`). A ready
+yard does not establish that an unselected component is running. `profile list [--json]` lists
+all shipped environment profiles, including provision hooks, resources and role-forbidden
+profiles. Its selection reasons distinguish implicit provision defaults, explicit empty lists
+and inherited Git selection from local overrides. An explicit empty profile list
+still uses the established provision fallback for eligible hooks without a profile
+descriptor; these inventory entries report `legacy-provision-fallback`.
 
 The shipped `test-vms` role has `ALLOWS_CODING_TOOLS=false`. Its inherited tools are
 suppressed, explicit nonempty selections fail, and agent-only utilities such as
@@ -452,6 +471,46 @@ Supported unfinished activation-only history also requires a schema-2 capability
 sealed original owner. That owner subsequently needs separate fresh consent for changed-input recovery;
 staging newer tooling does not add capabilities to an old caller. Unsupported metadata or unresolved
 intent requires its exact original owner or the reported supported bridge, without editing journals.
+
+An optional activation hook can fail after migrations have completed. To reduce its persistent
+selection while that activation remains unfinished, preview an explicit local source change:
+
+```sh
+yard -Y demo config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --check
+yard -Y demo config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local
+yard migrate --check
+yard migrate
+```
+
+This source-only operation requires its own consent and leaves the interrupted journal and
+runtime links intact. It admits only a reduction of the current persistent optional list, with
+all affected yards validated, a complete original migration ledger, no unfinished migration
+steps and a supported capability probe of the exact sealed original owner. Temporary optional
+selection overrides are rejected. Typed local selection `config set`, integration disable and
+profile disable use the same boundary when activation blocks ordinary mutation. A subsequent
+activation recovery needs a newly assessed plan and separate consent from its sealed owner.
+Exact operation planning and remote/RPC source reduction are unavailable; run the explicit
+owner-local preview above. Ordinary configuration apply retains its completed-history gate.
+
+After a completed transition, local selection `config set`, integration disable and profile
+disable can also reduce desired source while materialized configuration is stale. They use
+ordinary configuration authoring with fresh consent, validated terminal history and sealed
+assets; other activation resources must remain current. The write preserves release history,
+links, file modes and unrelated settings, and does not run hooks or materialize an intermediate
+inherited selection. Run a separately assessed `yard migrate` to apply the final desired state.
+Temporary overrides and any effective selection expansion remain blocked at this boundary.
+
+`SSH_PORT` is an owner-local listener setting. New Git authoring is rejected. Static literal
+legacy Git assignments remain readable until explicit cleanup; dynamic legacy assignments are
+blocked. The release settings migration pins each affected local yard's existing persistent
+effective port, preserving winning local files and leaving external Git source and managed cache
+untouched. Command overrides do not participate. Explicit config sync transactionally removes
+legacy SSH assignments from its owned cache and adds local pins when removal would change a
+port. Prepared Git push or selected Git authoring separately removes them from the selected
+owner's source after consent, retaining empty tracked yard definitions, other owners and assets.
+Existing port collisions, permissions, ownership and stale-input checks still apply. Policies
+for other listeners remain with their declaring core or profile settings; listener classification
+alone does not make a setting portable.
 
 The default is local storage; `--local` makes that choice explicit and needs no Git source.
 `--git` saves only the selected assignment or file in the registered source, creates one commit

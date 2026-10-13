@@ -61,7 +61,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ports", "previewroute", "profile", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
+		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ownerpublication", "ports", "previewroute", "profile", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/codexdesktop", "adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -93,7 +93,7 @@ func BuiltInRegistry() (Registry, error) {
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview", "preview-proxy",
-		"project-registry-convergence",
+		"project-registry-convergence", "proxy-address-boot-controller",
 		"prompt-contract", "provision-profile-check", "release-candidate", "remote-projects",
 		"runtime-privilege-reexec", "ssh-config", "ssh-transport-identity", "ssh-agent-environment",
 		"teardown-runtime-preservation", "test-vms",

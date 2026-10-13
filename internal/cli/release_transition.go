@@ -908,6 +908,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		if assessErr != nil {
 			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
 		}
+		consequences = append(consequences, target.Loaded.IntegrationSelectionExplanation(), target.Loaded.EnvironmentProfileSelectionExplanation())
 		integrationScope := ""
 		var managedPaths []string
 		platform := operation.initPlatform(target.Loaded, nil)
@@ -1331,6 +1332,7 @@ func executeReleaseTransitionRequest(
 	}
 	transitionOptions := candidateTransitionOptions(request, releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
+		OperatorHome:       os.Getenv("SUBYARD_OPERATOR_HOME"),
 		RecoveryContract:   request.RecoveryContract,
 		CandidateConfigDir: filepath.Join(repositoryRoot, "config"),
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {

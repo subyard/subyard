@@ -120,6 +120,9 @@ func TestV2CheckpointLedgerStepsUseCompactAuthorityAndResume(t *testing.T) {
 			if err != nil || !bytes.Equal(legacyAfter.Payload, projectionPayload) {
 				t.Fatalf("legacy projection changed: %q, err=%v", legacyAfter.Payload, err)
 			}
+			if _, err := transition.store.InspectSourceMetadata(registry, digest); err != nil {
+				t.Fatalf("completed compact-authority source admission: %v", err)
+			}
 			repeat, err := transition.Inspect(context.Background(), goal)
 			if err != nil || repeat.Assessment.Changed || repeat.Outcome == nil || repeat.Outcome.Status != StatusReady {
 				t.Fatalf("repeat checkpoint inspection = %#v, err=%v", repeat, err)

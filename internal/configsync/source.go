@@ -245,7 +245,13 @@ func (snapshot *sourceSnapshot) readConfig(
 		return err
 	}
 	for _, name := range names {
-		definition, err := snapshot.catalog.ValidateSettingName(scope, name, true)
+		requireSyncable := name != "SSH_PORT"
+		if !requireSyncable {
+			if err := config.LegacyGitSSHPort(source, content); err != nil {
+				return err
+			}
+		}
+		definition, err := snapshot.catalog.ValidateSettingName(scope, name, requireSyncable)
 		if err != nil {
 			return err
 		}

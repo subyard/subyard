@@ -18,6 +18,7 @@ release-candidate.sh
 release-acceptance.sh
 release-publication.sh
 provision-profile-check.sh
+proxy-address-boot-controller.sh
 ssh-agent-environment.sh
 test-impact.sh
 test-runner.sh

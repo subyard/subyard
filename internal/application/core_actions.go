@@ -75,6 +75,8 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Action: "config.repair-alias", Summary: "Repair explicitly selected persistent aliases", Effect: domain.ActionMutation,
 			Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible,
 		},
+		{Action: "config.reduce-selection", Summary: "Reduce persistent optional selection during activation recovery", Effect: domain.ActionMutation,
+			Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible},
 		{
 			Action: "config.repair-registration", Summary: "Repair duplicate yard registration", Effect: domain.ActionMutation,
 			Impacts:  []domain.ActionImpact{domain.ImpactLocalMetadata},

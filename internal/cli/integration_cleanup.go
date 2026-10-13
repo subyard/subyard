@@ -31,6 +31,10 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 	if err != nil {
 		return err
 	}
+	permit := cli.integrationCleanupRepair
+	if permit != nil && (permit.yard != loaded.Context.YardName || permit.cleanupID != request.id || permit.cleanupPlanBinding != plan.StateBinding()) {
+		return domain.ErrPlanStale
+	}
 	preview := func() {
 		fmt.Fprintf(cli.options.Stdout, "Integration cleanup: %s (yard %s)\n", request.id, loaded.Context.YardName)
 		if !plan.Changed {
@@ -47,6 +51,9 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 	prepared.exactState = operationStateDigest(struct{ Runtime, Configuration string }{
 		plan.StateBinding(), integrationConfigurationFingerprint(loaded),
 	})
+	if permit != nil {
+		prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
+	}
 	prepared.steps = func() []domain.OperationStep {
 		decision, observed := domain.StepSkip, "converged"
 		if plan.Changed {
@@ -64,6 +71,13 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 	prepared.executeNoOp = true
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
 		result := domain.AdapterResult{Schema: 1, OperationID: prepared.Plan.OperationID, Status: "ok"}
+		if permit != nil {
+			unlock, err := cli.lockConfigApplyRepair(ctx, permit)
+			if err != nil {
+				return result, err
+			}
+			defer unlock()
+		}
 		unlock, err := lockIntegrationYard(ctx, loaded)
 		if err != nil {
 			return result, err
@@ -88,6 +102,11 @@ func (prepared *preparedCommand) prepareIntegrationCleanup(ctx context.Context, 
 		}
 		if integrationConfigurationFingerprint(final) != integrationConfigurationFingerprint(loaded) {
 			return result, fmt.Errorf("%w: integration settings changed during cleanup; inspect status", domain.ErrPlanStale)
+		}
+		if permit != nil {
+			if err := cli.finishIntegrationCleanupRecovery(ctx, permit); err != nil {
+				return result, err
+			}
 		}
 		return result, nil
 	}

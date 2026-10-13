@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -76,7 +77,7 @@ func TestNativePrepareAcceptsHashedIncusContext(t *testing.T) {
 			if observation == "restart-verified" && (step.Decision != domain.StepSkip || step.Observed != step.Desired) {
 				t.Fatalf("native restart guard/verify did not converge: %#v", step)
 			}
-			if observation == "down" && step.ID == "route" && !strings.HasPrefix(step.Observed, "sha256:") {
+			if observation == "down" && step.ID == "route" && !regexp.MustCompile(`^receipt:device:[0-9a-f]{64}:[0-9a-f]{64}$`).MatchString(step.Observed) {
 				t.Fatalf("native route fingerprint was lost: %q", step.Observed)
 			}
 		}

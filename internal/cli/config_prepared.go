@@ -61,6 +61,9 @@ func configExactInvocation(loaded config.Loaded, arguments []string) bool {
 
 func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBootstrap) error {
 	arguments := configArguments(prepared.Arguments)
+	if len(arguments) != 0 && arguments[0] == "reduce-selection" {
+		return fmt.Errorf("%w: activation source reduction is owner-local CLI only; preview config reduce-selection with --check, then inspect a fresh sealed-owner migrate plan", errConfigUsage)
+	}
 	if !configExactInvocation(prepared.Loaded, arguments) {
 		return fmt.Errorf("%w: configuration invocation requires its dedicated transport", errConfigUsage)
 	}
@@ -87,11 +90,15 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 }
 
 func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action string, arguments []string, protected ...bool) error {
-	cli, loaded := prepared.CLI, prepared.Loaded
 	request, err := parseConfigAuthoringRequest(action, arguments, false)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errConfigUsage, err)
 	}
+	return prepared.prepareConfigScalarRequest(ctx, action, arguments, request, protected...)
+}
+
+func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, arguments []string, request configAuthoringRequest, protected ...bool) error {
+	cli, loaded := prepared.CLI, prepared.Loaded
 	definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {
 		return fmt.Errorf("%w: only non-sensitive scalar settings support exact authoring", errConfigUsage)
@@ -149,7 +156,11 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	if action == "unset" && len(candidate) == 0 {
 		desired = config.PersistentFileSnapshot{}
 	}
-	prospective, err := cli.prepareConfigProspective(loaded, request, path, desired)
+	prospectiveRequest := request
+	if request.sourceGuard != nil {
+		prospectiveRequest.action = "selection-repair"
+	}
+	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired)
 	if err != nil {
 		return err
 	}
@@ -179,8 +190,8 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	prepared.exactState = operationStateDigest(struct {
 		Action, Name, Value, Scope, Path string
 		Before, Desired                  config.PersistentFileSnapshot
-		Dependencies, Semantics          string
-	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics})
+		Dependencies, Semantics, Source  string
+	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding})
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
@@ -210,6 +221,11 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 		if err := prospective.check(); err != nil {
 			return domain.AdapterResult{}, err
 		}
+		if request.sourceGuard != nil {
+			if err := request.sourceGuard(); err != nil {
+				return domain.AdapterResult{}, err
+			}
+		}
 		if sameConfigAuthoringSnapshot(current, desired) {
 			if !changed && current.Identity != baseline.Identity {
 				return domain.AdapterResult{}, domain.ErrPlanStale
@@ -231,7 +247,15 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 				return domain.AdapterResult{}, err
 			}
 		}
-		if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, func() error { return prospective.checkLocked(true) }); err != nil {
+		if err := config.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, func() error {
+			if err := prospective.checkLocked(true); err != nil {
+				return err
+			}
+			if request.sourceGuard != nil {
+				return request.sourceGuard()
+			}
+			return nil
+		}); err != nil {
 			if errors.Is(err, config.ErrPersistentTargetStale) {
 				return domain.AdapterResult{}, fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}

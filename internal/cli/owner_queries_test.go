@@ -101,7 +101,11 @@ func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T
 		t.Fatal(err)
 	}
 	for _, entry := range result.Profiles {
-		if entry.Selected {
+		if entry.Name == "legacy" {
+			if !entry.Selected || !entry.Effective || entry.Requested || entry.Reason != "legacy-provision-fallback" {
+				t.Fatalf("empty legacy fallback=%#v", entry)
+			}
+		} else if entry.Effective || entry.Requested {
 			t.Fatalf("empty selection=%#v", entry)
 		}
 	}
@@ -407,9 +411,34 @@ func TestOwnerQueriesReloadPersistedSettingsWithoutChangingSession(t *testing.T)
 		}
 	}
 	profiles := query("profile.list").(ownerapi.ProfileList)
+	if !profiles.Selection.Present || profiles.Selection.Value != "" || len(profiles.Selection.Requested) != 0 ||
+		!slices.Equal(profiles.Selection.Effective, []string{"legacy"}) || len(profiles.Profiles) != 4 {
+		t.Fatalf("stale empty selection=%#v", profiles)
+	}
+	if !slices.ContainsFunc(profiles.Selection.Provenance, func(source ownerapi.SettingProvenance) bool {
+		return source.Scope == "yard" && source.Role == "scalar settings" && source.Status == "effective"
+	}) {
+		t.Fatalf("fresh yard selection source missing: %#v", profiles.Selection.Provenance)
+	}
 	for _, profile := range profiles.Profiles {
-		if profile.Selected {
-			t.Fatalf("stale selection=%#v", profile)
+		if profile.Requested || profile.SourceGroup != "local overrides" {
+			t.Fatalf("stale requested selection or source=%#v", profile)
+		}
+		switch profile.Name {
+		case "legacy":
+			if !profile.Selected || !profile.Effective || !profile.Eligible || profile.Reason != "legacy-provision-fallback" {
+				t.Fatalf("fresh empty legacy fallback=%#v", profile)
+			}
+		case "dedicated":
+			if !profile.Selected || profile.Effective || profile.Eligible || profile.Reason != "role-restricted" || profile.Eligibility != "dedicated-role-required" {
+				t.Fatalf("fresh empty role restriction=%#v", profile)
+			}
+		case "selected", "resource-only":
+			if profile.Selected || profile.Effective || !profile.Eligible || profile.Reason != "excluded-by-replace-list" {
+				t.Fatalf("fresh empty exclusion=%#v", profile)
+			}
+		default:
+			t.Fatalf("unexpected profile=%#v", profile)
 		}
 	}
 	if !reflect.DeepEqual(handler.cli.env, beforeEnvironment) {
