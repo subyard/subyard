@@ -112,9 +112,9 @@ candidate that was actually tested and distinguish inherited coverage from curre
 An attestation containing transfers uses schema version 2 with an exact `reviewed_transfers`
 check-ID list and complete sanitized per-check transfer provenance. Remote validation checks
 that inventory, the target preparation identity, original hashes, declared/actual command,
-environment provenance and nonblank scope/reason/authorization. Ordinary attestations retain
+environment provenance and nonblank scope, reason and review reference. Ordinary attestations retain
 strict schema version 1; transfer fields cannot be silently downgraded to that schema.
-The trusted operator owns the reviewed unchanged-scope decision. A transfer does not waive
+The review establishes the unchanged scope. A transfer does not waive
 new or affected scenarios, invent an old collector PASS or replace current preparation.
 The pinned publication candidate must contain this tooling before using schema version 2;
 never amend an older frozen snapshot to add support.

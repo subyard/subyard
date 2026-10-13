@@ -382,8 +382,8 @@ Local evidence also requires its recorded execution environment to match.
 profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
 remain identical. This exception never applies to local gates or continuous release smoke.
 
-When the operator explicitly approves reuse after a reviewed change, use the separate
-per-check transfer contract. It accepts inherited coverage, never execution on the new candidate:
+After reviewing changed inputs, use the separate per-check transfer contract.
+It accepts inherited coverage, never execution on the new candidate:
 
 ```sh
 python3 dev/release-acceptance.py transfer --output NEW --from OLD --check CHECK --review REVIEW.json
@@ -399,10 +399,10 @@ The latter is the preparation identity hash for CI candidates, otherwise the col
 version/source/assets/transport identity hash. Generate these identities with the tooling's
 `transfer_candidate(receipt)` helper; no field may be omitted. `review` contains public,
 nonblank `unchanged_scope`, `reason` and `authorization_reference` strings identifying the
-actual reviewed decision. The scope must explain why this exact check remains valid despite
+review and release task. The scope must explain why this exact check remains valid despite
 the recorded source/runtime/asset differences. New or affected scenarios require fresh execution.
-The tool checks bindings and evidence; the trusted operator owns that scope judgment and
-the authenticity of the authorization reference.
+The tool checks bindings and evidence; the review establishes the unchanged scope and
+records its reference.
 
 For an original collector PASS, `standalone` is `null`. The original exit must be zero,
 the exact command must match, and the original receipt/log and execution environment are
