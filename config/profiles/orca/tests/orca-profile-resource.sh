@@ -75,6 +75,16 @@ case "${1:-}" in
     fi
     ;;
   config)
+    if [ "${2:-}" = get ]; then
+      [ ! -f "$state_root/config-${4:-}" ] || cat "$state_root/config-${4:-}"
+      exit 0
+    elif [ "${2:-}" = set ]; then
+      printf '%s' "${5:-}" > "$state_root/config-${4:-}"
+      exit 0
+    elif [ "${2:-}" = unset ]; then
+      rm -f -- "$state_root/config-${4:-}"
+      exit 0
+    fi
     case "${2:-} ${3:-}" in
       'device list')
         [ -f "$route" ] && printf 'orca-server\n'
@@ -717,6 +727,28 @@ rm -f "$TMP/nft-mode"
 run_orca up --yes >/dev/null
 [ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
   || fail 'identical up restarted an unchanged runtime'
+# A fully converged historical exact route still needs the new owning receipt.
+rm -f "$TMP/config-user.subyard.resource.orca-server"
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/legacy-route-plan.json"
+jq -e '.changed and (.steps|all(.[]; if .id == "host-route" then .decision == "apply" else .decision == "skip" end))' \
+  "$TMP/legacy-route-plan.json" >/dev/null || fail 'fully converged legacy route was incorrectly a no-op'
+route_mutations="$(count_log 'config device add') $(count_log 'config device remove')"
+receipt_writes="$(count_log 'config set yard user.subyard.resource.orca-server')"
+run_orca up --yes >/dev/null
+expected_receipt="v1:$(printf 'v1\nbind=host\nconnect=tcp:127.0.0.1:6768\nlisten=tcp:100.64.1.20:17678\ntype=proxy\n' | sha256sum | awk '{print $1}')"
+[ "$(cat "$TMP/config-user.subyard.resource.orca-server")" = "$expected_receipt" ] \
+  || fail 'explicit legacy convergence did not establish the exact receipt'
+[ "$route_mutations" = "$(count_log 'config device add') $(count_log 'config device remove')" ] \
+  || fail 'legacy receipt convergence rewrote the exact route'
+[ "$(count_log 'config set yard user.subyard.resource.orca-server')" -eq "$((receipt_writes + 1))" ] \
+  || fail 'legacy receipt convergence did not write exactly once'
+ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
+  "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/owned-route-noop.json"
+jq -e '.changed == false' "$TMP/owned-route-noop.json" >/dev/null || fail 'receipt convergence was not idempotent'
+run_orca up --yes >/dev/null
+[ "$(count_log 'config set yard user.subyard.resource.orca-server')" -eq "$((receipt_writes + 1))" ] \
+  || fail 'unchanged explicit up rewrote the owning receipt'
 if grep -Fq 'apt-get install -y -qq /tmp/subyard-orca' "$ORCA_TEST_LOG"; then
   fail 'repeated up reinstalled the already verified Orca release'
 fi
@@ -749,7 +781,7 @@ touch "$TMP/missing-dispatcher"
 if run_orca up --yes >"$TMP/missing-dispatcher.out" 2>&1; then
   fail 'up reported full readiness with a missing automatic dispatcher'
 fi
-grep -Fq 'init' "$TMP/missing-dispatcher.out" || fail 'missing dispatcher recovery was not actionable'
+grep -Fq 'init' "$TMP/missing-dispatcher.out" || fail "missing dispatcher recovery was not actionable: $(cat "$TMP/missing-dispatcher.out")"
 rm -f "$TMP/missing-dispatcher"
 
 touch "$TMP/project-sync-fail"

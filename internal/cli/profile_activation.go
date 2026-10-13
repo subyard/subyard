@@ -36,8 +36,18 @@ func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configT
 		return nil, nil, reconciler.failure("default", "inspect", err)
 	}
 	targets, err := operation.localConfigTargets(loaded, true)
+	if err != nil {
+		return operation, nil, err
+	}
+	// Only installed local yard runtimes belong to release activation. A verified
+	// absent local installation has none; raw runtime observation still reports
+	// unavailable transport so init can retain its approved prerequisite slots.
+	incus, _ := operation.statusPorts()
+	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+		targets = nil
+	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
-	return operation, targets, err
+	return operation, targets, nil
 }
 
 func (reconciler *profileRuntimeActivationReconciler) sourceMigrationsComplete() (bool, error) {

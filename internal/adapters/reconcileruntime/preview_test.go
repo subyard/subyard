@@ -2,6 +2,7 @@ package reconcileruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -298,5 +300,21 @@ func TestPreviewRouteDefersOnlyMissingInstanceOrMissingVMPin(t *testing.T) {
 				t.Fatalf("drift=%v err=%v", drift, err)
 			}
 		})
+	}
+}
+
+func TestDeferredPreviewPreservesInstalledHostWithoutOwnerInterface(t *testing.T) {
+	host := "100.101.102.103"
+	device := previewroute.Device(host, "32222")
+	saved, _ := json.Marshal(ownerpublication.Receipt{Version: 1, Ownership: "v1:" + host + ":32222", Device: device})
+	instance := ports.InstanceInfo{LocalConfig: map[string]string{previewroute.Key: "v1:" + host + ":32222", ownerpublication.Prefix + previewroute.DeviceName: string(saved)}, Devices: map[string]map[string]string{}, LocalDevices: map[string]map[string]string{}}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}
+	runtime := Runtime{Incus: incus, Yard: domain.Context{IncusProject: "p", YardInstanceName: "yard", YardKind: domain.YardContainer}, Environment: []string{"WEB_PREVIEW_HOST_PORT=32222"}}
+	if runtime.previewHost(context.Background()) != host || !runtime.previewRouteConverged(context.Background(), instance) {
+		t.Fatal("deferred endpoint was replaced by fallback")
+	}
+	delete(instance.LocalConfig, previewroute.Key)
+	if runtime.previewRouteConvergedForHost(host, instance) {
+		t.Fatal("orphaned endpoint accepted")
 	}
 }

@@ -127,9 +127,10 @@ func (service PowerService) Commit(
 }
 
 type LifecycleRunner struct {
-	Power    PowerService
-	Physical ports.AdapterRunner
-	Yard     domain.Context
+	Power       PowerService
+	Physical    ports.AdapterRunner
+	Yard        domain.Context
+	AfterCommit func(context.Context, domain.Context) error
 }
 
 func (runner LifecycleRunner) Run(
@@ -166,6 +167,11 @@ func (runner LifecycleRunner) Run(
 	if err := runner.Power.Commit(ctx, runner.Yard, desired); err != nil {
 		return result, diagnostics, fmt.Errorf("physical %s succeeded but desired power was not committed: %w",
 			request.Action, err)
+	}
+	if request.Action == "start" && runner.AfterCommit != nil {
+		if err := runner.AfterCommit(ctx, runner.Yard); err != nil {
+			return result, diagnostics, fmt.Errorf("desired power committed but publication retry failed: %w", err)
+		}
 	}
 	if result.Output == nil {
 		result.Output = make(map[string]any)

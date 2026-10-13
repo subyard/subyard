@@ -540,7 +540,10 @@ class LifecycleTest(unittest.TestCase):
         docker.write_text('#!/bin/sh\ncase "$*" in "container inspect subyard-ai-observer") exit 0 ;; "inspect -f "*) cat "$FIXTURE_ROOT/owner"; exit ;; esac\n[ "$*" = "stop --time 10 container-1" ] || exit 2\n[ "$(cat "$FIXTURE_ROOT/owner")" = ai-observer-v1 ] || exit 3\nprintf "%s\\n" "$*" >> "$FIXTURE_ROOT/docker.log"\nif [ -f "$FIXTURE_ROOT/stop-fail" ]; then rm "$FIXTURE_ROOT/stop-fail"; exit 4; fi\nprintf false > "$FIXTURE_ROOT/running"\n')
         docker.chmod(0o755)
         environment = {"PATH": str(binary_root) + ":/usr/bin:/bin", "FIXTURE_ROOT": str(native_root)}
-        fixture = Path(__file__).resolve().parent / "fixtures/wrapper-v0.14.0.sh"
+        source_fixture = Path(__file__).resolve().parent / "fixtures/wrapper-v0.14.0.sh"
+        fixture = native_root / "wrapper"
+        fixture.write_bytes(source_fixture.read_bytes())
+        fixture.chmod(0o755)
         real_run, base_guest = subprocess.run, self.guest
         mutation = None
 

@@ -312,11 +312,20 @@ def verify_checkpoint_refusal(fixture):
 
 
 def verify_checkpoint_source(release, version, baseline, arch, root, baseline_version=BASELINE):
+    boundary = Fixture(root / f"checkpoint-boundary-{baseline_version}", release, version,
+                       baseline, arch, baseline_version)
+    boundary.update("--version", version, "--yes")
+    boundary.complete()
+    verify_power_rollback_refusal(boundary)
+    # Preserve matching-epoch rollback and future settings/reader-bridge coverage
+    # independently of the real candidate's irreversible power reader boundary.
+    release, version = compatible_power_release(release, version, arch, root)
     fixture = Fixture(root / f"checkpoint-source-{baseline_version}", release, version, baseline, arch,
                       baseline_version)
     source_reader = sealed_checkpoint_reader(fixture.runtime / fixture.initial)
     fixture.update("--version", version, "--yes")
     fixture.complete()
+    verify_epoch_one_publication_gate(fixture)
     bridge = os.readlink(fixture.runtime / "current")
     require((fixture.runtime / bridge / "config/release-checkpoint.json").is_file(),
             "checkpoint-source acceptance requires a sealed checkpoint-reader candidate")
@@ -368,7 +377,7 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
     registry_path = future_source / "config/release-transition.json"
-    registry = json.loads(registry_path.read_text())
+    registry = json.loads((fixture.runtime / bridge / "config/release-transition.json").read_text())
     require(registry["currentEpochs"] == projection_epochs,
             "synthetic future source does not match the supplied bridge registry")
     registry["currentEpochs"]["settings"] = 3
@@ -584,6 +593,87 @@ def verify_completed_activation_drift(fixture):
           flush=True)
 
 
+def verify_power_rollback_refusal(fixture):
+    checkpoint = json.loads((fixture.config / "release-transition/v2/history-checkpoint.json").read_text())
+    require(checkpoint["domains"]["power-metadata"]["epoch"] == 2,
+            "optional publication reader boundary did not commit")
+    for launcher in (fixture.old_launcher, fixture.runtime / "current/bin/yard"):
+        before = snapshot(fixture.config)
+        links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+        refused = run_process([str(launcher), "update", "--rollback", "--yes"], fixture.env, timeout=180)
+        diagnostic = (refused.stdout + refused.stderr).lower()
+        after = snapshot(fixture.config)
+        changed = sorted(key for key in before.keys() | after.keys() if before.get(key) != after.get(key))
+        after_links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+        require(refused.returncode != 0 and "code=rollback-incompatible" in diagnostic,
+                f"epoch-1 rollback omitted its typed refusal: exit={refused.returncode} diagnostic={diagnostic}")
+        require(not changed and after_links == links,
+                f"epoch-1 rollback mutated protected state: changed={changed} links_changed={after_links != links}")
+    print(f"PASS: actual released {fixture.baseline_version} and current callers refuse epoch-1 rollback after epoch 2 without mutation", flush=True)
+
+
+def verify_power_publication_boundary(release, version, baseline, arch, root, baseline_version):
+    fixture = Fixture(root / f"power-boundary-{baseline_version}", release, version, baseline, arch, baseline_version)
+    require(fixture.check()["outcome"]["status"] == "migration-required",
+            "epoch-1 released caller cannot inspect the power reader upgrade")
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+    verify_power_rollback_refusal(fixture)
+
+
+def compatible_power_release(release, version, arch, root):
+    """Build a sealed fixture bridge with the exact historical epoch-1 registry.
+
+    Its production reader gate remains enabled, so this package cannot mint a
+    publication snapshot or write deferred state. This is never the candidate.
+    """
+    destination = root / "compatible-power-release"
+    bridge_version = version + "-power1-fixture"
+    if destination.exists():
+        return destination, bridge_version
+    source = Path(__file__).resolve().parent.parent
+    copied = root / "compatible-power-source"
+    selected = run_process(["bash", str(source / "tests/helpers/source-files.sh"), str(source)],
+                           env=None, timeout=30)
+    require(selected.returncode == 0, "cannot select public fixture bridge inputs")
+    for relative in filter(None, selected.stdout.split("\0")):
+        path = source / relative
+        require(path.is_file() and not path.is_symlink(), "bridge input is not a regular public file")
+        target = copied / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+    registry_path = copied / "config/release-transition.json"
+    registry = json.loads(registry_path.read_text())
+    exact = {"id": "introduce-owner-publication-state-v1", "domain": "power-metadata",
+             "fromEpoch": 1, "toEpoch": 2, "kind": "owner-publication-state-v1"}
+    require(registry["currentEpochs"]["power-metadata"] == 2
+            and registry["migrations"].count(exact) == 1, "fixture bridge boundary differs")
+    registry["migrations"].remove(exact)
+    registry["currentEpochs"]["power-metadata"] = 1
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+    destination.mkdir()
+    for path in release.iterdir():
+        if path.is_file():
+            shutil.copy2(path, destination / path.name)
+    built = run_process(["bash", str(copied / "dev/package-engine.sh"), "--version", bridge_version,
+                         "--arch", arch, "--output-dir", str(destination)], env=None, timeout=180)
+    require(built.returncode == 0, f"cannot package compatible fixture bridge: {built.stdout}{built.stderr}")
+    bundle = destination / f"subyard-{bridge_version}-linux-{arch}.tar.gz"
+    print(f"FIXTURE: sealed compatible power-1 bridge {bridge_version} sha256={digest(bundle)}; "
+          "only exact publication migration removed; production reader gate retained", flush=True)
+    return destination, bridge_version
+
+
+def verify_epoch_one_publication_gate(fixture):
+    before = snapshot(fixture.config)
+    refused = run_process([str(fixture.runtime / "current/bin/yard"), "_publication-contracts"],
+                          fixture.env, timeout=30)
+    require(refused.returncode != 0 and not refused.stdout
+            and "epoch 2" in refused.stderr and snapshot(fixture.config) == before,
+            "compatible fixture bridge minted deferred-publication authority before epoch 2: "
+            + refused.stdout + refused.stderr)
+
+
 def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
     normal = Fixture(root / f"normal-{baseline_version}", release, version, baseline, arch, baseline_version)
     require(normal.check()["outcome"]["status"] == "migration-required",
@@ -592,11 +682,24 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
     normal.complete()
     verify_checkpoint_refusal(normal)
     verify_completed_activation_drift(normal)
-    normal.update("--rollback", "--yes", old=False)
-    require(os.readlink(normal.runtime / "current") == normal.initial, "rollback lost the old runtime")
+    verify_power_rollback_refusal(normal)
     normal.update("--offline", "--version", version, "--yes")
     normal.complete()
-    print(f"PASS: released {baseline_version} updater -> {version}, fixed point, rollback and forward retry", flush=True)
+    print(f"PASS: released {baseline_version} updater -> {version}, fixed point and power rollback refusal", flush=True)
+
+    bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
+    compatible = Fixture(root / f"normal-compatible-{baseline_version}", bridge_release, bridge_version,
+                         baseline, arch, baseline_version)
+    compatible.update("--version", bridge_version, "--yes")
+    compatible.complete()
+    verify_epoch_one_publication_gate(compatible)
+    compatible.update("--rollback", "--yes", old=False)
+    require(os.readlink(compatible.runtime / "current") == compatible.initial,
+            "matching-epoch rollback lost the old runtime")
+    compatible.update("--offline", "--version", bridge_version, "--yes")
+    compatible.complete()
+    print(f"PASS: actual released {baseline_version} matching-epoch rollback and forward retry "
+          "with sealed compatible fixture bridge", flush=True)
 
     interrupted = Fixture(root / f"interrupted-{baseline_version}", release, version, baseline, arch,
                           baseline_version)
@@ -803,13 +906,16 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
           f"({time.monotonic() - started:.1f}s)", flush=True)
 
 
-def verify_fresh_activation_recovery(release, version, baseline, arch, root):
-    fixture = Fixture(root / "fresh-activation", release, version, baseline, arch)
+def verify_fresh_activation_recovery(release, version, baseline, arch, root, compatible=False):
+    fixture = Fixture(root / ("fresh-activation-compatible" if compatible else "fresh-activation"),
+                      release, version, baseline, arch)
     host_settings = fixture.config / "config.env"
     host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
     host_settings.chmod(0o600)
     fixture.update("--version", version, "--yes")
     fixture.complete()
+    if compatible:
+        verify_epoch_one_publication_gate(fixture)
     launcher = fixture.runtime / "current/bin/yard"
     ledger = fixture.config / "release-transition/v2/ledger.json"
     ledger_before = ledger.read_bytes()
@@ -954,9 +1060,15 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
             and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == links_before
             and not unexpected.exists(),
             "released-caller resume changed recovery evidence, selections, ledger or runtime links")
-    fixture.update("--rollback", "--yes", old=False)
-    require(os.readlink(fixture.runtime / "current") == fixture.initial,
-            "fresh recovery made the retained runtime unavailable for explicit rollback")
+    if compatible:
+        fixture.update("--rollback", "--yes", old=False)
+        require(os.readlink(fixture.runtime / "current") == fixture.initial,
+                "matching-epoch fresh recovery made the retained runtime unavailable for rollback")
+    else:
+        verify_power_rollback_refusal(fixture)
+        require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+                and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
+                "refused power rollback changed protected recovery evidence")
     fixture.update("--offline", "--version", version, "--yes")
     fixture.complete()
     terminal_path = fixture.config / "release-transition/recovery/v2/archive" / (transaction + ".json")
@@ -964,9 +1076,12 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root):
         json.dumps(json.loads(terminal_path.read_text())["receipt"], separators=(",", ":")) + "\n").encode()
     require(retained_receipt == receipt_bytes and ledger.read_bytes() == ledger_before
             and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
-            "rollback and forward update changed protected recovery history")
+            "rollback/refusal and forward update changed protected recovery history")
     print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "
-          "caller inspects and resumes V2 successor, rollback and forward", flush=True)
+          f"caller inspects and resumes V2 successor, {'matching-epoch rollback' if compatible else 'power rollback refusal'} and forward", flush=True)
+    if not compatible:
+        bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
+        verify_fresh_activation_recovery(bridge_release, bridge_version, baseline, arch, root, compatible=True)
 
 
 def verify_alias_source_repair(fixture, release, unfinished=False):
@@ -1085,8 +1200,12 @@ def main():
                         help="run only released-caller checkpoint source and future rollback compatibility")
     parser.add_argument("--only-runtime-recovery", action="store_true",
                         help="run published runtime continuation/rollback and exact sealed activation-owner recovery")
+    parser.add_argument("--only-power-publication", action="store_true",
+                        help="run actual released caller power reader upgrade and rollback refusal")
+    parser.add_argument("--only-power-transition-regression", action="store_true",
+                        help="run affected rollback, checkpoint-reader bridge and fresh recovery contracts")
     args = parser.parse_args()
-    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery)) <= 1,
+    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression)) <= 1,
             "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
@@ -1114,6 +1233,40 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
+                if args.only_power_transition_regression:
+                    for baseline_version, hashes, directory in (
+                            (BASELINE, BASELINE_SHA256, args.baseline_dir),
+                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
+                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
+                        cached = release.parent / "power-publication-baselines" / baseline_version
+                        if directory is None and cached.is_dir():
+                            directory = cached
+                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
+                        if directory is None:
+                            cached.mkdir(parents=True, exist_ok=True)
+                            for asset in baseline.iterdir():
+                                if asset.is_file():
+                                    shutil.copy2(asset, cached / asset.name)
+                        verify(release, args.version, baseline, arch, root, baseline_version)
+                        verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
+                        if baseline_version == BASELINE:
+                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root)
+                    return
+                if args.only_power_publication:
+                    for baseline_version, hashes, directory in (
+                            (PUBLISHED_BASELINE, PUBLISHED_BASELINE_SHA256, args.published_baseline_dir),
+                            (SOURCE_BASELINE, SOURCE_BASELINE_SHA256, args.source_baseline_dir)):
+                        cached = release.parent / "power-publication-baselines" / baseline_version
+                        if directory is None and cached.is_dir():
+                            directory = cached
+                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
+                        if directory is None:
+                            cached.mkdir(parents=True, exist_ok=True)
+                            for asset in baseline.iterdir():
+                                if asset.is_file():
+                                    shutil.copy2(asset, cached / asset.name)
+                        verify_power_publication_boundary(release, args.version, baseline, arch, root, baseline_version)
+                    return
                 if args.only_runtime_recovery:
                     baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
                                                SOURCE_BASELINE_SHA256, arch)

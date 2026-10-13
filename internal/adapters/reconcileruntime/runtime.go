@@ -23,8 +23,8 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/operatoraccess"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/sshidentity"
@@ -122,7 +122,7 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		if err != nil && !errors.Is(err, yardnetwork.ErrNotConverged) {
 			return false, err
 		}
-		drift, routeErr := runtime.previewRouteDrift(ctx, previewroute.Host(ctx))
+		drift, routeErr := runtime.previewRouteDrift(ctx, runtime.previewHost(ctx))
 		return err == nil && !drift, routeErr
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
 		return runtime.powerConverged(ctx, true)
@@ -196,7 +196,7 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		if runtime.NetworkPolicy == nil {
 			return errors.New("yard network policy service is required")
 		}
-		if err := runtime.preparePreviewRoute(ctx, previewroute.Host(ctx)); err != nil {
+		if err := runtime.preparePreviewRoute(ctx, runtime.previewHost(ctx)); err != nil {
 			return err
 		}
 		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
@@ -1381,7 +1381,19 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 	if runErr != nil {
 		return runErr
 	}
-	return runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired)
+	if err := runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired); err != nil {
+		return err
+	}
+	if intent.Desired == application.PowerRunning {
+		instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+		if err != nil {
+			return err
+		}
+		if len(ownerpublication.Deferred(instance)) != 0 {
+			return runtime.runScript(ctx, runtime.Stderr, "lifecycle-guard.sh", "start", "--publication-retry-only")
+		}
+	}
+	return nil
 }
 
 func (runtime Runtime) withNetworkStart(ctx context.Context, start func() error) error {
@@ -1998,9 +2010,20 @@ func (runtime Runtime) powerReconcilerConverged(ctx context.Context) bool {
 	contents, err := os.ReadFile(unit)
 	template, templateErr := os.ReadFile(filepath.Join(runtime.RepositoryRoot,
 		"config", "systemd", "subyard-power-reconcile.service.in"))
-	if err != nil || templateErr != nil || string(contents) != strings.ReplaceAll(
-		string(template), "@SUBYARD_POWER_RECONCILER@", reconciler,
-	) {
+	if err != nil || templateErr != nil {
+		return false
+	}
+	contracts, err := ownerpublication.Load(runtime.RepositoryRoot)
+	if err != nil {
+		return false
+	}
+	snapshot, err := ownerpublication.Encode(contracts)
+	if err != nil {
+		return false
+	}
+	expected := strings.ReplaceAll(string(template), "@SUBYARD_POWER_RECONCILER@", reconciler) +
+		"\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=" + snapshot + "\n"
+	if string(contents) != expected {
 		return false
 	}
 	systemctl, err := runtime.executableFromPath("systemctl")

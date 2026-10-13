@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "type": "response",
+  "id": "yard-status",
+  "result": {
+    "context": {
+      "yardName": "default",
+      "accessKind": "local",
+      "yardKind": "container",
+      "yardInstanceName": "yard",
+      "incusProject": "subyard",
+      "incusBridge": "incusbr0",
+      "sshHost": "yard",
+      "devUser": "dev",
+      "sshPort": 2222,
+      "shiftMode": "shift",
+      "forwardSshAgent": false,
+      "devSudo": false,
+      "nestedE2EVMs": false,
+      "devUid": 1000,
+      "paths": {
+        "repositoryRoot": "/example/repositoryRoot",
+        "configDir": "/example/configDir",
+        "operatorHome": "/example/operatorHome",
+        "configHome": "/example/configHome",
+        "dataHome": "/example/dataHome",
+        "storagePath": "/example/storagePath",
+        "hostBase": "/example/hostBase",
+        "stateDir": "/example/stateDir"
+      }
+    },
+    "state": "Running",
+    "deferredPublications": [
+      "tcp:192.0.2.12:8080"
+    ],
+    "desired": "running",
+    "initialized": "true",
+    "incusAutostart": "false",
+    "sshConfigured": true,
+    "mounts": [],
+    "projectCount": 1,
+    "facts": {
+      "profiles": [],
+      "agents": [],
+      "shared": [],
+      "security": "",
+      "space": ""
+    }
+  }
+}

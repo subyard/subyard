@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -381,7 +383,7 @@ func TestIntentionallyStoppedShortcutPhaseMatrix(t *testing.T) {
 }
 
 func TestPowerProbeSeparatesInstallFromFinalMetadata(t *testing.T) {
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	bin := filepath.Join(root, "bin")
 	installed := filepath.Join(root, "installed")
 	for _, directory := range []string{
@@ -393,19 +395,49 @@ func TestPowerProbeSeparatesInstallFromFinalMetadata(t *testing.T) {
 	}
 	write := func(path, contents string, mode os.FileMode) {
 		t.Helper()
-		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
-			t.Fatal(err)
-		}
+		testkit.WriteFile(t, path, []byte(contents), mode)
 	}
 	reconcilerSource := filepath.Join(root, "yard-engine")
 	reconciler := filepath.Join(installed, "yard-boot-reconcile")
 	unit := filepath.Join(installed, "subyard-power-reconcile.service")
-	write(reconcilerSource, "reconciler\n", 0o700)
-	write(reconciler, "reconciler\n", 0o700)
-	template := "[Service]\nExecStart=@SUBYARD_POWER_RECONCILER@ _power-reconcile\nRestart=on-failure\n"
+	repository, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateBytes, err := os.ReadFile(filepath.Join(repository, "config", "systemd", "subyard-power-reconcile.service.in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := string(templateBytes)
 	write(filepath.Join(root, "config", "systemd", "subyard-power-reconcile.service.in"),
 		template, 0o600)
-	write(unit, strings.ReplaceAll(template, "@SUBYARD_POWER_RECONCILER@", reconciler), 0o600)
+	contracts, err := ownerpublication.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ownerpublication.Encode(contracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(reconcilerSource, `#!/bin/sh
+set -eu
+case "$*" in
+  _publication-contracts) printf '%s\n' '`+snapshot+`' ;;
+  "_network-lock ensure") ;;
+  *) exit 64 ;;
+esac
+`, 0o700)
+	write(filepath.Join(bin, "id"), `#!/bin/sh
+if [ "${1:-}" = -u ]; then printf '0\n'; else exec /usr/bin/id "$@"; fi
+`, 0o700)
+	write(filepath.Join(bin, "install"), `#!/bin/bash
+set -eu
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac
+done
+exec /usr/bin/install "${args[@]}"
+`, 0o700)
 	write(filepath.Join(bin, "systemctl"), `#!/bin/sh
 set -eu
 case "$*" in
@@ -413,6 +445,7 @@ case "$*" in
     printf 'LoadState=%s\nNeedDaemonReload=%s\n' "$POWER_LOAD_STATE" "$POWER_NEED_RELOAD"
     ;;
   "is-enabled --quiet subyard-power-reconcile.service") ;;
+  daemon-reload) ;;
   *) exit 2 ;;
 esac
 `, 0o700)
@@ -432,7 +465,52 @@ esac
 		"SUBYARD_POWER_ENGINE_SOURCE=" + reconcilerSource, "SUBYARD_POWER_UNIT_PATH=" + unit,
 		"POWER_LOAD_STATE=loaded", "POWER_NEED_RELOAD=no",
 	}}
+	// Run the real installer with a fixture engine and manager, keeping every
+	// write under the private root and never invoking host sudo or systemd.
+	installer := exec.Command("bash", "-c", `
+set -euo pipefail
+. "$1/tests/helpers/test-context.sh"
+setup_test_context "$2/context"
+export SUBYARD_USER=root
+exec bash "$1/scripts/install-power-reconciler.sh" --yes
+`, "_", repository, root)
+	installer.Env = append(os.Environ(), runtime.Environment...)
+	installer.Env = append(installer.Env, "PATH="+bin+":"+os.Getenv("PATH"),
+		"SUBYARD_POWER_LIBEXEC_DIR="+installed)
+	if output, err := installer.CombinedOutput(); err != nil {
+		t.Fatalf("fixture install: %v\n%s", err, output)
+	}
+	bare := strings.ReplaceAll(template, "@SUBYARD_POWER_RECONCILER@", reconciler)
+	installedUnit, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedUnit := string(installedUnit)
 	assertStage(t, runtime, "power", true, "installed and finalized power state")
+	emptySnapshot, err := ownerpublication.Encode(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongEpoch := base64.StdEncoding.EncodeToString([]byte(strings.Replace(string(payload), `"readerEpoch":2`, `"readerEpoch":1`, 1)))
+	for _, test := range []struct{ name, contents string }{
+		{"bare unit", bare},
+		{"wrong contracts", strings.Replace(expectedUnit, snapshot, emptySnapshot, 1)},
+		{"wrong reader epoch", strings.Replace(expectedUnit, snapshot, wrongEpoch, 1)},
+		{"foreign override", expectedUnit + "ExecStart=/bin/true\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			write(unit, test.contents, 0o644)
+			verified, err := runtime.VerifyStage(context.Background(), "power")
+			if err != nil || verified {
+				t.Fatalf("divergent unit verified=%v error=%v", verified, err)
+			}
+		})
+	}
+	write(unit, expectedUnit, 0o644)
 	for _, test := range []struct {
 		name       string
 		loadState  string

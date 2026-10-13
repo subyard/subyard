@@ -8,7 +8,7 @@
   },
   "currentEpochs": {
     "owner-registration": 2,
-    "power-metadata": 1,
+    "power-metadata": 2,
     "project-state": 1,
     "settings": 2
   },
@@ -26,7 +26,16 @@
       "fromEpoch": 1,
       "toEpoch": 2,
       "kind": "test-yard-owner-v1-to-v2",
-      "dependsOn": ["canonicalize-test-vms-settings-v2"]
+      "dependsOn": [
+        "canonicalize-test-vms-settings-v2"
+      ]
+    },
+    {
+      "id": "introduce-owner-publication-state-v1",
+      "domain": "power-metadata",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "owner-publication-state-v1"
     }
   ]
 }

@@ -408,9 +408,11 @@ bash dev/e2e/config-sync-acceptance.sh --slot "$slot"
 
 The boot check uses one standard VM. It packages the current worktree and installs it through the
 supported installer, reboots the VM, observes the installed power service waiting for a missing
-synthetic proxy address, then verifies automatic startup when a marked boot service supplies it.
-It checks independent ready-yard startup, desired power, root-owned runtime/unit, host networking
-guards, the default route and cleanup:
+required proxy address while an owned optional publication keeps its yard and local workload
+running. A marked boot service supplies both exact addresses; publication returns without restarting
+the running yard. It also checks explicit start, retry/cancellation, ownership drift, independent
+ready-yard startup, desired power, root-owned runtime/unit, host networking guards, the default
+route and cleanup:
 
 ```sh
 bash dev/e2e/proxy-address-boot.sh --slot "$slot"

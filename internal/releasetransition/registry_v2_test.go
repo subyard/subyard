@@ -256,12 +256,15 @@ func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
 	}
 	if registry.MinimumEpochs["settings"] != 1 || registry.CurrentEpochs["settings"] != 2 ||
 		registry.MinimumEpochs["owner-registration"] != 1 ||
-		registry.CurrentEpochs["owner-registration"] != 2 || len(registry.Migrations) != 2 ||
+		registry.CurrentEpochs["owner-registration"] != 2 || len(registry.Migrations) != 3 ||
 		registry.Migrations[0].ID != "canonicalize-test-vms-settings-v2" ||
 		registry.Migrations[1].ID != "canonicalize-test-yard-owner-v2" {
 		t.Fatalf("published registry = %#v", registry)
 	}
-	for _, domain := range []string{"power-metadata", "project-state"} {
+	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 2 || registry.Migrations[2].Kind != "owner-publication-state-v1" {
+		t.Fatalf("published power reader boundary = %#v", registry)
+	}
+	for _, domain := range []string{"project-state"} {
 		if registry.MinimumEpochs[domain] != 1 || registry.CurrentEpochs[domain] != 1 {
 			t.Fatalf("published registry omitted stable baseline domain %q: %#v", domain, registry)
 		}

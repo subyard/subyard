@@ -71,6 +71,13 @@ fi
 [ -n "$ENGINE_SOURCE" ] || die "SUBYARD_POWER_ENGINE_SOURCE is required"
 [ -f "$ENGINE_SOURCE" ] && [ -x "$ENGINE_SOURCE" ] \
   || die "power engine source must be an executable regular file: $ENGINE_SOURCE"
+# Read the protected epoch as its approved operator before copying any runtime.
+publication_args=(env "SUBYARD_REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
+if [ "$(id -u)" = 0 ] && [ "${SUBYARD_USER:-root}" != root ]; then
+  publication_args=(runuser -u "$SUBYARD_USER" -- "${publication_args[@]}")
+fi
+publication_contracts="$("${publication_args[@]}" "$ENGINE_SOURCE" _publication-contracts)"
+[[ "$publication_contracts" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || die 'invalid publication contract snapshot'
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$(dirname "$UNIT_PATH")"
 install -o root -g root -m 0755 "$ENGINE_SOURCE" "$RECONCILER_PATH"
 # Upgrades can reach this helper without running the new host-network stage.
@@ -81,6 +88,8 @@ install -o root -g root -m 0755 "$ENGINE_SOURCE" "$RECONCILER_PATH"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER_PATH|g" "$TEMPLATE" > "$tmp"
+# Snapshot owning declarations into the root-owned unit beside its copied engine.
+printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$publication_contracts" >> "$tmp"
 if [ ! -f "$UNIT_PATH" ] || ! cmp -s "$tmp" "$UNIT_PATH"; then
   install -o root -g root -m 0644 "$tmp" "$UNIT_PATH"
   ok "installed $UNIT_PATH"

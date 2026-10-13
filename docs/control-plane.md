@@ -433,6 +433,12 @@ the release outcome and safe continuation; it does not reopen completed migratio
 an automatic migration from `start`. A later activation repair requires a fresh assessment
 and authorization.
 
+The standalone installer completes the supported current-release transition after creating
+the first runtime link and before publishing CLI entrypoints. Its initial installation
+consent includes this boundary. An interrupted first installation retains protected recovery
+evidence; rerunning the installer uses the existing-runtime transition to resume it before
+publishing entrypoints. Publication-only staging leaves migration state untouched.
+
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
 failures as errors. The operation boundary renders current `Outcome.Warnings`
@@ -951,6 +957,44 @@ The targeted real-Incus/PID1 check is `dev/e2e/proxy-address-wait.sh`, run throu
 allocated VM runner. It exercises delayed address appearance, independent starts and
 automatic recovery, and measures cumulative retry CPU and IP traffic in a dedicated slice.
 IP traffic results require a successful local positive control and exclude the Incus daemon.
+
+### Optional owner publication
+
+Receipt-owned optional owner listeners are reconciled independently of desired power.
+The power reconciler snapshots an exact, local, non-NAT device in version 1 metadata
+under `user.subyard.deferred_publication.<device>` and removes that device atomically
+using the observed Incus ETag when its listen IP is absent. The original owning receipt,
+IP, port and connect endpoint remain unchanged. The yard can start with local access;
+Detailed status, owner inventory and the owner status summary report
+`deferredPublications` separately from the yard's physical running state.
+
+The installed root-owned unit contains a versioned snapshot of public owning contracts
+from the candidate paired with its copied binary. Generic codecs recognize preview,
+integration dashboard and explicitly declared resource ownership receipts; device names
+alone never prove ownership. Foreign, inherited and unreceipted devices retain the normal
+address prerequisite. Legacy resource devices lacking a receipt require an ordinary,
+explicit owning operation to establish ownership; exact recipe matching alone does not
+authorize automatic boot adoption.
+
+An expected publication wait uses the existing 30-second temporary-failure retry, including
+when the yard is already running. When the exact address returns, the reconciler validates
+the saved device against its current owning receipt and atomically restores it without
+restarting the yard. Explicit start schedules this retry after committing running intent.
+Publication restore failures do not enter the security-critical running-runtime failure
+path. Host network and policy guards continue to fail closed.
+
+The compiled `owner-publication-state-v1` capability advances `power-metadata` from epoch 1
+to 2 before runtime activation. Existing canonical power and ownership values retain their
+formats. The protected capture/apply/verify ledger establishes the reader boundary; explicit
+publication writes and installation of a publication-capable power unit require that committed
+epoch. The unit snapshots `readerEpoch: 2` with its owning contracts. A copied engine without
+this unit contract retains required-listener checks and cannot defer optional publication.
+Supported rollback to an epoch-1 owner is refused before activation because historical owners
+cannot honor detached publication state, including Orca cleanup. The inspection reports this
+loss of rollback eligibility before authorization. Recovery restores only a still-matching
+receipt; owning removal clears its journal before retiring that receipt.
+Unknown journal/contract versions, ownership drift and conflicting local/effective devices
+are errors.
 
 ### Credential ledger
 

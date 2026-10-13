@@ -20,17 +20,18 @@ type OwnerProject struct {
 }
 
 type OwnerYard struct {
-	Name                string            `json:"name"`
-	Kind                string            `json:"kind"`
-	Instance            string            `json:"instance"`
-	State               string            `json:"state"`
-	StartState          StartState        `json:"startState,omitempty"`
-	WaitingForAddresses []string          `json:"waitingForAddresses,omitempty"`
-	SSHPort             int               `json:"sshPort"`
-	DevUser             string            `json:"devUser"`
-	YardImageRef        YardImageRef      `json:"yardImageRef,omitempty"`
-	ResolvedYardImage   ResolvedYardImage `json:"resolvedYardImage,omitempty"`
-	Projects            []OwnerProject    `json:"projects"`
+	Name                 string            `json:"name"`
+	Kind                 string            `json:"kind"`
+	Instance             string            `json:"instance"`
+	State                string            `json:"state"`
+	StartState           StartState        `json:"startState,omitempty"`
+	WaitingForAddresses  []string          `json:"waitingForAddresses,omitempty"`
+	DeferredPublications []string          `json:"deferredPublications,omitempty"`
+	SSHPort              int               `json:"sshPort"`
+	DevUser              string            `json:"devUser"`
+	YardImageRef         YardImageRef      `json:"yardImageRef,omitempty"`
+	ResolvedYardImage    ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+	Projects             []OwnerProject    `json:"projects"`
 }
 
 type OwnerInventory struct {

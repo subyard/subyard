@@ -95,6 +95,11 @@ func BuiltinCapabilityCatalog() CapabilityCatalog {
 			RollbackCompatibility: RollbackCompatibilityBackwardCompatibleNoOp,
 			LegacyMinimumVersion:  "0.8.0",
 		},
+		{
+			Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1,
+			// Epoch-1 owners cannot honor detached optional listener state.
+			// The absence of a backward-compatible policy forbids their rollback.
+		},
 	})
 	if err != nil {
 		panic(err)
@@ -126,7 +131,13 @@ func (catalog CapabilityCatalog) supportsV0111PostActivationRecovery(source Fing
 	if source != publishedV0111 {
 		return false
 	}
-	descriptors := slices.Clone(catalog.descriptors)
+	var descriptors []CapabilityDescriptor
+	for _, descriptor := range catalog.descriptors {
+		if descriptor == (CapabilityDescriptor{Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1}) {
+			continue // Only this exact new implementation is outside the historical catalog.
+		}
+		descriptors = append(descriptors, descriptor)
+	}
 	for index := range descriptors {
 		descriptors[index].RollbackCompatibility = ""
 		descriptors[index].LegacyMinimumVersion = ""

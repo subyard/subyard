@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/state"
 )
@@ -137,7 +138,8 @@ func (source cliOwnerSource) Runtime(
 	}
 	return application.OwnerYardRuntime{State: instance.Status,
 		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
-		StartState:        startState, WaitingForAddresses: waiting}, nil
+		StartState:        startState, WaitingForAddresses: waiting,
+		DeferredPublications: ownerpublication.Deferred(instance)}, nil
 }
 
 func (cli *CLI) ownerInventory(ctx context.Context, loaded config.Loaded) (domain.OwnerInventory, error) {

@@ -20,11 +20,12 @@ SSH_HOST="${SSH_HOST:-yard}"
 PROJ=(--project "$INCUS_PROJECT")
 
 action="${1:-}"; shift || true
-force=0 reconcile=0
+force=0 reconcile=0 publication_retry=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --reconcile) reconcile=1 ;;
+    --publication-retry-only) publication_retry=1 ;;
     -*) die "unknown option '$a'" ;;
     *) ;;
   esac
@@ -38,6 +39,12 @@ incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1 \
 
 state() { incus list "$YARD_INSTANCE_NAME" "${PROJ[@]}" -f csv -c s 2>/dev/null; }
 BRIDGE="${INCUS_BRIDGE:-${INCUS_NETWORK:-incusbr0}}"
+if [ "$publication_retry" = 1 ]; then
+  [ "$action" = start ] && [ "$force" = 0 ] && [ "$reconcile" = 0 ] || die 'publication retry needs ordinary start'
+  sudo systemctl start --no-block subyard-power-reconcile.service
+  exit
+fi
+
 
 # A container stop cannot gracefully close desktop windows or SSH shells. Refuse to cross an active
 # session after closing the SSH listener to new connections.

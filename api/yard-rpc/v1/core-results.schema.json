@@ -349,6 +349,14 @@
             "space"
           ],
           "additionalProperties": false
+        },
+        "deferredPublications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "maxItems": 1024
         }
       },
       "required": [

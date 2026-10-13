@@ -523,6 +523,7 @@ type networkIncusServer struct {
 	clustered            bool
 	projectIfMatch       string
 	profileIfMatch       string
+	instanceIfMatch      string
 	aclIfMatch           string
 	powerCalls           []fakePowerCall
 	operationWaitBounded []bool
@@ -622,6 +623,8 @@ func (fake *networkIncusServer) ServeHTTP(writer http.ResponseWriter, request *h
 	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/1.0/instances/") &&
 		strings.HasSuffix(request.URL.Path, "/state"):
 		fake.updatePower(writer, request)
+	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/1.0/instances/"):
+		fake.updateInstance(writer, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/1.0/operations/") &&
 		strings.HasSuffix(request.URL.Path, "/wait"):
 		fake.mu.Lock()
@@ -931,4 +934,38 @@ func writeNetworkIncusError(writer http.ResponseWriter, status int, message stri
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"type": "error", "error": message, "error_code": status,
 	})
+}
+
+func (fake *networkIncusServer) updateInstance(writer http.ResponseWriter, request *http.Request) {
+	name := strings.TrimPrefix(request.URL.Path, "/1.0/instances/")
+	key := request.URL.Query().Get("project") + "/" + name
+	var put api.InstancePut
+	if err := json.NewDecoder(request.Body).Decode(&put); err != nil {
+		writeNetworkIncusError(writer, http.StatusBadRequest, "bad instance update")
+		return
+	}
+	fake.mu.Lock()
+	instance, ok := fake.instances[key]
+	if !ok {
+		fake.mu.Unlock()
+		writeNetworkIncusError(writer, http.StatusNotFound, "missing instance")
+		return
+	}
+	fake.instanceIfMatch = request.Header.Get("If-Match")
+	if fake.instanceIfMatch != instance.ETag {
+		fake.mu.Unlock()
+		writeNetworkIncusError(writer, http.StatusPreconditionFailed, "stale instance")
+		return
+	}
+	instance.Data["config"], instance.Data["expanded_config"] = put.Config, put.Config
+	instance.Data["devices"], instance.Data["expanded_devices"] = put.Devices, put.Devices
+	instance.Data["description"], instance.Data["profiles"] = put.Description, put.Profiles
+	instance.ETag = instance.ETag + "-next"
+	fake.instances[key] = instance
+	fake.nextOperation++
+	id := fmt.Sprintf("network-operation-%d", fake.nextOperation)
+	fake.mu.Unlock()
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(writer).Encode(map[string]any{"type": "async", "status": "Operation created", "status_code": http.StatusAccepted, "operation": "/1.0/operations/" + id, "metadata": map[string]any{"id": id, "class": "task", "status": "Running", "status_code": 103}})
 }

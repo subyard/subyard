@@ -1910,7 +1910,9 @@ esac
 exit 90
 `, 0o700)
 	writeCLIFile(t, filepath.Join(bin, "ip"), "#!/bin/sh\nexit 0\n", 0o700)
+	writeCLIFile(t, filepath.Join(bin, "engine"), fmt.Sprintf("#!/bin/sh\n[ \"$*\" = '_publications subyard yard' ] || exit 90\nprintf 'publication-reconcile\\n' >> %q\n", logPath), 0o700)
 	contextValues := structuredAdapterContext(loaded.Context)
+	contextValues["SUBYARD_DISPATCHER_PATH"] = filepath.Join(bin, "engine")
 	if contextValues["YARD_VERSION"] != Version {
 		t.Fatalf("structured adapter context lost engine version: %#v", contextValues)
 	}

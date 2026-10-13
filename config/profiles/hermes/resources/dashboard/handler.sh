@@ -14,6 +14,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib-service.sh
 . "$SCRIPT_DIR/lib-service.sh"
+# shellcheck source=scripts/lib/owner-address.sh
+. "$SCRIPT_DIR/lib/owner-address.sh"
 
 HERMES_DEVICE=hermes-dashboard
 HERMES_GUEST_PORT=9119
@@ -174,7 +176,30 @@ set_route_ownership() {
   [ "$observed" = "$marker" ]
 }
 
+clear_deferred_route() {
+  local deferred_key=user.subyard.deferred_publication.hermes-dashboard deferred marker fingerprint listen host port
+  deferred="$(incus config get "$YARD_INSTANCE_NAME" "$deferred_key" "${PROJ[@]}")" || return 1
+  [ -n "$deferred" ] || return 0
+  marker="$(ownership_marker)" || return 1
+  jq -e --arg marker "$marker" --arg connect "tcp:127.0.0.1:$HERMES_GUEST_PORT" '
+    keys == ["device","ownership","version"] and .version == 1 and .ownership == $marker and
+    (.device | keys) == ["bind","connect","listen","type"] and
+    .device.type == "proxy" and .device.bind == "host" and .device.connect == $connect and
+    (.device.listen | type) == "string"
+  ' <<<"$deferred" >/dev/null || die 'invalid deferred Hermes route ownership'
+  listen="$(jq -r .device.listen <<<"$deferred")" || return 1
+  host="${listen#tcp:}"; port="${host##*:}"; host="${host%:*}"
+  subyard_owner_tail_address "$host" && [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] &&
+    [ "$port" -le 65535 ] && [ "$listen" = "tcp:$host:$port" ] || die 'invalid deferred Hermes listener'
+  fingerprint="$(fingerprint_entries bind=host "connect=tcp:127.0.0.1:$HERMES_GUEST_PORT" "listen=$listen" type=proxy)" || return 1
+  { [ "$marker" = "v1:$fingerprint" ] || [ "$marker" = "v1:pending:$fingerprint" ]; } \
+    || die 'invalid deferred Hermes route receipt'
+  incus config unset "$YARD_INSTANCE_NAME" "$deferred_key" "${PROJ[@]}" >/dev/null || return 1
+}
+
 clear_route_ownership() {
+  clear_deferred_route || return 1
+  device_exists && return 1
   local marker
   marker="$(ownership_marker)" || return 1
   [ -n "$marker" ] || return 0
@@ -185,13 +210,17 @@ clear_route_ownership() {
 }
 
 remove_owned_route() {
-  if ! device_exists; then
-    clear_route_ownership || return 1
-    return 0
+  if device_exists; then
+    device_is_authorized || die "refusing to remove foreign or unowned device '$HERMES_DEVICE'"
   fi
-  device_is_authorized || die "refusing to remove foreign or unowned device '$HERMES_DEVICE'"
-  incus config device remove "$YARD_INSTANCE_NAME" "$HERMES_DEVICE" \
-    "${PROJ[@]}" >/dev/null || return 1
+  # Revoke restore authority before observing absence. A pending restore then
+  # loses its ETag; a restore that already committed is caught by the fresh read.
+  clear_deferred_route || return 1
+  if device_exists; then
+    device_is_authorized || die "refusing to remove foreign or unowned device '$HERMES_DEVICE'"
+    incus config device remove "$YARD_INSTANCE_NAME" "$HERMES_DEVICE" \
+      "${PROJ[@]}" >/dev/null || return 1
+  fi
   device_exists && return 1
   clear_route_ownership || return 1
 }
@@ -247,7 +276,7 @@ ensure_route() {
       || die "device '$HERMES_DEVICE' exists without matching ownership metadata"
     remove_owned_route || return 1
   else
-    clear_route_ownership || return 1
+    remove_owned_route || return 1
   fi
   set_route_ownership "$pending_marker" || return 1
   if ! incus config device add "$YARD_INSTANCE_NAME" "$HERMES_DEVICE" proxy "${PROJ[@]}" \

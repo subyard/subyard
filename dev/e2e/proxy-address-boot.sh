@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 controller_main() {
-  local slot='' bundle='' bundle_hash='' token='' prepared=0 before_boot='' after_boot=''
-  local down=0 up=0 rc=0 failed=0
+  local slot='' before_boot='' after_boot=''
+  local down=0 up=0
+  # EXIT can run after errexit has unwound this function's local scope.
+  # Keep only the trap's owned fixture state in the top-level shell.
+  PROXY_CONTROLLER_BUNDLE='' PROXY_CONTROLLER_BUNDLE_HASH=''
+  PROXY_CONTROLLER_TOKEN='' PROXY_CONTROLLER_PREPARED=0
   [ "$#" = 2 ] && [ "$1" = --slot ] || {
     printf 'Usage: dev/e2e/proxy-address-boot.sh --slot N\n' >&2; return 2;
   }
@@ -18,13 +22,13 @@ controller_main() {
   VM_COUNT_REQUESTED=1 LEASE_PURPOSE=proxy-address-boot
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
   controller_cleanup() {
-    rc=$?
+    local rc=$? failed=0
     trap - EXIT INT TERM
     set +e
-    if [ "$prepared" = 1 ]; then
+    if [ "$PROXY_CONTROLLER_PREPARED" = 1 ]; then
       cleanup_guest 1 quiet >/dev/null 2>&1 || failed=1
-      run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
-        bash dev/e2e/proxy-address-boot.sh clean "$token" \
+      run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+        bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN" \
         || failed=1
     fi
     [ "$failed" = 0 ] || rc=3
@@ -32,19 +36,21 @@ controller_main() {
     cleanup_on_exit
   }
   trap controller_cleanup EXIT
+  # Signal this process group to interrupt an active foreground SSH transport.
+  # A PID-only signal is handled when that foreground command returns.
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  bundle="$LOCAL_TEMP/worktree.tar.gz"
-  build_bundle "$ROOT" "$bundle"
-  bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
-  printf 'evidence: public_bundle_sha256=%s\n' "$bundle_hash"
+  PROXY_CONTROLLER_BUNDLE="$LOCAL_TEMP/worktree.tar.gz"
+  build_bundle "$ROOT" "$PROXY_CONTROLLER_BUNDLE"
+  PROXY_CONTROLLER_BUNDLE_HASH="$(sha256sum "$PROXY_CONTROLLER_BUNDLE" | awk '{print $1}')"
+  printf 'evidence: public_bundle_sha256=%s\n' "$PROXY_CONTROLLER_BUNDLE_HASH"
   acquire_lease
   start_lease_keeper
-  token="$LEASE_GENERATION"
-  [[ "$token" =~ ^[1-9][0-9]*$ ]] || die 'invalid lease generation'
-  prepared=1
-  run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
-    bash dev/e2e/proxy-address-boot.sh prepare "$token"
+  PROXY_CONTROLLER_TOKEN="$LEASE_GENERATION"
+  [[ "$PROXY_CONTROLLER_TOKEN" =~ ^[1-9][0-9]*$ ]] || die 'invalid lease generation'
+  PROXY_CONTROLLER_PREPARED=1
+  run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+    bash dev/e2e/proxy-address-boot.sh prepare "$PROXY_CONTROLLER_TOKEN"
   cleanup_guest 1
   before_boot="$(ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id)"
   timeout --foreground 20 ssh -F "$CLIENT_CONFIG" -T \
@@ -67,10 +73,10 @@ controller_main() {
   done
   [ "$up" = 1 ] || die 'VM did not return with a new boot ID'
   printf 'evidence: preboot=%s postboot=%s\n' "$before_boot" "$after_boot"
-  run_guest 1 "$bundle" "$bundle_hash" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$bundle_hash" \
-    bash dev/e2e/proxy-address-boot.sh resume "$token"
+  run_guest 1 "$PROXY_CONTROLLER_BUNDLE" "$PROXY_CONTROLLER_BUNDLE_HASH" env SUBYARD_E2E_PROXY_SOURCE_SHA256="$PROXY_CONTROLLER_BUNDLE_HASH" \
+    bash dev/e2e/proxy-address-boot.sh resume "$PROXY_CONTROLLER_TOKEN"
   cleanup_guest 1
-  prepared=0
+  PROXY_CONTROLLER_PREPARED=0
   ok 'current-worktree runtime restored desired power automatically after delayed-address reboot'
   exit 0
 }
@@ -94,6 +100,10 @@ RUNTIME_MANIFEST="$STATE_ROOT/runtime-files.expected.sha256"
 ADDRESS=192.0.2.123
 INTERFACE="sypb$TOKEN"
 READY=z-ready
+WAITING=a-required
+OWNER_ADDRESS=100.64.200.123
+OWNER_PORT=38475
+PREVIEW_UNIT="subyard-e2e-preview-$TOKEN.service"
 ADDRESS_UNIT="$MARKER-address.service"
 ADDRESS_UNIT_PATH="/etc/systemd/system/$ADDRESS_UNIT"
 ADDRESS_SCRIPT="$STATE_ROOT/deliver-address.sh"
@@ -102,6 +112,26 @@ owned_address_unit() {
   sudo -n test -f "$ADDRESS_UNIT_PATH" && sudo -n test ! -L "$ADDRESS_UNIT_PATH" \
     && [ "$(sudo -n head -n 1 "$ADDRESS_UNIT_PATH")" = "# $MARKER" ] \
     && [ "$(sudo -n stat -c %u:%g "$ADDRESS_UNIT_PATH")" = 0:0 ]
+}
+cleanup_preview_payload() {
+  local payload
+  payload="$(cat <<'CLEAN_PREVIEW'
+marker="$1"; unit="$2"; root="/var/lib/$marker-preview"; path="/etc/systemd/system/$unit"
+if [ -e "$root" ] || [ -L "$root" ]; then
+  [ -d "$root" ] && [ ! -L "$root" ] && [ "$(stat -c %u:%g:%a "$root")" = 0:0:755 ] || exit 1
+  [ -f "$root/.marker" ] && [ ! -L "$root/.marker" ] && [ "$(stat -c %u:%g:%a "$root/.marker")" = 0:0:600 ] && [ "$(cat "$root/.marker")" = "$marker" ] || exit 1
+fi
+if [ -e "$path" ] || [ -L "$path" ]; then
+  [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u:%g:%a "$path")" = 0:0:644 ] || exit 1
+  [ "$(head -n 1 "$path")" = "# $marker" ] || exit 1
+  systemctl disable --now "$unit"
+  find "$path" -delete
+  systemctl daemon-reload
+fi
+if [ -d "$root" ]; then find "$root" -xdev -depth -delete; fi
+CLEAN_PREVIEW
+  )"
+  incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c "$payload" sh "$MARKER" "$PREVIEW_UNIT"
 }
 proxy_cleanup() {
   local rc=$? failed=0
@@ -116,6 +146,13 @@ proxy_cleanup() {
   fi
   if [ "$CLEANUP_ARMED" = 1 ]; then
     assert_state_root
+    # A stopped or inaccessible guest is removed by the owning project cleanup.
+    # Never start it for cleanup; a running guest permits exact payload removal.
+    if [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s 2>/dev/null)" = RUNNING ]; then
+      if [ "$(incus project get "$PROJECT" user.subyard.p0-power-systemd)" = "$MARKER" ]; then
+        cleanup_preview_payload || failed=1
+      else failed=1; fi
+    fi
     if sudo -n test -e "$ADDRESS_UNIT_PATH" || sudo -n test -L "$ADDRESS_UNIT_PATH"; then
       if owned_address_unit; then
         sudo -n systemctl disable --now "$ADDRESS_UNIT" >/dev/null 2>&1 || failed=1
@@ -128,12 +165,14 @@ proxy_cleanup() {
         sudo -n ip link delete dev "$INTERFACE" || failed=1
       else failed=1; fi
     fi
-    if incus info "$READY" --project "$PROJECT" >/dev/null 2>&1; then
-      if [ "$(incus config get "$READY" user.subyard.e2e --project "$PROJECT")" = "$MARKER" ]; then
+    for cleanup_instance in "$READY" "$WAITING"; do
+    if incus info "$cleanup_instance" --project "$PROJECT" >/dev/null 2>&1; then
+      if [ "$(incus config get "$cleanup_instance" user.subyard.e2e --project "$PROJECT")" = "$MARKER" ]; then
         sudo -n systemctl stop subyard-power-reconcile.service || failed=1
-        incus delete "$READY" --project "$PROJECT" --force || failed=1
+        incus delete "$cleanup_instance" --project "$PROJECT" --force || failed=1
       else failed=1; fi
     fi
+    done
   fi
   [ "$failed" = 0 ] || rc=3
   (exit "$rc")
@@ -222,13 +261,11 @@ assert_release() {
   done
   [ "$(sudo -n stat -c %a "$RECONCILER")" = 755 ] \
     && [ "$(sudo -n stat -c %a "$UNIT")" = 644 ] || die 'unexpected boot runtime permissions'
-  operator_env cat "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" \
-    > "$STATE_ROOT/candidate.service.in"
-  assert_unit_matches "$STATE_ROOT/candidate.service.in" loaded 5
+  assert_unit_matches "$OPERATOR_HOME/.subyard/runtime/$target/config/systemd/subyard-power-reconcile.service.in" loaded 5
   snapshot="$(sudo -n systemctl show subyard-power-reconcile.service -p FragmentPath -p DropInPaths)"
   grep -Fxq "FragmentPath=$UNIT" <<<"$snapshot" \
     && grep -Fxq 'DropInPaths=' <<<"$snapshot" || die 'unexpected boot unit override'
-  for name in "$INSTANCE" "$READY"; do
+  for name in "$INSTANCE" "$READY" "$WAITING"; do
     [ "$(incus config get "$name" boot.autostart --project "$PROJECT")" = false ] \
       && [ "$(incus config get "$name" user.subyard.desired_power --project "$PROJECT")" = running ] \
       || die 'desired power or Incus autostart changed'
@@ -237,6 +274,169 @@ assert_release() {
     "$SOURCE_BUNDLE_SHA256" "$CANDIDATE_VERSION" "$digest" \
     "$(sudo -n sha256sum "$RECONCILER" | awk '{print $1}')"
   assert_guards
+}
+
+optional_route() {
+  local host="$1" runtime_root
+  runtime_root="$OPERATOR_HOME/.subyard/runtime/$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  operator_env bash -eu -c '
+    . "$1/scripts/lib/preview-proxy.sh"
+    YARD_INSTANCE_NAME="$2" INCUS_PROJECT="$3" WEB_PREVIEW_HOST_PORT="$4" YARD_KIND=container
+    PROJ=(--project "$INCUS_PROJECT")
+    subyard_preview_route "$5"
+  ' _ "$runtime_root" "$INSTANCE" "$PROJECT" "$OWNER_PORT" "$host"
+}
+
+optional_reconcile() {
+  local rc=0 contracts
+  contracts="$(sudo -n sed -n 's/^Environment=SUBYARD_PUBLICATION_CONTRACTS=//p' "$UNIT")"
+  sudo -n env SUBYARD_PUBLICATION_CONTRACTS="$contracts" "$RECONCILER" _power-reconcile || rc=$?
+  [ "$rc" = 0 ] || [ "$rc" = 75 ] || die 'optional reconcile failed'
+}
+
+wait_local_preview() {
+  local deadline=$((SECONDS+60))
+  until incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --max-time 3 --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --max-time 3 --silent \
+        --output /dev/null --write-out 'evidence: local_preview_http_status=%{http_code}\n' http://127.0.0.1:8765/ >&2 || true
+      incus exec "$INSTANCE" --project "$PROJECT" -- systemctl show "$PREVIEW_UNIT" \
+        -p LoadState -p ActiveState -p SubState -p Result -p ExecMainStatus -p MainPID >&2 || true
+      die 'local preview did not become reachable'
+    fi
+    sleep 1
+  done
+}
+
+assert_optional_restored() {
+  local boot_file="$1" pid_file="$2" deadline=$((SECONDS+60)) snapshot route_ready=0 http_ready=0
+  while :; do
+    snapshot="$(incus query "/1.0/instances/$INSTANCE?project=$PROJECT")" || {
+      printf 'evidence: owner_route_query=failed\n' >&2
+      die 'owner route was broadened or ownership did not converge'
+    }
+    if jq -e --arg host "$OWNER_ADDRESS" --arg port "$OWNER_PORT" '
+    .status == "Running" and .config["user.subyard.desired_power"] == "running"
+    and .config["user.subyard.deferred_publication.subyard-preview"] == null
+    and .devices["subyard-preview"] == {type:"proxy",bind:"host",listen:("tcp:"+$host+":"+$port),connect:"tcp:127.0.0.1:8765"}
+    and .config["user.subyard.preview_proxy"] == ("v1:"+$host+":"+$port)
+    ' <<<"$snapshot" >/dev/null 2>&1; then
+      route_ready=1
+      if curl -q --noproxy '*' --connect-timeout 2 --max-time 3 --fail --silent "http://$OWNER_ADDRESS:$OWNER_PORT/" | grep -Fx "$MARKER" >/dev/null; then
+        http_ready=1; break
+      fi
+    else
+      route_ready=0
+    fi
+    (( SECONDS < deadline )) || break
+    sleep 1
+  done
+  if [ "$route_ready" != 1 ]; then
+    jq -c --arg host "$OWNER_ADDRESS" --arg port "$OWNER_PORT" '
+      if type != "object" or (.config | type) != "object" or (.devices | type) != "object"
+         or (.expanded_devices != null and (.expanded_devices | type) != "object") then
+        {owner_route_snapshot:"invalid-shape"}
+      else
+        {type:"proxy",bind:"host",listen:("tcp:"+$host+":"+$port),connect:"tcp:127.0.0.1:8765"} as $expected
+        | .config["user.subyard.deferred_publication.subyard-preview"] as $deferred
+        | {owner_route_snapshot:"parsed", running:(.status == "Running"),
+           desired_running:(.config["user.subyard.desired_power"] == "running"),
+           deferred_absent:($deferred == null),
+           deferred_class:(if $deferred == null then "absent" elif ($deferred | type) != "string" then "invalid-type" elif $deferred == "" then "empty" else "present" end),
+           local_device_exact:(.devices["subyard-preview"] == $expected),
+           effective_device_exact:((.expanded_devices // .devices)["subyard-preview"] == $expected),
+           ownership_exact:(.config["user.subyard.preview_proxy"] == ("v1:"+$host+":"+$port))}
+      end
+    ' <<<"$snapshot" >&2 2>/dev/null || printf 'evidence: owner_route_snapshot=parse-failed\n' >&2
+    die 'owner route was broadened or ownership did not converge'
+  fi
+  [ "$http_ready" = 1 ] || die 'exact owner endpoint never became reachable'
+  incus exec "$INSTANCE" --project "$PROJECT" -- cat /proc/sys/kernel/random/boot_id > "$STATE_ROOT/current-optional-boot-id"
+  incus exec "$INSTANCE" --project "$PROJECT" -- systemctl show "$PREVIEW_UNIT" -p MainPID --value > "$STATE_ROOT/current-optional-preview-pid"
+  cmp -s "$boot_file" "$STATE_ROOT/current-optional-boot-id" || die 'publication restore restarted the yard'
+  cmp -s "$pid_file" "$STATE_ROOT/current-optional-preview-pid" || die 'publication restore restarted the local preview workload'
+}
+
+prepare_optional_publication() {
+  local payload
+  ! ip -j address show | jq -e --arg address "$OWNER_ADDRESS" 'any(.[].addr_info[]; .local == $address)' >/dev/null || die 'synthetic owner address already exists'
+  sudo -n ip address add "$OWNER_ADDRESS/32" dev "$INTERFACE"
+  payload="$(cat <<'GUEST'
+marker="$1"; unit="$2"
+command -v python3 >/dev/null
+command -v curl >/dev/null
+[ ! -e "/etc/systemd/system/$unit" ] && [ ! -L "/etc/systemd/system/$unit" ] || exit 1
+root="/var/lib/$marker-preview"
+if [ -e "$root" ] || [ -L "$root" ]; then
+  [ -d "$root" ] && [ ! -L "$root" ] && [ "$(stat -c %u:%g:%a "$root")" = 0:0:755 ] || exit 1
+  [ -f "$root/.marker" ] && [ ! -L "$root/.marker" ] && [ "$(stat -c %u:%g:%a "$root/.marker")" = 0:0:600 ] && [ "$(cat "$root/.marker")" = "$marker" ] || exit 1
+fi
+[ ! -L "$root/index.html" ] || exit 1
+install -d -m 0755 "$root"
+printf '%s\n' "$marker" > "$root/.marker"
+chmod 0600 "$root/.marker"
+printf '%s\n' "$marker" > "$root/index.html"
+chmod 0644 "$root/index.html"
+{
+ printf '# %s\n[Unit]\nDescription=%s preview workload\nAfter=network.target\n' "$marker" "$marker"
+ printf '[Service]\nExecStart=/usr/bin/python3 -m http.server 8765 --bind 127.0.0.1 --directory %s\n' "$root"
+ printf '[Install]\nWantedBy=multi-user.target\n'
+} | install -o root -g root -m 0644 /dev/stdin "/etc/systemd/system/$unit"
+systemctl daemon-reload
+systemctl enable --now "$unit"
+GUEST
+  )"
+  incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c "$payload" sh "$MARKER" "$PREVIEW_UNIT"
+  wait_local_preview
+  optional_route "$OWNER_ADDRESS"
+  operator_yard stop --force --yes
+  sudo -n ip address del "$OWNER_ADDRESS/32" dev "$INTERFACE"
+  operator_yard start --yes
+  incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -e '
+    .status == "Running" and .config["user.subyard.desired_power"] == "running"
+    and .devices["subyard-preview"] == null
+    and .config["user.subyard.deferred_publication.subyard-preview"] != null' >/dev/null || die 'explicit start did not defer only the optional listener'
+  wait_local_preview
+  incus exec "$INSTANCE" --project "$PROJECT" -- cat /proc/sys/kernel/random/boot_id > "$STATE_ROOT/explicit-optional-boot-id"
+  incus exec "$INSTANCE" --project "$PROJECT" -- systemctl show "$PREVIEW_UNIT" -p MainPID --value > "$STATE_ROOT/explicit-optional-preview-pid"
+  optional_reconcile
+  optional_reconcile
+  # Contradictory saved ownership fails without stopping the local workload.
+  sudo -n systemctl stop subyard-power-reconcile.service
+  incus config set "$INSTANCE" user.subyard.preview_proxy "v1:$OWNER_ADDRESS:38476" --project "$PROJECT"
+  local conflict_rc=0 contracts
+  contracts="$(sudo -n sed -n 's/^Environment=SUBYARD_PUBLICATION_CONTRACTS=//p' "$UNIT")"
+  # The fixture operator owns STATE_ROOT; only the reconciler process needs root.
+  # shellcheck disable=SC2024
+  sudo -n env SUBYARD_PUBLICATION_CONTRACTS="$contracts" "$RECONCILER" _power-reconcile > "$STATE_ROOT/publication-conflict.log" 2>&1 || conflict_rc=$?
+  [ "$conflict_rc" = 1 ] || die 'saved ownership drift was accepted'
+  [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] || die 'ownership conflict stopped the local yard'
+  incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null
+  incus config set "$INSTANCE" user.subyard.preview_proxy "v1:$OWNER_ADDRESS:$OWNER_PORT" --project "$PROJECT"
+  sudo -n systemctl reset-failed subyard-power-reconcile.service
+  sudo -n systemctl start --no-block subyard-power-reconcile.service
+  optional_reconcile
+  local ssh_endpoint ssh_port
+  ssh_endpoint="$(incus config device get "$INSTANCE" ssh listen --project "$PROJECT")"
+  [[ "$ssh_endpoint" =~ ^tcp:127\.0\.0\.1:([0-9]+)$ ]] || die 'local SSH endpoint changed'
+  ssh_port="${BASH_REMATCH[1]}"
+  timeout --foreground 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; read -r banner <&3; [[ "$banner" = SSH-2.0-* ]]' _ "$ssh_port" || die 'local SSH listener was unavailable'
+  operator_yard status | grep -F 'publication waiting for address:' >/dev/null || die 'status omitted pending publication'
+  sudo -n ip address add "$OWNER_ADDRESS/32" dev "$INTERFACE"
+  assert_optional_restored "$STATE_ROOT/explicit-optional-boot-id" "$STATE_ROOT/explicit-optional-preview-pid"
+  optional_reconcile
+  # A second disappearance and cancellation must never resurrect the saved route.
+  sudo -n ip address del "$OWNER_ADDRESS/32" dev "$INTERFACE"
+  optional_reconcile
+  optional_route 127.0.0.1
+  sudo -n ip address add "$OWNER_ADDRESS/32" dev "$INTERFACE"
+  optional_reconcile
+  incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -e '
+    .status == "Running" and .devices["subyard-preview"] == null
+    and .config["user.subyard.preview_proxy"] == null
+    and .config["user.subyard.deferred_publication.subyard-preview"] == null' >/dev/null || die 'cancelled route was resurrected'
+  optional_route "$OWNER_ADDRESS"
+  printf 'evidence: explicit_start=RUNNING missing_owner_ip=deferred local_preview=reachable exact_restore=reachable local_ssh=reachable guest_identity=unchanged cancellation=preserved ownership_drift=fail-closed\n'
 }
 
 prepare_proxy() {
@@ -286,8 +486,14 @@ prepare_proxy() {
   sudo -n ip link set dev "$INTERFACE" alias "$MARKER"
   sudo -n ip link set dev "$INTERFACE" up
   sudo -n ip address add "$ADDRESS/32" dev "$INTERFACE"
-  incus config device add "$INSTANCE" delayed-address proxy --project "$PROJECT" \
+  incus init subyard-e2e-debian-13-cloud-container "$WAITING" --project "$PROJECT" --storage default \
+    -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
+    -c user.subyard.managed=true -c user.subyard.initialized=true \
+    -c user.subyard.desired_power=running -c user.subyard.name="$WAITING" \
+    -c user.subyard.bridge=incusbr0 >/dev/null
+  incus config device add "$WAITING" delayed-address proxy --project "$PROJECT" \
     listen="tcp:$ADDRESS:38473" connect=tcp:127.0.0.1:22 bind=host nat=false >/dev/null
+  incus start "$WAITING" --project "$PROJECT"
   incus init subyard-e2e-debian-13-cloud-container "$READY" --project "$PROJECT" --storage default \
     -c user.subyard.e2e="$MARKER" -c boot.autostart=false \
     -c user.subyard.managed=true -c user.subyard.initialized=true \
@@ -296,12 +502,13 @@ prepare_proxy() {
   incus config device add "$READY" address-test proxy --project "$PROJECT" \
     listen=tcp:127.0.0.1:38474 connect=tcp:127.0.0.1:22 bind=host nat=false >/dev/null
   incus start "$READY" --project "$PROJECT"
+  prepare_optional_publication
   assert_release
   record_reboot_baseline
   {
     printf '# %s\n' "$MARKER"
     printf 'set -euo pipefail\n'
-    for name in MARKER STATE_ROOT INTERFACE ADDRESS PROJECT INSTANCE READY BOOT_ID_STATE; do
+    for name in MARKER STATE_ROOT INTERFACE ADDRESS OWNER_ADDRESS OWNER_PORT PREVIEW_UNIT PROJECT INSTANCE READY WAITING BOOT_ID_STATE; do
       printf '%s=%q\n' "$name" "${!name}"
     done
     cat <<'DELIVER'
@@ -315,20 +522,28 @@ ip link set dev "$INTERFACE" up
 for _ in $(seq 1 150); do
   snapshot="$(systemctl show subyard-power-reconcile.service -p SubState -p Result -p ExecMainStatus -p MainPID)"
   if journalctl -b -u subyard-power-reconcile.service --no-pager -o cat \
-      | grep -F "subyard-power: waiting-for-address $PROJECT/$INSTANCE: $ADDRESS" >/dev/null \
+      | grep -F "subyard-power: waiting-for-address $PROJECT/$WAITING: $ADDRESS" >/dev/null \
     && grep -Fxq 'SubState=auto-restart' <<<"$snapshot" \
     && grep -Fxq 'Result=success' <<<"$snapshot" \
     && grep -Fxq 'ExecMainStatus=75' <<<"$snapshot" \
     && grep -Fxq 'MainPID=0' <<<"$snapshot" \
-    && [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = STOPPED ] \
-    && [ "$(incus list "$READY" --project "$PROJECT" --format csv -c s)" = RUNNING ]; then
+    && [ "$(incus list "$WAITING" --project "$PROJECT" --format csv -c s)" = STOPPED ] \
+    && [ "$(incus list "$READY" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
+    && [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ] \
+    && incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --max-time 3 --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null; then
     printf '%s\n' "$snapshot" \
       | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.properties"
-    printf '%s\n' "waiting-for-address $PROJECT/$INSTANCE: $ADDRESS independent-ready=RUNNING" \
+    incus exec "$INSTANCE" --project "$PROJECT" -- curl -q --noproxy '*' --fail --silent http://127.0.0.1:8765/ | grep -Fx "$MARKER" >/dev/null
+    incus query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -e '.status == "Running" and .config["user.subyard.desired_power"] == "running" and .devices["subyard-preview"] == null and .config["user.subyard.deferred_publication.subyard-preview"] != null' >/dev/null
+    incus exec "$INSTANCE" --project "$PROJECT" -- cat /proc/sys/kernel/random/boot_id > "$STATE_ROOT/optional-boot-id"
+    incus exec "$INSTANCE" --project "$PROJECT" -- systemctl show "$PREVIEW_UNIT" -p MainPID --value > "$STATE_ROOT/optional-preview-pid"
+    printf '%s\n' "waiting-for-address $PROJECT/$WAITING: $ADDRESS optional-running=$PROJECT/$INSTANCE local-preview=reachable independent-ready=RUNNING" \
       | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/waiting.proof"
     sleep 35
-    [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = STOPPED ]
+    [ "$(incus list "$WAITING" --project "$PROJECT" --format csv -c s)" = STOPPED ]
     [ "$(incus list "$READY" --project "$PROJECT" --format csv -c s)" = RUNNING ]
+    [ "$(incus list "$INSTANCE" --project "$PROJECT" --format csv -c s)" = RUNNING ]
+    ip address add "$OWNER_ADDRESS/32" dev "$INTERFACE"
     ip address add "$ADDRESS/32" dev "$INTERFACE"
     printf '%s\n' "$MARKER" \
       | install -o root -g root -m 0644 /dev/stdin "$STATE_ROOT/address-delivered"
@@ -385,10 +600,11 @@ resume_proxy() {
   ip -4 route show default > "$route"
   cmp -s "$DEFAULT_ROUTE_STATE" "$route" || die 'host default route changed across reboot'
   assert_release
-  printf 'ok: explicit boot waiting, independent RUNNING, delayed address and automatic RUNNING passed\n'
+  assert_optional_restored "$STATE_ROOT/optional-boot-id" "$STATE_ROOT/optional-preview-pid"
+  printf 'ok: owned optional publication preserved RUNNING/local preview across delayed-address reboot; required foreign wait and independent yard preserved\n'
 }
 
-for command in sudo incus ip jq systemctl timeout go tar; do
+for command in sudo incus ip jq systemctl timeout go tar curl; do
   command -v "$command" >/dev/null || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'

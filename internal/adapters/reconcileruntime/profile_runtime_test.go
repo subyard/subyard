@@ -10,10 +10,46 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestProfileRuntimeColdInstallationPreservesDependencyLoss(t *testing.T) {
+	for _, scenario := range []string{"cold", "retained", "installed", "custom socket"} {
+		t.Run(scenario, func(t *testing.T) {
+			runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 9\n")
+			root := testkit.TempDir(t)
+			t.Setenv("PATH", root)
+			t.Setenv("INCUS_DIR", filepath.Join(root, "incus-state"))
+			t.Setenv("INCUS_SOCKET", "")
+			runtime.Incus = incusclient.New("")
+			switch scenario {
+			case "retained":
+				if err := os.Mkdir(filepath.Join(root, "incus-state"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "installed":
+				testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\nexit 9\n"), 0700)
+			case "custom socket":
+				runtime.Incus = incusclient.New(filepath.Join(root, "missing.socket"))
+			}
+			observations, err := runtime.ObserveProfileRuntimes(context.Background())
+			if err == nil {
+				t.Fatalf("dependency loss treated as absent: %#v", observations)
+			}
+			plan, err := runtime.PrepareProfileRuntimes(context.Background(), true, false)
+			if scenario == "cold" {
+				if err != nil || !plan.unavailable || plan.approved["synthetic-runtime"].State != ports.RuntimeStateDeferred {
+					t.Fatalf("approved cold prerequisite was not deferred: %#v %v", plan, err)
+				}
+			} else if err == nil {
+				t.Fatal("ambiguous dependency loss accepted as an approved cold prerequisite")
+			}
+		})
+	}
+}
 
 const (
 	testRuntimeOldDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -9,29 +9,48 @@ export OBSERVER_PROXY_STATE="$temporary/state.json" OBSERVER_PROXY_LOG="$tempora
 printf '{"config":{},"devices":{}}\n' >"$OBSERVER_PROXY_STATE"
 cat >"$temporary/bin/incus" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys
+import copy, json, os, sys
 args=sys.argv[1:]
 path=os.environ['OBSERVER_PROXY_STATE']
 with open(path) as f: state=json.load(f)
+def restore():
+ plan=state['restorePlan']; expected=plan['etag']; actual=state.get('revision',0)
+ if expected!=actual:
+  state['restoreResult']='etag-mismatch'
+ else:
+  receipt=plan['receipt']; assert receipt['ownership']==state['config']['user.subyard.ai_observer_proxy']
+  state['devices']['ai-observer']=receipt['device']; state['config'].pop('user.subyard.deferred_publication.ai-observer',None)
+  state['revision']=actual+1; state['restoreResult']='committed'
+  if os.environ.get('OBSERVER_PROXY_RACE')=='before-query-foreign':
+   state['devices']['ai-observer']['connect']='tcp:127.0.0.1:9999'; state['revision']+=1
+ with open(path,'w') as f: json.dump(state,f)
 if args==['query','/1.0/instances/fixture?project=fixture']:
- print(json.dumps(state)); sys.exit(0)
+ observed=copy.deepcopy(state)
+ if os.environ.get('OBSERVER_PROXY_RACE','').startswith('before-query') and not state.get('restoreResult'): restore()
+ print(json.dumps(observed)); sys.exit(0)
 with open(os.environ['OBSERVER_PROXY_LOG'],'a') as f: f.write(' '.join(args)+'\n')
 if args[:2]==['config','get']:
  if os.environ.get('OBSERVER_PROXY_GET_FAIL')=='1': sys.exit(1)
  print(state['config'].get(args[3],'')); sys.exit(0)
 elif args[:2]==['config','set']:
- state['config'][args[3]]=args[4]
+ state['config'][args[3]]=args[4]; state['revision']=state.get('revision',0)+1
 elif args[:2]==['config','unset']:
  if os.environ.get('OBSERVER_PROXY_UNSET_FAIL')=='1': sys.exit(1)
- if args[3] not in state['config']: sys.exit(4)
- del state['config'][args[3]]
+ if args[3] not in state['config']:
+  # User metadata deletion is a full instance-config update; removing an
+  # already-absent user key does not reintroduce it or resurrect the device.
+  if args[3]!='user.subyard.deferred_publication.ai-observer': sys.exit(4)
+ else:
+  del state['config'][args[3]]; state['revision']=state.get('revision',0)+1
+ if args[3]=='user.subyard.deferred_publication.ai-observer' and os.environ.get('OBSERVER_PROXY_RACE')=='after-revoke': restore()
 elif args[:3]==['config','device','remove']:
- del state['devices'][args[4]]
+ if os.environ.get('OBSERVER_PROXY_REMOVE_FAIL')=='1': sys.exit(1)
+ del state['devices'][args[4]]; state['revision']=state.get('revision',0)+1
 elif args[:3]==['config','device','add']:
  if os.environ.get('OBSERVER_PROXY_FAIL')=='1': sys.exit(1)
  assert args[5]=='proxy'
  props=dict(arg.split('=',1) for arg in args[6:] if '=' in arg)
- state['devices'][args[4]]={'type':'proxy',**props}
+ state['devices'][args[4]]={'type':'proxy',**props}; state['revision']=state.get('revision',0)+1
 else: raise RuntimeError(args)
 with open(path,'w') as f: json.dump(state,f)
 PY
@@ -157,3 +176,65 @@ jq -e --arg key "$provision_key" --arg context "$context" \
   '.config[$key] == $context' "$OBSERVER_PROXY_STATE" >/dev/null \
   || fail 'failed convergence marker clear mutated state'
 printf 'ok: AI Observer owner proxy lifecycle\n'
+
+# Deferred owner publication keeps the installed origin and is cancelled on retirement.
+YARD_KIND=container
+export OBSERVER_TAIL_ADDRESS=100.101.102.104 OBSERVER_ACTIVE_ADDRESS=100.101.102.104
+AI_OBSERVER_FRONTEND_URL=''
+subyard_ai_observer_proxy 1
+jq '.config["user.subyard.deferred_publication.ai-observer"] = ({version:1,ownership:.config["user.subyard.ai_observer_proxy"],device:.devices["ai-observer"]}|tojson) | .devices={}' "$OBSERVER_PROXY_STATE" > "$temporary/next.json"
+mv "$temporary/next.json" "$OBSERVER_PROXY_STATE"
+export OBSERVER_TAIL_ADDRESS='' OBSERVER_ACTIVE_ADDRESS=''
+before="$(wc -l <"$OBSERVER_PROXY_LOG")"
+subyard_ai_observer_proxy 1
+[ "$(wc -l <"$OBSERVER_PROXY_LOG")" = "$before" ] || fail 'deferred origin was replaced'
+subyard_ai_observer_proxy 0
+jq -e '.devices == {} and .config["user.subyard.ai_observer_proxy"] == null and .config["user.subyard.deferred_publication.ai-observer"] == null' "$OBSERVER_PROXY_STATE" >/dev/null
+
+# Model the generic restorer's atomic device+journal update with an observed
+# ETag, both before cancellation revokes authority and after that ETag is stale.
+for race in before-query after-revoke before-query-foreign before-query-failed-remove failed-revoke contradictory; do
+  python3 -B - <<'PY'
+import json,os
+marker='v2:100.101.102.104:22223'
+device={'type':'proxy','bind':'host','listen':'tcp:100.101.102.104:22223','connect':'tcp:127.0.0.1:8080'}
+receipt={'version':1,'ownership':marker,'device':device}
+state={'config':{'user.subyard.ai_observer_proxy':marker,'user.subyard.deferred_publication.ai-observer':json.dumps(receipt),'user.subyard.desired_power':'running'},
+       'devices':{'unrelated':{'type':'disk','path':'/unrelated'}},'revision':1,'restorePlan':{'etag':1,'receipt':receipt}}
+with open(os.environ['OBSERVER_PROXY_STATE'],'w') as f: json.dump(state,f)
+PY
+  if [ "$race" = contradictory ]; then
+    jq '.config["user.subyard.deferred_publication.ai-observer"] |= (fromjson | .ownership="foreign" | tojson)' "$OBSERVER_PROXY_STATE" >"$temporary/contradictory.json"
+    mv "$temporary/contradictory.json" "$OBSERVER_PROXY_STATE"
+  fi
+  if [ "$race" = before-query-foreign ] || [ "$race" = before-query-failed-remove ] || [ "$race" = failed-revoke ] || [ "$race" = contradictory ]; then
+    if OBSERVER_PROXY_RACE="$race" OBSERVER_PROXY_UNSET_FAIL="$([ "$race" = failed-revoke ] && printf 1 || printf 0)" \
+      OBSERVER_PROXY_REMOVE_FAIL="$([ "$race" = before-query-failed-remove ] && printf 1 || printf 0)" subyard_ai_observer_proxy 0; then
+      fail "cancellation accepted $race"
+    fi
+    if [ "$race" = before-query-foreign ]; then
+      jq -e '.devices["ai-observer"].connect == "tcp:127.0.0.1:9999" and .config["user.subyard.ai_observer_proxy"] != null' "$OBSERVER_PROXY_STATE" >/dev/null \
+        || fail 'cancellation removed a just-diverged device or its recovery receipt'
+    elif [ "$race" = before-query-failed-remove ]; then
+      jq -e '.devices["ai-observer"].connect == "tcp:127.0.0.1:8080" and .config["user.subyard.ai_observer_proxy"] != null and .config["user.subyard.deferred_publication.ai-observer"] == null' "$OBSERVER_PROXY_STATE" >/dev/null \
+        || fail 'failed removal lost its live owned device or recovery receipt'
+      subyard_ai_observer_proxy 0
+      jq -e '.devices["ai-observer"] == null and .config["user.subyard.ai_observer_proxy"] == null' "$OBSERVER_PROXY_STATE" >/dev/null \
+        || fail 'retry did not finish cancellation after failed removal'
+    else
+      jq -e '.devices["ai-observer"] == null and .config["user.subyard.deferred_publication.ai-observer"] != null and .config["user.subyard.ai_observer_proxy"] != null' "$OBSERVER_PROXY_STATE" >/dev/null \
+        || fail 'failed revoke changed recoverable publication state'
+    fi
+  else
+    OBSERVER_PROXY_RACE="$race" subyard_ai_observer_proxy 0
+    jq -e '.devices["ai-observer"] == null and .config["user.subyard.ai_observer_proxy"] == null and .config["user.subyard.deferred_publication.ai-observer"] == null' "$OBSERVER_PROXY_STATE" >/dev/null \
+      || fail "cancellation left a restorable or just-restored route: $race"
+    expected=committed; [ "$race" != after-revoke ] || expected=etag-mismatch
+    jq -e --arg expected "$expected" '.restoreResult == $expected' "$OBSERVER_PROXY_STATE" >/dev/null \
+      || fail 'fixture did not exercise the required ETag ordering'
+    subyard_ai_observer_proxy 0
+  fi
+  jq -e '.config["user.subyard.desired_power"] == "running" and .devices.unrelated == {type:"disk",path:"/unrelated"}' "$OBSERVER_PROXY_STATE" >/dev/null \
+    || fail 'cancellation changed desired power or an unrelated device'
+done
+printf 'ok: AI Observer cancellation preserves restore ETag and foreign-device guards\n'

@@ -189,12 +189,34 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			writeConfigCommandFile(t, fixture.namedAsset, `{"env":{"SCOPE":"named-v1"}}`)
 			result := fixture.execute(releasetransition.ProcessConverge, initial.Inspection.Plan, fixture.reconciler(interrupt))
 			journal := fixture.journal()
-			if len(journal.Steps) != 2 {
-				t.Fatalf("expected only two ledger steps: %#v", journal.Steps)
+			ledgerMigrations := map[string]string{
+				"canonicalize-test-vms-settings-v2":    "settings",
+				"canonicalize-test-yard-owner-v2":      "owner-registration",
+				"introduce-owner-publication-state-v1": "power-metadata",
 			}
+			if len(journal.Steps) != len(ledgerMigrations) {
+				t.Fatalf("expected only shipped ledger steps: %#v", journal.Steps)
+			}
+			seen := map[string]bool{}
 			for _, step := range journal.Steps {
-				if !strings.HasPrefix(step.Resource, "ledger.") {
+				domain, known := ledgerMigrations[step.Migration]
+				if !known || seen[step.Migration] || step.ID != step.Migration+".ledger" || step.Resource != "ledger."+domain {
 					t.Fatalf("unexpected source mutation: %#v", step)
+				}
+				seen[step.Migration] = true
+			}
+			ledgerSnapshot, err := fixture.store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ledger releasetransition.LedgerV2
+			if err := json.Unmarshal(ledgerSnapshot.Payload, &ledger); err != nil {
+				t.Fatal(err)
+			}
+			for migration, domain := range ledgerMigrations {
+				state := ledger.Domains[domain]
+				if state.Epoch != 2 || !reflect.DeepEqual(state.Applied, []string{migration}) {
+					t.Fatalf("ledger domain %s = %#v", domain, state)
 				}
 			}
 			if interrupt {

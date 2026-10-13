@@ -26,6 +26,16 @@ case "${1:-}" in
   info) [ -e "$state_root/up" ] ;;
   list) [ -e "$state_root/up" ] && printf 'RUNNING\n' ;;
   config)
+    if [ "${2:-}" = get ]; then
+      [ ! -f "$state_root/config-${4:-}" ] || cat "$state_root/config-${4:-}"
+      exit 0
+    elif [ "${2:-}" = set ]; then
+      printf '%s' "${5:-}" > "$state_root/config-${4:-}"
+      exit 0
+    elif [ "${2:-}" = unset ]; then
+      rm -f -- "$state_root/config-${4:-}"
+      exit 0
+    fi
     case "${2:-} ${3:-}" in
       'device list')
         if [ -e "$state_root/up" ]; then
@@ -171,4 +181,35 @@ grep -Fq 'systemctl disable --now subyard-orca.service' "$RESOURCE_TEST_LOG" \
   || fail 'Orca down did not converge all captured native targets'
 incus config device show yard | grep -Fq 'unrelated-device:' \
   || fail 'Orca down removed an unrelated device'
+# The native dispatcher must cancel detached publication intent even when every
+# guest target and the live device are already absent.
+receipt="v1:$(printf 'v1\nbind=host\nconnect=tcp:127.0.0.1:6768\nlisten=tcp:100.64.1.20:17678\ntype=proxy\n' | sha256sum | awk '{print $1}')"
+saved="$(jq -cn --arg owner "$receipt" '{version:1,ownership:$owner,device:{type:"proxy",bind:"host",listen:"tcp:100.64.1.20:17678",connect:"tcp:127.0.0.1:6768"}}')"
+printf '%s' "$receipt" >"$TMP/config-user.subyard.resource.orca-server"
+printf '%s' "$saved" >"$TMP/config-user.subyard.deferred_publication.orca-server"
+SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/deferred-down.json"
+jq -e '.changed and all(.steps[]; if .id == "route" then .decision == "apply" else .decision == "skip" end)' \
+  "$TMP/deferred-down.json" >/dev/null || fail 'detached-only down was incorrectly a native no-op'
+# A valid changed endpoint/receipt after authorization must invalidate the plan.
+alternate="v1:$(printf 'v1\nbind=host\nconnect=tcp:127.0.0.1:6768\nlisten=tcp:100.64.1.20:17679\ntype=proxy\n' | sha256sum | awk '{print $1}')"
+printf '%s' "$alternate" >"$TMP/config-user.subyard.resource.orca-server"
+jq -cn --arg owner "$alternate" '{version:1,ownership:$owner,device:{type:"proxy",bind:"host",listen:"tcp:100.64.1.20:17679",connect:"tcp:127.0.0.1:6768"}}' \
+  >"$TMP/config-user.subyard.deferred_publication.orca-server"
+if SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=stale-deferred-down \
+  SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$TMP/deferred-down.json")" \
+  SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$TMP/deferred-down.json")" \
+  "$orca_handler" down >"$TMP/stale-deferred-down.out" 2>&1; then fail 'down accepted changed saved intent'; fi
+grep -Fq 'plan_stale' "$TMP/stale-deferred-down.out" || fail 'saved intent drift lost stale-plan diagnostic'
+printf '%s' "$receipt" >"$TMP/config-user.subyard.resource.orca-server"
+if SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/contradictory-down.out" 2>&1; then
+  fail 'down accepted contradictory saved ownership'
+fi
+[ -f "$TMP/config-user.subyard.deferred_publication.orca-server" ] || fail 'invalid ownership lost saved intent'
+printf '%s' "$saved" >"$TMP/config-user.subyard.deferred_publication.orca-server"
+"$ROOT/bin/yard" orca down --yes >/dev/null
+[ ! -e "$TMP/config-user.subyard.deferred_publication.orca-server" ] \
+  && [ ! -e "$TMP/config-user.subyard.resource.orca-server" ] \
+  && [ -e "$TMP/missing-orca-route" ] || fail 'native down left restorable canceled intent'
+SUBYARD_RESOURCE_MODE=prepare "$orca_handler" down >"$TMP/deferred-down-noop.json"
+jq -e '.changed == false' "$TMP/deferred-down-noop.json" >/dev/null || fail 'canceled down was not idempotent'
 printf 'ok: Orca prepare, silent probes and dispatcher reverse lifecycle\n'

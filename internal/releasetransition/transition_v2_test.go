@@ -4276,6 +4276,18 @@ func v2RegistryPayload(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// These retained-caller fixtures intentionally exercise the original epoch-1
+	// power contract. The publication boundary has its own current-registry tests.
+	var registry RegistryV2
+	if err := json.Unmarshal(payload, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.CurrentEpochs["power-metadata"] = 1
+	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool { return m.Kind == "owner-publication-state-v1" })
+	payload, err = json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return payload
 }
 

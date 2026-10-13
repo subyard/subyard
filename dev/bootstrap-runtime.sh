@@ -208,6 +208,7 @@ fi
 printf 'Install the yard CLI\nThis will:\n'
 printf '  - download and verify Subyard %s for %s/%s;\n' "$VERSION" "$os" "$arch"
 printf '  - install the immutable runtime under %s;\n' "$RUNTIME_ROOT"
+printf '  - complete the installed release transition before publishing CLI entrypoints;\n'
 printf '  - link yard and sy under %s;\n' "$BIN_DIR"
 printf '  - configure login PATH and shell completion.\n'
 if [ -n "$SOURCE_INGRESS_ROOT" ]; then
@@ -330,6 +331,12 @@ if [ "$run_transition" = 1 ]; then
   fi
   env "${transition_environment[@]}" \
     "$candidate/bin/yard" "${transition_arguments[@]}"
+else
+  # The initial link has no predecessor, but its persisted-state capabilities
+  # still need the supported protected transition before init can use them.
+  # The bootstrap's installation consent covers this first-install boundary.
+  env "YARD_RUNTIME_ROOT=$RUNTIME_ROOT" \
+    "$candidate/bin/yard" migrate --yes
 fi
 
 if [ -z "$SOURCE_INGRESS_ROOT" ]; then

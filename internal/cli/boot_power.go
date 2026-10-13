@@ -36,6 +36,11 @@ func RunBootPower(
 		return 2
 	}
 	result, err := reconciler.Run(ctx)
+	if errors.Is(err, ports.ErrHostAddressUnavailable) {
+		for _, publicationErr := range result.PublicationErrors {
+			fmt.Fprintf(stderr, "subyard-power: FAIL: %v\n", publicationErr)
+		}
+	}
 	if err != nil && !errors.Is(err, ports.ErrHostAddressUnavailable) {
 		fmt.Fprintf(stderr, "subyard-power: FAIL: %v\n", err)
 		if errors.Is(err, ports.ErrIncusUnavailable) {
@@ -43,11 +48,14 @@ func RunBootPower(
 		}
 		return 1
 	}
+	for _, waiting := range result.PublicationWaiting {
+		fmt.Fprintf(stdout, "subyard-power: publication-waiting-for-address %s: %s\n", waiting.Instance, strings.Join(waiting.Addresses, ", "))
+	}
 	for _, waiting := range result.Waiting {
 		fmt.Fprintf(stdout, "subyard-power: waiting-for-address %s: %s\n",
 			waiting.Instance, strings.Join(waiting.Addresses, ", "))
 	}
-	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting) == 0 {
+	if len(result.Started)+len(result.Stopped)+len(result.AlreadyRunning)+len(result.Waiting)+len(result.PublicationWaiting) == 0 {
 		fmt.Fprintln(stdout, "subyard-power: no managed yards")
 		return 0
 	}

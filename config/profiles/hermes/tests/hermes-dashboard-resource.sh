@@ -57,6 +57,28 @@ cat >"$TMP/bin/incus" <<'MOCK'
 set -euo pipefail
 root="${HERMES_ROUTE_TEST_ROOT:?}"
 printf '%s\n' "$*" >>"$root/incus.log"
+advance_revision() {
+  local revision=0
+  [ ! -f "$root/revision" ] || revision="$(cat "$root/revision")"
+  printf '%s\n' "$((revision + 1))" >"$root/revision"
+}
+restore_pending() {
+  local actual expected
+  actual="$(cat "$root/revision")"; expected="$(cat "$root/restore-etag")"
+  if [ "$actual" != "$expected" ]; then
+    printf 'RESTORE expected-etag=%s actual-etag=%s result=etag-mismatch\n' "$expected" "$actual" >>"$root/incus.log"
+  else
+    cp "$root/restore-route" "$root/route"
+    printf 'hermes-dashboard\n' >"$root/route-name"
+    rm -f "$root/deferred"
+    advance_revision
+    printf 'RESTORE expected-etag=%s actual-etag=%s result=committed\n' "$expected" "$actual" >>"$root/incus.log"
+    if [ -f "$root/restore-foreign" ]; then
+      sed -i '3c tcp:127.0.0.1:9999' "$root/route"
+      advance_revision
+    fi
+  fi
+}
 case "${1:-}" in
   info) exit 0 ;;
   list) printf 'RUNNING\n' ;;
@@ -97,26 +119,47 @@ case "${1:-}" in
             done
             printf '%s\n' "${5:-}" >"$root/route-name"
             printf '%s\n%s\n%s\n%s\n' "${6:-}" "$listen" "$connect" "$bind" >"$root/route"
+            advance_revision
             ;;
           remove)
             [ ! -f "$root/fail-remove" ] || exit 1
             [ "${5:-}" = "$(cat "$root/route-name")" ] || exit 1
             rm -f -- "$root/route" "$root/route-name" "$root/route-extra"
+            advance_revision
             ;;
         esac
         ;;
-      get) [ ! -f "$root/ownership" ] || cat "$root/ownership" ;;
+      get)
+        case "${4:-}" in
+          user.subyard.resource.hermes-dashboard) [ ! -f "$root/ownership" ] || cat "$root/ownership" ;;
+          user.subyard.deferred_publication.hermes-dashboard)
+            if [ -f "$root/restore-before" ]; then rm "$root/restore-before"; restore_pending; fi
+            [ ! -f "$root/deferred" ] || cat "$root/deferred"
+            ;;
+        esac
+        ;;
       set)
+        if [ "${4:-}" = user.subyard.deferred_publication.hermes-dashboard ]; then
+          printf '%s' "${5:-}" >"$root/deferred"; advance_revision; exit 0
+        fi
         [ ! -f "$root/fail-marker-set" ] || exit 1
         case "${5:-}" in
           v1:pending:*) ;;
           *) [ ! -f "$root/fail-active-marker" ] || exit 1 ;;
         esac
         printf '%s\n' "${5:-}" >"$root/ownership"
+        advance_revision
         ;;
       unset)
+        if [ "${4:-}" = user.subyard.deferred_publication.hermes-dashboard ]; then
+          [ ! -f "$root/fail-journal-unset" ] || exit 1
+          if [ -f "$root/deferred" ]; then rm "$root/deferred"; advance_revision; fi
+          if [ -f "$root/restore-after" ]; then rm "$root/restore-after"; restore_pending; fi
+          exit 0
+        fi
         [ ! -f "$root/fail-marker-unset" ] || exit 1
         rm -f -- "$root/ownership"
+        advance_revision
         ;;
     esac
     ;;
@@ -408,5 +451,46 @@ if SUBYARD_RESOURCE_MODE=prepare "$HANDLER" up >"$TMP/wildcard.out" 2>&1; then
   fail 'up accepted a wildcard guest listener'
 fi
 [ ! -e "$TMP/route" ] || fail 'wildcard refusal changed the route'
+
+rm -f "$TMP/guest-wildcard"
+for race in before after foreign failed-revoke contradictory; do
+  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=seed-cancel-race "$HANDLER" up >/dev/null
+  cp "$TMP/route" "$TMP/restore-route"
+  saved="$(jq -cn --arg marker "$(cat "$TMP/ownership")" --arg listen "$(sed -n '2p' "$TMP/route")" \
+    '{version:1,ownership:$marker,device:{type:"proxy",bind:"host",listen:$listen,connect:"tcp:127.0.0.1:9119"}}')"
+  incus config set "$YARD_INSTANCE_NAME" user.subyard.deferred_publication.hermes-dashboard "$saved" --project "$INCUS_PROJECT" >/dev/null
+  incus config device remove "$YARD_INSTANCE_NAME" hermes-dashboard >/dev/null
+  cp "$TMP/revision" "$TMP/restore-etag"
+  printf 'running\n' >"$TMP/desired-power"
+  case "$race" in
+    before) touch "$TMP/restore-before" ;;
+    after) touch "$TMP/restore-after" ;;
+    foreign) touch "$TMP/restore-before" "$TMP/restore-foreign" ;;
+    failed-revoke) touch "$TMP/fail-journal-unset" ;;
+    contradictory) jq '.ownership="foreign"' "$TMP/deferred" >"$TMP/changed"; mv "$TMP/changed" "$TMP/deferred" ;;
+  esac
+  : >"$TMP/incus.log"
+  if [ "$race" = foreign ] || [ "$race" = failed-revoke ] || [ "$race" = contradictory ]; then
+    if SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=cancel-race "$HANDLER" down >"$TMP/cancel-$race.out" 2>&1; then
+      fail "Hermes cancellation accepted $race"
+    fi
+    [ -f "$TMP/ownership" ] || fail 'failed cancellation lost the recovery receipt'
+    if [ "$race" = foreign ]; then
+      grep -Fxq 'tcp:127.0.0.1:9999' "$TMP/route" || fail 'cancellation removed a just-diverged device'
+    else
+      [ -f "$TMP/deferred" ] && [ ! -f "$TMP/route" ] || fail 'failed revoke changed recoverable state'
+    fi
+    rm -f "$TMP/route" "$TMP/route-name" "$TMP/deferred" "$TMP/ownership" "$TMP/restore-foreign" "$TMP/fail-journal-unset"
+  else
+    SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=cancel-race "$HANDLER" down >/dev/null
+    [ ! -f "$TMP/route" ] && [ ! -f "$TMP/deferred" ] && [ ! -f "$TMP/ownership" ] \
+      || fail "Hermes cancellation left a just-restored or restorable route: $race"
+    expected=committed; [ "$race" != after ] || expected=etag-mismatch
+    grep -Fq "result=$expected" "$TMP/incus.log" || fail 'fixture did not exercise required ETag ordering'
+    SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=down SUBYARD_OPERATION_ID=repeat-cancel "$HANDLER" down >/dev/null
+  fi
+  [ "$(cat "$TMP/desired-power")" = running ] || fail 'cancellation changed desired power'
+  if grep -Eq 'config (set|unset) [^ ]+ user.subyard.desired_power' "$TMP/incus.log"; then fail 'cancellation mutated desired power'; fi
+done
 
 printf 'ok: Hermes route is infrastructure-only and fail-closed\n'

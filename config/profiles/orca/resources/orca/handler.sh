@@ -680,20 +680,105 @@ YARD
   cleanup_guest || die "Orca guest staging directory could not be removed"
 }
 
+clear_deferred_route() {
+  local key=user.subyard.deferred_publication.orca-server value
+  orca_route_state >/dev/null || return 1
+  value="$(incus config get "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}")" || return 1
+  [ -z "$value" ] || incus config unset "$YARD_INSTANCE_NAME" "$key" "${PROJ[@]}" >/dev/null
+}
+
+set_route_receipt() {
+  local fingerprint
+  fingerprint="$(printf 'v1\nbind=host\nconnect=tcp:127.0.0.1:%s\nlisten=tcp:%s:%s\ntype=proxy\n' "$ORCA_GUEST_PORT" "$ORCA_OWNER_IP" "$ORCA_HOST_PORT" | sha256sum | awk '{print $1}')"
+  incus config set "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "v1:$fingerprint" "${PROJ[@]}" >/dev/null
+}
+
 remove_route() {
-  device_exists || return 0
-  incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null
+  clear_deferred_route || return 1
+  if device_exists; then incus config device remove "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" "${PROJ[@]}" >/dev/null || return 1; fi
+  local value
+  value="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}")" || return 1
+  [ -z "$value" ] || incus config unset "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}" >/dev/null
+}
+
+route_receipt_matches() {
+  local marker fingerprint
+  orca_device_exact_shape || return 1
+  marker="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}")" || return 1
+  fingerprint="$(printf 'v1\nbind=%s\nconnect=%s\nlisten=%s\ntype=%s\n' "$(device_value bind)" "$(device_value connect)" "$(device_value listen)" "$(device_value type)" | sha256sum | awk '{print $1}')"
+  [ "$marker" = "v1:$fingerprint" ]
+}
+
+owned_route_matches() {
+  route_matches && route_receipt_matches && orca_route_state >/dev/null
+}
+
+# Bind cancellation and stale-plan checks to both the live route and saved exact
+# route. A journal never authorizes removal when its current owner differs.
+orca_route_state() {
+  local marker saved state=absent
+  marker="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server "${PROJ[@]}")" || return 1
+  saved="$(incus config get "$YARD_INSTANCE_NAME" user.subyard.deferred_publication.orca-server "${PROJ[@]}")" || return 1
+  if device_exists; then
+    state="device:$(orca_device_fingerprint)"
+    [ -z "$marker" ] || route_receipt_matches || die 'invalid Orca route ownership receipt'
+  fi
+  if [ -n "$saved" ]; then
+    python3 -B - "$marker" "$saved" "$ORCA_GUEST_PORT" <<'PY' || die 'invalid deferred Orca route ownership'
+import hashlib, ipaddress, json, sys
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+try:
+    marker, payload, guest_port = sys.argv[1:]
+    saved = json.loads(payload, object_pairs_hook=unique)
+    assert set(saved) == {"version", "ownership", "device"}
+    assert type(saved["version"]) is int and saved["version"] == 1
+    device = saved["device"]
+    assert set(device) == {"bind", "connect", "listen", "type"}
+    assert device["bind"] == "host" and device["type"] == "proxy"
+    assert device["connect"] == "tcp:127.0.0.1:" + guest_port
+    protocol, host, port = device["listen"].split(":")
+    address = ipaddress.IPv4Address(host)
+    assert protocol == "tcp" and not address.is_loopback and not address.is_unspecified
+    assert str(int(port)) == port and 1 <= int(port) <= 65535
+    fingerprint = hashlib.sha256(("v1\n" + "".join(key + "=" + device[key] + "\n"
+                               for key in sorted(device))).encode()).hexdigest()
+    assert marker == saved["ownership"] == "v1:" + fingerprint
+except (AssertionError, KeyError, TypeError, ValueError):
+    sys.exit(1)
+PY
+    # Any live owned route has the same receipt fingerprint, proving it agrees
+    # with the saved recipe rather than relying on the device name.
+    state="deferred:$state"
+  elif [ -n "$marker" ]; then
+    [[ "$marker" =~ ^v1:[0-9a-f]{64}$ ]] || die 'invalid Orca route ownership receipt'
+    state="receipt:$state"
+  fi
+  if [ "$state" = absent ]; then printf 'absent'; else
+    printf '%s:%s' "$state" "$(printf '%s\n%s\n' "$marker" "$saved" | sha256sum | awk '{print $1}')"
+  fi
 }
 
 ensure_route() {
+  orca_route_state >/dev/null || return 1
   if route_matches; then
+    set_route_receipt || return 1
     ok "owner route already exact: $ORCA_OWNER_IP:$ORCA_HOST_PORT"
     return 0
+  fi
+  if device_exists && ! route_receipt_matches; then
+    die "refusing to replace foreign or unreceipted device '$ORCA_DEVICE'"
   fi
   remove_route
   incus config device add "$YARD_INSTANCE_NAME" "$ORCA_DEVICE" proxy "${PROJ[@]}" \
     "listen=tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT" \
-    "connect=tcp:127.0.0.1:$ORCA_GUEST_PORT" bind=host >/dev/null
+    "connect=tcp:127.0.0.1:$ORCA_GUEST_PORT" bind=host >/dev/null || return 1
+  set_route_receipt
 }
 
 run_project_sync() {
@@ -842,7 +927,7 @@ service_contract_endpoint_ready() {
 
 up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
-    service_ready && ingress_active && route_matches && owner_endpoint_ready &&\
+    service_ready && ingress_active && owned_route_matches && owner_endpoint_ready &&\
     automatic_project_hook_ready && discovery_scheduled && codex_defaults_ready && projects_synced
 }
 
@@ -1029,11 +1114,11 @@ cmd_logs() {
 }
 
 cmd_down() {
-  local active=0 guarded=0 routed=0
+  local active=0 guarded=0 route
+  route="$(orca_route_state)" || die 'Orca route cancellation metadata is invalid'
   yexec systemctl is-active --quiet "$ORCA_UNIT" && active=1
   ingress_active && guarded=1
-  device_exists && routed=1
-  if [ "$active" -eq 0 ] && [ "$guarded" -eq 0 ] && [ "$routed" -eq 0 ]; then
+  if [ "$active" -eq 0 ] && [ "$guarded" -eq 0 ] && [ "$route" = absent ]; then
     stop_discovery
     ok "Orca already down"
     return 0
@@ -1109,7 +1194,7 @@ emit_up_assessment() {
       if "$predicate"; then observed="$desired"; decision=skip; fi
       if [ "$id" = host-route ] && [ "$decision" = apply ];then
         observed=absent
-        if device_exists;then observed="device:$(orca_device_fingerprint)";fi
+        observed="$(orca_route_state)" || die 'Orca route metadata is invalid'
       fi
     fi
     dependencies='[]'
@@ -1126,7 +1211,7 @@ headless-dependencies|dependencies_ready|packages/orca-headless|declared-headles
 runtime-contract|runtime_contract_ready|profile/orca-runtime|profile-helper-source-and-service-contract-current
 service-enable|service_enabled|$ORCA_UNIT/enabled|enabled
 service|service_ready|$ORCA_UNIT/readiness|running-and-native-ready
-host-route|route_matches|$ORCA_DEVICE|tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT-to-loopback:$ORCA_GUEST_PORT
+host-route|owned_route_matches|$ORCA_DEVICE|tcp:$ORCA_OWNER_IP:$ORCA_HOST_PORT-to-loopback:$ORCA_GUEST_PORT
 ingress|ingress_active|inet/subyard_orca|managed-ingress-active
 owner-endpoint|owner_endpoint_ready|endpoint/$ORCA_OWNER_IP:$ORCA_HOST_PORT|reachable
 project-hook|automatic_project_hook_ready|profile/project-dispatcher|current-hook-and-helper-contract
@@ -1217,13 +1302,11 @@ emit_down_assessment() {
     '$steps + [{id:"ingress",target:$target,observed:$observed,desired:"absent",
     decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["profile-owned nft table only"],verify:"managed ingress marker is absent",
     consequence:"remove the captured Orca ingress table"}]')"
-  if device_exists; then
-    route="sha256:$(orca_device_fingerprint)"
-  fi
+  route="$(orca_route_state)" || die 'Orca route cancellation metadata is invalid'
   steps="$(jq -cn --argjson steps "$steps" --arg target "incus:$INCUS_PROJECT/$YARD_INSTANCE_NAME/$ORCA_DEVICE" --arg observed "$route" \
     '$steps + [{id:"route",target:$target,observed:$observed,desired:"absent",
-    decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["captured selected proxy device metadata unchanged"],verify:"selected proxy device is absent",
-    consequence:"remove the captured Orca proxy device"}]')"
+    decision:(if $observed == "absent" then "skip" else "apply" end),preconditions:["captured selected proxy and validated ownership metadata unchanged"],verify:"selected proxy device, saved publication and ownership receipt are absent",
+    consequence:"remove the captured Orca proxy device and cancel its saved publication"}]')"
   binding="$(printf '%s\n' "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$ORCA_UNIT" "$ORCA_DEVICE" | sha256sum | awk '{print $1}')"
   jq -cn --argjson steps "$steps" --arg binding "$binding" \
     '{schema:"yard.resource-action-assessment.v2",action:"down",binding:$binding,

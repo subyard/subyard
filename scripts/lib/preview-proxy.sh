@@ -22,12 +22,6 @@ subyard_preview_address() {
 subyard_preview_route() {
   local snapshot marker device local_device host="$1" port="${WEB_PREVIEW_HOST_PORT:-}" desired guest=""
   local current_host="" current_port="" current_guest="" version value expected key=user.subyard.preview_proxy
-  if [ "$host" != 127.0.0.1 ] && { ! subyard_preview_address "$host" ||
-    ! ip -j -4 address show up | jq -e --arg address "$host" \
-      'any(.[].addr_info[]; .local == $address)' >/dev/null; }; then
-    printf 'Preview: prepared owner address is invalid or no longer active; retry init\n' >&2
-    return 1
-  fi
   snapshot="$(incus query "/1.0/instances/$YARD_INSTANCE_NAME?project=$INCUS_PROJECT")" || return 1
   marker="$(jq -r --arg key "$key" '.config[$key] // ""' <<<"$snapshot")" || return 1
   local_device="$(jq -c '.devices["subyard-preview"] // null' <<<"$snapshot")" || return 1
@@ -57,7 +51,24 @@ subyard_preview_route() {
       return 1
     fi
   fi
+  local deferred_key=user.subyard.deferred_publication.subyard-preview deferred
+  deferred="$(jq -r --arg key "$deferred_key" '.config[$key] // ""' <<<"$snapshot")" || return 1
+  if [ -n "$deferred" ]; then
+    if [ "$device" != null ] || [ "$local_device" != null ] ||
+      ! jq -e --arg marker "$marker" --argjson expected "$expected" '.version == 1 and .ownership == $marker and .device == $expected' <<<"$deferred" >/dev/null; then
+      printf 'Preview: invalid deferred route ownership\n' >&2
+      return 1
+    fi
+    if [ "$host" = "$current_host" ] && [ "$port" = "$current_port" ]; then return 0; fi
+  fi
+  if [ "$host" != 127.0.0.1 ] && { ! subyard_preview_address "$host" ||
+    ! ip -j -4 address show up | jq -e --arg address "$host" \
+      'any(.[].addr_info[]; .local == $address)' >/dev/null; }; then
+    printf 'Preview: prepared owner address is invalid or no longer active; retry init\n' >&2
+    return 1
+  fi
   if [ "$host" = 127.0.0.1 ]; then
+    [ -z "$deferred" ] || incus config unset "$YARD_INSTANCE_NAME" "$deferred_key" "${PROJ[@]}" >/dev/null || return 1
     if [ "$device" != null ]; then
       incus config device remove "$YARD_INSTANCE_NAME" subyard-preview "${PROJ[@]}" >/dev/null || return 1
     fi
@@ -97,6 +108,7 @@ subyard_preview_route() {
         esac
       done < <(awk '{print $4}' <<<"$listeners")
     fi
+    [ -z "$deferred" ] || incus config unset "$YARD_INSTANCE_NAME" "$deferred_key" "${PROJ[@]}" >/dev/null || return 1
     marker="${desired%%:*}:pending:${desired#*:}"
     incus config set "$YARD_INSTANCE_NAME" "$key" "$marker" "${PROJ[@]}" >/dev/null || return 1
     incus config device add "$YARD_INSTANCE_NAME" subyard-preview proxy "${PROJ[@]}" \

@@ -19,10 +19,11 @@ type OwnerYardSource interface {
 }
 
 type OwnerYardRuntime struct {
-	State               string
-	ResolvedYardImage   domain.ResolvedYardImage
-	StartState          domain.StartState
-	WaitingForAddresses []string
+	State                string
+	ResolvedYardImage    domain.ResolvedYardImage
+	StartState           domain.StartState
+	WaitingForAddresses  []string
+	DeferredPublications []string
 }
 
 type OwnerInventoryBuilder struct {
@@ -67,7 +68,8 @@ func (builder OwnerInventoryBuilder) Read(ctx context.Context) (domain.OwnerInve
 			State: strings.ToUpper(runtime.State), SSHPort: yard.SSHPort, DevUser: yard.DevUser,
 			YardImageRef: yard.YardImageRef, ResolvedYardImage: runtime.ResolvedYardImage,
 			StartState: runtime.StartState, WaitingForAddresses: runtime.WaitingForAddresses,
-			Projects: make([]domain.OwnerProject, 0, len(records)),
+			DeferredPublications: runtime.DeferredPublications,
+			Projects:             make([]domain.OwnerProject, 0, len(records)),
 		}
 		for _, record := range records {
 			entry.Projects = append(entry.Projects, domain.OwnerProject{

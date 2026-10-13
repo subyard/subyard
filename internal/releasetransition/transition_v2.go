@@ -1710,6 +1710,20 @@ func (transition *V2Transition) observeFresh(
 	ledgerSnapshot := observation.ledgerSnapshot
 	for _, migration := range pending {
 		switch migration.Kind {
+		case "owner-publication-state-v1":
+			// Canonical power and owning receipt values retain their existing
+			// representation. The captured/applied/verified ledger transform
+			// publishes the reader boundary before runtime activation: epoch-1
+			// owners may not be activated against detached listener state.
+			if migration.Domain != "power-metadata" || migration.FromEpoch != 1 || migration.ToEpoch != 2 {
+				return invalid("owner publication migration requires power-metadata 1 to 2")
+			}
+			observation.decisions = append(observation.decisions, RedactedDecision{
+				Resource: "power-metadata", Scope: "power-metadata", Decision: DecisionTransform,
+				Result: "optional-publication-reader-v1",
+			})
+			observation.activationConsequences = append(observation.activationConsequences,
+				"preserve exact optional publication state; rollback to an epoch-1 power reader becomes unavailable")
 		case "test-vms-settings-v1-to-v2":
 			capability := newTestVMSettingsV2Capability(
 				transition.options.ConfigHome, transition.options.InheritedSettingIDs,

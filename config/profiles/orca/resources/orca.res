@@ -2,7 +2,7 @@
 COMMAND=orca
 HANDLER=resources/orca/handler.sh
 TITLE="Orca remote server"
-PROXY="orca-server ORCA_ADVERTISE_HOST ORCA_HOST_PORT tcp:127.0.0.1:6768 loopback-or-tailscale"
+PROXY="orca-server ORCA_ADVERTISE_HOST ORCA_HOST_PORT tcp:127.0.0.1:6768 owner-metadata-v1 loopback-or-tailscale"
 ENDPOINT_DEFAULTS="tailscale-self 6768"
 BOOTSTRAP=profile
 ACTION="up up bootstrap-change recreatable"

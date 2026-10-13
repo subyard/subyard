@@ -130,6 +130,20 @@ PREVIEW_HOST=127.0.0.1
 route
 jq -e '.devices == {} and .config == {}' "$PREVIEW_PROXY_STATE" >/dev/null
 
+# A captured optional route remains exact without its host interface, and removal
+# cancels the captured device so a later reconcile cannot resurrect it.
+PREVIEW_HOST=100.101.102.104
+export PREVIEW_ACTIVE_ADDRESS=100.101.102.104
+route
+rewrite '.config["user.subyard.deferred_publication.subyard-preview"] = ({version:1,ownership:.config["user.subyard.preview_proxy"],device:.devices["subyard-preview"]}|tojson) | .devices={}'
+export PREVIEW_ACTIVE_ADDRESS=''
+before="$(wc -l <"$PREVIEW_PROXY_LOG")"
+route
+[ "$(wc -l <"$PREVIEW_PROXY_LOG")" = "$before" ] || fail 'deferred exact route was rewritten'
+PREVIEW_HOST=127.0.0.1
+route
+jq -e '.devices == {} and .config == {}' "$PREVIEW_PROXY_STATE" >/dev/null
+
 # VMs consume the instance stage pin before publishing an owned NAT route.
 YARD_KIND=vm
 PREVIEW_HOST=192.168.1.20

@@ -1234,6 +1234,9 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			}
 			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n", hostID, yard.Name, displayYardState(status.State, status.StartState))
 			cli.printAddressWait(status.WaitingForAddresses)
+			for _, endpoint := range status.DeferredPublications {
+				fmt.Fprintf(cli.options.Stdout, "  publication waiting for address: %s\n", endpoint)
+			}
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
@@ -1249,6 +1252,9 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n",
 				loaded.Context.OwnerEndpoint, status.Context.YardName, displayYardState(status.State, status.StartState))
 			cli.printAddressWait(status.WaitingForAddresses)
+			for _, endpoint := range status.DeferredPublications {
+				fmt.Fprintf(cli.options.Stdout, "  publication waiting for address: %s\n", endpoint)
+			}
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", status.ProjectCount)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
@@ -1273,6 +1279,9 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "%s/%s  %s\n",
 				result.inventory.HostID, yard.Name, displayYardState(yard.State, yard.StartState))
 			cli.printAddressWait(yard.WaitingForAddresses)
+			for _, endpoint := range yard.DeferredPublications {
+				fmt.Fprintf(cli.options.Stdout, "  publication waiting for address: %s\n", endpoint)
+			}
 			fmt.Fprintf(cli.options.Stdout, "  instance %s (%s)\n", yard.Instance, yard.Kind)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n", yard.DevUser, yard.SSHPort)
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", len(yard.Projects))
@@ -1305,6 +1314,9 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	fmt.Fprintf(cli.options.Stdout, "  desired  %s  (initialized=%s, incus-autostart=%s)\n",
 		status.Desired, status.Initialized, status.IncusAutostart)
 	cli.printAddressWait(status.WaitingForAddresses)
+	for _, endpoint := range status.DeferredPublications {
+		fmt.Fprintf(cli.options.Stdout, "  publication waiting for address: %s\n", endpoint)
+	}
 	resolvedImage := string(status.ResolvedYardImage)
 	if resolvedImage == "" {
 		resolvedImage = "unknown"
@@ -1570,17 +1582,18 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 	}
 	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
 	type yardOutput struct {
-		YardRef             domain.YardRef           `json:"yardRef"`
-		AccessKind          domain.AccessKind        `json:"accessKind"`
-		YardKind            domain.YardKind          `json:"yardKind"`
-		YardInstanceName    string                   `json:"yardInstanceName"`
-		State               string                   `json:"state"`
-		StartState          domain.StartState        `json:"startState,omitempty"`
-		WaitingForAddresses []string                 `json:"waitingForAddresses,omitempty"`
-		Projects            int                      `json:"projects"`
-		YardImageRef        domain.YardImageRef      `json:"yardImageRef,omitempty"`
-		ResolvedYardImage   domain.ResolvedYardImage `json:"resolvedYardImage,omitempty"`
-		OwnerEndpoint       string                   `json:"ownerEndpoint,omitempty"`
+		YardRef              domain.YardRef           `json:"yardRef"`
+		AccessKind           domain.AccessKind        `json:"accessKind"`
+		YardKind             domain.YardKind          `json:"yardKind"`
+		YardInstanceName     string                   `json:"yardInstanceName"`
+		State                string                   `json:"state"`
+		StartState           domain.StartState        `json:"startState,omitempty"`
+		WaitingForAddresses  []string                 `json:"waitingForAddresses,omitempty"`
+		DeferredPublications []string                 `json:"deferredPublications,omitempty"`
+		Projects             int                      `json:"projects"`
+		YardImageRef         domain.YardImageRef      `json:"yardImageRef,omitempty"`
+		ResolvedYardImage    domain.ResolvedYardImage `json:"resolvedYardImage,omitempty"`
+		OwnerEndpoint        string                   `json:"ownerEndpoint,omitempty"`
 	}
 	var rows []yardOutput
 	code := 0
@@ -1625,7 +1638,8 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 				AccessKind: accessKind, YardKind: domain.YardKind(yard.Kind),
 				YardInstanceName: yard.Instance, State: stateValue, Projects: len(yard.Projects),
 				StartState: yard.StartState, WaitingForAddresses: yard.WaitingForAddresses,
-				YardImageRef: yard.YardImageRef, ResolvedYardImage: yard.ResolvedYardImage,
+				DeferredPublications: yard.DeferredPublications,
+				YardImageRef:         yard.YardImageRef, ResolvedYardImage: yard.ResolvedYardImage,
 				OwnerEndpoint: endpoints[result.inventory.HostID],
 			})
 		}

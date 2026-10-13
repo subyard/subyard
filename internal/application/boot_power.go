@@ -18,10 +18,12 @@ type BootNetworkPolicy interface {
 }
 
 type BootPowerResult struct {
-	Started        []string
-	Stopped        []string
-	AlreadyRunning []string
-	Waiting        []BootAddressWait
+	Started            []string
+	Stopped            []string
+	AlreadyRunning     []string
+	Waiting            []BootAddressWait
+	PublicationWaiting []BootAddressWait
+	PublicationErrors  []error
 }
 
 type BootAddressWait struct {
@@ -37,12 +39,14 @@ type BootPowerReconciler struct {
 	NetworkPolicy BootNetworkPolicy
 	// AfterStart runs inside NetworkPolicy.WithStart's host network lock, only
 	// after a stopped instance has been started successfully.
-	AfterStart        func(context.Context, yardnetwork.Yard) error
-	ReconcileRunning  func(context.Context, yardnetwork.Yard) error
-	EnsureNetworkLock func() error
-	Clock             ports.Clock
-	IncusWait         time.Duration
-	LocalAddresses    func() ([]netip.Addr, error)
+	AfterStart       func(context.Context, yardnetwork.Yard) error
+	ReconcileRunning func(context.Context, yardnetwork.Yard) error
+	// ReconcilePublications changes only optional owned listeners, independently of power.
+	ReconcilePublications func(context.Context, yardnetwork.Yard) ([]string, error)
+	EnsureNetworkLock     func() error
+	Clock                 ports.Clock
+	IncusWait             time.Duration
+	LocalAddresses        func() ([]netip.Addr, error)
 }
 
 func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, error) {
@@ -97,6 +101,29 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			continue
 		}
 		reference := instanceReference(instance)
+		publicationFailed := false
+		if reconciler.ReconcilePublications != nil {
+			var publicationErr error
+			var waiting []string
+			err := reconciler.NetworkPolicy.WithStart(ctx, bootNetworkYard(instance), func() error {
+				waiting, publicationErr = reconciler.ReconcilePublications(ctx, bootNetworkYard(instance))
+				return nil // Publication failures are isolated; policy failures still stop all yards.
+			})
+			if err != nil {
+				return result, reconciler.stopRunningFailClosed(ctx, err)
+			}
+			if publicationErr != nil {
+				result.PublicationErrors = append(result.PublicationErrors, fmt.Errorf("reconcile optional publication %s: %w", reference, publicationErr))
+				publicationFailed = true
+			}
+			if !publicationFailed && len(waiting) != 0 {
+				result.PublicationWaiting = append(result.PublicationWaiting, BootAddressWait{Instance: reference, Addresses: waiting})
+			}
+			instance, err = reconciler.Instances.Instance(ctx, observed.Project, observed.Name)
+			if err != nil {
+				return result, err
+			}
+		}
 		switch strings.ToLower(instance.Status) {
 		case "running":
 			var runtimeErr error
@@ -121,6 +148,9 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			}
 			result.AlreadyRunning = append(result.AlreadyRunning, reference)
 		case "stopped":
+			if publicationFailed {
+				continue // Keep this unsafe publication untouched; independent yards still converge.
+			}
 			_, addresses, err := StartAddressReadiness(instance, reconciler.LocalAddresses)
 			if err != nil {
 				return result, fmt.Errorf("prepare start %s: %w", reference, err)
@@ -159,10 +189,10 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			return result, reconciler.stopRunningFailClosed(ctx, err)
 		}
 	}
-	if len(result.Waiting) != 0 {
-		return result, ports.ErrHostAddressUnavailable
+	if len(result.Waiting) != 0 || len(result.PublicationWaiting) != 0 {
+		return result, errors.Join(append(result.PublicationErrors, ports.ErrHostAddressUnavailable)...)
 	}
-	return result, nil
+	return result, errors.Join(result.PublicationErrors...)
 }
 
 func bootNetworkYard(instance ports.InstanceInfo) yardnetwork.Yard {

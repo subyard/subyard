@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/cli"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
@@ -227,8 +229,64 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_publication-contracts" {
+		root, err := repositoryRoot()
+		if err == nil {
+			err = ownerpublication.RequireReader(root, os.Getenv("SUBYARD_CONFIG_HOME"))
+		}
+		var contracts []ownerpublication.Contract
+		if err == nil {
+			contracts, err = ownerpublication.Load(root)
+		}
+		var encoded string
+		if err == nil {
+			encoded, err = ownerpublication.Encode(contracts)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, encoded)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_publications" {
+		if len(os.Args) != 4 || !domain.SafeName(os.Args[2]) || !domain.SafeName(os.Args[3]) {
+			fmt.Fprintln(os.Stderr, "usage: _publications PROJECT INSTANCE")
+			os.Exit(2)
+		}
+		root, err := repositoryRoot()
+		var contracts []ownerpublication.Contract
+		if err == nil {
+			contracts, err = ownerpublication.Load(root)
+		}
+		client := incusclient.New(os.Getenv("SUBYARD_INCUS_SOCKET"), "projects")
+		var waiting []string
+		if err == nil {
+			waiting, err = reconcilePublications(ctx, client, contracts, os.Args[2], os.Args[3], func() error {
+				return ownerpublication.RequireReader(root, os.Getenv("SUBYARD_CONFIG_HOME"))
+			})
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		for _, endpoint := range waiting {
+			fmt.Fprintln(os.Stdout, endpoint)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_power-reconcile" {
 		client := incusclient.New(os.Getenv("SUBYARD_INCUS_SOCKET"), "projects")
+		var contracts []ownerpublication.Contract
+		if encoded := os.Getenv("SUBYARD_PUBLICATION_CONTRACTS"); encoded != "" {
+			var err error
+			contracts, err = ownerpublication.Decode(encoded)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+
 		bootPolicy := &yardnetwork.Service{Host: client, Lock: networkruntime.HostLock{},
 			UseApprovedIngress: true, ClearStaleUDP: (hostruntime.ConntrackCleaner{}).Clear}
 		os.Exit(cli.RunBootPower(ctx, os.Args[2:], os.Stdout, os.Stderr,
@@ -237,6 +295,9 @@ func main() {
 				Network:       hostruntime.NetworkGuard{},
 				NetworkPolicy: bootPolicy,
 				AfterStart:    bootPolicy.ClearBootStaleUDP,
+				ReconcilePublications: func(ctx context.Context, yard yardnetwork.Yard) ([]string, error) {
+					return reconcilePublications(ctx, client, contracts, yard.Project, yard.Instance)
+				},
 				ReconcileRunning: func(ctx context.Context, yard yardnetwork.Yard) error {
 					ready, err := client.VMCPUConverged(ctx, yard.Project, yard.Instance, true)
 					if err == nil && !ready {
@@ -314,4 +375,12 @@ func repositoryRoot() (string, error) {
 		return filepath.Dir(directory), nil
 	}
 	return "", fmt.Errorf("set SUBYARD_REPOSITORY_ROOT for executable %s", executable)
+}
+
+// Recheck once on an attach failure: the exact address can disappear between
+// local observation and binding. Ownership/port conflicts still return errors.
+func reconcilePublications(ctx context.Context, client *incusclient.Client, contracts []ownerpublication.Contract, project, name string, beforeWrite ...func() error) ([]string, error) {
+	return ownerpublication.ReconcileAddresses(hostruntime.LocalAddresses, func(addresses []netip.Addr) ([]string, error) {
+		return client.ReconcilePublications(ctx, project, name, contracts, addresses, beforeWrite...)
+	})
 }

@@ -2,9 +2,14 @@
 package observation
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
+	"github.com/Subyard/Subyard/internal/ownerroute"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -245,6 +250,28 @@ func Observe(request Request) (Result, error) {
 	if marker != localMarker || proxyExists != localProxyExists || !equal(ordered(proxy), ordered(localProxy)) {
 		return Result{}, fail("ambiguous-ownership")
 	}
+	deferred, err := receipt(localConfig, ownerpublication.Prefix+"ai-observer")
+	if err != nil {
+		return Result{}, err
+	}
+	if deferred != "" {
+		var saved ownerpublication.Receipt
+		decoder := json.NewDecoder(bytes.NewBufferString(deferred))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&saved) != nil || decoder.Decode(new(any)) != io.EOF || saved.Version != 1 || saved.Ownership != marker {
+			return Result{}, fail("ambiguous-ownership")
+		}
+		host, _, _ := ownerroute.Owned(marker, saved.Device, 8080)
+		if host == "" || (proxyExists && !proxy.IsNull()) {
+			return Result{}, fail("ambiguous-ownership")
+		}
+		payload, _ := json.Marshal(saved.Device)
+		proxy, err = semantic.Decode(payload)
+		if err != nil {
+			return Result{}, fail("invalid-schema")
+		}
+		proxyExists = true
+	}
 	host, port, ready := "", "", false
 	if proxyExists && !proxy.IsNull() {
 		version, value, separated := strings.Cut(marker, ":")
@@ -278,6 +305,9 @@ func Observe(request Request) (Result, error) {
 		frontendHost := "127.0.0.1"
 		if request.Environment["YARD_KIND"] != "vm" {
 			frontendHost = request.OwnerHost
+			if ready && host != "" {
+				frontendHost = host
+			}
 		}
 		if net.ParseIP(frontendHost) == nil {
 			return Result{}, fail("native-unavailable")

@@ -7,6 +7,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
+bash "$ROOT/tests/proxy-address-boot-controller.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
 
 grep -Fq 'SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes' \

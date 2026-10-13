@@ -154,6 +154,15 @@ power_start_guarded() { # <project> <instance> <bridge...>
   local project="$1" instance="$2" current err
   shift 2
   power_host_safe "$@" || return 1
+  if [ "${SUBYARD_ENGINE_CONTEXT:-}" = 1 ] && [ -n "${SUBYARD_DISPATCHER_PATH:-}" ] && [ -x "$SUBYARD_DISPATCHER_PATH" ]; then
+    local publication_wait engine="${SUBYARD_DISPATCHER_PATH:-}"
+    [ -n "$engine" ] && [ -x "$engine" ] || { power_fail 'optional publication engine is unavailable'; return 1; }
+    publication_wait="$("$engine" _publications "$project" "$instance")" \
+      || { power_fail 'could not reconcile optional owner publication'; return 1; }
+    if [ -n "$publication_wait" ]; then
+      printf 'Optional owner publication waiting for address: %s\n' "$publication_wait"
+    fi
+  fi
   current="$(power_state "$project" "$instance")"
   if [ "$current" != RUNNING ]; then
     incus start "$instance" --project "$project" || {

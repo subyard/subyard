@@ -646,6 +646,8 @@ func TestYardRPCGoldenFrames(t *testing.T) {
 				typed = &domain.Context{}
 			case "owner-inventory.json":
 				typed = &domain.OwnerInventory{}
+			case "yard-status.json":
+				typed = &domain.YardStatus{}
 			case "operation-exact.json":
 				typed = &exactOperationPlan{}
 			case "session-shell.json", "session-vscode.json":

@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -191,6 +192,7 @@ func (cli *CLI) executeLifecycle(
 		return domain.AdapterResult{}, err
 	}
 	contextValues := structuredAdapterContext(yard)
+	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
 	if weight := execution.observed.Config["user.subyard.vm_cpu_weight"]; weight != "" {
 		contextValues["VM_CPU_WEIGHT"] = weight
 		contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
@@ -202,9 +204,24 @@ func (cli *CLI) executeLifecycle(
 	if execution.action == "start" && cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
 		contextValues["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
 	}
+	physical := orchestrator.Runner
 	orchestrator.Runner = application.LifecycleRunner{
 		Power:    power,
-		Physical: orchestrator.Runner, Yard: yard,
+		Physical: physical, Yard: yard,
+		AfterCommit: func(ctx context.Context, yard domain.Context) error {
+			instance, err := power.Instances.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+			if err != nil || len(ownerpublication.Deferred(instance)) == 0 {
+				return err
+			}
+			retryResult, _, retryErr := physical.Run(ctx, domain.AdapterRequest{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Adapter: "lifecycle", Action: "start", Arguments: []string{"start", "--publication-retry-only"}, Context: contextValues}, nil)
+			if retryErr != nil {
+				return retryErr
+			}
+			if retryResult.Status != "ok" {
+				return errors.New("publication retry scheduling failed")
+			}
+			return nil
+		},
 	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,

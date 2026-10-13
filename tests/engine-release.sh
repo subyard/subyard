@@ -325,6 +325,11 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
 [ "$($standalone_bin/yard --version)" = 'yard 1.0.0-test' ] \
   && [ -L "$standalone_bin/sy" ] && [ ! -e "$TMP/standalone-go-invoked" ] \
   || fail 'standalone installer did not publish a usable runtime without a checkout'
+standalone_ledger="$standalone_home/.config/subyard/release-transition/v2/ledger.json"
+jq -e '.domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}' \
+  "$standalone_ledger" >/dev/null \
+  || fail 'fresh bootstrap published entrypoints before the optional publication reader boundary'
+standalone_ledger_before="$(sha256sum "$standalone_ledger")"
 grep -Fq 'Subyard CLI login PATH' "$standalone_home/.profile" \
   && grep -Fq 'Subyard CLI interactive PATH' "$standalone_home/.bashrc" \
   && grep -Fq 'Subyard CLI completion' "$standalone_home/.bashrc" \
@@ -352,6 +357,48 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   PATH="$standalone_no_go:$PATH" \
   "$release/subyard-install.sh" --yes >/dev/null
+[ "$(sha256sum "$standalone_ledger")" = "$standalone_ledger_before" ] \
+  || fail 'bootstrap retry rewrote the committed reader history'
+# A rejected first transition keeps its installed owner, withholds entrypoints,
+# and remains recoverable through the existing-runtime supported transition.
+(
+  export HOME="$TMP/bootstrap-retry-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-retry-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME"
+  printf 'YARD_TEMPLATE=unknown-bootstrap-template\n' > "$SUBYARD_CONFIG_HOME/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-blocked.log" 2>&1; then
+    fail 'fresh bootstrap accepted invalid scoped configuration'
+  fi
+  [ -L "$YARD_RUNTIME_ROOT/current" ] && [ ! -e "$YARD_BIN_DIR/yard" ] \
+    || fail 'failed first transition published entrypoints or discarded its owner'
+  : > "$SUBYARD_CONFIG_HOME/config.env"
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-retry.log" 2>&1
+  jq -e '.domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}' \
+    "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
+  [ -x "$YARD_BIN_DIR/yard" ] || fail 'supported bootstrap retry did not publish entrypoints'
+)
+# A proven cold host needs neither Incus, Go nor privilege escalation to install
+# the CLI and commit its reader boundary. Retained state is tested by Incus's probe.
+(
+  export HOME="$TMP/bootstrap-cold-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-cold-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test
+  export SUBYARD_INCUS_SOCKET='' INCUS_SOCKET='' INCUS_DIR="$TMP/bootstrap-cold-incus-state"
+  native_tools="$TMP/bootstrap-cold-tools"
+  mkdir "$native_tools"
+  for tool in bash dirname uname jq sha256sum tar gzip cp chmod mv mktemp cut install readlink basename ln sed awk sort find env date id getent python3 cat head stat tr grep wc realpath flock rm cmp comm mkdir rmdir; do
+    ln -s "$(command -v "$tool")" "$native_tools/$tool"
+  done
+  export PATH="$native_tools"
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-cold.log" 2>&1
+  jq -e '.domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}' \
+    "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
+  [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap did not publish entrypoints'
+)
 [ "$(grep -cF 'Subyard CLI login PATH' "$standalone_home/.profile")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI interactive PATH' "$standalone_home/.bashrc")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI completion' "$standalone_home/.bashrc")" -eq 1 ] \
@@ -614,10 +661,21 @@ recovery_previous_bundle="$recovery_release/subyard-0.9.1-linux-amd64.tar.gz"
 recovery_older_source_bundle="$recovery_release/subyard-0.11.0-linux-amd64.tar.gz"
 recovery_source_bundle="$recovery_release/subyard-0.11.1-linux-amd64.tar.gz"
 recovery_candidate_bundle="$recovery_release/subyard-0.11.2-linux-amd64.tar.gz"
+# Pin the historical persisted-state contract in this disposable source copy.
+# The exact two-step recovery journal predates optional publication metadata;
+# current bootstrap and transition checks above keep the current registry.
+(
+cp "$ROOT/config/release-transition.json" "$TMP/release-transition.current.json"
+trap 'cp "$TMP/release-transition.current.json" "$ROOT/config/release-transition.json"' EXIT
+jq '.currentEpochs["power-metadata"] = 1 |
+  .migrations |= map(select(.kind != "owner-publication-state-v1"))' \
+  "$TMP/release-transition.current.json" > "$TMP/release-transition.historical.json"
+cp "$TMP/release-transition.historical.json" "$ROOT/config/release-transition.json"
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.9.1 >/dev/null
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.0 >/dev/null
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.1 >/dev/null
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.2 >/dev/null
+)
 recovery_fixture="$TMP/release-transition-fixture"
 go build -o "$recovery_fixture" "$ROOT/tests/helpers/release-transition-fixture"
 recovery_home="$TMP/v0111-recovery-home"
@@ -646,9 +704,13 @@ recovery_source="${recovery_source_path#releases/}"
 recovery_source_journal="$recovery_config/release-transition/v2/journal.json"
 recovery_ledger="$recovery_config/release-transition/v2/ledger.json"
 jq -e '.checkpoint == "reconciling" and .transaction == "tx-source-v0111" and
-  (.steps | length) == 2 and all(.steps[]; .checkpoint == "verified")' \
+  [.steps[].migration] == ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"] and
+  all(.steps[]; .checkpoint == "verified")' \
   "$recovery_source_journal" >/dev/null \
   || fail 'public fixture did not produce the exact v0.11.1 post-activation journal'
+jq -e '.domains["power-metadata"] == {"epoch": 1, "applied": []}' \
+  "$recovery_ledger" >/dev/null \
+  || fail 'historical recovery fixture advanced the publication reader boundary'
 source_blocker="$TMP/v0111-source-blocker.json"
 HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
   SUBYARD_CONFIG_HOME="$recovery_config" SUBYARD_YARD=recovery-yard \

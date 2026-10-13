@@ -9,8 +9,10 @@ import (
 	"net/netip"
 	"path/filepath"
 
+	"encoding/json"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/previewroute"
 )
@@ -55,14 +57,14 @@ func (runtime Runtime) previewEndpointHash(ctx context.Context) (string, error) 
 }
 
 func (runtime Runtime) previewEndpoint(ctx context.Context) ([]byte, error) {
-	return runtime.previewEndpointForHost(ctx, previewroute.Host(ctx))
+	return runtime.previewEndpointForHost(ctx, runtime.previewHost(ctx))
 }
 
 func (runtime Runtime) preparePreview(ctx context.Context) ([]byte, error) {
 	if runtime.NetworkPolicy == nil {
 		return nil, fmt.Errorf("yard network policy service is required")
 	}
-	host := previewroute.Host(ctx)
+	host := runtime.previewHost(ctx)
 	endpoint, err := runtime.previewEndpointForHost(ctx, host)
 	if err != nil {
 		return nil, err
@@ -96,7 +98,7 @@ func (runtime Runtime) previewEndpointForHost(ctx context.Context, host string) 
 }
 
 func (runtime Runtime) previewRouteConverged(ctx context.Context, instance ports.InstanceInfo) bool {
-	return runtime.previewRouteConvergedForHost(previewroute.Host(ctx), instance)
+	return runtime.previewRouteConvergedForHost(runtime.previewHost(ctx), instance)
 }
 
 // Fresh VMs acquire their primary pin in the instance stage. Until then, the
@@ -129,6 +131,15 @@ func (runtime Runtime) preparePreviewRoute(ctx context.Context, host string) err
 func (runtime Runtime) previewRouteConvergedForHost(host string, instance ports.InstanceInfo) bool {
 	marker := instance.LocalConfig[previewroute.Key]
 	device := instance.Devices[previewroute.DeviceName]
+	deferred := false
+	if value := instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName]; value != "" {
+		var receipt ownerpublication.Receipt
+		if json.Unmarshal([]byte(value), &receipt) != nil || receipt.Version != 1 || receipt.Ownership != marker || len(device) != 0 || len(instance.LocalDevices[previewroute.DeviceName]) != 0 {
+			return false
+		}
+		device = receipt.Device
+		deferred = true
+	}
 	if host == "127.0.0.1" {
 		return marker == "" && len(device) == 0 && len(instance.LocalDevices[previewroute.DeviceName]) == 0
 	}
@@ -141,5 +152,26 @@ func (runtime Runtime) previewRouteConvergedForHost(host string, instance ports.
 		}
 	}
 	return ready && actualHost == host && port == runtime.environmentValue("WEB_PREVIEW_HOST_PORT") &&
-		maps.Equal(device, instance.LocalDevices[previewroute.DeviceName]) && maps.Equal(device, previewroute.Device(host, port, guest))
+		(deferred || maps.Equal(device, instance.LocalDevices[previewroute.DeviceName])) && maps.Equal(device, previewroute.Device(host, port, guest))
+}
+
+// Keep an installed owner endpoint exact while its interface is temporarily absent.
+func (runtime Runtime) previewHost(ctx context.Context) string {
+	if runtime.Incus != nil {
+		instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+		if err == nil {
+			marker := instance.LocalConfig[previewroute.Key]
+			device := instance.Devices[previewroute.DeviceName]
+			if value := instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName]; value != "" {
+				var receipt ownerpublication.Receipt
+				if json.Unmarshal([]byte(value), &receipt) == nil && receipt.Ownership == marker {
+					device = receipt.Device
+				}
+			}
+			if host, _, _ := previewroute.Owned(marker, device); host != "" {
+				return host
+			}
+		}
+	}
+	return previewroute.Host(ctx)
 }

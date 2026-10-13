@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -241,6 +242,53 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			if len(fake.ExecCalls) != 3 || slices.Contains(fake.ExecCalls[2].Request.Command, "apply") ||
 				!slices.Contains(fake.ExecCalls[2].Request.Command, "observe") || len(fake.ConfigUpdates) != 0 || len(fake.PowerUpdates) != 0 {
 				t.Fatal("ownership observation attempted a mutation")
+			}
+		})
+	}
+}
+
+func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *testing.T) {
+	for _, scenario := range []string{"cold", "retained", "client present", "custom socket", "invalid config"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			writeRuntimeProfileFixture(t, root)
+			home := filepath.Join(root, "state")
+			seedCurrentReleaseLedger(t, root, home)
+			serverRoot := filepath.Join(root, "absent-server")
+			t.Setenv("INCUS_DIR", serverRoot)
+			t.Setenv("INCUS_SOCKET", "")
+			t.Setenv("PATH", root)
+			client := incusclient.New("")
+			switch scenario {
+			case "retained":
+				if err := os.Mkdir(serverRoot, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "client present":
+				writeCLIFile(t, filepath.Join(root, "incus"), "#!/bin/sh\nexit 79\n", 0700)
+			case "custom socket":
+				client = incusclient.New(filepath.Join(root, "unknown.socket"))
+			case "invalid config":
+				writeCLIFile(t, filepath.Join(home, "config.env"), "YARD_TEMPLATE=unknown-cold-template\n", 0600)
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
+			observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+			if scenario == "cold" {
+				if err != nil || !observation.Converged || observation.Actual != observation.Desired {
+					t.Fatalf("verified empty installed scope: %#v %v", observation, err)
+				}
+				if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatalf("cold installed scope bypassed %s guard", scenario)
+			}
+			if _, err := os.Lstat(filepath.Join(home, "sample-applied")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("cold assessment or activation wrote guest runtime state")
 			}
 		})
 	}
@@ -762,8 +810,14 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
 	)
 	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed ||
-		len(inspected.Inspection.Decisions) != 2 {
+		len(inspected.Inspection.Decisions) != 3 {
 		t.Fatalf("inspection = %#v, err=%v", inspected, err)
+	}
+	if inspected.ActivationReconciliationOwned || inspected.Inspection.Decisions[2] != (releasetransition.RedactedDecision{
+		Resource: "power-metadata", Scope: "power-metadata", Decision: releasetransition.DecisionTransform,
+		Result: "optional-publication-reader-v1",
+	}) {
+		t.Fatalf("candidate protocol ownership or power decision changed: %#v", inspected)
 	}
 	request.Mode = releasetransition.ProcessConverge
 	request.Execution = &releasetransition.Execution{

@@ -75,6 +75,46 @@ func TestRunBootPowerReturnsTempfailForUnavailableIncus(t *testing.T) {
 	}
 }
 
+func TestRunBootPowerPublicationConflictKeepsOtherYardRetry(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprint(pending), func(t *testing.T) {
+			r := bootPowerFailureReconciler(nil)
+			fake := r.Inventory.(*testkit.Incus)
+			instance := fake.Instances["p/yard"]
+			delete(fake.Instances, "p/yard")
+			instance.Name, instance.Status = "a", "Running"
+			fake.Instances["p/a"] = instance
+			instance.Name, instance.Status = "z", "Stopped"
+			fake.Instances["p/z"] = instance
+			r.Power = fake
+			checks := 0
+			r.ReconcileRunning = func(context.Context, yardnetwork.Yard) error { checks++; return nil }
+			r.ReconcilePublications = func(_ context.Context, yard yardnetwork.Yard) ([]string, error) {
+				if yard.Instance == "a" {
+					return nil, errors.New("ownership conflict")
+				}
+				if pending {
+					return []string{"tcp:192.0.2.12:8080"}, nil
+				}
+				return nil, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := RunBootPower(context.Background(), nil, &stdout, &stderr, r)
+			want := 1
+			if pending {
+				want = 75
+			}
+			if code != want || !strings.Contains(stderr.String(), "FAIL: reconcile optional publication p/a: ownership conflict") ||
+				fake.Instances["p/z"].Status != "Running" || checks != 1 {
+				t.Fatalf("publication conflict lost failure/retry or skipped independent yard/security checks: exit=%d stdout=%s stderr=%s checks=%d", code, stdout.String(), stderr.String(), checks)
+			}
+			if pending && !strings.Contains(stdout.String(), "publication-waiting-for-address p/z") {
+				t.Fatal("missing address lost its retry diagnostic")
+			}
+		})
+	}
+}
+
 func TestRunBootPowerRecoversAfterAsyncStorageUnavailable(t *testing.T) {
 	server, err := testkit.NewIncusServer(t.TempDir())
 	if err != nil {

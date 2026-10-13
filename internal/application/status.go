@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -47,7 +48,7 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 	}
 	status := domain.YardStatus{
 		Context: yard, State: strings.ToUpper(instance.Status),
-		StartState: startState, WaitingForAddresses: waiting,
+		StartState: startState, WaitingForAddresses: waiting, DeferredPublications: ownerpublication.Deferred(instance),
 		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
 		Desired:           valueOr(instance.Config["user.subyard.desired_power"], "unmanaged"),
 		Initialized:       valueOr(instance.Config["user.subyard.initialized"], "no"),

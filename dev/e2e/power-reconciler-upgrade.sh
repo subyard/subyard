@@ -367,8 +367,35 @@ prepare_operator() {
 }
 
 materialize_unit() {
-  local template="$1" output="$2"
-  sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER|g" "$template" > "$output"
+  local template="$1" output="$2" runtime_root contracts
+  local -a reader=()
+  case "$template" in
+    "$OPERATOR_HOME/.subyard/runtime/releases/"*/config/systemd/subyard-power-reconcile.service.in)
+      reader=(operator_env)
+      runtime_root="${template%/config/systemd/subyard-power-reconcile.service.in}" ;;
+    "$OLD_UNIT_FIXTURE") runtime_root='' ;;
+    "$ROOT/config/systemd/subyard-power-reconcile.service.in")
+      runtime_root="$OPERATOR_HOME/.subyard/runtime/${CANDIDATE_RELEASE_TARGET:-}" ;;
+    *) die 'unsupported power unit template context' ;;
+  esac
+  "${reader[@]}" sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER|g" "$template" > "$output"
+  [ "$template" != "$OLD_UNIT_FIXTURE" ] || return 0
+  # Current templates bind to the captured immutable candidate, including when
+  # the controller-owned source template is used to verify rollback's boot unit.
+  case "$runtime_root" in
+    "$OPERATOR_HOME/.subyard/runtime/releases/"?*) ;;
+    *) die 'candidate power unit runtime is unavailable' ;;
+  esac
+  operator_env test -f "$runtime_root/bin/yard-engine" \
+    && operator_env test ! -L "$runtime_root/bin/yard-engine" \
+    && operator_env test -x "$runtime_root/bin/yard-engine" \
+    || die 'candidate power unit engine is missing or unsafe'
+  contracts="$(operator_env env SUBYARD_REPOSITORY_ROOT="$runtime_root" \
+    SUBYARD_CONFIG_HOME="$OPERATOR_HOME/.config/subyard" \
+    "$runtime_root/bin/yard-engine" _publication-contracts)" \
+    || die 'candidate power unit publication snapshot is unavailable'
+  [[ "$contracts" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || die 'candidate power unit publication snapshot is invalid'
+  printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$contracts" >> "$output"
 }
 
 assert_unit_matches() {
@@ -462,7 +489,7 @@ assert_v2_transition() {
     .domains["owner-registration"] == {
       "epoch": 2, "applied": ["canonicalize-test-yard-owner-v2"]
     } and
-    .domains["power-metadata"] == {"epoch": 1, "applied": []} and
+    .domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]} and
     .domains["project-state"] == {"epoch": 1, "applied": []} and
     .domains.settings == {
       "epoch": 2, "applied": ["canonicalize-test-vms-settings-v2"]
@@ -494,7 +521,7 @@ assert_runtime_links() {
 
 assert_candidate_state() {
   assert_runtime_state "$CANDIDATE_VERSION" \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
+    "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
     "$CANDIDATE_RELEASE_TARGET"
   assert_published_v1_history_unchanged
   assert_v2_transition activate-target "$CANDIDATE_RELEASE_TARGET"
@@ -563,7 +590,7 @@ exercise_activation_only_repair() {
   completed_transaction="$(operator_env jq -er '.transaction' "$V2_JOURNAL")" \
     || die 'completed candidate transaction is unavailable'
   sudo -n install -m 0600 "$V2_LEDGER" "$ACTIVATION_LEDGER_BASELINE"
-  materialize_unit "$ROOT/config/systemd/subyard-power-reconcile.service.in" "$candidate_unit"
+  materialize_unit "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" "$candidate_unit"
   materialize_unit "$OLD_UNIT_FIXTURE" "$drift_unit"
   sudo -n install -o root -g root -m 0644 "$drift_unit" "$UNIT"
   sudo -n systemctl daemon-reload

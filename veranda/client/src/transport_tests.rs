@@ -322,6 +322,7 @@ fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
     for name in [
         "negotiate",
         "owner-inventory",
+        "yard-status",
         "context",
         "profile-list",
         "settings-list",

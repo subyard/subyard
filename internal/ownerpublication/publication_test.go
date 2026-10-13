@@ -1,0 +1,129 @@
+package ownerpublication
+
+import (
+	"encoding/json"
+	"maps"
+	"net/netip"
+	"reflect"
+	"testing"
+
+	"github.com/Subyard/Subyard/internal/ports"
+)
+
+func syntheticContract() (Contract, map[string]string) {
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:192.0.2.12:8080", "connect": "tcp:127.0.0.1:80"}
+	return Contract{Device: "optional", Key: "user.fixture.owned", Owns: func(marker string, actual map[string]string) bool {
+		return marker == "exact-v1" && maps.Equal(actual, device)
+	}}, device
+}
+func TestExactDeferredPublicationLifecycle(t *testing.T) {
+	contract, device := syntheticContract()
+	instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: "exact-v1", "foreign": "preserved"}, LocalDevices: map[string]map[string]string{contract.Device: device, "local": {"type": "proxy", "listen": "tcp:127.0.0.1:2222"}}, Devices: map[string]map[string]string{contract.Device: device}}
+	config, devices, waiting, err := Plan(instance, []Contract{contract}, nil)
+	if err != nil || len(waiting) != 1 || devices[contract.Device] != nil || config["foreign"] != "preserved" || devices["local"] == nil {
+		t.Fatalf("detach: %v %v %v %v", config, devices, waiting, err)
+	}
+	if instance.LocalDevices[contract.Device] == nil || instance.LocalConfig[Prefix+contract.Device] != "" {
+		t.Fatal("planner mutated observation")
+	}
+	instance.LocalConfig, instance.LocalDevices, instance.Devices = config, devices, devices
+	again, unchanged, pending, err := Plan(instance, []Contract{contract}, nil)
+	if err != nil || !maps.Equal(config, again) || !reflect.DeepEqual(devices, unchanged) || !reflect.DeepEqual(waiting, pending) {
+		t.Fatal("repeated deferral changed desired state")
+	}
+	config, devices, waiting, err = Plan(instance, []Contract{contract}, []netip.Addr{netip.MustParseAddr("192.0.2.12")})
+	if err != nil || len(waiting) != 0 || config[Prefix+contract.Device] != "" || !maps.Equal(devices[contract.Device], device) {
+		t.Fatalf("restore: %v %v %v %v", config, devices, waiting, err)
+	}
+	// A second disappearance retains the same exact route, never a wildcard.
+	instance.LocalConfig, instance.LocalDevices, instance.Devices = config, devices, devices
+	_, devices, waiting, err = Plan(instance, []Contract{contract}, nil)
+	if err != nil || len(waiting) != 1 || devices[contract.Device] != nil {
+		t.Fatal("second disappearance did not defer")
+	}
+}
+func TestDeferredPublicationRejectsContradictoryRecovery(t *testing.T) {
+	contract, device := syntheticContract()
+	payload, _ := json.Marshal(Receipt{Version: 1, Ownership: "exact-v1", Device: device})
+	for _, scenario := range []string{"version", "ownership", "saved device", "foreign device", "inherited device", "unknown contract", "trailing JSON"} {
+		t.Run(scenario, func(t *testing.T) {
+			instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: "exact-v1", Prefix + contract.Device: string(payload)}, LocalDevices: map[string]map[string]string{}, Devices: map[string]map[string]string{}}
+			contracts := []Contract{contract}
+			switch scenario {
+			case "version":
+				instance.LocalConfig[Prefix+contract.Device] = `{"version":2}`
+			case "ownership":
+				instance.LocalConfig[contract.Key] = "changed"
+			case "saved device":
+				instance.LocalConfig[Prefix+contract.Device] = `{"version":1,"ownership":"exact-v1","device":{"type":"proxy"}}`
+			case "foreign device":
+				instance.Devices[contract.Device] = map[string]string{"type": "disk"}
+				instance.LocalDevices[contract.Device] = instance.Devices[contract.Device]
+			case "inherited device":
+				instance.Devices[contract.Device] = device
+			case "unknown contract":
+				contracts = nil
+			case "trailing JSON":
+				instance.LocalConfig[Prefix+contract.Device] += " {}"
+			}
+			if _, _, _, err := Plan(instance, contracts, []netip.Addr{netip.MustParseAddr("192.0.2.12")}); err == nil {
+				t.Fatal("contradictory recovery accepted")
+			}
+		})
+	}
+}
+
+func TestCanceledPublicationCannotRestoreWhenAddressReturns(t *testing.T) {
+	contract, device := syntheticContract()
+	instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: "exact-v1", "user.subyard.desired_power": "running"},
+		LocalDevices: map[string]map[string]string{contract.Device: device}, Devices: map[string]map[string]string{contract.Device: device}}
+	config, devices, _, err := Plan(instance, []Contract{contract}, nil)
+	if err != nil || config[Prefix+contract.Device] == "" {
+		t.Fatalf("detach: %v", err)
+	}
+	// The owning cancellation removes both its journal and receipt, even when
+	// the listener is already detached and there is no running guest service.
+	delete(config, Prefix+contract.Device)
+	delete(config, contract.Key)
+	instance.LocalConfig, instance.LocalDevices, instance.Devices = config, devices, devices
+	for range 2 {
+		actualConfig, actualDevices, waiting, err := Plan(instance, []Contract{contract}, []netip.Addr{netip.MustParseAddr("192.0.2.12")})
+		if err != nil || len(waiting) != 0 || !maps.Equal(config, actualConfig) || !reflect.DeepEqual(devices, actualDevices) || actualDevices[contract.Device] != nil {
+			t.Fatalf("canceled listener resurrected: %v %v %v %v", actualConfig, actualDevices, waiting, err)
+		}
+	}
+}
+func TestUnownedAndInheritedPublicationRetainsRequiredDevice(t *testing.T) {
+	contract, device := syntheticContract()
+	for _, marker := range []string{"", "foreign"} {
+		instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: marker}, LocalDevices: map[string]map[string]string{contract.Device: device}, Devices: map[string]map[string]string{contract.Device: device}}
+		config, devices, waiting, err := Plan(instance, []Contract{contract}, nil)
+		if err != nil || len(waiting) != 0 || !maps.Equal(devices[contract.Device], device) || config[Prefix+contract.Device] != "" {
+			t.Fatal("unowned device detached")
+		}
+	}
+}
+
+func TestPublicationContractSnapshotRejectsUnknownReaderState(t *testing.T) {
+	encoded, err := Encode(CoreContracts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil || len(decoded) != 1 {
+		t.Fatalf("snapshot: %v %v", decoded, err)
+	}
+	if _, err := Decode("invalid"); err == nil {
+		t.Fatal("invalid snapshot accepted")
+	}
+	contract := CoreContracts()[0]
+	contract.Codec = "future"
+	encoded, _ = Encode([]Contract{contract})
+	if _, err := Decode(encoded); err == nil {
+		t.Fatal("unknown codec accepted")
+	}
+	encoded, _ = Encode(append(CoreContracts(), CoreContracts()...))
+	if _, err := Decode(encoded); err == nil {
+		t.Fatal("duplicate ownership accepted")
+	}
+}

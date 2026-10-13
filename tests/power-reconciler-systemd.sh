@@ -64,10 +64,15 @@ fi
   export TEST_NETWORK_LOCK="$temporary/install/network.lock"
   export TEST_SYSTEMCTL_LOG="$temporary/install/systemctl.log"
   export TEST_NETWORK_LOCK_FAIL=0
+  export TEST_READER_BOUNDARY_FAIL=0
 
   cat > "$SUBYARD_POWER_ENGINE_SOURCE" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$*" = _publication-contracts ]; then
+  [ "$TEST_READER_BOUNDARY_FAIL" = 0 ] || exit 1
+  printf 'eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n'; exit 0
+fi
 [ "$*" = '_network-lock ensure' ] || exit 64
 [ "$TEST_NETWORK_LOCK_FAIL" = 0 ] || exit 1
 : > "$TEST_NETWORK_LOCK"
@@ -110,6 +115,17 @@ EOF
     fail 'install did not prepare the network lock before enabling boot reconciliation'
   fi
   [ -f "$TEST_NETWORK_LOCK" ] || fail 'install left the upgraded host without a network lock'
+  cp "$SUBYARD_POWER_RECONCILER_PATH" "$temporary/install/before-engine"
+  cp "$SUBYARD_POWER_UNIT_PATH" "$temporary/install/before-unit"
+  export TEST_READER_BOUNDARY_FAIL=1
+  : > "$TEST_SYSTEMCTL_LOG"
+  if bash "$ROOT/scripts/install-power-reconciler.sh" --yes > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
+    fail 'install admitted an uncommitted publication reader boundary'
+  fi
+  cmp "$temporary/install/before-engine" "$SUBYARD_POWER_RECONCILER_PATH" || fail 'boundary refusal changed engine'
+  cmp "$temporary/install/before-unit" "$SUBYARD_POWER_UNIT_PATH" || fail 'boundary refusal changed unit'
+  [ ! -s "$TEST_SYSTEMCTL_LOG" ] || fail 'boundary refusal changed service state'
+  export TEST_READER_BOUNDARY_FAIL=0
 
   export TEST_NETWORK_LOCK_FAIL=1
   : > "$TEST_SYSTEMCTL_LOG"
