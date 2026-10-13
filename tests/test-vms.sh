@@ -44,6 +44,28 @@ grep -Fq 'slot_home_has_managed_marker' "$PROVISION" \
   || fail "slot data-account ownership markers are not validated fail-closed"
 grep -Fq 'apt-get install -y -qq --no-install-recommends' "$PROVISION" \
   || fail "inner VM backend installs optional QEMU desktop packages"
+# Execute the actual package reconciliation block without installing anything.
+package_calls="$TMP/package-calls"
+package_fixture="$TMP/package-fixture.sh"
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'run_with_progress() { shift; "$@"; }\n'
+  printf 'apt-get() { printf "%%s\\n" "$*" >> "$PACKAGE_CALLS"; }\n'
+  printf 'version_ok() { return 0; }\n'
+  sed -n '/^export DEBIAN_FRONTEND=noninteractive$/,/^version_ok ||/p' "$PROVISION"
+} > "$package_fixture"
+mkdir -p "$TMP/metadata-bin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/metadata-bin/mkisofs"
+chmod 0700 "$TMP/metadata-bin/mkisofs"
+PACKAGE_CALLS="$package_calls" PATH="$TMP/metadata-bin" /bin/bash "$package_fixture"
+grep -Eq '^install .* genisoimage$' "$package_calls" \
+  || fail "inner VM provisioning does not install the cloud-init ISO generator"
+if PACKAGE_CALLS="$package_calls" PATH="$TMP/missing" /bin/bash "$package_fixture" 2>"$TMP/mkisofs-error"; then
+  fail "inner VM provisioning accepted a missing cloud-init ISO generator"
+else
+  grep -Fq 'mkisofs is required' "$TMP/mkisofs-error" \
+    || fail "inner VM provisioning failed without the metadata prerequisite diagnostic"
+fi
 grep -Fq 'run_with_progress "installing inner Incus and QEMU"' "$PROVISION" \
   && grep -Fq 'still working, %ss elapsed' "$PROVISION" \
   || fail "inner VM backend package installation has no periodic progress"

@@ -34,6 +34,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 	upstream, fingerprint := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	var mu sync.Mutex
 	var projectExists, vmExists bool
+	var metadataAttached bool
 	var owner, buildKey string
 	var builds, publications, deletions int
 	images := map[string]incusImage{}
@@ -103,6 +104,20 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			return []byte("root\neth0"), nil, nil
 		case "list e2e-base-1 --project " + project + " -f csv -c s":
 			return []byte("STOPPED"), nil, nil
+		case "query /1.0/instances/e2e-base-1?project=" + project:
+			devices := map[string]map[string]string{}
+			if metadataAttached {
+				devices[cloudInitDevice] = map[string]string{"type": "disk", "source": "cloud-init:config"}
+			}
+			return encode(map[string]any{"type": "virtual-machine", "config": map[string]string{"user.subyard.managed": managedMarker}, "devices": devices, "expanded_devices": devices})
+		case "config device add e2e-base-1 " + cloudInitDevice + " disk source=cloud-init:config --project " + project:
+			metadataAttached = true
+			return nil, nil, nil
+		case "start e2e-base-1 --project " + project:
+			if !metadataAttached {
+				return nil, nil, errors.New("builder started without metadata")
+			}
+			return nil, nil, nil
 		case "operation list --project " + project + " --format json", "list --all-projects --format json":
 			return []byte("[]"), nil, nil
 		case "delete e2e-base-1 --project " + project:
@@ -125,6 +140,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 				return nil, nil, errors.New("builder sleep configuration does not match architecture")
 			}
 			builds++
+			metadataAttached = false
 			vmExists, buildKey = true, properties()["user.subyard.base_key"]
 		case strings.HasPrefix(command, "publish e2e-base-1 "):
 			publications++
@@ -149,6 +165,9 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			deletedImages = append(deletedImages, args[2])
 			delete(images, args[2])
 		case strings.HasPrefix(command, "exec e2e-base-1 "):
+			if strings.Contains(command, "cloud-init status") {
+				return []byte(`{"status":"done","extended_status":"done"}`), nil, nil
+			}
 			if strings.HasSuffix(command, "-- cat /var/lib/subyard/base-manifest.sha256") {
 				return []byte(strings.Repeat("c", 64)), nil, nil
 			}

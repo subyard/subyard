@@ -3,6 +3,7 @@ package testvmsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -56,11 +57,36 @@ func (runtime *Runtime) waitAgent(ctx context.Context, vm string) error {
 	}
 	fmt.Fprintf(runtime.Stdout, "  [ ok ] %s Incus agent is ready\n", vm)
 	if err := runtime.progress(ctx, "waiting for "+vm+" cloud-init", func() error {
-		// Plain "status: done" can still exit nonzero; retain the error details.
-		_, err := runtime.guest(ctx, vm, nil, "timeout",
+		// A disabled datasource can exit zero. Require both native success and
+		// positive structured completion before any guest package installation.
+		body, err := runtime.guest(ctx, vm, nil, "timeout",
 			fmt.Sprintf("%d", int(runtime.Config.BootTimeout.Seconds())),
-			"cloud-init", "status", "--wait", "--long")
-		return err
+			"cloud-init", "status", "--wait", "--format", "json")
+		if err != nil {
+			if context.Cause(ctx) != nil {
+				return context.Cause(ctx)
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			var native *CommandError
+			if errors.As(err, &native) {
+				return &CommandError{Name: "cloud-init", ExitCode: native.ExitCode,
+					Duration: native.Duration, Message: "status command failed"}
+			}
+			return fmt.Errorf("%s cloud-init command failed", vm)
+		}
+		var status struct {
+			Status         string `json:"status"`
+			ExtendedStatus string `json:"extended_status"`
+		}
+		if len(body) > 64<<10 || json.Unmarshal([]byte(body), &status) != nil {
+			return fmt.Errorf("%s cloud-init status is invalid", vm)
+		}
+		if status.Status != "done" || (status.ExtendedStatus != "" && status.ExtendedStatus != "done") {
+			return fmt.Errorf("%s cloud-init did not complete successfully", vm)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}

@@ -638,6 +638,12 @@ func (runtime *Runtime) startVM(ctx context.Context, vm string) error {
 	if strings.TrimSpace(state) == "RUNNING" {
 		return nil
 	}
+	if strings.TrimSpace(state) != "STOPPED" {
+		return fmt.Errorf("%s is not stopped before initialization", vm)
+	}
+	if err := runtime.ensureCloudInitDisk(ctx, vm); err != nil {
+		return err
+	}
 	if err := runtime.progress(ctx, "starting "+vm, func() error {
 		_, err := runtime.incus(ctx, "start", vm, "--project", runtime.Config.Project)
 		return err
