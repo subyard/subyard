@@ -395,14 +395,13 @@ class Contracts(unittest.TestCase):
             self.assertFalse(any(method != "GET" for _, method in self.github.calls))
             self.assertIsNone(self.github.ref)
 
-    def operator_failure(self):
+    def operator_failure(self, name="profile:sample", lanes=()):
         source_output = self.directory / "original-failure"
-        _, prepared, identity = fixture(source_output)
+        _, prepared, identity = fixture(source_output, lanes)
         identity["candidate_id"] = "r122-a1"
         m.write_json(prepared / "identity.json", identity)
         original_output, original_root, _ = accepted(source_output, prepared, identity)
         _, original = m.a.load_bound(original_output)
-        name = "profile:sample"
         original["checks"][name] = {"status": "pending"}
         m.a.save(original_output, original)
         _, target = m.a.load_bound(self.output)
@@ -435,6 +434,139 @@ class Contracts(unittest.TestCase):
         path = self.directory / "operator-acceptance.json"
         m.write_json(path, declaration)
         return path, files, original_output
+
+    def unrun_profile(self, name="profile:sample"):
+        _, receipt = m.a.load_bound(self.output)
+        # Construct unrun fixture state; no real execution evidence is erased.
+        (self.output / receipt["checks"][name]["log"]).unlink()
+        receipt["checks"][name] = {"status": "pending"}
+        m.a.save(self.output, receipt)
+        return receipt
+
+    def profile_deferral_attestation(self, names=("profile:sample",), paths=()):
+        return m.attestation(self.output, self.identity, paths, names, "Known profile issue; postpone this check", "operator:fixture")
+
+    def test_profile_deferral_cli_publication_preserves_receipt_and_exact_retry(self):
+        self.unrun_profile()
+        state_dir = self.directory / "publication"
+        candidate = state_dir / self.identity["candidate_id"]
+        candidate.mkdir(parents=True)
+        shutil.copytree(self.prepared, candidate / "prepared")
+        shutil.copytree(self.output, candidate / "acceptance")
+        self.output = candidate / "acceptance"
+        root = self.output / "source"
+        before = (self.output / "receipt.json").read_bytes()
+        document = self.profile_deferral_attestation()
+        result = document["checks"]["profile:sample"]
+        self.assertEqual((result["status"], result["execution"]), ("not-run", "operator-deferred"))
+        self.assertEqual(set(result), {"status", "execution", "profile_deferral"})
+        decision = result["profile_deferral"]
+        self.assertEqual((decision["target"], decision["original_status"], decision["receipt_sha256"]),
+                         (self.identity, "pending", m.a.digest(self.output / "receipt.json")))
+        self.assertEqual(decision["command"], ["bash", "config/profiles/sample/tests/e2e/acceptance.sh"])
+        self.assertNotIn(str(self.directory), json.dumps(document))
+        dispatched = []
+        run = {"id": 456, "status": "completed", "conclusion": "success", "run_attempt": 1, "html_url": "https://fixture/run"}
+        original_api = self.github.api
+        def api(path, method="GET", payload=None, missing=False):
+            if path.endswith("/dispatches"):
+                dispatched.append(copy.deepcopy(payload["inputs"]))
+                envelope = json.loads(base64.b64decode(payload["inputs"]["attestation"], validate=True))
+                m.publish_remote(self.github, candidate / "prepared", envelope, root)
+                return None
+            if path == "actions/runs/456":
+                return run
+            if path == "releases/tags/v1.2.3":
+                return copy.deepcopy(self.github.release)
+            return original_api(path, method, payload, missing)
+        self.github.api = api
+        argv = ["release-publication", "--state-dir", str(state_dir), "publish", "--candidate", self.identity["candidate_id"],
+                "--defer-profile", "profile:sample", "--deferral-reason", "Known profile issue; postpone this check",
+                "--deferral-authorization-reference", "operator:fixture"]
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), patch.object(m, "discover", return_value=run):
+            self.assertEqual(m.main(), 0)
+            self.assertEqual(m.main(), 0)
+            retained = (candidate / "publication.json").read_bytes()
+            attestation_before = (candidate / "attestation.json").read_bytes()
+            changed = argv.copy()
+            changed[changed.index("--deferral-reason") + 1] = "Different decision"
+            with patch.object(sys, "argv", changed), self.assertRaisesRegex(ValueError, "attestation changed"):
+                m.main()
+            self.assertEqual((candidate / "publication.json").read_bytes(), retained)
+            self.assertEqual((candidate / "attestation.json").read_bytes(), attestation_before)
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(before, (self.output / "receipt.json").read_bytes())
+        self.assertEqual(json.loads(before)["result"], "incomplete")
+        with self.assertRaisesRegex(ValueError, "complete passing"):
+            m.attestation(self.output, self.identity)
+
+    def test_profile_deferral_refuses_attempts_and_other_gates_before_mutation(self):
+        receipt = self.unrun_profile()
+        document = self.profile_deferral_attestation()
+        for names in (("profile:unknown",), ("verify",), ("package",), ("p0-release-smoke",), ("profile:sample", "profile:sample")):
+            with self.subTest(names=names), self.assertRaises(ValueError):
+                self.profile_deferral_attestation(names)
+        with self.assertRaises(ValueError):
+            m.attestation(self.output, self.identity, (), ["profile:sample"], "reason", " ")
+        for status in ("failed", "interrupted", "blocked", "passed", "not-applicable"):
+            invalid = copy.deepcopy(receipt)
+            invalid["checks"]["profile:sample"] = {"status": status}
+            m.a.save(self.output, invalid)
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                self.profile_deferral_attestation()
+        m.a.save(self.output, receipt)
+        for mutate in (lambda d: d["checks"]["profile:sample"]["profile_deferral"]["target"].update(candidate_id="r124-a1"),
+                       lambda d: d["checks"]["profile:sample"]["profile_deferral"].update(command=["true"]),
+                       lambda d: d["checks"]["profile:sample"]["profile_deferral"].update(receipt_sha256="d" * 64),
+                       lambda d: d["checks"]["profile:sample"].update(status="passed"),
+                       lambda d: d["checks"]["verify"].update(status="failed"),
+                       lambda d: d["checks"]["p0-release-smoke"].update(status="pending"),
+                       lambda d: d.update(profile_deferrals=[]), lambda d: d.update(schema_version=3)):
+            invalid = copy.deepcopy(document)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                m.publish_remote(self.github, self.prepared, invalid, self.frozen)
+            self.assertIsNone(self.github.ref)
+            self.assertFalse(any(method != "GET" for _, method in self.github.calls))
+        log = self.output / "profile-sample-12345678.log"
+        log.write_text("original execution evidence")
+        with self.assertRaisesRegex(ValueError, "execution logs"):
+            self.profile_deferral_attestation()
+        log.unlink()
+        m.a.event(self.output, "check-start", check="profile:sample", slot=1)
+        with self.assertRaisesRegex(ValueError, "previously attempted"):
+            self.profile_deferral_attestation()
+
+    def test_profile_deferral_coexists_with_transfers_failures_and_external_deferrals(self):
+        mixed = self.directory / "mixed"
+        self.root, self.prepared, self.identity = fixture(mixed, ("one", "two"))
+        self.output, self.frozen, _ = accepted(mixed, self.prepared, self.identity)
+        self.github = FakeGitHub(self.identity)
+        failure, _, original_output = self.operator_failure("profile:sample/one", ("one", "two"))
+        self.unrun_profile("profile:sample/two")
+        _, original = m.a.load_bound(original_output)
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["verify"] = {"status": "pending"}
+        external = receipt["external_obligations"]["sample:fixture-external"]
+        external["status"] = "not-run"
+        del external["evidence_sha256"]
+        m.a.save(self.output, receipt)
+        review = {"schema_version": 1, "check": "verify", "tested": m.a.transfer_candidate(original),
+                 "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(original_output / "receipt.json"),
+                 "review": {"unchanged_scope": "Unchanged verification scope", "reason": "Reuse reviewed native PASS",
+                            "authorization_reference": "operator:fixture"}, "standalone": None}
+        path = self.directory / "mixed-review.json"
+        m.write_json(path, review)
+        m.a.transfer_evidence(self.output, original_output, "verify", path)
+        m.a.defer_external(self.output, ["sample:fixture-external"], "External account unavailable", "operator:fixture")
+        before = (self.output / "receipt.json").read_bytes()
+        document = self.profile_deferral_attestation(["profile:sample/two"], [failure])
+        self.assertEqual((document["reviewed_transfers"], document["operator_acceptances"], document["profile_deferrals"]),
+                         (["verify"], ["profile:sample/one"], ["profile:sample/two"]))
+        self.assertEqual(document["checks"]["profile:sample/one"]["status"], "failed")
+        self.assertEqual(document["external_obligations"]["sample:fixture-external"]["status"], "not-run")
+        self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.frozen)["immutable"])
+        self.assertEqual(before, (self.output / "receipt.json").read_bytes())
 
     def test_explicit_profile_failure_decision_preserves_native_failure_and_receipts(self):
         path, files, original_output = self.operator_failure()

@@ -77,13 +77,14 @@ public and free of credentials or private details. The declaration is bound to t
 identity (including candidate ID, pinned commit, source and all asset hashes). Its receipt entry stays
 `status: not-run`, with a separate `deferral` containing the reason, authorization reference and
 candidate identity hash. No actual evidence hash or PASS is invented. The complete `result` remains
-`incomplete`; the collector and `accept` keep their nonzero exit status. A valid deferral permits
+`incomplete`; the collector and `accept` keep their nonzero exit status. By itself, a valid deferral permits
 `publish` only when `reproducible_result` is `passed` and every other external obligation has actual
 passing evidence or its own valid authorization. Publication prints the deferred IDs and `execution=not-run`.
 
 There are no default deferrals. Unknown IDs, missing/blank reason or authorization, failed actual
-checks, changed declarations and candidate bindings reject this path. Local, physical, core and
-shipped-profile checks remain required with unchanged evidence. Existing candidates prepared before
+checks, changed declarations and candidate bindings reject this path. External deferrals cannot
+waive local, physical, core or shipped-profile checks; the separate publication-only profile
+decisions below preserve their original evidence. Existing candidates prepared before
 this tooling change cannot use the exception: publication checks out the pinned candidate code,
 so commit the change and prepare a new candidate before using it. Never edit an older frozen source.
 
@@ -91,7 +92,8 @@ so commit the change and prepare a new candidate before using it. Never edit an 
 
 `publish` loads and verifies the frozen collector receipt, source, transport, asset
 inventory, hashes and passing logs before dispatching Release publication. It requires
-all declared checks and external obligations (actual passes or authorized deferrals), matching command provenance and local
+all declared checks (passing evidence or the explicit publication-only profile decisions below)
+and external obligations (actual passes or authorized deferrals), matching command provenance and local
 execution environments. It sends only a sanitized attestation: candidate and identity
 hash, receipt hash, complete expected check IDs/statuses/log hashes, public execution and
 VM base identities, and external evidence hashes or the bound public deferral declarations.
@@ -187,6 +189,28 @@ statement by the trusted operator against the pinned candidate and all other req
 Schemas `1` and `2` continue to require normal passing evidence and cannot contain decisions.
 The pinned candidate must include schema `3` support before using this explicit path.
 
+For an explicitly authorized live profile check that has never run, use the separate
+publication-only deferral:
+
+```sh
+dev/release.sh publish --candidate rRUN_ID-aATTEMPT \
+  --defer-profile profile:NAME \
+  --deferral-reason 'Known profile issue; postpone this check for this release' \
+  --deferral-authorization-reference 'Public reference to operator authorization'
+```
+
+Repeat `--defer-profile` for exact declared IDs; lane profiles require `profile:NAME/LANE`.
+Only pristine pending runnable profile entries without execution logs or collector attempt events
+qualify. Failed, interrupted, blocked, passed and not-applicable checks cannot use this path.
+Every other gate, including all CI checks, remains mandatory. Receipts and logs stay unchanged;
+collector acceptance remains incomplete. Local and remote publication report `not-run` and
+`operator-deferred`. Strict attestation schema `4` binds each decision to the full preparation
+identity, normalized command, original receipt hash/status, public reason and authorization.
+Its exact `profile_deferrals`, `operator_acceptances` and `reviewed_transfers` lists allow existing
+failure decisions, transfers and external deferrals to coexist. Remote validation precedes mutation;
+schemas `1`–`3` cannot contain these deferrals. Retry with the same decision and receipt.
+The pinned candidate must contain this tooling; prepare a new candidate rather than editing an old one.
+
 All publication workflow runs use the same repository-wide stable concurrency group,
 `cancel-in-progress: false` and `queue: max`. This serializes different versions as well
 as same-version retries across operator machines, and preserves queued requests. Local
@@ -240,7 +264,8 @@ candidate to current branch HEAD as a workaround.
 acceptance, candidate/provenance/inventory binding, foreign refs/drafts, partial upload,
 HTTP 502 starter recovery, response loss at ref/draft/upload/publication, idempotent
 retry, large complete reviewed-transfer transport, legacy plain inputs, bounded malformed/bomb
-refusal, explicit exact-candidate profile failure decisions and the native workflow serialization
+refusal, explicit exact-candidate profile failure decisions, unrun live profile deferrals with
+unchanged receipts, mixed decisions, retained retry binding and the native workflow serialization
 contract using an in-memory GitHub fixture.
 The existing collector, workflow gates and packaging contracts cover their own preserved
 behavior. These tests perform no real workflow dispatch, release publication or VM work;

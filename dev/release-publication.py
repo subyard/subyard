@@ -425,16 +425,77 @@ def operator_acceptances(paths, identity, root, receipt):
     return accepted
 
 
-def attestation(output, identity, operator_acceptance_paths=()):
+def validate_profile_deferral(document, name, command, identity, receipt_sha256):
+    keys = {"schema_version", "check", "target", "command", "decision", "receipt_sha256", "original_status"}
+    if (not isinstance(document, dict) or set(document) != keys or type(document["schema_version"]) is not int
+        or document["schema_version"] != 1 or not name.startswith("profile:") or not a.is_live(name) or command is None
+        or document["check"] != name or canonical(document["target"]) != canonical(identity)
+        or document["command"] != command or document["receipt_sha256"] != receipt_sha256
+        or document["original_status"] != "pending"):
+        raise ValueError("invalid exact-candidate profile deferral")
+    decision = document["decision"]
+    if (not isinstance(decision, dict) or set(decision) != {"reason", "authorization_reference"}
+        or any(not isinstance(decision[key], str) or not decision[key].strip() or len(decision[key]) > limit
+               or any(ord(c) < 32 for c in decision[key])
+               for key, limit in (("reason", 1024), ("authorization_reference", 256)))):
+        raise ValueError("profile deferral requires public reason and authorization reference")
+
+
+def profile_deferrals(output, names, reason, authorization_reference, identity, root, receipt):
+    if not names:
+        if reason is not None or authorization_reference is not None:
+            raise ValueError("profile deferral reason and authorization require an explicit check")
+        return {}
+    required = a.commands(root, identity["version"], receipt["profiles"])
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate profile deferral check")
+    deferred = {}
+    receipt_sha256 = a.digest(output / "receipt.json")
+    for name in names:
+        if not isinstance(name, str) or not name.startswith("profile:") or name not in required or required[name] is None:
+            raise ValueError("profile deferral requires one exact declared runnable profile check")
+        if receipt["checks"][name] != {"status": "pending"}:
+            raise ValueError("profile deferral requires an unrun pending check")
+        prefix = name.replace(":", "-").replace("/", "-")
+        log = output / (prefix + ".log")
+        if log.exists() or log.is_symlink() or any(re.fullmatch(re.escape(prefix) + r"-[0-9a-f]{8}\.log", path.name)
+                                                  for path in output.glob(prefix + "-*.log")):
+            raise ValueError("profile deferral cannot hide existing execution logs")
+        deferred[name] = {"schema_version": 1, "check": name, "target": identity,
+                          "command": a.command_identity(required[name], root),
+                          "decision": {"reason": reason, "authorization_reference": authorization_reference},
+                          "receipt_sha256": receipt_sha256, "original_status": "pending"}
+        validate_profile_deferral(deferred[name], name, deferred[name]["command"], identity, receipt_sha256)
+    events = output / "events.jsonl"
+    if events.exists():
+        with events.open() as stream:
+            for line in stream:
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    raise ValueError("invalid collector execution event")
+                if item.get("check") in deferred:
+                    raise ValueError("profile deferral cannot hide a previously attempted check")
+    return deferred
+
+
+def attestation(output, identity, operator_acceptance_paths=(), profile_deferral_checks=(),
+                deferral_reason=None, deferral_authorization_reference=None):
     root, receipt = a.load_bound(output)
     a.update_result(receipt)
     accepted = operator_acceptances(operator_acceptance_paths, identity, root, receipt)
-    if ((receipt["reproducible_result"] != "passed" and not accepted) or receipt.get("superseded") or receipt.get("preparation") != identity
+    deferred_profiles = profile_deferrals(output, profile_deferral_checks, deferral_reason,
+                                         deferral_authorization_reference, identity, root, receipt)
+    if set(accepted) & set(deferred_profiles):
+        raise ValueError("a profile check cannot have both failure acceptance and deferral")
+    if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
     checks = {}
     for name, result in receipt["checks"].items():
+        if name in deferred_profiles:
+            checks[name] = {"status": "not-run", "execution": "operator-deferred", "profile_deferral": deferred_profiles[name]}
+            continue
         if name in accepted:
             decision = accepted[name]
             checks[name] = {"status": "failed", "exit_code": decision["exit_code"], "log_sha256": decision["artifacts"]["log"],
@@ -464,11 +525,12 @@ def attestation(output, identity, operator_acceptance_paths=()):
                 raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
             external[name] = {"status": "passed", "evidence_sha256": result["evidence_sha256"]}
     transfers = sorted(name for name, result in checks.items() if "evidence_transfer" in result)
-    document = {"schema_version": 3 if accepted else 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
+    document = {"schema_version": 4 if deferred_profiles else 3 if accepted else 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
             "receipt_sha256": a.digest(output / "receipt.json"), "environment": receipt["environment"],
             "checks": checks, "external_obligations": external,
-            **({"reviewed_transfers": transfers} if transfers or accepted else {}),
-            **({"operator_acceptances": sorted(accepted)} if accepted else {})}
+            **({"reviewed_transfers": transfers} if transfers or accepted or deferred_profiles else {}),
+            **({"operator_acceptances": sorted(accepted)} if accepted or deferred_profiles else {}),
+            **({"profile_deferrals": sorted(deferred_profiles)} if deferred_profiles else {})}
     validate_attestation(document, identity, root)
     return document
 
@@ -476,21 +538,28 @@ def attestation(output, identity, operator_acceptance_paths=()):
 def validate_attestation(document, identity, root):
     version = document.get("schema_version")
     keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
-    if version in (2, 3):
+    if version in (2, 3, 4):
         keys.add("reviewed_transfers")
-    if version == 3:
+    if version in (3, 4):
         keys.add("operator_acceptances")
-    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3) or document["candidate_id"] != identity["candidate_id"]
+    if version == 4:
+        keys.add("profile_deferrals")
+    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3, 4) or document["candidate_id"] != identity["candidate_id"]
         or document["identity_sha256"] != identity_hash(identity)
         or not re.fullmatch(r"[0-9a-f]{64}", document["receipt_sha256"])):
         raise ValueError("acceptance attestation identity mismatch")
     transfers = sorted(name for name, result in document["checks"].items() if "evidence_transfer" in result)
-    if (version == 1 and transfers or version in (2, 3) and
+    if (version == 1 and transfers or version in (2, 3, 4) and
         (version == 2 and not transfers or document["reviewed_transfers"] != transfers)):
         raise ValueError("reviewed transfer attestation inventory mismatch")
     accepted = sorted(name for name, result in document["checks"].items() if "operator_acceptance" in result)
-    if (version != 3 and accepted or version == 3 and (not accepted or document["operator_acceptances"] != accepted)):
+    if (version not in (3, 4) and accepted or version in (3, 4) and
+        (version == 3 and not accepted or document["operator_acceptances"] != accepted)):
         raise ValueError("operator acceptance attestation inventory mismatch")
+    deferred_profiles = sorted(name for name, result in document["checks"].items() if "profile_deferral" in result)
+    if (version != 4 and deferred_profiles or version == 4 and
+        (not deferred_profiles or document["profile_deferrals"] != deferred_profiles)):
+        raise ValueError("profile deferral attestation inventory mismatch")
     environment = document["environment"]
     if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
         or any(not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value)
@@ -507,6 +576,13 @@ def validate_attestation(document, identity, root):
             if result != {"status": "not-applicable"}:
                 raise ValueError("invalid not-applicable attestation")
         else:
+            if name in deferred_profiles:
+                validate_profile_deferral(result["profile_deferral"], name, a.command_identity(command, root), identity,
+                                          document["receipt_sha256"])
+                if (set(result) != {"status", "execution", "profile_deferral"} or result["status"] != "not-run"
+                    or result["execution"] != "operator-deferred"):
+                    raise ValueError("profile deferral must retain not-run execution")
+                continue
             if name in accepted:
                 decision = result["operator_acceptance"]
                 validate_operator_acceptance(decision, name, a.command_identity(command, root), identity)
@@ -562,6 +638,12 @@ def verify_owned_ref(github, tag, marker, commit, ref=None):
     return ref
 
 
+def report_profile_deferrals(document):
+    if document.get("profile_deferrals"):
+        print("PUBLICATION profile_deferred=" + ",".join(document["profile_deferrals"])
+              + " status=not-run execution=operator-deferred", flush=True)
+
+
 def publish_remote(github, prepared, document, root):
     document = decode_attestation(document)
     identity = checked_identity(prepared)
@@ -569,6 +651,7 @@ def publish_remote(github, prepared, document, root):
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
+    report_profile_deferrals(document)
     for name in document.get("operator_acceptances", []):
         print(f"PUBLICATION operator_accepted={name} native_status=failed exit_code={document['checks'][name]['exit_code']}", flush=True)
     deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
@@ -719,6 +802,10 @@ def main():
             command.add_argument("--workflow-ref", default="master")
             command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
                                  help="explicit exact-candidate profile failure declaration; repeat for each authorized check")
+            command.add_argument("--defer-profile", action="append", default=[], metavar="CHECK",
+                                 help="explicitly defer one exact unrun live profile check; repeat for each authorized check")
+            command.add_argument("--deferral-reason", help="public reason for the named profile deferrals")
+            command.add_argument("--deferral-authorization-reference", help="public reference to the profile deferral authorization")
     export = sub.add_parser("export-ci", help="internal CI asset freezing entrypoint")
     for name in ("version", "commit", "candidate"):
         export.add_argument("--" + name, required=True)
@@ -810,9 +897,10 @@ def main():
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result
         with a.acceptance_lock(output, shared=True):
-            document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance])
+            document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance], args.defer_profile,
+                                   args.deferral_reason, args.deferral_authorization_reference)
             validate_attestation(document, identity, output / "source")
-            write_json(directory / "attestation.json", document)
+        report_profile_deferrals(document)
         deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
         if deferred:
             print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
@@ -821,6 +909,7 @@ def main():
             "request": str(uuid.uuid4()), "workflow_ref": args.workflow_ref, "attestation_sha256": identity_hash(document)}
         if state["attestation_sha256"] != identity_hash(document):
             raise ValueError("publication attestation changed; preserve original unfinished state")
+        write_json(directory / "attestation.json", document)
         write_json(path, state)
         encoded = encode_attestation(document)
         run = dispatch(github, "release-publish.yml", {"candidate": args.candidate, "attestation": encoded}, state, path)
