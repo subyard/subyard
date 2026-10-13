@@ -16,6 +16,7 @@ home="$(getent passwd "$user" | cut -d: -f6)"
 [ -n "$home" ] || exit 1
 uid="$(id -u "$user")"; gid="$(id -g "$user")"
 die() { echo "openlit: $*" >&2; exit 1; }
+stage() { printf 'openlit: guest stage=%s\n' "$1" >&2; }
 owned() {
   [ -d "$state" ] && [ ! -L "$state" ] && [ "$(stat -c '%u:%g:%a' "$state")" = 0:0:700 ] \
     && [ -f "$state/marker" ] && [ ! -L "$state/marker" ] \
@@ -46,10 +47,11 @@ safe_file /run/lock/subyard-openlit.lock || die 'unsafe runtime lock'
 exec 9>/run/lock/subyard-openlit.lock
 chmod 0600 /run/lock/subyard-openlit.lock
 flock -w 5 9 || die 'runtime is being reconciled'
-if [ "$mode" = refresh ]; then
+if [ "$mode" = refresh ] || [ "$#" = 6 ]; then
   [ "$#" = 6 ] || exit 2
   # Source recipe, native metadata and actual installed/container identities must still
   # match the approved observation before service or file mutations.
+  stage guard
   runtime guard --actual "$5" --desired "$6" >/dev/null
 fi
 if [ "$mode" = pause ]; then
@@ -97,6 +99,7 @@ native validate "$([ "$selected" = 1 ] && printf '%s' "$agents")"
 if [ "$selected" = 1 ]; then
   # The image digests are immutable. A complete local cache permits offline re-enable;
   # downloads finish before desired files replace the installed recipe.
+  stage image-inventory
   mapfile -t images < <(compose config --images)
   [ "${#images[@]}" = 3 ] || die 'unexpected Compose image inventory'
   missing=0
@@ -104,7 +107,12 @@ if [ "$selected" = 1 ]; then
   if [ "$missing" = 1 ]; then
     pull_limit=240
     [ "$mode" != refresh ] || pull_limit=20
-    if ! timeout "$pull_limit" docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" pull --quiet > "$state/pull.log" 2>&1; then
+    stage image-pull
+    if timeout "$pull_limit" docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" pull --quiet > "$state/pull.log" 2>&1; then
+      :
+    else
+      pull_status=$?
+      printf 'openlit: pinned image pull exit=%s\n' "$pull_status" >&2
       die 'bounded pinned image pull failed; inspect root-private pull.log inside the yard'
     fi
   fi
@@ -116,6 +124,7 @@ publish_asset() {
   install -m "$permissions" -o 0 -g 0 "$source" "$temporary"
   mv -f -- "$temporary" "$destination"
 }
+stage assets
 for source in guest.sh native.py runtime.py tomli_w.py compose.yaml openlit-collector.yaml; do
   publish_asset "$root/$source" "$state/$source" 600
 done
@@ -125,6 +134,7 @@ publish_asset "$root/collector.yaml" "$state/collector.yaml" 644
 publish_asset "$root/subyard-openlit.service" "$unit" 644
 systemctl daemon-reload
 if [ "$selected" = 0 ]; then
+  stage native-disable
   native apply ''
   systemctl disable --now subyard-openlit.service >/dev/null
   compose down --timeout 20 >/dev/null
@@ -133,10 +143,14 @@ else
   [ "$mode" != refresh ] || wait_limit=60
   # Recreate after every assessed repair, including equal Compose hashes with a changed
   # collector bind inode. Receipt publication is separate and occurs only after verification.
+  stage compose-start
   compose up -d --force-recreate --pull never --wait --wait-timeout "$wait_limit" >/dev/null
   systemctl enable subyard-openlit.service >/dev/null
+  stage unit-start
   systemctl start subyard-openlit.service
+  stage native-enable
   native apply "$agents"
 fi
+stage publication
 published="$(runtime publish)"
 if [ "$mode" = refresh ]; then printf '%s\n' "$published"; else printf 'openlit: yard-local collector and OpenLIT are ready\n'; fi

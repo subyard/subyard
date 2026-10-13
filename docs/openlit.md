@@ -9,6 +9,7 @@ Enable it on an existing running yard:
 
 ```sh
 yard -Y demo profile enable openlit
+yard -Y demo status
 yard -Y demo profile status openlit
 yard -Y demo profile disable openlit
 ```
@@ -25,13 +26,28 @@ limit; initial Compose startup has a separate three-minute limit. Failed setup c
 The profile uses public multi-architecture image manifests pinned by SHA-256: OpenLIT 2.1.0, ClickHouse 24.4.1,
 and Collector Contrib 0.162.0. See the [shipped stack](../config/profiles/openlit/compose.yaml).
 
-OpenLIT listens at `http://127.0.0.1:3000` **inside the yard**. The dedicated Collector accepts OTLP
+Enabling the profile automatically publishes the UI after stack readiness. Detailed
+`yard -Y demo status` lists `openlit dashboard` under shared resources. For a container yard,
+the owned proxy binds exactly the owner's active Tailscale IPv4, with owner loopback as the
+fallback. `OPENLIT_HOST_PORT` can select an explicit unprivileged port; its bounded default is
+`SSH_PORT + 20000` within 1024..65535. Existing listener reservations and foreign devices are
+rejected before guest changes. Disabling removes only this owned publication.
+
+Remote owner-loopback and VM yards show an SSH forwarding command and the browser URL.
+Use that command before opening the URL; a VM forwards to its own loopback UI through the
+configured yard SSH alias, with an outer owner tunnel for remote use. Status only observes
+profile readiness and the owned route. It never starts a stopped yard or repairs a route.
+Repeat initialization and release activation reconcile owner-address and port drift.
+
+Inside the yard, the UI remains `127.0.0.1:3000`. The dedicated Collector accepts OTLP
 gRPC on `127.0.0.1:4317` and OTLP HTTP on `127.0.0.1:4318`; its health endpoint is
-`127.0.0.1:13133`. Docker publishes these ports only on yard loopback. ClickHouse and OpenLIT's
-internal receiver have no published ports. Use an existing trusted SSH connection with forwarding
-for browser access; the profile does not open an owner-host listener or public endpoint. Sign in
-and manage the local OpenLIT account through its upstream UI. All agents in the same yard share
-the yard's trust boundary and can reach its local services.
+`127.0.0.1:13133`. Those endpoints remain private to yard loopback. ClickHouse and OpenLIT's
+internal receiver have no published ports. Only the UI has an owner route. Sign in and manage
+the local OpenLIT account through its upstream UI. All agents in the same yard share the
+yard's trust boundary and can reach its local services. The pinned UI uses its persistent
+SQLite volume for its own auth secret. Credentials auth trusts the request host so the private
+owner URL and localhost SSH browser origin share the same account store; OAuth callbacks are
+outside this profile's access contract.
 
 Native logs and metrics flow through the dedicated Collector to OpenLIT's internal OTLP HTTP
 receiver, which writes `otel_logs` and `otel_metrics_*` tables in the `openlit` database.
@@ -94,15 +110,18 @@ Profile-owned host-free checks run with:
 bash config/profiles/openlit/tests/run.sh
 ```
 
-Physical acceptance uses one fresh standard leased VM, through the documented
+Physical acceptance uses one fresh 8 GiB leased Linux VM per container/VM lane, through the documented
 [VM workflow](test-vms.md#agent-workflow):
 
 ```sh
 bash config/profiles/openlit/tests/e2e/acceptance.sh --slot N
+bash config/profiles/openlit/tests/e2e/acceptance.sh --slot N --kind vm
 ```
 
 The fixture checks default-off initialization, public profile enable, repeat init/config apply,
 actual native Claude Code and Codex exporter ingestion into OpenLIT logs and metrics tables,
+two live container yards, actual owner RPC and rendered SSH tunnels from an isolated synthetic
+client namespace, account/session behavior across browser origins, route drift/refusal/recovery,
 guest runtime CAS rejection, actual Collector bind replacement, recipe update/rollback, and
 disable with custom settings preserved. Model responses come from local synthetic HTTP providers;
 it uses no live model account or external model calls. A passing host-free runner alone does not
@@ -117,3 +136,16 @@ Upstream contracts checked for this profile:
   and [native configuration schema](https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json).
 - [OpenTelemetry Collector configuration](https://opentelemetry.io/docs/collector/configuration/).
 - [Pinned Collector image user and contents](https://github.com/open-telemetry/opentelemetry-collector-releases/blob/v0.162.0/distributions/otelcol-contrib/Dockerfile).
+
+## Predecessor retirement
+
+AI Observer is retired. Compatible reconciliation removes only proven managed service controls,
+its stopped container, and its dashboard route/receipts. Persistent databases, session roots and
+credentials remain. Foreign or ambiguous controls are preserved with an ownership diagnostic.
+Interrupted cleanup can resume from its protected control-hash receipt. Stopped yards are
+reconciled during their next ordinary initialization; they are not started for cleanup.
+
+Old persisted selection and port entries do not prevent configuration loading. The original
+files retain their source ownership, unrelated selections and explicit empty lists. This does
+not enable OpenLIT automatically. OpenLIT uses native telemetry; AI Observer database history
+is retained separately and is not imported into the new dashboard.

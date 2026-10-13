@@ -3813,7 +3813,7 @@ func TestProjectInfoDoesNotRecoverOwnerOrProjectJournals(t *testing.T) {
 }
 
 func TestRPCReadsDoNotRecoverProjectStore(t *testing.T) {
-	for _, method := range []string{"project.list", "yard.status"} {
+	for _, method := range []string{"project.list", "yard.status", "yard.status.profile-dashboards"} {
 		t.Run(method, func(t *testing.T) {
 			root, environment, stateDirectory := nativeFixture(t)
 			environment = append(environment, "SUBYARD_HOST_ID=owner-a")

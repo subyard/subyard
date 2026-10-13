@@ -4,7 +4,7 @@
     {
       "path": "config/profiles/openlit/guest.sh",
       "kind": "profile",
-      "owner": "config/profiles/openlit/owner.sh",
+      "owner": "config/profiles/openlit/dashboard.py",
       "reference": "guest.sh"
     }
   ]

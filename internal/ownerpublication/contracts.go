@@ -28,15 +28,25 @@ func Load(root string) ([]Contract, error) {
 		return nil, err
 	}
 	for _, definition := range integrations {
+		for _, route := range definition.RetiredRoutes {
+			contract := dashboardContract(&profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{DeviceName: route.DeviceName, MarkerKey: route.MarkerKey}})
+			contract.CleanupOnly = true
+			contracts = append(contracts, contract)
+		}
 		dashboard := definition.Dashboard
 		if dashboard == nil || dashboard.ContainerRoute == nil {
 			continue
 		}
-		contracts = append(contracts, Contract{Device: dashboard.ContainerRoute.DeviceName, Key: dashboard.ContainerRoute.MarkerKey, Codec: "dashboard", GuestPort: dashboard.GuestPort,
-			Owns: func(marker string, device map[string]string) bool {
-				host, _, _ := ownerroute.Owned(marker, device, dashboard.GuestPort)
-				return host != ""
-			}})
+		contracts = append(contracts, dashboardContract(dashboard))
+	}
+	profiles, err := profile.Load(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range profiles {
+		if dashboard := definition.Dashboard; dashboard != nil && dashboard.ContainerRoute != nil {
+			contracts = append(contracts, dashboardContract(dashboard))
+		}
 	}
 	registry, err := resource.Load(root)
 	if err != nil {
@@ -52,6 +62,14 @@ func Load(root string) ([]Contract, error) {
 	return contracts, nil
 }
 
+func dashboardContract(dashboard *profile.IntegrationDashboard) Contract {
+	return Contract{Device: dashboard.ContainerRoute.DeviceName, Key: dashboard.ContainerRoute.MarkerKey, Codec: "dashboard", GuestPort: dashboard.GuestPort,
+		Owns: func(marker string, device map[string]string) bool {
+			host, _, _ := ownerroute.Owned(marker, device, dashboard.GuestPort)
+			return host != ""
+		}}
+}
+
 func resourceOwnership(proxy resource.ProxyContract) func(string, map[string]string) bool {
 	return func(marker string, device map[string]string) bool {
 		host, _, ok := strings.Cut(strings.TrimPrefix(device["listen"], "tcp:"), ":")
@@ -65,12 +83,15 @@ func resourceOwnership(proxy resource.ProxyContract) func(string, map[string]str
 
 // Encode binds public owning declarations into the root-owned power unit. The
 // unit and copied binary already share the install/rollback snapshot boundary.
+// Envelope v2 adds cleanup-only contracts; durable receipts and their protected
+// power-metadata reader epoch remain v1 and 2 respectively. Older copied engines
+// reject v2 units, so activation must retain the paired unit/binary snapshot.
 func Encode(contracts []Contract) (string, error) {
 	payload, err := json.Marshal(struct {
 		Version     int        `json:"version"`
 		ReaderEpoch int        `json:"readerEpoch"`
 		Contracts   []Contract `json:"contracts"`
-	}{1, 2, contracts})
+	}{2, 2, contracts})
 	return base64.StdEncoding.EncodeToString(payload), err
 }
 func Decode(value string) ([]Contract, error) {
@@ -83,8 +104,27 @@ func Decode(value string) ([]Contract, error) {
 		ReaderEpoch int        `json:"readerEpoch"`
 		Contracts   []Contract `json:"contracts"`
 	}
-	if strictJSON(payload, &envelope) != nil || envelope.Version != 1 || envelope.ReaderEpoch != 2 {
+	if strictJSON(payload, &envelope) != nil || (envelope.Version != 1 && envelope.Version != 2) || envelope.ReaderEpoch != 2 {
 		return nil, fmt.Errorf("invalid publication contract schema")
+	}
+	if envelope.Version == 1 {
+		// Decode the historical closed schema as well: even cleanupOnly:false
+		// was not a v1 field and must not silently introduce newer semantics.
+		var legacy struct {
+			Version     int `json:"version"`
+			ReaderEpoch int `json:"readerEpoch"`
+			Contracts   []struct {
+				Device    string `json:"device"`
+				Key       string `json:"key"`
+				Codec     string `json:"codec"`
+				GuestPort int    `json:"guestPort,omitempty"`
+				Connect   string `json:"connect,omitempty"`
+				Policy    string `json:"policy,omitempty"`
+			} `json:"contracts"`
+		}
+		if strictJSON(payload, &legacy) != nil {
+			return nil, fmt.Errorf("invalid historical publication contract schema")
+		}
 	}
 	seen := map[string]bool{}
 	for index := range envelope.Contracts {
@@ -93,6 +133,9 @@ func Decode(value string) ([]Contract, error) {
 			return nil, fmt.Errorf("invalid publication contract identity")
 		}
 		seen[contract.Device] = true
+		if contract.CleanupOnly && contract.Codec != "dashboard" {
+			return nil, fmt.Errorf("invalid cleanup-only publication contract")
+		}
 		switch contract.Codec {
 		case "preview":
 			if contract.Device != previewroute.DeviceName || contract.Key != previewroute.Key {

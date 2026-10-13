@@ -36,8 +36,25 @@ func TestOpenLITIsExplicitlySelectedAndPreservesAgentDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "claude codex opencode pi aiobserver" {
+		if loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "claude codex opencode pi" {
 			t.Fatal("optional telemetry changed ordinary coding integration defaults")
 		}
+	}
+}
+
+func TestOpenLITDashboardSettingDerivationAndEnableCollision(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	for _, test := range []struct{ ssh, port string }{{"2222", "22222"}, {"60000", "15488"}} {
+		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"ENVIRONMENT_PROFILES": "", "SSH_PORT": test.ssh}})
+		if err != nil || loaded.Environment["OPENLIT_HOST_PORT"] != test.port {
+			t.Fatalf("derived listener: %s, %v", loaded.Environment["OPENLIT_HOST_PORT"], err)
+		}
+	}
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"ENVIRONMENT_PROFILES": "", "SSH_PORT": "2222", "OPENLIT_HOST_PORT": "2222"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.WithEnvironmentProfiles(loaded, []string{"openlit"}); err == nil {
+		t.Fatal("enable accepted dashboard/SSH collision")
 	}
 }

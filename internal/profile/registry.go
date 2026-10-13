@@ -61,6 +61,7 @@ type Definition struct {
 	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
 	ManagedPaths               []ManagedPath         `json:"managed_paths,omitempty"`
 	Setup                      *Setup                `json:"setup,omitempty"`
+	Dashboard                  *IntegrationDashboard `json:"dashboard,omitempty"`
 	Settings                   []Setting             `json:"settings,omitempty"`
 	Runtime                    *RuntimeHook          `json:"runtime,omitempty"`
 	GuestEnvironment           *GuestEnvironmentHook `json:"guest_environment,omitempty"`

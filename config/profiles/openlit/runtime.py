@@ -64,7 +64,7 @@ def capture(state, source, unit, home, selected, agents, user):
     """Return readiness and a nonsecret CAS projection; raw inspect/config stays local."""
     desired = recipe(source, selected, agents, user)
     if not state.exists():
-        return {'state': 'absent', 'actual': '', 'desired': ''}, {}
+        return ({'state': 'stale', 'actual': digest({'absent': True}), 'desired': desired} if selected else {'state': 'absent', 'actual': '', 'desired': ''}), {}
     if state.is_symlink() or not state.is_dir() or state.stat().st_uid != os.getuid() or state.stat().st_mode & 0o777 != 0o700:
         raise ValueError('unsafe runtime directory')
     if not owned_file(state/'marker', 0o600) or (state/'marker').read_text().strip() != MARKER:
@@ -167,7 +167,7 @@ def valid_receipt(value):
 
 def observe(state, source, unit, home, selected, agents, user):
     observation, facts = capture(state, source, unit, home, selected, agents, user)
-    if observation['state'] == 'absent':
+    if not state.exists():
         return observation
     receipt_path = state/'receipt.json'
     facts['receipt_metadata'] = metadata(receipt_path)

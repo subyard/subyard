@@ -97,3 +97,19 @@ and local/remote SSH tunnels from that metadata. Existing route receipt versions
 pending recovery, foreign-device guards and persisted state remain compatible.
 Concrete package tests and physical acceptance belong to the integration;
 compatibility entrypoints preserve the existing release coverage aggregation.
+
+## Retired package compatibility
+
+Retirement-only declarations live under `config/retired-integrations/<id>/integration.json`.
+Their `retired` flag and `retired_settings` names normalize historical configuration inputs
+without mutating authored files or enabling another integration. Unknown unrelated IDs still
+fail validation. These declarations have only a bounded cleanup lifecycle; provisioning,
+image/version inputs, settings, dashboard services and native executables are prohibited.
+The existing assessed integration lifecycle binds cleanup ownership, source and actual state.
+Protected predecessor transitions retain their sealed source authority; cleanup does not
+rewrite an old in-flight plan.
+
+The Observer compatibility package verifies exact predecessor routes, local ownership,
+managed control hashes and the labelled native container before disabling or removing them.
+A root-private control-hash receipt permits interrupted deletion to resume. Databases,
+session roots and credentials are outside its deletion inventory.

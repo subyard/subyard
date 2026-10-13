@@ -59,7 +59,7 @@ def digest(path):
 def write_observation_incus(shims, control, unexpected):
     source = Path(__file__).resolve().parent.parent
     probes = {}
-    fixtures = [fixture for owner in ("agents", "profiles")
+    fixtures = [fixture for owner in ("agents", "profiles", "retired-integrations")
                 for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
     for fixture in sorted(fixtures):
         commands = runpy.run_path(str(fixture))["read_only_commands"](fixture.parent.parent)

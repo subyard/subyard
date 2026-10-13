@@ -96,7 +96,6 @@ runtime_extras=(
   scripts/reconcile-integrations.sh
   scripts/profile-services.sh
   config/agents/codex/provision.sh
-  config/agents/aiobserver/provision.sh
   config/preview/subyard-preview
   config/systemd/subyard-test-vms-host-sink.service.in
   config/systemd/subyard-test-vms-host-sink.timer.in
@@ -113,7 +112,7 @@ runtime_extras=(
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
   case "$relative" in
-    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go) continue ;;
+    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/retired-integrations/*/tests/*) continue ;;
   esac
   case "$relative" in
     scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;

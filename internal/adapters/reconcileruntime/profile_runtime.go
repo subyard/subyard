@@ -338,3 +338,24 @@ func (buffer *profileRuntimeBoundedBuffer) Write(value []byte) (int, error) {
 	}
 	return buffer.Buffer.Write(value)
 }
+
+// ProfileServiceBinding binds scoped service approval to its declared runtime,
+// including pending work. Profiles without a runtime retain their existing hook.
+func (runtime Runtime) ProfileServiceBinding(ctx context.Context, name string) (string, error) {
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return "", err
+	}
+	for _, definition := range definitions {
+		if definition.Name != name {
+			continue
+		}
+		observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(observations[definition.Runtime.ActivationID])
+		return string(payload), err
+	}
+	return "", nil
+}

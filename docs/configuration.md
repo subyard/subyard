@@ -219,7 +219,7 @@ An ID filters membership and dependency details; readiness describes the whole y
 
 `yard init` uses the selection resolved from profiles and persistent configuration;
 no tool-selection argument or explicit per-yard assignment is required. Default and
-named yards inherit `claude codex opencode pi aiobserver` unless their profiles or
+named yards inherit `claude codex opencode pi` unless their profiles or
 settings select another set. Init preserves inheritance, so later profile changes
 remain effective. It only canonicalizes an explicit local legacy `AGENTS` assignment;
 registered configuration sources are consumed without a local selection write.
@@ -699,3 +699,8 @@ still masks the Git value; remove it with `yard -Y default config unset ENVIRONM
 --scope yard` when you want to use the fallback. `--apply` refreshes materialized file settings and
 is not required for scalar profile selection. Remote writes and provisioning run on the selected
 owner host.
+
+Retired shipped integrations are normalized only by their compatibility declaration. Old
+`aiobserver` selection entries and `AI_OBSERVER_HOST_PORT` assignments are ignored without
+rewriting their source files; other choices and explicit empty selections retain their authority.
+OpenLIT is not selected as a replacement automatically. See [retirement](openlit.md#predecessor-retirement).

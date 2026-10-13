@@ -17,6 +17,12 @@ import (
 
 const Capability = "owner-inventory-v1"
 
+// ProfileDashboardStatusCapability preserves the legacy closed status response while
+// allowing controllers to render profile dashboard routes through VM guest SSH.
+const ProfileDashboardStatusCapability = "yard-status-profile-dashboards-v1"
+
+var errCapabilityUnsupported = errors.New("owner RPC capability unsupported")
+
 var ErrIntegrity = errors.New("owner inventory integrity violation")
 
 type Client struct {
@@ -104,7 +110,10 @@ func (client Client) fetch(ctx context.Context) (domain.OwnerInventory, error) {
 }
 
 func (client Client) YardStatus(ctx context.Context) (domain.YardStatus, error) {
-	raw, err := client.call(ctx, "status", "yard.status", "yard-status")
+	raw, err := client.call(ctx, "status", "yard.status.profile-dashboards", ProfileDashboardStatusCapability)
+	if errors.Is(err, errCapabilityUnsupported) {
+		raw, err = client.call(ctx, "status", "yard.status", "yard-status")
+	}
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
@@ -172,7 +181,7 @@ func decodeResponse(payload []byte, responseID, capability string) (json.RawMess
 			}
 			if !slices.Contains(result.Capabilities, capability) {
 				return nil, fmt.Errorf(
-					"owner does not support %s; update Subyard on the owner host", capability,
+					"%w: owner does not support %s; update Subyard on the owner host", errCapabilityUnsupported, capability,
 				)
 			}
 			negotiated = true

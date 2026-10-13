@@ -162,10 +162,11 @@ bundle_list="$TMP/runtime-bundle.list"
 tar -tzf "$bundle_one" > "$bundle_list"
 ! grep -Eq '^\./config/profiles/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
   || fail 'runtime bundle contains profile-owned tests or Go source'
-! grep -Eq '^\./config/agents/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
+! grep -Eq '^\./config/(agents|retired-integrations)/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
   || fail 'runtime bundle contains integration-owned tests or Go source'
 grep -Fxq './config/agents/package-fixture/bin/worker' "$bundle_list" \
   || fail 'runtime bundle omitted an untracked integration native executable'
+! grep -Eq '^\./config/agents/aiobserver/' "$bundle_list" || fail 'runtime bundle retained the retired active integration'
 grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
   && grep -Fxq './config/profiles/package-fixture/bin/worker' "$bundle_list" \
   || fail 'runtime bundle omitted untracked profile assets or native executable'
@@ -187,8 +188,8 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
   && grep -Fxq './config/preview/instructions.md' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
-  && grep -Fxq './config/agents/aiobserver/provision.sh' "$bundle_list" \
-  && grep -Fxq './config/agents/aiobserver/proxy.sh' "$bundle_list" \
+  && grep -Fxq './config/retired-integrations/aiobserver/retire.py' "$bundle_list" \
+  && grep -Fxq './config/profiles/openlit/dashboard.py' "$bundle_list" \
   && grep -Fxq './scripts/lib/preview-proxy.sh' "$bundle_list" \
   || fail 'runtime bundle does not contain the complete launcher contract'
 # Every profile owns its asset inventory; packaging must preserve all runtime

@@ -153,7 +153,10 @@ class RuntimeTest(unittest.TestCase):
         raise AssertionError(arguments)
 
     def test_absent_is_read_only(self):
-        self.assertEqual(runtime.observe(*self.args), {'state': 'absent', 'actual': '', 'desired': ''})
+        observed = runtime.observe(*self.args)
+        self.assertEqual(observed['state'], 'stale')
+        self.assertNotEqual(observed['actual'], observed['desired'])
+        self.assertEqual(len(observed['desired']), 64)
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands, [])
 

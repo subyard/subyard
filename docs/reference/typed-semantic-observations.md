@@ -1,6 +1,9 @@
 # Typed semantic observations
 
-Accepted: 2026-10-11. Scope: the AI Observer owning integration pilot. This
+Accepted: 2026-10-11. Historical scope: the now-retired AI Observer integration pilot.
+The generic canonicalizer remains supported; the active integration and its native producer
+were removed during dashboard replacement. Historical protected fingerprints retain their
+release recovery authority. This
 contract keeps the existing planner, integration catalog and desired-state
 authority. Source and artifact digests remain byte-exact.
 

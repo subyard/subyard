@@ -46,6 +46,21 @@ var allowedScopes = map[string]bool{
 }
 
 func (definition *Definition) validateExtensions() error {
+	if dashboard := definition.Dashboard; dashboard != nil {
+		if definition.OwnerService == "" || definition.Runtime == nil || dashboard.ContainerRoute == nil ||
+			(dashboard.Scheme != "http" && dashboard.Scheme != "https") || !strings.HasPrefix(dashboard.Path, "/") || !textSafe(dashboard.Path) ||
+			dashboard.GuestPort < 1 || dashboard.GuestPort > 65535 || !settingNamePattern.MatchString(dashboard.PortSetting) ||
+			!strings.HasPrefix(dashboard.ContainerRoute.MarkerKey, "user.subyard.") || !textSafe(dashboard.ContainerRoute.MarkerKey) || !domain.SafeName(dashboard.ContainerRoute.DeviceName) {
+			return errors.New("invalid profile dashboard ownership")
+		}
+		owned := false
+		for _, field := range definition.Settings {
+			owned = owned || field.Name == dashboard.PortSetting && field.Type == "port" && field.HostListener
+		}
+		if !owned {
+			return errors.New("profile dashboard requires its owned listener port")
+		}
+	}
 	seen := map[string]bool{}
 	for _, setting := range definition.Settings {
 		if !settingNamePattern.MatchString(setting.Name) || seen[setting.Name] {

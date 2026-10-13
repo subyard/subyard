@@ -98,7 +98,7 @@ func TestSelectSemanticObservationSelectsCanonicalAndConsumerChecks(t *testing.T
 		t.Run(test.path, func(t *testing.T) {
 			got := Select(policy, registry, ChangeSet{SchemaVersion: 1, Changes: []Change{modifiedChange(test.path)}})
 			if got.Status != "selected" || len(got.Errors) != 0 || got.FullP0.Required || len(got.E2EChecks) != 0 ||
-				!slices.Equal(recommendationIDs(got.HostFreeChecks), []string{"go:observation", "shell:aiobserver-provision"}) ||
+				!slices.Equal(recommendationIDs(got.HostFreeChecks), []string{"go:adapters/reconcileruntime", "go:observation"}) ||
 				!slices.Equal(got.RiskDomains, test.domains) || len(got.Reasons) != 1 || got.Reasons[0].RuleID != "internal-observation" {
 				t.Fatalf("semantic observation selection = %#v", got)
 			}

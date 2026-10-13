@@ -15,9 +15,9 @@ acceptance. Superseded alternatives and execution reports belong in Git history.
 
 ## Typed observation pilot
 
-The AI Observer integration uses one package-owned Go native producer and the
+The retired AI Observer pilot used one package-owned Go native producer and the
 generic immutable snapshot canonicalizer. Mounts has explicit multiset semantics;
-other native arrays retain their existing order. Actual helper bytes bind the
+other native arrays retain their existing order. Historical helper bytes bound the
 package, while exact sealed owners retain historical fingerprints and recovery
 authority. Source-owned phase/reason diagnostics cross the existing activation
 interface without raw native output. The [bounded contract](typed-semantic-observations.md)
@@ -235,7 +235,7 @@ contract, and storage roles; status/apply refers to materialized file consumers.
 ## Per-yard coding-tool selection and artifact ownership
 
 Every yard initializes without mandatory tool parameters. Default/named yards inherit active
-profile/settings selection; shipped fallback is `claude codex opencode pi aiobserver`. Init does
+profile/settings selection; shipped fallback is `claude codex opencode pi`. Init does
 not materialize inherited values or empty a fresh named yard. Remote access reaches owner
 authority; controller discovery never changes selection. Paseo remains optional.
 
@@ -734,7 +734,7 @@ yard start. After VPN down, provision/init/start/reboot preserve disabled intent
 Selecting profile alone never publishes VPN; external exposure follows confirmation policy. See
 [Amnezia](../amnezia.md).
 
-AI Observer installation readiness proves exact owned runtime/active service, separate from
+The retired AI Observer installation readiness contract proved exact owned runtime/active service, separate from
 advisory health. Initial history scan can delay HTTP while sole watcher works; re-provision does
 not restart a valid starting service. Watcher commits file data/offset transactionally, skips
 unchanged committed files, may retry interrupted files; progress uses offset/message/checkpoint

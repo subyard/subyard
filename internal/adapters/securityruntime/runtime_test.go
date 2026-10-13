@@ -719,3 +719,20 @@ func TestPreviewProxyAcceptsOnlyExactContainerAndVMRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestRetiredDashboardSecurityAllowsOnlyExactCleanupRoute(t *testing.T) {
+	runtime := Runtime{Integrations: []profile.IntegrationDefinition{{Name: "obsolete", Retired: true, RetiredRoutes: []profile.RetiredRoute{{MarkerKey: "user.subyard.obsolete", DeviceName: "obsolete-ui", GuestPort: 8080}}}}}
+	definition := runtime.integrationProxy("obsolete-ui")
+	if definition == nil {
+		t.Fatal("retired cleanup ownership missing")
+	}
+	device := map[string]string{"type": "proxy", "bind": "host", "listen": "tcp:100.101.102.103:22222", "connect": "tcp:127.0.0.1:8080"}
+	metadata := map[string]string{"user.subyard.obsolete": "v2:pending:100.101.102.103:22222"}
+	if err := runtime.checkIntegrationProxy(context.Background(), *definition, device, metadata); err != nil {
+		t.Fatal(err)
+	}
+	device["connect"] = "tcp:127.0.0.1:3000"
+	if err := runtime.checkIntegrationProxy(context.Background(), *definition, device, metadata); err == nil {
+		t.Fatal("foreign retired route was accepted")
+	}
+}

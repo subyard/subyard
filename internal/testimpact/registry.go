@@ -61,7 +61,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ports", "previewroute", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
+		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ports", "previewroute", "profile", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/codexdesktop", "adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -85,7 +85,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	shellTests := []string{
-		"agent-e2e", "agent-selection", "aiobserver-provision", "aiobserver-proxy", "build-engine", "release-acceptance", "release-publication",
+		"agent-e2e", "agent-selection", "integration-retirement", "build-engine", "release-acceptance", "release-publication",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
 		"command-registry", "create-subyard-docker-apparmor", "create-subyard-limits", "docker-forwarding-convergence",
 		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",

@@ -94,3 +94,46 @@ func TestIntegrationImmutableInputsIgnoreConfigDirectoryDefaults(t *testing.T) {
 		t.Fatal("persistent override of immutable input was accepted")
 	}
 }
+
+func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
+	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample"}`)
+	retired := filepath.Join(root, "config/retired-integrations/obsolete")
+	if err := os.MkdirAll(retired, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(retired, "integration.json"), []byte(`{"schema_version":1,"retired":true,"retired_settings":["OBSOLETE_PORT"],"lifecycle":{"handler":"retire.sh"}}`), 0o600)
+	testkit.WriteFile(t, filepath.Join(retired, "retire.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	for _, selection := range []string{"sample obsolete", "obsolete", ""} {
+		home, configHome := testkit.TempDir(t), testkit.TempDir(t)
+		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=${UNUSED_PORT:=12345}\n"
+		path := filepath.Join(configHome, "config.env")
+		testkit.WriteFile(t, path, []byte(original), 0o600)
+		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := ""
+		if selection == "sample obsolete" {
+			expected = "sample"
+		}
+		if loaded.Environment["CODING_TOOL_INTEGRATIONS"] != expected || !loaded.Integrations.Present {
+			t.Fatalf("selection lost: %#v", loaded.Integrations)
+		}
+		if _, ok := loaded.Environment["OBSOLETE_PORT"]; ok {
+			t.Fatal("retired setting remains effective")
+		}
+		if _, ok := loaded.Environment["UNUSED_PORT"]; ok {
+			t.Fatal("retired expression mutated live environment")
+		}
+		data, _ := os.ReadFile(path)
+		if string(data) != original {
+			t.Fatal("read modified source-owned persisted inputs")
+		}
+		if _, err := loaded.Catalog.LookupSetting("OBSOLETE_PORT"); err {
+			t.Fatal("retired setting is writable")
+		}
+	}
+	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
+		t.Fatal("arbitrary unknown integration accepted")
+	}
+}

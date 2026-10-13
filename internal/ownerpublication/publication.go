@@ -20,13 +20,14 @@ import (
 const Prefix = "user.subyard.deferred_publication."
 
 type Contract struct {
-	Device    string                               `json:"device"`
-	Key       string                               `json:"key"`
-	Codec     string                               `json:"codec"`
-	GuestPort int                                  `json:"guestPort,omitempty"`
-	Connect   string                               `json:"connect,omitempty"`
-	Policy    string                               `json:"policy,omitempty"`
-	Owns      func(string, map[string]string) bool `json:"-"`
+	Device      string                               `json:"device"`
+	Key         string                               `json:"key"`
+	Codec       string                               `json:"codec"`
+	GuestPort   int                                  `json:"guestPort,omitempty"`
+	Connect     string                               `json:"connect,omitempty"`
+	Policy      string                               `json:"policy,omitempty"`
+	CleanupOnly bool                                 `json:"cleanupOnly,omitempty"`
+	Owns        func(string, map[string]string) bool `json:"-"`
 }
 
 type Receipt struct {
@@ -66,11 +67,21 @@ func Plan(instance ports.InstanceInfo, contracts []Contract, addresses []netip.A
 		} else if len(device) == 0 || !maps.Equal(device, local) || !contract.Owns(ownership, device) {
 			continue // Foreign, inherited, required and unreceipted listeners retain their start prerequisite.
 		}
+		if contract.CleanupOnly && saved == "" {
+			continue
+		}
 		address, eligible := listenAddress(device)
 		if !eligible {
 			if saved != "" {
 				return nil, nil, nil, fmt.Errorf("invalid deferred listener %q", contract.Device)
 			}
+			continue
+		}
+		// Validate the same durable receipt/listener schema before cancelling.
+		// Retirement must never restore an exposure that is no longer active.
+		if contract.CleanupOnly {
+			delete(config, key)
+			delete(devices, contract.Device)
 			continue
 		}
 		present := slices.ContainsFunc(addresses, func(available netip.Addr) bool { return available.Unmap() == address })

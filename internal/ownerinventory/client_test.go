@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
 )
 
@@ -291,5 +292,70 @@ func TestClientRejectsTimeoutAndOversizedResponse(t *testing.T) {
 		Fetch(context.Background(), "owner-a"); err == nil ||
 		!strings.Contains(err.Error(), "outside the allowed range") {
 		t.Fatalf("oversized RPC response was accepted: %v", err)
+	}
+}
+
+// statusTransport models negotiated old/new owners without opening the response schema.
+type statusTransport struct {
+	t                *testing.T
+	capabilities     []string
+	failure          error
+	applicationError bool
+	methods          []string
+}
+
+func (transport *statusTransport) Call(_ context.Context, _ string, payload []byte) ([]byte, error) {
+	codec := rpc.NewCodec(bytes.NewReader(payload), nil)
+	if _, err := codec.ReadRequest(); err != nil {
+		transport.t.Fatal(err)
+	}
+	call, err := codec.ReadRequest()
+	if err != nil {
+		transport.t.Fatal(err)
+	}
+	transport.methods = append(transport.methods, call.Method)
+	if transport.failure != nil {
+		return nil, transport.failure
+	}
+	var output bytes.Buffer
+	writer := rpc.NewCodec(nil, &output)
+	if err := writer.Write(rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate", Result: map[string]any{"capabilities": transport.capabilities}}); err != nil {
+		transport.t.Fatal(err)
+	}
+	response := rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "status", Result: domain.YardStatus{State: "RUNNING"}}
+	if transport.applicationError {
+		response.Result = nil
+		response.Error = &rpc.Error{Code: "status_failed", Message: "synthetic owner failure"}
+	}
+	if err := writer.Write(response); err != nil {
+		transport.t.Fatal(err)
+	}
+	return output.Bytes(), nil
+}
+func TestYardStatusCapabilitySkew(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		capabilities     []string
+		failure          error
+		applicationError bool
+		methods          string
+		wantError        bool
+	}{
+		{"new owner", []string{"yard-status", ProfileDashboardStatusCapability}, nil, false, "yard.status.profile-dashboards", false},
+		{"old owner", []string{"yard-status"}, nil, false, "yard.status.profile-dashboards,yard.status", false},
+		{"unsupported owner", nil, nil, false, "yard.status.profile-dashboards,yard.status", true},
+		{"transport failure", nil, errors.New("synthetic transport failure"), false, "yard.status.profile-dashboards", true},
+		{"application failure", []string{ProfileDashboardStatusCapability}, nil, true, "yard.status.profile-dashboards", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &statusTransport{t: t, capabilities: test.capabilities, failure: test.failure, applicationError: test.applicationError}
+			status, err := (Client{Transport: transport}).YardStatus(context.Background())
+			if (err != nil) != test.wantError || strings.Join(transport.methods, ",") != test.methods {
+				t.Fatalf("status=%+v err=%v methods=%v", status, err, transport.methods)
+			}
+			if !test.wantError && status.State != "RUNNING" {
+				t.Fatal("status response was lost")
+			}
+		})
 	}
 }

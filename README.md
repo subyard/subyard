@@ -29,7 +29,7 @@ where agents run your product, reproduce bugs, and verify changes.
 - **Encrypted staging credentials.** Sync selected staging/QA records between
   trusted hosts; deliver only authorized files to yards. [Credential sync →](docs/keys.md)
 - **Persistent history and statistics.** Keep agent sessions, projects, and caches.
-  [AI Observer](docs/ai-observer.md) tracks Claude Code and Codex session usage.
+  [OpenLIT](docs/openlit.md) optionally collects native Claude Code and Codex telemetry and publishes its dashboard.
 
 ## Getting started
 

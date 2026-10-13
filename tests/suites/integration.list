@@ -1,7 +1,5 @@
 # Host-free process integrations using temporary roots and fake external commands.
 agent-selection.sh
-aiobserver-provision.sh
-aiobserver-proxy.sh
 ccusage-provision.sh
 codex-agent-defaults.sh
 codex-agent-provision.sh
@@ -19,3 +17,4 @@ lifecycle-guard.sh
 yard-keys.sh
 yard-remote.sh
 yard-shell.sh
+integration-retirement.sh

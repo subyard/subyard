@@ -216,12 +216,17 @@ active operation ID, and a bounded writer queue closes a client that cannot keep
 Negotiation also returns the engine build version, supported protocol range and capabilities so a
 rolling controller/owner-host mismatch is explicit. Calls may carry an RFC 3339 deadline; expiry and
 explicit cancellation produce different typed errors.
+The `yard-status-profile-dashboards-v1` capability selects `yard.status.profile-dashboards`
+with the existing status response schema. Controllers fall back to `yard.status` when the
+capability is absent. Legacy status omits VM profile dashboard URLs that require guest
+SSH routing and reports an update-controller diagnostic instead.
+
 The outer event `sequence` and `revision` are one monotonic per-session stream; adapter-local Incus
 revisions remain typed event data and cannot make the RPC revision move backwards after a snapshot.
 
 The switched surface exposes `command.list`, `context.get`, `operation.route`, `operation.plan`,
 `operation.execute`, `integration.status`, `project.list`, `owner.inventory`, `yard.status`,
-`profile.list`, `settings.list`, `host.sync.status`, `session.prepare`, `credential.list`, `credential.status`,
+`yard.status.profile-dashboards`, `profile.list`, `settings.list`, `host.sync.status`, `session.prepare`, `credential.list`, `credential.status`,
 `incus.events`, `system.snapshot`, `system.resync` and `system.ping`. `operation.plan` accepts every
 public mutating core command whose handler family supports preparation. Interactive terminal and
 protected credential-payload commands keep their dedicated transport rather than treating human
@@ -445,7 +450,7 @@ failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
 
-The AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
+The historical AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
 uses one package-owned Go producer for native projection and semantic hashes.
 Mount records form an unordered multiset; other arrays preserve order. Native
 helper executable bytes bind the package. Its optional closed failure transport
@@ -970,7 +975,7 @@ Detailed status, owner inventory and the owner status summary report
 
 The installed root-owned unit contains a versioned snapshot of public owning contracts
 from the candidate paired with its copied binary. Generic codecs recognize preview,
-integration dashboard and explicitly declared resource ownership receipts; device names
+integration and profile dashboards and explicitly declared resource ownership receipts; device names
 alone never prove ownership. Foreign, inherited and unreceipted devices retain the normal
 address prerequisite. Legacy resource devices lacking a receipt require an ordinary,
 explicit owning operation to establish ownership; exact recipe matching alone does not
@@ -993,6 +998,17 @@ Supported rollback to an epoch-1 owner is refused before activation because hist
 cannot honor detached publication state, including Orca cleanup. The inspection reports this
 loss of rollback eligibility before authorization. Recovery restores only a still-matching
 receipt; owning removal clears its journal before retiring that receipt.
+The unit contract envelope is version 2, independently of the unchanged durable receipt
+version and power-metadata epoch. Version 2 adds cleanup-only contracts from retired route
+declarations: they validate and cancel saved restoration authority without restoring a
+retired exposure. Current engines also read the exact closed version 1 envelope; version 1
+cannot carry cleanup-only fields. Older epoch-2 engines cannot read version 2 unit snapshots.
+Installation writes the copied binary and its generated unit sequentially. Convergence
+requires matching engine bytes, the exact generated unit and fresh systemd manager state;
+this check does not establish an atomic native-file snapshot. A mismatched older binary
+rejects version 2 before publication effects. Matching durable metadata epochs do not imply
+compatible unit envelopes. Deferred selected profiles keep their original endpoint identity
+while status withholds the URL until publication resumes.
 Unknown journal/contract versions, ownership drift and conflicting local/effective devices
 are errors.
 
@@ -1440,3 +1456,10 @@ execution boundary. Its source is read only from the validated shipped profile. 
 readiness; `ensure` performs the previously assessed repair. Profile selection does not suppress
 repair of an installed service. Core owns transport, confirmation and orchestration; each profile
 owns its service paths, diagnostics and restart mechanics.
+
+Profile declarations may expose a `dashboard` with an owned listener setting, container marker
+and device, guest port, scheme and path. The owning owner service/runtime binds route and guest
+readiness. Core projects selected, ready dashboards into shared status and renders VM/remote
+SSH instructions using shipped metadata, without extending the closed owner-response schema.
+Retired integration declarations live under `config/retired-integrations/`; they permit only
+bounded cleanup lifecycle and discarded-input metadata, with no provisioning or native binaries.

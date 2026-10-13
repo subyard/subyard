@@ -17,9 +17,17 @@ if bash "$tmp/$controller" > "$tmp/missing" 2>&1; then
 fi
 ! grep -q -- '--purpose' "$tmp/missing"
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
-grep -Fxq -- '--slot 7 --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- bash config/profiles/openlit/tests/e2e/owner.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh' "$tmp/calls"
+bash "$tmp/$controller" --slot 7 --kind vm > "$tmp/vm-calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh vm' "$tmp/vm-calls"
 rc=0
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
 [ "$rc" -eq 23 ]
 [ "$(wc -l < "$tmp/failure")" -eq 1 ]
 printf 'ok: acceptance dispatch, slot requirement and failure propagation\n'
+
+bash "$tmp/$controller" --slot 7 --kind container --auth-only > "$tmp/auth-calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container auth-only' "$tmp/auth-calls"
+
+bash "$tmp/$controller" --slot 7 --teardown-only > "$tmp/teardown-calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container teardown-only' "$tmp/teardown-calls"

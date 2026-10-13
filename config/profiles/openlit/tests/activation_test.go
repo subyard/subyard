@@ -48,6 +48,7 @@ func TestOpenLITActivationUpdateRollbackAndStaleAssessment(t *testing.T) {
 	testkit.WriteFile(t, filepath.Join(tmp, "incus"), []byte(`#!/usr/bin/env bash
 set -euo pipefail
 if [ "$1" = list ]; then echo RUNNING; exit; fi
+if [ "$1" = query ]; then printf '{"config":{},"devices":{}}\n'; exit; fi
 [ "$1" = exec ] || exit 1
 tar -tf - >/dev/null
 while [ "$1" != subyard ]; do shift; done
@@ -72,14 +73,14 @@ printf '{"state":"%s","actual":"%s","desired":"%s"}\n' "$state" "$actual" "$desi
 		"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1",
 		"SUBYARD_OPERATOR_HOME": tmp, "SUBYARD_CONFIG_DIR": filepath.Join(root, "config"),
 		"SUBYARD_CONFIG_HOME": tmp, "SUBYARD_HOME": tmp, "STORAGE_PATH": tmp,
-		"HOST_BASE": tmp, "RESTRICTED_DISK_PATHS": tmp, "ACCESS_KIND": "local", "YARD_KIND": "container",
+		"HOST_BASE": tmp, "RESTRICTED_DISK_PATHS": tmp, "ACCESS_KIND": "local", "YARD_KIND": "vm",
 		"YARD_INSTANCE_NAME": "yard-fixture", "INCUS_PROJECT": "fixture", "INCUS_BRIDGE": "fixture",
 		"SSH_HOST": "127.0.0.1", "DEV_USER": "dev", "DEV_UID": "1000", "DEV_SUDO": "0",
 		"FORWARD_SSH_AGENT": "0", "NESTED_E2E_VMS": "0", "ENVIRONMENT_PROFILES": "openlit",
 		"CODING_TOOL_INTEGRATIONS": "claude codex", "FIXTURE_ACTUAL": actualPath, "FIXTURE_DESIRED": desiredPath,
 		"AGENT_claude_CONFIG": filepath.Join(root, "config/agents/claude/settings.json"), "AGENT_claude_CONFIG_DEST": ".claude/settings.json",
 		"AGENT_codex_CONFIG": filepath.Join(root, "config/agents/codex/config.toml"), "AGENT_codex_CONFIG_DEST": ".codex/config.toml",
-		"FIXTURE_CALLS": calls,
+		"FIXTURE_CALLS": calls, "OPENLIT_HOST_PORT": "22222",
 	}
 	runner := reconcileruntime.Runtime{RepositoryRoot: root, Profiles: []profile.Definition{definition},
 		Yard:  domain.Context{IncusProject: "fixture", YardInstanceName: "yard-fixture"},
@@ -87,31 +88,39 @@ printf '{"state":"%s","actual":"%s","desired":"%s"}\n' "$state" "$actual" "$desi
 	for key, value := range environment {
 		runner.Environment = append(runner.Environment, key+"="+value)
 	}
-	observe := func(want ports.RuntimeState, actual, desired string) {
+	observe := func(want ports.RuntimeState) ports.RuntimeObservation {
 		t.Helper()
 		observations, err := runner.ObserveProfileRuntimes(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		value := observations["openlit-runtime"]
-		if value.State != want || value.Actual != actual || value.Desired != desired {
+		if value.State != want {
 			t.Fatalf("observation = %#v", value)
 		}
+		return value
 	}
-	observe(ports.RuntimeStateStale, old, updated)
-	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-update", old, updated); err != nil {
+	before := observe(ports.RuntimeStateStale)
+	if before.Actual == before.Desired || before.Desired == "" {
+		t.Fatal("missing combined activation bindings")
+	}
+	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-update", before.Actual, before.Desired); err != nil {
 		t.Fatal(err)
 	}
-	observe(ports.RuntimeStateCurrent, updated, updated)
+	after := observe(ports.RuntimeStateCurrent)
+	if after.Actual != before.Desired || after.Desired != before.Desired {
+		t.Fatal("update did not converge to assessed identity")
+	}
 	testkit.WriteFile(t, desiredPath, []byte(old), 0o600)
-	observe(ports.RuntimeStateStale, updated, old)
-	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-rollback", updated, old); err != nil {
+	rollback := observe(ports.RuntimeStateStale)
+	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-rollback", rollback.Actual, rollback.Desired); err != nil {
 		t.Fatal(err)
 	}
-	observe(ports.RuntimeStateCurrent, old, old)
+	observe(ports.RuntimeStateCurrent)
 	testkit.WriteFile(t, desiredPath, []byte(updated), 0o600)
+	stale := observe(ports.RuntimeStateStale)
 	testkit.WriteFile(t, actualPath, []byte(strings.Repeat("c", 64)), 0o600)
-	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-stale", old, updated); !errors.Is(err, domain.ErrPlanStale) {
+	if err := runner.ApplyProfileRuntime(context.Background(), "openlit-runtime", "op-stale", stale.Actual, stale.Desired); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("changed actual state error = %v", err)
 	}
 	data, err := os.ReadFile(calls)
@@ -137,9 +146,9 @@ printf '{"state":"%s","actual":"%s","desired":"%s"}\n' "$state" "$actual" "$desi
 	for key, value := range environment {
 		runner.Environment = append(runner.Environment, key+"="+strings.ReplaceAll(value, root, runner.RepositoryRoot))
 	}
-	observe(ports.RuntimeStateStale, strings.Repeat("c", 64), updated)
+	observe(ports.RuntimeStateStale)
 	runner.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard-fixture": {Status: "stopped"}}}
-	observe(ports.RuntimeStateDeferred, "", "")
+	observe(ports.RuntimeStateDeferred)
 	runner.Incus = &testkit.Incus{}
-	observe(ports.RuntimeStateAbsent, "", "")
+	observe(ports.RuntimeStateAbsent)
 }

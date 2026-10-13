@@ -14,7 +14,6 @@ choices that widen it.
 - [Credential ledger](keys.md) — manage selected encrypted staging and QA credentials outside yards
   and repositories.
 - [Per-yard SSH agent](ssh-agent.md) — grant temporary access to one owner-host SSH key.
-- [AI Observer](ai-observer.md) — inspect persistent Claude Code and Codex usage statistics.
 - [Codex Desktop](codex-desktop.md) — export one yard's registered projects through an existing SSH connection on a GNU/Linux desktop.
 - [Agent E2E VM pool](test-vms.md) — configure and use disposable leased test VMs.
 

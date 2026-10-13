@@ -5,5 +5,37 @@
   "runtime": {
     "activation_id": "openlit-runtime",
     "handler": "runtime.sh"
+  },
+  "settings": [
+    {
+      "name": "OPENLIT_HOST_PORT",
+      "type": "port",
+      "scopes": [
+        "shipped",
+        "host",
+        "yard",
+        "command"
+      ],
+      "application": "yard-init",
+      "optional": true,
+      "minimum": 1024,
+      "maximum": 65535,
+      "syncable": true,
+      "host_listener": true,
+      "default_from": {
+        "setting": "SSH_PORT",
+        "offset": 20000
+      }
+    }
+  ],
+  "dashboard": {
+    "scheme": "http",
+    "path": "/",
+    "port_setting": "OPENLIT_HOST_PORT",
+    "guest_port": 3000,
+    "container_route": {
+      "marker_key": "user.subyard.openlit_dashboard",
+      "device_name": "openlit-dashboard"
+    }
   }
 }

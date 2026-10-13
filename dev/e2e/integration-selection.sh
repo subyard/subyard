@@ -165,45 +165,12 @@ sudo -n mv -fT -- "$platform_marker.$token" "$platform_marker"
 [ "$(cat "$platform_marker")" = subyard-e2e-platform-v1 ] || die 'unexpected platform marker'
 yard integration status --json > "$STATE/status.json"
 if [ "$KIND" = default ]; then
-  jq -e '.selection.requested == ["claude","codex","opencode","pi","aiobserver"] and .observed == "ready"' "$STATE/status.json" >/dev/null \
-    || die 'fresh default did not receive the five approved integrations'
-  guest sh -eu -c 'command -v codex; command -v opencode; command -v ai-observer; test -f /home/dev/.claude/settings.json; test -f /home/dev/.pi/agent/settings.json'
+  jq -e '.selection.requested == ["claude","codex","opencode","pi"] and .observed == "ready"' "$STATE/status.json" >/dev/null \
+    || die 'fresh default did not receive the four approved integrations'
+  guest sh -eu -c 'command -v codex; command -v opencode; test -f /home/dev/.claude/settings.json; test -f /home/dev/.pi/agent/settings.json'
   yard init --yes
   yard integration status --json | jq -e '.observed == "ready"' >/dev/null
-  sentinel="/srv/agents/ai-observer/data/.selection-preservation-$token"
-  guest sh -eu -c '[ ! -e "$1" ]; printf "%s\n" "$2" > "$1"' subyard "$sentinel" "$MARKER"
-  yard integration disable aiobserver --yes
-  yard integration status --json > "$STATE/observer-disabled-status.json"
-  jq -c '{observed, detail, effective: .selection.effective}' "$STATE/observer-disabled-status.json"
-  jq -e '.observed == "ready" and (.selection.effective | index("aiobserver") | not)' "$STATE/observer-disabled-status.json" >/dev/null \
-    || die 'observer disable did not converge to ready with observer excluded'
-  guest sh -eu -c '
-    active=$(systemctl show -p ActiveState --value subyard-ai-observer.service) || active=unavailable
-    enabled=$(systemctl show -p UnitFileState --value subyard-ai-observer.service) || enabled=unavailable
-    running=$(docker inspect -f "{{.State.Running}}" subyard-ai-observer 2>/dev/null) || running=unavailable
-    preserved=false
-    if [ "$(cat "$1" 2>/dev/null)" = "$2" ]; then preserved=true; fi
-    printf "observer disabled: ActiveState=%s UnitFileState=%s dockerRunning=%s sentinelPreserved=%s\n" "$active" "$enabled" "$running" "$preserved"
-    case "$active" in inactive|failed) ;; *) exit 1 ;; esac
-    [ "$enabled" = disabled ] && [ "$running" = false ] && [ "$preserved" = true ]
-  ' subyard "$sentinel" "$MARKER" || die 'observer disabled service/container/data assertion failed'
-  for key in user.subyard.ai_observer_provision user.subyard.ai_observer_proxy; do
-    [ -z "$(incus config get "$INSTANCE" "$key" --project "$PROJECT")" ] || die "observer disable retained $key"
-  done
-  if incus config device list "$INSTANCE" --project "$PROJECT" | grep -qx ai-observer; then
-    die 'observer disable retained its dashboard proxy'
-  fi
-  yard integration enable aiobserver --yes
-  yard integration status --json > "$STATE/observer-enabled-status.json"
-  jq -c '{observed, detail, effective: .selection.effective}' "$STATE/observer-enabled-status.json"
-  jq -e '.observed == "ready" and (.selection.effective | index("aiobserver") != null)' "$STATE/observer-enabled-status.json" >/dev/null \
-    || die 'observer enable did not converge to ready with observer selected'
-  guest sh -eu -c '
-    [ "$(cat "$1")" = "$2" ]
-    systemctl is-active --quiet subyard-ai-observer.service
-  ' subyard "$sentinel" "$MARKER" \
-    || die 'observer enable did not preserve data and activate its service'
-  printf 'ok: fresh logical default converges five integrations; observer disable/enable preserves data and retires service/proxy\n'
+  printf 'ok: fresh default converges four integrations without optional profiles\n'
   exit 0
 fi
 if [ "$KIND" != special ]; then

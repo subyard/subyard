@@ -551,7 +551,7 @@ The `local-first` mode connects an isolated Git source to an initialized contain
 integration locally, and verifies that source pull/sync preserve the local selection and explicit
 empty override. Other modes are `vm`, `default`, `special` (fresh test-vms role), and `upgrade` (owned
 ordinary-yard artifacts retired when adopting the test-vms role). The `default` mode installs
-all five fresh-default integrations and needs their normal package download access. Test config,
+all four fresh-default integrations and needs their normal package download access. Test config,
 physical project and instance names, and teardown are isolated from the retained host baseline.
 
 The pinned legacy-upgrade fixture installs the published v0.14.0 ordinary default, then exercises

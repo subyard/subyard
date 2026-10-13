@@ -26,6 +26,7 @@ services:
     image: ghcr.io/openlit/openlit:2.1.0@sha256:94552ccd09379b5e2fec3c51c4fec1b41d88d6b56b0a5ccc895c116673884fa8
     environment:
       TELEMETRY_ENABLED: 'false'
+      AUTH_TRUST_HOST: 'true'
       INIT_DB_HOST: clickhouse
       INIT_DB_PORT: '8123'
       INIT_DB_DATABASE: openlit

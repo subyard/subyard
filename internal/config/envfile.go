@@ -55,6 +55,10 @@ func applyEnvFile(path string, values environment) error {
 }
 
 func applyEnvFileObserved(path string, values environment, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
+	return applyEnvFileObservedRetired(path, values, observer, isRetiredSetting, readers...)
+}
+
+func applyEnvFileObservedRetired(path string, values environment, observer assignmentObserver, retired func(string) bool, readers ...func(string) ([]byte, error)) error {
 	var input io.Reader
 	if len(readers) != 0 && readers[0] != nil {
 		payload, err := readers[0](path)
@@ -100,7 +104,7 @@ func applyEnvFileObserved(path string, values environment, observer assignmentOb
 				observer(name, value, recordLine)
 			}
 		}
-		if err := applyRecord(record.String(), values, recordObserver); err != nil {
+		if err := applyRecordRetired(record.String(), values, recordObserver, retired); err != nil {
 			return sourceContext(path, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
@@ -138,6 +142,10 @@ func scanQuote(line string, quote byte) byte {
 }
 
 func applyRecord(record string, values environment, observer func(name, value string)) error {
+	return applyRecordRetired(record, values, observer, isRetiredSetting)
+}
+
+func applyRecordRetired(record string, values environment, observer func(name, value string), retired func(string) bool) error {
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
@@ -159,7 +167,7 @@ func applyRecord(record string, values environment, observer func(name, value st
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	if isRetiredSetting(name) {
+	if isRetiredSetting(name) || retired(name) {
 		// Validate the old expression without allowing its assignments or nested
 		// defaults to affect current settings, provenance, or sync exports.
 		values = cloneEnvironment(values)

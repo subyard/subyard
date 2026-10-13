@@ -1169,7 +1169,7 @@ func (cli *CLI) statusFacts(loaded config.Loaded) ports.StatusFactsReader {
 	})
 	incusPort, executor := cli.statusPorts()
 	return statusruntime.Runtime{
-		Environment: environment, Resources: definitions, Integrations: loaded.Catalog.Integrations(), Program: cli.options.Program,
+		Environment: environment, Resources: definitions, Integrations: loaded.Catalog.Integrations(), Profiles: loaded.Catalog.Profiles(), Program: cli.options.Program,
 		Incus: incusPort, Executor: executor,
 		Security: securityruntime.Runtime{
 			RepositoryRoot: cli.options.RepositoryRoot, Environment: loaded.Environment,
@@ -1376,7 +1376,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		for _, shared := range status.Facts.Shared {
 			detail := shared.Hint
 			if shared.URL != "" {
-				detail = shared.URL
+				detail = cli.sharedDashboardDetail(status.Context, shared, "")
 			}
 			if detail == "" {
 				fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %s\n", shared.Profile, shared.Name, shared.State)
@@ -1512,7 +1512,7 @@ func (cli *CLI) printRemoteStatusFacts(status domain.YardStatus, ownerEndpoint s
 	for _, shared := range status.Facts.Shared {
 		detail := shared.Hint
 		if shared.URL != "" {
-			detail = remoteDashboardDetail(shared.URL, ownerEndpoint)
+			detail = cli.sharedDashboardDetail(status.Context, shared, ownerEndpoint)
 		}
 		if detail == "" {
 			fmt.Fprintf(cli.options.Stdout, "    %-9s %-16s %s\n", shared.Profile, shared.Name, shared.State)
@@ -3817,7 +3817,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 	defer handler.closePlans()
 	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: []string{
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
-		"projects", "yard-status", "credential-metadata", "credential-status",
+		"projects", "yard-status", ownerinventory.ProfileDashboardStatusCapability, "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
 		profileListCapability, settingsListCapability, hostSyncStatusCapability, sessionPrepareCapability,
 		yardBootstrapCapability,
@@ -4340,11 +4340,15 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "owner_inventory_failed", Message: err.Error()}
 		}
 		return inventory, nil
-	case "yard.status":
+	case "yard.status", "yard.status.profile-dashboards":
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
-		return handler.status(ctx)
+		status, err := handler.status(ctx)
+		if call.Method == "yard.status" {
+			status = handler.cli.legacyDashboardStatus(status)
+		}
+		return status, err
 	case "credential.list":
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
@@ -4529,4 +4533,46 @@ func decodeRPCParams(raw json.RawMessage, target any) error {
 		return &rpc.Error{Code: "invalid_params", Message: "params have trailing data"}
 	}
 	return nil
+}
+
+// Legacy controllers cannot infer a profile dashboard's VM guest port. Keep the
+// same response schema and omit only routes that require the negotiated renderer.
+func (cli *CLI) legacyDashboardStatus(status domain.YardStatus) domain.YardStatus {
+	if status.Context.YardKind != domain.YardVM {
+		return status
+	}
+	status.Facts.Shared = append([]domain.SharedResourceStatus(nil), status.Facts.Shared...)
+	for index, shared := range status.Facts.Shared {
+		for _, definition := range cli.catalog.Profiles() {
+			if definition.Name == shared.Profile && definition.Dashboard != nil && shared.Name == "dashboard" && shared.URL != "" {
+				status.Facts.Shared[index].URL = ""
+				status.Facts.Shared[index].Hint = "update the controller to access this VM profile dashboard"
+			}
+		}
+	}
+	return status
+}
+
+func (cli *CLI) sharedDashboardDetail(yard domain.Context, shared domain.SharedResourceStatus, ownerEndpoint string) string {
+	for _, definition := range cli.catalog.Profiles() {
+		dashboard := definition.Dashboard
+		if definition.Name != shared.Profile || dashboard == nil || shared.Name != "dashboard" {
+			continue
+		}
+		parsed, err := url.Parse(shared.URL)
+		if err != nil {
+			return shared.URL
+		}
+		port, _ := strconv.Atoi(parsed.Port())
+		agent := domain.AgentStatus{URL: shared.URL, DashboardPort: port, DashboardGuestPort: dashboard.GuestPort}
+		if arguments := integrationTunnelArguments(yard, agent, ownerEndpoint); len(arguments) != 0 {
+			parsed.Host = net.JoinHostPort("127.0.0.1", parsed.Port())
+			return "open " + parsed.String() + " after: " + shellquote.Command(arguments)
+		}
+		return shared.URL
+	}
+	if ownerEndpoint != "" {
+		return remoteDashboardDetail(shared.URL, ownerEndpoint)
+	}
+	return shared.URL
 }

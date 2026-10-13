@@ -443,21 +443,37 @@ grep -Fq 'No cleanup needed.' "$STATE_ROOT/paseo-cleanup-retry-check.log" \
   || die 'candidate cleanup retry was not a no-op'
 assert_paseo_retired
 
+# The baseline really contains the managed predecessor. Keep a persistent history
+# sentinel separate from credentials and assert compatible retirement after update.
+observer_history=/srv/agents/ai-observer/data/.retirement-history
+guest sh -eu -c 'test -d /srv/agents/ai-observer/data; printf "%s\n" "$2" > "$1"' subyard "$observer_history" "$MARKER"
 info 'upgrading through the published updater and adopting the exact legacy state'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
   || die 'candidate release was not activated'
 guest test -f "$INVENTORY" || die 'successful upgrade did not publish integration inventory'
+guest sh -eu -c '
+  [ "$(cat "$1")" = "$2" ]
+  [ ! -e /usr/local/bin/ai-observer ]
+  [ ! -e /etc/systemd/system/subyard-ai-observer.service ]
+  ! docker container ls -a --format "{{.Names}}" | grep -Fxq subyard-ai-observer
+  [ ! -e /var/lib/subyard/openlit ]
+' subyard "$observer_history" "$MARKER" || die 'retirement lost history or retained the predecessor controls'
+for key in user.subyard.ai_observer_provision user.subyard.ai_observer_proxy; do
+  [ -z "$(incus config get "$INSTANCE" "$key" --project "$PROJECT")" ] || die 'retirement retained Observer receipt'
+done
+! incus config device list "$INSTANCE" --project "$PROJECT" | grep -Fxq ai-observer || die 'retirement retained Observer route'
+
 [ "$(guest sha256sum /usr/local/libexec/subyard/projects-changed | awk '{print $1}')" = \
   "$(sha256sum "$ROOT/config/projects-changed.sh" | awk '{print $1}')" ] \
   || die 'successful upgrade did not replace the historical dispatcher'
 operator_yard integration status --json > "$STATE_ROOT/adopted-status.json"
 jq -e '
   .observed == "ready" and
-  .selection.requested == ["claude","codex","opencode","pi","aiobserver"]
+  .selection.requested == ["claude","codex","opencode","pi"]
 ' "$STATE_ROOT/adopted-status.json" >/dev/null \
-  || die 'successful upgrade did not adopt the ordinary five integrations'
+  || die 'successful upgrade did not preserve the four current integrations'
 assert_preserved_user_state
 
 info 'repeating init without materializing an inherited selection'
@@ -469,7 +485,7 @@ operator_env test ! -e "$YARD_CONFIG" \
   || die 'init materialized a default-yard selection from inherited settings'
 operator_yard integration status --json | jq -e '
   .observed == "ready" and
-  .selection.requested == ["claude","codex","opencode","pi","aiobserver"]
+  .selection.requested == ["claude","codex","opencode","pi"]
 ' >/dev/null || die 'explicit init changed the inherited requested set'
 assert_preserved_user_state
 
@@ -499,10 +515,10 @@ assert_preserved_user_state
 operator_yard integration enable claude --yes
 operator_yard integration status --json > "$STATE_ROOT/re-enabled-status.json"
 jq -e '
-  .observed == "ready" and (.selection.requested | length) == 5 and
+  .observed == "ready" and (.selection.requested | length) == 4 and
   (.selection.requested | index("claude") != null)
 ' "$STATE_ROOT/re-enabled-status.json" >/dev/null \
-  || die 'Claude re-enable did not converge to the five-tool requested set'
+  || die 'Claude re-enable did not converge to the four-tool requested set'
 [ "$(guest readlink "$LINK_PATH")" = "$LINK_TARGET" ] \
   || die 'Claude re-enable did not restore the owned history link'
 assert_preserved_user_state
@@ -517,7 +533,7 @@ info 'retrying the candidate upgrade after retained-runtime config writes'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
 operator_yard integration status --json > "$STATE_ROOT/re-upgraded-status.json"
-jq -e '.observed == "ready" and (.selection.requested | length) == 5' \
+jq -e '.observed == "ready" and (.selection.requested | length) == 4' \
   "$STATE_ROOT/re-upgraded-status.json" >/dev/null \
   || die 'candidate did not recover after retained-runtime config writes'
 assert_preserved_user_state

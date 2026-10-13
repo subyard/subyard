@@ -41,22 +41,31 @@ type IntegrationDashboard struct {
 	GuestPort      int               `json:"guest_port"`
 	ContainerRoute *IntegrationRoute `json:"container_route,omitempty"`
 }
+type RetiredRoute struct {
+	MarkerKey  string `json:"marker_key"`
+	DeviceName string `json:"device_name"`
+	GuestPort  int    `json:"guest_port"`
+}
+
 type IntegrationDefinition struct {
-	SchemaVersion int                   `json:"schema_version"`
-	Name          string                `json:"-"`
-	Root          string                `json:"-"`
-	Inputs        []IntegrationInput    `json:"inputs,omitempty"`
-	Settings      []Setting             `json:"settings,omitempty"`
-	Provision     string                `json:"provision,omitempty"`
-	Command       string                `json:"command,omitempty"`
-	Check         string                `json:"check,omitempty"`
-	Health        string                `json:"health,omitempty"`
-	Cleanup       string                `json:"cleanup,omitempty"`
-	Depends       []string              `json:"depends,omitempty"`
-	Persist       string                `json:"persist,omitempty"`
-	Lifecycle     *IntegrationLifecycle `json:"lifecycle,omitempty"`
-	Dashboard     *IntegrationDashboard `json:"dashboard,omitempty"`
-	Native        []Native              `json:"native,omitempty"`
+	SchemaVersion   int                   `json:"schema_version"`
+	Retired         bool                  `json:"retired,omitempty"`
+	RetiredRoutes   []RetiredRoute        `json:"retired_routes,omitempty"`
+	RetiredSettings []string              `json:"retired_settings,omitempty"`
+	Name            string                `json:"-"`
+	Root            string                `json:"-"`
+	Inputs          []IntegrationInput    `json:"inputs,omitempty"`
+	Settings        []Setting             `json:"settings,omitempty"`
+	Provision       string                `json:"provision,omitempty"`
+	Command         string                `json:"command,omitempty"`
+	Check           string                `json:"check,omitempty"`
+	Health          string                `json:"health,omitempty"`
+	Cleanup         string                `json:"cleanup,omitempty"`
+	Depends         []string              `json:"depends,omitempty"`
+	Persist         string                `json:"persist,omitempty"`
+	Lifecycle       *IntegrationLifecycle `json:"lifecycle,omitempty"`
+	Dashboard       *IntegrationDashboard `json:"dashboard,omitempty"`
+	Native          []Native              `json:"native,omitempty"`
 
 	validationInputs []string
 }
@@ -66,8 +75,13 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
+	retired, err := loadDeclarations(root, "retired-integrations", "integration.json")
+	if err != nil {
+		return nil, err
+	}
+	packages = append(packages, retired...)
 	result := make([]IntegrationDefinition, 0, len(packages))
-	keys, devices := map[string]bool{}, map[string]bool{}
+	keys, devices, names := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, shipped := range packages {
 		var definition IntegrationDefinition
 		decoder := json.NewDecoder(bytes.NewReader(shipped.data))
@@ -79,6 +93,10 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 			return nil, errors.New("integration declaration has trailing data")
 		}
 		definition.Root, definition.Name = filepath.Dir(shipped.path), filepath.Base(filepath.Dir(shipped.path))
+		if names[definition.Name] || (filepath.Base(filepath.Dir(definition.Root)) == "retired-integrations") != definition.Retired {
+			return nil, errors.New("integration name collision or invalid retirement package")
+		}
+		names[definition.Name] = true
 		definition.validationInputs = []string{shipped.path}
 		if err := definition.validate(); err != nil {
 			return nil, fmt.Errorf("integration %s: %w", definition.Name, err)
@@ -196,6 +214,18 @@ func (definition *IntegrationDefinition) validate() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported integration schema or name")
 	}
+	if definition.Retired {
+		if definition.Lifecycle == nil || definition.Provision != "" || definition.Cleanup != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
+			return errors.New("retired integration permits only cleanup lifecycle metadata")
+		}
+		for _, name := range definition.RetiredSettings {
+			if !settingNamePattern.MatchString(name) {
+				return errors.New("invalid retired setting name")
+			}
+		}
+	} else if len(definition.RetiredSettings) != 0 || len(definition.RetiredRoutes) != 0 {
+		return errors.New("retired settings require retired integration")
+	}
 	packaged := definition.packageDefinition()
 	if err := packaged.validateExtensions(); err != nil {
 		return err
@@ -265,6 +295,13 @@ func (definition *IntegrationDefinition) validate() error {
 			seen[name] = true
 		}
 	}
+	for _, route := range definition.RetiredRoutes {
+		if definition.Lifecycle == nil || route.GuestPort < 1 || route.GuestPort > 65535 ||
+			!slices.Contains(definition.Lifecycle.InstanceConfigKeys, route.MarkerKey) || !slices.Contains(definition.Lifecycle.InstanceDevices, route.DeviceName) {
+			return errors.New("retired route is outside cleanup ownership")
+		}
+	}
+
 	if dashboard := definition.Dashboard; dashboard != nil {
 		if dashboard.Scheme != "http" && dashboard.Scheme != "https" || !strings.HasPrefix(dashboard.Path, "/") || !textSafe(dashboard.Path) || dashboard.GuestPort < 1 || dashboard.GuestPort > 65535 || !settingNamePattern.MatchString(dashboard.PortSetting) {
 			return errors.New("invalid integration dashboard")

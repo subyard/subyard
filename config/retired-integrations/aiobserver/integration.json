@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "retired": true,
+  "retired_settings": [
+    "AI_OBSERVER_HOST_PORT"
+  ],
+  "lifecycle": {
+    "handler": "retire.py",
+    "instance_config_keys": [
+      "user.subyard.ai_observer_provision",
+      "user.subyard.ai_observer_proxy",
+      "user.subyard.deferred_publication.ai-observer"
+    ],
+    "instance_devices": [
+      "ai-observer"
+    ]
+  },
+  "retired_routes": [
+    {
+      "marker_key": "user.subyard.ai_observer_proxy",
+      "device_name": "ai-observer",
+      "guest_port": 8080
+    }
+  ]
+}

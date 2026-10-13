@@ -7,14 +7,46 @@ state="$(mktemp -d /tmp/subyard-openlit-owner.XXXXXX)"
 trap 'rm -rf -- "$state"' EXIT
 mkdir "$state/bin"
 cat > "$state/bin/incus" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = list ]; then printf '%s\n' "${OPENLIT_OWNER_FIXTURE_STATE:-RUNNING}"; exit; fi
-[ "$1" = exec ] || exit 1
-# Exactly these profile-owned sources and the shared TOML writer are transported.
-tar -tf - | sort > "$OPENLIT_OWNER_FIXTURE_FILES"
-printf '%s\n' "${@: -4}" >> "$OPENLIT_OWNER_FIXTURE_CALLS"
-[ "${@: -4:1}" != pause ] || printf 'paused\n'
+#!/usr/bin/env python3
+import json,os,sys,tarfile,subprocess
+from pathlib import Path
+args=sys.argv[1:]
+path=Path(os.environ['OPENLIT_OWNER_FIXTURE_CALLS']+'.route')
+state=json.loads(path.read_text()) if path.exists() else {'config':{},'devices':{}}
+if args[:2]==['list','--all-projects']: print('[]'); sys.exit()
+if args[0]=='list': print(os.environ.get('OPENLIT_OWNER_FIXTURE_STATE','RUNNING')); sys.exit()
+if args[0]=='query':
+    print(json.dumps([] if 'recursion=1' in args[1] else state)); sys.exit()
+if args[0]=='config':
+    if args[1]=='set': state['config'][args[3]]=args[4]
+    elif args[1]=='unset': state['config'].pop(args[3])
+    elif args[2]=='add': state['devices'][args[4]]={'type':args[5],**dict(arg.split('=',1) for arg in args[6:] if '=' in arg)}
+    elif args[2]=='remove': state['devices'].pop(args[4])
+    path.write_text(json.dumps(state)); sys.exit()
+assert args[0]=='exec'
+names=[]
+guest_code=''
+with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
+    for member in archive:
+        names.append(member.name)
+        if member.name=='guest.sh': guest_code=archive.extractfile(member).read().decode()
+names.sort()
+Path(os.environ['OPENLIT_OWNER_FIXTURE_FILES']).write_text(''.join(name+'\n' for name in names))
+position=args.index('subyard')
+mode,selected,user,agents,*bindings=args[position+1:]
+if mode!='observe':
+    with open(os.environ['OPENLIT_OWNER_FIXTURE_CALLS'],'a') as output: output.write('\n'.join((mode,selected,user,agents))+'\n')
+if mode=='pause' and os.environ.get('OPENLIT_OWNER_FIXTURE_REAL_GUEST')=='1':
+    directory=Path(os.environ['OPENLIT_OWNER_FIXTURE_CALLS']).parent/'guest'
+    state=directory/'state'; state.mkdir(parents=True,mode=0o700,exist_ok=True)
+    (state/'marker').write_text('subyard-openlit-v1\n')
+    unit=directory/'unit'; unit.write_text('# Managed by Subyard OpenLIT profile.\n')
+    guest_code=guest_code.replace('state=/var/lib/subyard/openlit','state='+str(state)).replace('unit=/etc/systemd/system/subyard-openlit.service','unit='+str(unit)).replace('/run/lock/subyard-openlit.lock',str(directory/'lock'))
+    result=subprocess.run(['bash','-euo','pipefail','-s','--',mode,selected,user,agents],input=guest_code.encode())
+    sys.exit(result.returncode)
+elif mode=='pause': print('paused')
+elif mode in ('observe','refresh'):
+    print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
 MOCK
 chmod 755 "$state/bin/incus"
 export PATH="$state/bin:$PATH"
@@ -27,21 +59,19 @@ export DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
 export CODING_TOOL_INTEGRATIONS='claude codex'
 export AGENT_claude_CONFIG="$root/config/agents/claude/settings.json" AGENT_claude_CONFIG_DEST=.claude/settings.json
 export AGENT_codex_CONFIG="$root/config/agents/codex/config.toml" AGENT_codex_CONFIG_DEST=.codex/config.toml
+export OPENLIT_HOST_PORT=22222
 export SUBYARD_PROFILE_SELECTED=0
 bash "$root/config/profiles/openlit/owner.sh" --check
-printf 'check\n0\ndev\nclaude codex\n' > "$state/expected"
-cmp "$state/expected" "$state/calls"
+[ ! -s "$state/calls" ]
 export SUBYARD_PROFILE_SELECTED=1
 : > "$state/calls"
 bash "$root/config/profiles/openlit/owner.sh" --yes
-printf 'apply\n1\ndev\nclaude codex\n' > "$state/expected"
-cmp "$state/expected" "$state/calls"
+[ ! -s "$state/calls" ]
 printf 'collector.yaml\ncompose.yaml\nguest.sh\nnative.py\nopenlit-collector.yaml\nruntime.py\nsubyard-openlit.service\ntomli_w.py\n' > "$state/expected"
 cmp "$state/expected" "$state/files"
 : > "$state/calls"
 bash "$root/config/profiles/openlit/owner.sh" --remove
-printf 'apply\n0\ndev\nclaude codex\n' > "$state/expected"
-cmp "$state/expected" "$state/calls"
+[ ! -s "$state/calls" ]
 [ "$(bash "$root/config/profiles/openlit/owner.sh" --pause)" = paused ]
 : > "$state/calls"
 OPENLIT_OWNER_FIXTURE_STATE=STOPPED bash "$root/config/profiles/openlit/owner.sh" --yes
@@ -52,3 +82,41 @@ if AGENT_codex_CONFIG="$state/conflict.toml" bash "$root/config/profiles/openlit
 fi
 [ ! -s "$state/calls" ]
 printf 'ok: OpenLIT lifecycle transport, stopped preservation and template-conflict refusal\n'
+
+# Exercise the real elevation projection, owner controller and tar-delivered guest
+# pause script. Only systemctl/identity facts are fixture-owned platform doubles.
+cat > "$state/bin/systemctl" <<'SH'
+#!/bin/sh
+case "$1" in
+  is-active) [ ! -f "$OPENLIT_OWNER_FIXTURE_CALLS.stopped" ] ;;
+  stop) touch "$OPENLIT_OWNER_FIXTURE_CALLS.stopped" ;;
+  *) exit 99 ;;
+esac
+SH
+cat > "$state/bin/stat" <<'SH'
+#!/bin/sh
+case "$2" in %u:%g:%a) printf '0:0:700\n' ;; %u) printf '0\n' ;; *) exit 99 ;; esac
+SH
+cat > "$state/bin/id" <<'SH'
+#!/bin/sh
+case "$1:${2-}" in -u:) printf '0\n' ;; -u:dev|-g:dev) printf '1000\n' ;; *) exec /usr/bin/id "$@" ;; esac
+SH
+cat > "$state/bin/getent" <<'SH'
+#!/bin/sh
+if [ "$1:${2-}" = passwd:dev ]; then
+  printf 'dev:x:1000:1000::%s:/bin/bash\n' "$OPENLIT_OWNER_FIXTURE_HOME"
+else exec /usr/bin/getent "$@"; fi
+SH
+chmod 755 "$state/bin/"{systemctl,stat,id,getent}
+# shellcheck source=scripts/lib/engine-context.sh
+. "$root/scripts/lib/engine-context.sh"
+subyard_elevated_context
+for expected in paused ''; do
+  result="$(env -i "${SUBYARD_ELEVATED_ENV[@]}" PATH="$PATH" \
+    SUBYARD_PROFILE_SELECTED=1 OPENLIT_OWNER_FIXTURE_REAL_GUEST=1 \
+    OPENLIT_OWNER_FIXTURE_HOME="$state/home" \
+    OPENLIT_OWNER_FIXTURE_FILES="$state/files" OPENLIT_OWNER_FIXTURE_CALLS="$state/calls" \
+    bash -euc '[ -z "${OPENLIT_HOST_PORT+x}" ]; bash "$1" --pause' fixture "$root/config/profiles/openlit/owner.sh")"
+  [ "$result" = "$expected" ]
+done
+printf 'ok: elevated owner/guest pause with absent desired port and exact paused/empty stdout\n'

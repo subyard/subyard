@@ -502,8 +502,12 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker) error {
 			}
 		}
 	}
+	return validateHostListenerCollisions(values, tracker.catalog)
+}
+
+func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
 	ports := map[string]string{}
-	for _, definition := range tracker.catalog.SettingCatalog() {
+	for _, definition := range settings.SettingCatalog() {
 		if !definition.HostListener {
 			continue
 		}
@@ -914,9 +918,9 @@ func (settings Catalog) applyEnvFileValidated(
 func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
-	if err := applyEnvFileObserved(source, probe, func(name, value string, line int) {
+	if err := applyEnvFileObservedRetired(source, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, readers...); err != nil {
+	}, settings.retiredSetting, readers...); err != nil {
 		var diagnostic *SourceError
 		if source != path && errors.As(err, &diagnostic) {
 			copy := *diagnostic
@@ -933,6 +937,10 @@ func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values en
 	}
 	seen := make(map[string]layerValue)
 	for _, assignment := range assignments {
+		if settings.retiredSetting(assignment.name) {
+			delete(probe, assignment.name)
+			continue
+		}
 		canonical := canonicalSettingName(assignment.name)
 		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&

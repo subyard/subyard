@@ -6,6 +6,7 @@ root="$(cd "$profile/../../.." && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$root/scripts/lib/engine-context.sh"
 subyard_require_engine_context
+export SUBYARD_REPOSITORY_ROOT="$root"
 mode=apply
 selected=${SUBYARD_PROFILE_SELECTED:-0}
 runtime_args=()
@@ -58,13 +59,5 @@ for agent in claude codex; do
     fi
   fi
 done
-# Exclude tests and do not transport operator files or native config values.
-tar -C "$profile" -cf - guest.sh native.py runtime.py compose.yaml collector.yaml openlit-collector.yaml subyard-openlit.service \
-  -C "$root/internal/adapters/configmaterial" tomli_w.py | \
-  incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- \
-    bash -euo pipefail -c '
-      stage="$(mktemp -d /tmp/subyard-openlit.XXXXXX)"
-      trap '\''rm -rf -- "$stage"'\'' EXIT
-      tar -xf - -C "$stage"
-      bash "$stage/guest.sh" "$@"
-    ' subyard "$mode" "$selected" "$DEV_USER" "$agents" "${runtime_args[@]}"
+# Route and guest observations share one assessed activation binding.
+exec python3 "$profile/dashboard.py" "$mode" "$selected" "$DEV_USER" "$agents" "${runtime_args[@]}"

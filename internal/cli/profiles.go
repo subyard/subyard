@@ -24,6 +24,10 @@ type ProfileServiceRuntime interface {
 	ApplyProfileService(context.Context, string, []ports.TeardownArtifact) error
 }
 
+type profileServiceBinder interface {
+	ProfileServiceBinding(context.Context, string) (string, error)
+}
+
 type profileRequest struct {
 	verb, id string
 	json     bool
@@ -323,6 +327,13 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			return err
 		}
 	}
+	runtimeBinding := ""
+	if binder, ok := runtime.(profileServiceBinder); ok {
+		runtimeBinding, err = binder.ProfileServiceBinding(ctx, request.id)
+		if err != nil {
+			return err
+		}
+	}
 	consequences := setups.consequences()
 	if keysPlan.Pending() != 0 {
 		consequences = append(consequences, stage.Label)
@@ -339,11 +350,11 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		action = "profile.setup"
 	}
 	prepared.exactState = operationStateDigest(struct {
-		Inputs, Connection, Setup, Yard string
-		Selection                       config.PersistentFileSnapshot
-		Keys                            application.ReconcilePlan
-		Artifacts                       []ports.TeardownArtifact
-	}{inputs.binding(), connection, (&initExecution{profileSetup: setups}).stateBinding(), yardBinding, before, keysPlan, artifacts})
+		Inputs, Connection, Setup, Yard, Runtime string
+		Selection                                config.PersistentFileSnapshot
+		Keys                                     application.ReconcilePlan
+		Artifacts                                []ports.TeardownArtifact
+	}{inputs.binding(), connection, (&initExecution{profileSetup: setups}).stateBinding(), yardBinding, runtimeBinding, before, keysPlan, artifacts})
 	prepared.stepsComplete, prepared.executeNoOp = true, true
 	prepared.steps = func() []domain.OperationStep {
 		var steps []domain.OperationStep
@@ -409,6 +420,15 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		if len(keysPlan.Steps) != 0 {
 			if err := reconciler.CheckApproved(ctx, keysPlan); err != nil {
 				return err
+			}
+		}
+		if binder, ok := runtime.(profileServiceBinder); ok {
+			fresh, err := binder.ProfileServiceBinding(ctx, request.id)
+			if err != nil {
+				return err
+			}
+			if fresh != runtimeBinding {
+				return fmt.Errorf("%w: profile runtime assessment changed", domain.ErrPlanStale)
 			}
 		}
 		if runtime != nil && converged {

@@ -30,6 +30,22 @@ func normalizeLegacySelection(name, value string) string {
 
 func resolveLoadedIntegrations(values environment, tracker *settingTracker) error {
 	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
+	for _, definition := range tracker.catalog.Integrations() {
+		if !definition.Retired {
+			continue
+		}
+		filtered := requested[:0]
+		for _, id := range requested {
+			if id != definition.Name {
+				filtered = append(filtered, id)
+			}
+		}
+		requested = filtered
+		for _, name := range definition.RetiredSettings {
+			delete(values, name)
+			delete(tracker.assignments, name)
+		}
+	}
 	selection, err := ResolveIntegrationSelection(values, requested)
 	if err != nil {
 		return err

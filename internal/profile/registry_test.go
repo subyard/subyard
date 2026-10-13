@@ -402,3 +402,22 @@ func TestRuntimeProjectHookPathsStayInsideNativeDispatcherDirectory(t *testing.T
 		}
 	}
 }
+
+func TestProfileDashboardRequiresOwnedLifecycleListener(t *testing.T) {
+	root := testkit.TempDir(t)
+	declaration := Definition{Runtime: &RuntimeHook{ActivationID: "sample-runtime", Handler: "runtime.sh"},
+		Settings:  []Setting{{Name: "SAMPLE_PORT", Type: "port", Scopes: []string{"yard"}, Application: "yard-init", Minimum: 1024, Maximum: 65535, HostListener: true}},
+		Dashboard: &IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_PORT", GuestPort: 3000, ContainerRoute: &IntegrationRoute{MarkerKey: "user.subyard.sample", DeviceName: "sample-dashboard"}}}
+	path := fixture(t, root, "sample", "#!/bin/sh\nexit 0\n", declaration)
+	testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "runtime.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)
+	if _, err := Load(root); err != nil {
+		t.Fatal(err)
+	}
+	declaration.OwnerService = "owner.sh"
+	declaration.Settings[0].HostListener = false
+	bytes, _ := json.Marshal(declaration)
+	testkit.WriteFile(t, path, bytes, 0o600)
+	if _, err := Load(root); err == nil {
+		t.Fatal("dashboard without listener ownership accepted")
+	}
+}

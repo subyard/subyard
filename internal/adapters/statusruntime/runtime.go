@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -27,6 +28,7 @@ type Runtime struct {
 	Environment  map[string]string
 	Resources    []resource.Definition
 	Integrations []profile.IntegrationDefinition
+	Profiles     []profile.Definition
 	Program      string
 	Security     ports.SecurityChecker
 	Incus        ports.Incus
@@ -59,6 +61,7 @@ func (runtime Runtime) ReadStatusFacts(
 	}
 	result.Agents = runtime.agentStatus(ctx, yard, running)
 	result.Shared = runtime.resourceStatus(ctx, running)
+	result.Shared = append(result.Shared, runtime.profileDashboardStatus(ctx, yard, running)...)
 	return result, nil
 }
 
@@ -156,6 +159,9 @@ func (runtime Runtime) integrationDashboardURL(ctx context.Context, yard domain.
 	defer cancel()
 	instance, err := runtime.Incus.Instance(probeCtx, yard.IncusProject, yard.YardInstanceName)
 	if err != nil {
+		return ""
+	}
+	if instance.Config[ownerpublication.Prefix+dashboard.ContainerRoute.DeviceName] != "" {
 		return ""
 	}
 	host, port, ready := ownerroute.Owned(instance.Config[dashboard.ContainerRoute.MarkerKey], instance.Devices[dashboard.ContainerRoute.DeviceName], dashboard.GuestPort)
@@ -450,7 +456,7 @@ func (runtime Runtime) resourceStatus(ctx context.Context, running bool) []domai
 		if running {
 			probeCtx, cancel := context.WithTimeout(ctx, timeout)
 			probe := exec.CommandContext(probeCtx, definition.HandlerPath(), "is-up")
-			probe.Env = environment(runtime.Environment)
+			probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
 			err := probe.Run()
 			timedOut := probeCtx.Err() != nil
 			cancel()
@@ -526,6 +532,37 @@ func environment(values map[string]string) []string {
 	result := make([]string, 0, len(keys))
 	for _, key := range keys {
 		result = append(result, key+"="+values[key])
+	}
+	return result
+}
+
+func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.Context, running bool) []domain.SharedResourceStatus {
+	var result []domain.SharedResourceStatus
+	for _, definition := range runtime.Profiles {
+		dashboard := definition.Dashboard
+		if dashboard == nil || !definition.Selected(yard.YardName, runtime.Environment) {
+			continue
+		}
+		status := domain.SharedResourceStatus{Profile: definition.Name, Name: "dashboard", State: "down", Hint: runtime.program() + " init"}
+		if running {
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			probe := exec.CommandContext(probeCtx, filepath.Join(definition.Root, definition.OwnerService), "--check")
+			probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
+			err := probe.Run()
+			cancel()
+			if err == nil {
+				status.State = "up"
+				if yard.YardKind == domain.YardVM {
+					status.URL = dashboard.Scheme + "://127.0.0.1:" + runtime.Environment[dashboard.PortSetting] + dashboard.Path
+				} else {
+					status.URL = runtime.integrationDashboardURL(ctx, yard, dashboard)
+				}
+				if status.URL == "" {
+					status.State = "down"
+				}
+			}
+		}
+		result = append(result, status)
 	}
 	return result
 }

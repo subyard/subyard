@@ -116,3 +116,12 @@ func (settings Catalog) Profiles() []profile.Definition {
 func (settings Catalog) Integrations() []profile.IntegrationDefinition {
 	return append([]profile.IntegrationDefinition{}, settings.integrations...)
 }
+
+func (settings Catalog) retiredSetting(name string) bool {
+	for _, definition := range settings.integrations {
+		if definition.Retired && slices.Contains(definition.RetiredSettings, name) {
+			return true
+		}
+	}
+	return false
+}

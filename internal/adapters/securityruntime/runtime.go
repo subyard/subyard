@@ -323,7 +323,19 @@ func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinit
 	if definitions == nil {
 		definitions, _ = profile.LoadIntegrations(runtime.RepositoryRoot)
 	}
+	profiles, _ := profile.Load(runtime.RepositoryRoot)
+	for _, owner := range profiles {
+		if owner.Dashboard != nil && owner.Selected(runtime.Yard.YardName, runtime.Environment) {
+			definitions = append(definitions, profile.IntegrationDefinition{Name: owner.Name, Dashboard: owner.Dashboard})
+		}
+	}
 	for _, definition := range definitions {
+		for _, route := range definition.RetiredRoutes {
+			if route.DeviceName == name {
+				definition.Dashboard = &profile.IntegrationDashboard{GuestPort: route.GuestPort, ContainerRoute: &profile.IntegrationRoute{MarkerKey: route.MarkerKey, DeviceName: route.DeviceName}}
+				return &definition
+			}
+		}
 		if definition.Dashboard != nil && definition.Dashboard.ContainerRoute != nil && definition.Dashboard.ContainerRoute.DeviceName == name {
 			return &definition
 		}
@@ -333,7 +345,13 @@ func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinit
 func (runtime Runtime) checkIntegrationProxy(ctx context.Context, definition profile.IntegrationDefinition, device, instanceConfig map[string]string) error {
 	dashboard := definition.Dashboard
 	host, port, ready := ownerroute.Owned(instanceConfig[dashboard.ContainerRoute.MarkerKey], device, dashboard.GuestPort)
-	if !ready || !ownerroute.TailscaleAddress(host) || port != runtime.Environment[dashboard.PortSetting] || !slices.Contains(strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"]), definition.Name) || runtime.Yard.YardKind == domain.YardVM {
+	if definition.Retired {
+		if host == "" || port == "" {
+			return errors.New("retired proxy is outside proven cleanup ownership")
+		}
+		return nil
+	}
+	if !ready || !ownerroute.TailscaleAddress(host) || port != runtime.Environment[dashboard.PortSetting] || !(slices.Contains(strings.Fields(runtime.Environment["CODING_TOOL_INTEGRATIONS"]), definition.Name) || slices.Contains(strings.Fields(runtime.Environment["ENVIRONMENT_PROFILES"]), definition.Name)) || runtime.Yard.YardKind == domain.YardVM {
 		return errors.New("integration proxy does not match its selected, owned Tailscale route")
 	}
 	resolver := runtime.ResolveOwnerAddress

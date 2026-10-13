@@ -711,3 +711,36 @@ func mapMerge(base, extra map[string]string) map[string]string {
 	}
 	return result
 }
+
+func TestProfileDashboardStatusUsesOwnedReadinessAndExistingProjection(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\n[ \"$1\" = --check ] && [ \"$SUBYARD_PROFILE_SELECTED\" = 1 ] && [ \"$PROFILE_READY\" = 1 ]\n"), 0o700)
+	declaration := profile.Definition{Name: "sample", Root: root, OwnerService: "owner.sh",
+		Dashboard: &profile.IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_PORT", GuestPort: 3000, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.sample", DeviceName: "sample-dashboard"}}}
+	yard := domain.Context{YardName: "demo", YardKind: domain.YardVM}
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "SAMPLE_PORT": "22222", "PROFILE_READY": "1"}, Profiles: []profile.Definition{declaration}}
+	ready := runtime.profileDashboardStatus(context.Background(), yard, true)
+	if len(ready) != 1 || ready[0].State != "up" || ready[0].URL != "http://127.0.0.1:22222/" {
+		t.Fatalf("VM projection: %#v", ready)
+	}
+	runtime.Environment["PROFILE_READY"] = "0"
+	pending := runtime.profileDashboardStatus(context.Background(), yard, true)
+	if pending[0].URL != "" || pending[0].State != "down" {
+		t.Fatal("pending profile exposed a working link")
+	}
+	// A native publication journal withholds the URL even if the readiness
+	// adapter sees a route restored concurrently, before journal cancellation.
+	yard.YardKind, yard.IncusProject, yard.YardInstanceName = domain.YardContainer, "fixture", "yard"
+	runtime.Environment["PROFILE_READY"] = "1"
+	runtime.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{"fixture/yard": {
+		Config:  map[string]string{"user.subyard.sample": "v2:100.64.1.2:22222", "user.subyard.deferred_publication.sample-dashboard": "saved"},
+		Devices: map[string]map[string]string{"sample-dashboard": {"type": "proxy", "bind": "host", "listen": "tcp:100.64.1.2:22222", "connect": "tcp:127.0.0.1:3000"}},
+	}}}
+	if got := runtime.profileDashboardStatus(context.Background(), yard, true); got[0].State != "down" || got[0].URL != "" {
+		t.Fatal("deferred publication exposed a working profile link")
+	}
+	runtime.Environment["ENVIRONMENT_PROFILES"] = ""
+	if got := runtime.profileDashboardStatus(context.Background(), yard, true); len(got) != 0 {
+		t.Fatal("unselected profile exposed dashboard")
+	}
+}
