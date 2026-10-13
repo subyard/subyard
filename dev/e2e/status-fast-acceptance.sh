@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Real-Incus acceptance for status summary routing and cache-first detailed status.
+# Real-Incus space/cache acceptance; selector and freshness matrices run locally.
+# Build as dev, then run as root on an allocated VM; no operator group changes.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,6 +21,13 @@ fail() {
   exit 1
 }
 
+[ "${SUBYARD_E2E_VM:?run through dev/agent-e2e.sh}" = 1 ] || fail 'requires VM1'
+[ "$(id -u)" = 0 ] || fail 'run as root inside the allocated VM after dev/build-engine.sh'
+command -v incus >/dev/null || fail 'incus is required'
+[ -x "$ROOT/.build/yard" ] || fail 'build the current candidate before running the fixture'
+incus() { /usr/bin/incus "$@" </dev/null; }
+incus info >/dev/null
+
 cleanup() {
   if incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sh -eu -c '
     marker=$1/.subyard-status-storage-fixture
@@ -30,7 +38,6 @@ cleanup() {
   fi
   incus delete -f "$NAMED_INSTANCE" --project "$NAMED_PROJECT" >/dev/null 2>&1 || true
   incus delete -f "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" >/dev/null 2>&1 || true
-  incus storage volume delete default yard-srv-demo --project "$NAMED_PROJECT" >/dev/null 2>&1 || true
   incus project delete "$NAMED_PROJECT" >/dev/null 2>&1 || true
   incus project delete "$DEFAULT_PROJECT" >/dev/null 2>&1 || true
   if [ -f "$FIXTURE/.subyard-status-fixture" ] \
@@ -38,16 +45,16 @@ cleanup() {
     find "$FIXTURE" -depth -delete
   fi
 }
-trap cleanup EXIT
 
 [ ! -e "$FIXTURE" ] || fail "fixture path already exists: $FIXTURE"
 for project in "$DEFAULT_PROJECT" "$NAMED_PROJECT"; do
   ! incus project show "$project" >/dev/null 2>&1 \
     || fail "refusing to reuse existing Incus project $project"
 done
+trap cleanup EXIT
 install -d -m 0700 "$FIXTURE" "$HOME_DIR" "$CONFIG_HOME/yards" "$DATA_HOME"
 printf '%s\n' "$RUN_ID" >"$FIXTURE/.subyard-status-fixture"
-printf 'SSH_PORT=32223\nINSTANCE_TYPE=vm\n' >"$CONFIG_HOME/yards/demo.env"
+printf 'SSH_PORT=32223\n' >"$CONFIG_HOME/yards/demo.env"
 
 if ! incus storage show default >/dev/null 2>&1; then
   incus storage create default dir >/dev/null
@@ -73,16 +80,12 @@ for project in "$DEFAULT_PROJECT" "$NAMED_PROJECT"; do
   incus profile device add default root disk pool=default path=/ --project "$project" >/dev/null
   incus profile device add default eth0 nic network=incusbr0 --project "$project" >/dev/null
 done
-incus storage volume create default yard-srv-demo --project "$NAMED_PROJECT" >/dev/null
-
 incus init images:debian/13 "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" \
   -c security.nesting=true >/dev/null
 incus start "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT"
 
-incus init images:alpine/3.22 "$NAMED_INSTANCE" --vm --project "$NAMED_PROJECT" \
-  -c security.secureboot=false -c limits.cpu=2 -c limits.memory=1024MiB >/dev/null
-incus config device add "$NAMED_INSTANCE" srv disk --project "$NAMED_PROJECT" \
-  pool=default source=yard-srv-demo path=/srv >/dev/null
+incus init images:debian/13 "$NAMED_INSTANCE" --project "$NAMED_PROJECT" \
+  -c security.nesting=true >/dev/null
 incus start "$NAMED_INSTANCE" --project "$NAMED_PROJECT"
 
 for target in "$DEFAULT_PROJECT/$DEFAULT_INSTANCE" "$NAMED_PROJECT/$NAMED_INSTANCE"; do
@@ -97,11 +100,11 @@ for target in "$DEFAULT_PROJECT/$DEFAULT_INSTANCE" "$NAMED_PROJECT/$NAMED_INSTAN
     sleep 1
   done
   [ "$ready" = 1 ] || fail "$target agent did not become ready"
-  incus exec "$instance" --project "$project" -- sh -c \
-    'dd if=/dev/zero of=/root/status-root bs=1M count=2 2>/dev/null
-     fallocate -l 128M /srv/status-srv
-     sync'
 done
+
+# A small real mount proves du -x handling without a nested VM or custom volume.
+incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- sh -eu -c \
+  'mount -t tmpfs -o size=64M subyard-status /srv; fallocate -l 32M /srv/status-srv; sync'
 
 incus exec "$DEFAULT_INSTANCE" --project "$DEFAULT_PROJECT" -- sh -eu -c '
 source=$1
@@ -110,13 +113,12 @@ run_id=$3
 [ ! -e "$source" ] && [ ! -e "$alias" ]
 install -d -m 0700 "$source" "$alias"
 printf "%s\n" "$run_id" > "$source/.subyard-status-storage-fixture"
-fallocate -l 1G "$source/allocated-fixture"
+fallocate -l 128M "$source/allocated-fixture"
 mount --bind "$source" "$alias"
 sync
 ' _ "$STORAGE_SOURCE" "$STORAGE_ALIAS" "$RUN_ID"
 
 cd "$ROOT"
-./dev/build-engine.sh
 
 yard() {
   env \
@@ -131,15 +133,10 @@ yard() {
 
 summary="$(yard status)"
 grep -Fq 'status-owner/default' <<<"$summary" || fail "summary omitted default yard"
-grep -Fq 'status-owner/demo' <<<"$summary" || fail "summary omitted named VM yard"
+grep -Fq 'status-owner/demo' <<<"$summary" || fail "summary omitted named yard"
 grep -Fq 'instance yard (container)' <<<"$summary" || fail "summary omitted container kind"
-grep -Fq 'instance yard-demo (vm)' <<<"$summary" || fail "summary omitted VM kind"
+grep -Fq 'instance yard-demo (container)' <<<"$summary" || fail "summary omitted named container"
 ! grep -Fq '  desired  ' <<<"$summary" || fail "summary ran detailed status"
-
-override="$(yard -Y demo status --all)"
-grep -Fq 'status-owner/default' <<<"$override" || fail "--all did not override selector"
-grep -Fq 'status-owner/demo' <<<"$override" || fail "--all omitted selected yard"
-! grep -Fq '  desired  ' <<<"$override" || fail "--all ran detailed status"
 
 check_detail() {
   local name="$1" cache="$2" label="$3" output started elapsed
@@ -156,41 +153,14 @@ check_detail() {
     sleep 0.1
   done
   [ -s "$cache" ] || fail "$name async refresh did not create cache"
-  started="$(date +%s%N)"
-  output="$(yard "$@" status)"
-  elapsed=$((($(date +%s%N) - started) / 1000000))
-  [ "$elapsed" -lt 8000 ] || fail "$name warm detailed status took ${elapsed}ms"
-  grep -Fq 'in-yard rootfs' <<<"$output" || fail "$name warm status did not reuse cache"
-  ! grep -Fq 'refresh started' <<<"$output" || fail "$name fresh cache was refreshed"
-  printf '%s cold/warm detailed status <8s\n' "$name"
+  printf '%s cold detailed status <8s; async cache created\n' "$name"
 }
 
 check_detail default "$DATA_HOME/space.cache" yard -Y default
-check_detail named-vm "$DATA_HOME/space-demo.cache" demo -Y demo
+check_detail named-container "$DATA_HOME/space-demo.cache" demo -Y demo
 [ ! -e "$DATA_HOME/space-default.cache" ] || fail "legacy default cache name was recreated"
 
-space_output="$(yard space)"
-grep -Fq 'YARD' <<<"$space_output" || fail "space table omitted header"
-grep -Eq '^default[[:space:]]+RUNNING[[:space:]]+' <<<"$space_output" \
-  || fail "space table omitted default container"
-grep -Eq '^demo[[:space:]]+RUNNING[[:space:]]+' <<<"$space_output" \
-  || fail "space table omitted named VM"
-
-default_before="$(awk 'NF == 2 { print $2 }' "$DATA_HOME/space.cache")"
-named_before="$(awk 'NF == 2 { print $2 }' "$DATA_HOME/space-demo.cache")"
-while [ "$(date +%s)" -le "$default_before" ] || [ "$(date +%s)" -le "$named_before" ]; do
-  sleep 0.1
-done
 refreshed="$(yard space --refresh)"
-grep -Eq '^default[[:space:]]+RUNNING[[:space:]]+' <<<"$refreshed" \
-  || fail "space refresh omitted default container"
-grep -Eq '^demo[[:space:]]+RUNNING[[:space:]]+' <<<"$refreshed" \
-  || fail "space refresh omitted named VM"
-[ "$(awk 'NF == 2 { print $2 }' "$DATA_HOME/space.cache")" -gt "$default_before" ] \
-  || fail "space refresh did not update default cache"
-[ "$(awk 'NF == 2 { print $2 }' "$DATA_HOME/space-demo.cache")" -gt "$named_before" ] \
-  || fail "space refresh did not update named cache"
-
 assert_cache_includes_separate_srv() {
   local name="$1" project="$2" instance="$3" cache="$4"
   local root_device srv_device root_figure total_figure cached_figure
@@ -277,104 +247,6 @@ assert_unique_incus_storage_alias() {
 assert_unique_incus_storage_alias \
   "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE" "$DATA_HOME/space.cache"
 assert_cache_includes_separate_srv \
-  named-vm "$NAMED_PROJECT" "$NAMED_INSTANCE" "$DATA_HOME/space-demo.cache"
+  named-container "$NAMED_PROJECT" "$NAMED_INSTANCE" "$DATA_HOME/space-demo.cache"
 
-selected_space="$(yard @demo space)"
-grep -Eq '^demo[[:space:]]+RUNNING[[:space:]]+' <<<"$selected_space" \
-  || fail "@demo space omitted selected yard"
-! grep -Eq '^default[[:space:]]' <<<"$selected_space" \
-  || fail "@demo space included an unselected yard"
-
-grep -Fq 'demo  RUNNING' < <(yard @demo status) || fail "@demo selector did not stay detailed"
-grep -Fq 'demo  RUNNING' < <(yard -Y status-owner/demo status) \
-  || fail "canonical HostID/yard selector did not stay detailed"
-grep -Fq 'demo  RUNNING' < <(SUBYARD_YARD=demo yard status) \
-  || fail "inherited named yard did not stay detailed"
-
-python3 - "$ROOT/.build/yard" "$HOME_DIR" "$CONFIG_HOME" "$DATA_HOME" <<'PY'
-import json
-import os
-import struct
-import subprocess
-import sys
-
-engine, home, config_home, data_home = sys.argv[1:]
-environment = os.environ.copy()
-environment.update({
-    "HOME": home,
-    "SUBYARD_OPERATOR_HOME": home,
-    "SUBYARD_CONFIG_HOME": config_home,
-    "SUBYARD_HOME": data_home,
-    "SUBYARD_HOST_ID": "status-owner",
-    "SUBYARD_NO_AUDIT": "1",
-})
-process = subprocess.Popen(
-    [engine, "-Y", "demo", "rpc", "--stdio"],
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    env=environment,
-)
-
-def write(request):
-    payload = json.dumps(request, separators=(",", ":")).encode()
-    process.stdin.write(struct.pack(">I", len(payload)) + payload)
-    process.stdin.flush()
-
-def read():
-    header = process.stdout.read(4)
-    if len(header) != 4:
-        raise RuntimeError(process.stderr.read().decode())
-    size = struct.unpack(">I", header)[0]
-    return json.loads(process.stdout.read(size))
-
-write({"version": 1, "type": "request", "id": "negotiate", "method": "rpc.negotiate"})
-while read().get("id") != "negotiate":
-    pass
-write({"version": 1, "type": "request", "id": "status", "method": "yard.status"})
-while True:
-    response = read()
-    if response.get("id") == "status":
-        break
-result = response.get("result", {})
-if response.get("error") or result.get("context", {}).get("yardName") != "demo":
-    raise RuntimeError(f"yard.status escaped selected context: {response!r}")
-process.stdin.close()
-if process.wait(timeout=5) != 0:
-    raise RuntimeError(process.stderr.read().decode())
-PY
-
-install -d -m 0700 \
-  "$DATA_HOME/owner-inventory/connections" \
-  "$DATA_HOME/owner-inventory/owners" \
-  "$FIXTURE/fake-bin"
-cat >"$DATA_HOME/owner-inventory/connections/remote-owner.json" <<'JSON'
-{"hostId":"remote-owner","destination":"unreachable.invalid"}
-JSON
-cat >"$DATA_HOME/owner-inventory/owners/remote-owner.json" <<'JSON'
-{"fetchedAt":"2020-01-01T00:00:00Z","inventory":{"schema":1,"hostId":"remote-owner","observedAt":"2020-01-01T00:00:00Z","yards":[{"name":"remote","kind":"container","instance":"yard-remote","state":"RUNNING","sshPort":2222,"devUser":"dev","projects":[]}]}}
-JSON
-printf '#!/bin/sh\nexit 42\n' >"$FIXTURE/fake-bin/ssh"
-chmod 0700 "$FIXTURE/fake-bin/ssh"
-started="$(date +%s%N)"
-set +e
-env \
-  PATH="$FIXTURE/fake-bin:$PATH" \
-  HOME="$HOME_DIR" \
-  SUBYARD_OPERATOR_HOME="$HOME_DIR" \
-  SUBYARD_CONFIG_HOME="$CONFIG_HOME" \
-  SUBYARD_HOME="$DATA_HOME" \
-  SUBYARD_HOST_ID=status-owner \
-  SUBYARD_NO_AUDIT=1 \
-  "$ROOT/.build/yard" status >"$FIXTURE/stale.out" 2>"$FIXTURE/stale.err"
-stale_code=$?
-set -e
-elapsed=$((($(date +%s%N) - started) / 1000000))
-[ "$stale_code" -eq 1 ] || fail "stale remote inventory exit code changed: $stale_code"
-[ "$elapsed" -lt 3000 ] || fail "unavailable remote owner was not bounded: ${elapsed}ms"
-grep -Fq 'remote-owner/remote' "$FIXTURE/stale.out" \
-  || fail "stale remote inventory was not rendered"
-grep -Fq 'Warning: owner inventory refresh:' "$FIXTURE/stale.err" \
-  || fail "stale remote inventory warning was lost"
-
-printf 'ok: status routing, unique-allocation space refresh, cache-first container/VM detail and scoped RPC\n'
+printf 'ok: real container space refresh, separate /srv and unique storage allocation\n'

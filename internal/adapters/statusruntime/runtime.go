@@ -193,33 +193,10 @@ func (runtime Runtime) space(ctx context.Context, yard domain.Context, running b
 	}
 	cache := spaceCachePath(dataHome, yard.YardName)
 	figure, measured := readSpaceCache(cache)
-	ttl := 10 * time.Minute
-	if seconds, err := strconv.Atoi(runtime.Environment["SPACE_TTL"]); err == nil && seconds > 0 {
-		ttl = time.Duration(seconds) * time.Second
-	}
-	stale := figure == "" || now.Sub(measured) > ttl
-	refreshing := false
-	if stale && ctx.Err() == nil {
-		refreshing = runtime.startSpaceRefresh(yard, cache)
-	}
-	if figure == "" {
-		if refreshing {
-			return "in-yard size unavailable — refresh started"
-		}
-		return "in-yard size unavailable"
-	}
-	age := now.Sub(measured)
-	if age < 0 {
-		age = 0
-	}
-	note := ""
-	if stale {
-		note = ", refresh unavailable"
-		if refreshing {
-			note = ", refresh started"
-		}
-	}
-	return fmt.Sprintf("%s  (in-yard rootfs, %s ago%s)", figure, ageHuman(age), note)
+	return describeSpaceCache(SpaceMeasurement{Figure: figure, MeasuredAt: measured}, now,
+		runtime.Environment["SPACE_TTL"], func() bool {
+			return ctx.Err() == nil && runtime.startSpaceRefresh(yard, cache)
+		})
 }
 
 func (runtime Runtime) startSpaceRefresh(yard domain.Context, cache string) bool {

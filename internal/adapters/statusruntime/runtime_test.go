@@ -337,27 +337,27 @@ func TestRuntimeStartsAndReusesAsyncSpaceRefresh(t *testing.T) {
 	}
 }
 
-func TestRuntimeKeepsStaleSpaceWhenAsyncRefreshFails(t *testing.T) {
-	root := t.TempDir()
-	measured := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
-	if err := writeSpaceCache(filepath.Join(root, "space-demo.cache"), "2G", measured); err != nil {
-		t.Fatal(err)
-	}
-	environment := fakeIncusEnvironment(t, "exit 1\n")
-	facts, err := (Runtime{
-		Environment: mapMerge(environment, map[string]string{"SPACE_TTL": "1"}),
-		Now:         func() time.Time { return measured.Add(2 * time.Minute) },
-	}).ReadStatusFacts(context.Background(), domain.Context{
-		YardName: "demo", IncusProject: "subyard-demo", YardInstanceName: "yard-demo",
-		Paths: domain.RuntimePaths{DataHome: root},
-	}, true)
-	if err != nil || facts.Space != "2G  (in-yard rootfs, 2m ago, refresh started)" {
-		t.Fatalf("stale status result = %#v err=%v", facts, err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	figure, cachedAt := readSpaceCache(filepath.Join(root, "space-demo.cache"))
-	if figure != "2G" || !cachedAt.Equal(measured) {
-		t.Fatalf("failed refresh replaced valid cache: figure=%q measured=%s", figure, cachedAt)
+func TestSpaceRefreshPreservesCacheOnFailure(t *testing.T) {
+	for name, body := range map[string]string{
+		"executor failure": "exit 1\n",
+		"invalid result":   "printf '1..2G\\n'\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cache := filepath.Join(testkit.TempDir(t), "space-demo.cache")
+			measured := time.Unix(100, 0)
+			if err := writeSpaceCache(cache, "2G", measured); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("sh", "-c", spaceRefreshScript, "yard-space-refresh", cache, "subyard-demo", "yard-demo")
+			command.Env = environment(fakeIncusEnvironment(t, body))
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("background refresh did not exit quietly: %s: %v", output, err)
+			}
+			figure, cachedAt := readSpaceCache(cache)
+			if figure != "2G" || !cachedAt.Equal(measured) {
+				t.Fatalf("failed refresh replaced valid cache: figure=%q measured=%s", figure, cachedAt)
+			}
+		})
 	}
 }
 
@@ -680,13 +680,11 @@ func TestRuntimeRunsOnlyOneConcurrentSpaceRefresh(t *testing.T) {
 
 func fakeIncusEnvironment(t *testing.T, body string) map[string]string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "bin")
+	bin := filepath.Join(testkit.TempDir(t), "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "incus"), []byte("#!/bin/sh\nset -eu\n"+body), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testkit.WriteFile(t, filepath.Join(bin, "incus"), []byte("#!/bin/sh\nset -eu\n"+body), 0o700)
 	return map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
