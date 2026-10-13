@@ -231,3 +231,33 @@ func (store Connections) pendingRecoveryLocked() error {
 	}
 	return nil
 }
+
+// WithAvailableLocalHostID fences registration/adoption of a controller owner
+// while publishing the local identity. Other owners remain independent.
+func (store Connections) WithAvailableLocalHostID(ctx context.Context, hostID string, apply func() error) error {
+	release, err := store.acquireHostMutation(ctx, hostID, true, false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	connectionsMu.Lock()
+	defer connectionsMu.Unlock()
+	unlock, err := store.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := store.recoverPendingLocked(hostID); err != nil {
+		return err
+	}
+	connections, err := store.list()
+	if err != nil {
+		return err
+	}
+	for _, connection := range connections {
+		if connection.HostID == hostID {
+			return fmt.Errorf("owner HostID %q is already registered for a remote owner", hostID)
+		}
+	}
+	return apply()
+}

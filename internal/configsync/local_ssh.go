@@ -3,6 +3,7 @@ package configsync
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,8 +12,81 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Manifest, contexts []config.Loaded) (map[string]candidateFile, map[string]string, func(), error) {
-	locals, overrides := map[string]candidateFile{}, map[string]string{}
+// Keep the Git snapshot digest intact while projecting local-only assignments out of its cache.
+func normalizeGitSSHCache(source *sourceSnapshot) ([]string, error) {
+	var changed []string
+	for path, candidate := range source.files {
+		if source.scalarPath[path] == "" {
+			continue
+		}
+		content, err := config.EditPersistentAssignmentContent(candidate.SourcePath, candidate.Content, "SSH_PORT", nil)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(content, candidate.Content) {
+			continue
+		}
+		candidate.Content, candidate.Digest = content, digestBytes(content)
+		source.files[path] = candidate
+		changed = append(changed, path)
+	}
+	return changed, nil
+}
+
+// Rename preserves local settings exactly; unfinished SSH migration belongs to sync.
+// A normalized managed digest proves that a raw Git port was already discarded by
+// sync, including when an explicit recovery has lost the normalized cache itself.
+func prepareRenameSSHCache(options Options, source *sourceSnapshot, previous Manifest) error {
+	inspection := options
+	inspection.inspectionOnly = true
+	var raw []config.Loaded
+	if err := validateCandidate(inspection, *source, previous, source.catalog, &raw); err != nil {
+		return err
+	}
+	overrides, _, cleanup, err := projectGitSSHCache(source)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	validation := options
+	validation.validationOverrides = overrides
+	validation.inspectionOnly = true
+	var projected []config.Loaded
+	if err := validateCandidate(validation, *source, previous, source.catalog, &projected); err != nil {
+		return err
+	}
+	ports := map[string]int{}
+	for _, loaded := range projected {
+		ports[loaded.Context.YardName] = loaded.Context.SSHPort
+	}
+	for _, loaded := range raw {
+		selection, _, origin := config.ComponentSelectionSource(loaded.Settings["SSH_PORT"])
+		if loaded.Context.AccessKind != domain.AccessLocal || origin != "Git settings" || ports[loaded.Context.YardName] == loaded.Context.SSHPort {
+			continue
+		}
+		normalized := false
+		for path, candidate := range source.files {
+			if candidate.SourcePath != selection.Path {
+				continue
+			}
+			for _, managed := range previous.Files {
+				if managed.Path == path && managed.Digest == candidate.Digest && managed.Mode == candidate.Mode {
+					normalized = true
+				}
+			}
+		}
+		if !normalized {
+			return fmt.Errorf("yard %s: complete local SSH port migration before owner rename; preserved Git SSH_PORT has no normalized managed baseline", loaded.Context.YardName)
+		}
+	}
+	validation.inspectionOnly = false
+	return validateCandidate(validation, *source, previous, source.catalog)
+}
+
+// Project normalized cache bytes through temporary paths because validation reads SourcePath.
+// The returned writer also stages prospective local pins for ordinary sync; rename never uses it.
+func projectGitSSHCache(source *sourceSnapshot) (map[string]string, func(string, []byte) error, func(), error) {
+	overrides := map[string]string{}
 	temporary, err := os.MkdirTemp("/tmp", "subyard-local-ssh-*")
 	if err != nil {
 		return nil, nil, func() {}, err
@@ -28,24 +102,26 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		overrides[path] = draft
 		return nil
 	}
-	for path, candidate := range source.files {
-		if source.scalarPath[path] == "" {
-			continue
-		}
-		content, err := config.EditPersistentAssignmentContent(candidate.SourcePath, candidate.Content, "SSH_PORT", nil)
-		if err != nil {
+	changed, err := normalizeGitSSHCache(source)
+	if err != nil {
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	for _, path := range changed {
+		candidate := source.files[path]
+		if err := write(candidate.SourcePath, candidate.Content); err != nil {
 			cleanup()
 			return nil, nil, func() {}, err
 		}
-		if bytes.Equal(content, candidate.Content) {
-			continue
-		}
-		candidate.Content, candidate.Digest = content, digestBytes(content)
-		source.files[path] = candidate
-		if err := write(candidate.SourcePath, content); err != nil {
-			cleanup()
-			return nil, nil, func() {}, err
-		}
+	}
+	return overrides, write, cleanup, nil
+}
+
+func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Manifest, contexts []config.Loaded) (map[string]candidateFile, map[string]string, func(), error) {
+	locals := map[string]candidateFile{}
+	overrides, write, cleanup, err := projectGitSSHCache(source)
+	if err != nil {
+		return nil, nil, func() {}, err
 	}
 	projectedOptions := options
 	projectedOptions.validationOverrides, projectedOptions.inspectionOnly = overrides, true

@@ -352,14 +352,20 @@ The validated context contract includes:
 
 Source-only domain modules do not load configuration themselves.
 
-`HostID` is explicit owner-host identity. `yard host rename` changes it transactionally on the owner.
+`HostID` is persisted owner-host identity; the OS hostname supplies only its initial snapshot.
+`yard host rename` transactionally moves a registered Git owner subtree, commits the exact move
+locally, and updates identity/cache provenance without changing runtime resource names. Explicit
+`--source-host-id` recovery validates preserved settings before loading broken effective configuration.
 `yard host add <owner-endpoint>` first lets OpenSSH resolve the endpoint (including ordinary aliases
 and proxy configuration), shows the concrete SSH server-key SHA256 fingerprint, HostID and discovered
 yards, then atomically stores the connection, strict host-key pin and initial inventory cache after
 confirmation. Controller refreshes use only that managed key with `StrictHostKeyChecking=yes`.
 
 When the pinned key is unchanged, an already registered controller adopts a new authoritative HostID
-automatically and atomically moves its connection, cache and HostID-scoped project-routing state.
+automatically on active status/yard/project-list queries after the 30-second cache TTL, and
+atomically moves its connection, cache and HostID-scoped project-routing state. Offline peers
+keep explicitly stale last-known data and converge on a successful reconnect query. Idle peers
+have no background refresh guarantee. Operator endpoints, aliases and proxy settings stay unchanged.
 Collisions fail before mutation and the old HostID is not retained as an alias. A changed SSH key is
 an integrity failure: refresh preserves the last cache as stale data and instructs the operator to
 run `yard host repair <old-host-id>`. Repair shows the old/new fingerprints and old/observed HostIDs;

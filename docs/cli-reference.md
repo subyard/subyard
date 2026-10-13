@@ -288,7 +288,7 @@ Usage: yard yards [--verbose | --json]
 manage owner-host identity and controller registration.
 
 ```text
-Usage: yard host add <owner-endpoint> | list | rename <new-host-id> | remove <host-id> | repair <host-id> [--yes]
+Usage: yard host add <owner-endpoint> | list | rename <new-host-id> [--source-host-id <old-host-id>] | remove <host-id> | repair <host-id> [--yes]
 ```
 
 ## update

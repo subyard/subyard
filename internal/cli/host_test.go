@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
@@ -535,5 +537,166 @@ func TestHostExactRPCRejectsChangedManifest(t *testing.T) {
 	current, err := os.ReadFile(configsync.ManifestPath(configHome))
 	if err != nil || !bytes.Equal(current, manifest) {
 		t.Fatalf("stale plan mutated manifest: %q, %v", current, err)
+	}
+}
+
+func TestRegisteredHostRenameNoninteractiveConsent(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	for _, explicit := range []bool{false, true} {
+		for _, flag := range []string{"", "--yes", "-y"} {
+			t.Run(fmt.Sprintf("recovery=%t/flag=%s", explicit, flag), func(t *testing.T) {
+				root, home, configHome, environment := configCommandFixture(t)
+				origin, source := configBareSourceRepository(t, "owner-a", "YARD_IMAGE=images:debian/13\n")
+				runConfigSyncGit(t, source, "config", "user.name", "Subyard Test")
+				runConfigSyncGit(t, source, "config", "user.email", "test@invalid")
+				writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
+				loaded := loadConfigCommandContext(t, root, environment, "default")
+				plan, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := configsync.Apply(plan); err != nil {
+					t.Fatal(err)
+				}
+				if err := configsync.RegisterSourceOrigin(configHome, source, origin); err != nil {
+					t.Fatal(err)
+				}
+				arguments := []string{"host", "rename", "owner-b"}
+				if explicit {
+					writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-b\n")
+					payload, err := os.ReadFile(configsync.ManifestPath(configHome))
+					if err != nil {
+						t.Fatal(err)
+					}
+					writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(bytes.ReplaceAll(payload, []byte("owner-a"), []byte("owner-b"))))
+					if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); err != nil {
+						t.Fatal(err)
+					}
+					arguments = append(arguments, "--source-host-id", "owner-a")
+				}
+				if flag != "" {
+					arguments = append(arguments, flag)
+				}
+				before := strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD"))
+				oldTree := strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD:hosts/owner-a"))
+				identity, err := os.ReadFile(configsync.HostIDPath(configHome))
+				if err != nil {
+					t.Fatal(err)
+				}
+				manifest, err := os.ReadFile(configsync.ManifestPath(configHome))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
+				if err != nil {
+					t.Fatal(err)
+				}
+				code := program.Run(context.Background())
+				if flag == "" {
+					if code != 1 || !strings.Contains(stderr.String(), "confirmation required") || strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD")) != before {
+						t.Fatalf("unconfirmed rename code=%d stderr=%s", code, stderr.String())
+					}
+					current, err := os.ReadFile(configsync.HostIDPath(configHome))
+					if err != nil || !bytes.Equal(current, identity) {
+						t.Fatal("unconfirmed rename changed identity")
+					}
+					current, err = os.ReadFile(configsync.ManifestPath(configHome))
+					if err != nil || !bytes.Equal(current, manifest) || strings.TrimSpace(configSourceGitOutput(t, source, "status", "--porcelain")) != "" {
+						t.Fatal("unconfirmed rename changed source worktree or manifest")
+					}
+					return
+				}
+				if code != 0 {
+					t.Fatalf("confirmed rename code=%d stderr=%s", code, stderr.String())
+				}
+				if _, err := os.Stat(filepath.Join(source, "hosts", "owner-a")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("confirmed rename retained old subtree")
+				}
+				if strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD:hosts/owner-b")) != oldTree || strings.TrimSpace(configSourceGitOutput(t, source, "rev-parse", "HEAD^")) != before || strings.TrimSpace(configSourceGitOutput(t, origin, "rev-parse", "HEAD")) != before {
+					t.Fatal("confirmed rename changed content, produced extra commits or pushed")
+				}
+			})
+		}
+	}
+}
+
+func TestRegisteredHostRenameRecoveryBeforeBrokenSettingsLoad(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	source := filepath.Join(testkit.TempDir(t), "source")
+	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts/owner-a/config.env"), "SSH_PORT=2233\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts/owner-a/yards/demo/config.env"), "SSH_PORT=2234\nYARD_KIND=vm\n")
+	runConfigSyncGit(t, source, "init", "-q")
+	runConfigSyncGit(t, source, "config", "user.name", "Subyard Test")
+	runConfigSyncGit(t, source, "config", "user.email", "test@invalid")
+	commitConfigSource(t, source, "initial")
+	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	native, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configsync.Apply(native); err != nil {
+		t.Fatal(err)
+	}
+	if err := configsync.RegisterSource(configHome, source); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(configsync.ManifestPath(configHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.ReplaceAll(payload, []byte("owner-a"), []byte("owner-b"))
+	writeConfigCommandFile(t, configsync.ManifestPath(configHome), string(payload))
+	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-b\n")
+	if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(configHome, config.GitSettingsRelativePath, "yards/demo/config.env")); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the upstream migration's local port pin. The deleted Git kind
+	// leaves a recoverable VM-only local setting invalid before early ingress.
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards/demo/config.env"), "SSH_PORT=2234\nVM_CPU_WEIGHT=1000\nYARD_IMAGE=images:ubuntu/24.04\n")
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "demo", DisablePrivate: true}); err == nil || !strings.Contains(err.Error(), "require YARD_KIND=vm") {
+		t.Fatalf("deleted Git cache did not break effective VM settings: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b", "--source-host-id", "owner-a"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("recovery code=%d stderr=%s", code, stderr.String())
+	}
+	if len(prompt.Requests) != 1 {
+		t.Fatalf("confirmation count=%d", len(prompt.Requests))
+	}
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "default", DisablePrivate: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalHostRenameRejectsRegisteredRemoteIdentity(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, configsync.HostIDPath(configHome), "owner-a\n")
+	store := ownerinventory.Connections{Root: filepath.Join(home, ".subyard", "owner-inventory")}
+	if err := store.Write(ownerinventory.Connection{HostID: "owner-b", Destination: "remote.example"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"host", "rename", "owner-b"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "remote owner") {
+		t.Fatalf("collision code=%d stderr=%s prompts=%d", code, stderr.String(), len(prompt.Requests))
+	}
+	identity, _ := os.ReadFile(configsync.HostIDPath(configHome))
+	if string(identity) != "owner-a\n" {
+		t.Fatal("collision changed identity")
 	}
 }

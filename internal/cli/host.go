@@ -28,7 +28,7 @@ func hostReadOnlyInvocation(arguments []string) bool {
 }
 
 func (cli *CLI) hostUsage() {
-	fmt.Fprintf(cli.options.Stdout, "Usage: %s host add <owner-endpoint> | list | rename <new-host-id> | remove <host-id> | repair <host-id> [--yes]\n", cli.options.Program)
+	fmt.Fprintf(cli.options.Stdout, "Usage: %s host add <owner-endpoint> | list | rename <new-host-id> [--source-host-id <old-host-id>] | remove <host-id> | repair <host-id> [--yes]\n", cli.options.Program)
 }
 
 func (cli *CLI) runHost(ctx context.Context, loaded config.Loaded, arguments []string) int {

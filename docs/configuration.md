@@ -580,6 +580,43 @@ For an existing literal conflict, use the bounded `config repair-alias` ingress 
 [Applying changes](#applying-changes), choosing the complete intended selection explicitly.
 Then retry the scoped profile action and check its status to complete pending runtime work.
 
+## Renaming an owner
+
+The persisted `host-id` is authoritative after initialization. Changing the OS hostname does
+not change this identity, SSH endpoints or runtime resource names.
+
+`yard host rename NEW` previews the exact owner transition. With a registered Git source it
+moves every tracked setting in `hosts/OLD/` to `hosts/NEW/`, preserving content and modes, and
+includes a separate local Git commit in the same confirmation. It does not push. The source
+must be clean, its applied commit current, Git identity configured, and the destination absent.
+Local overrides, yard ports, credentials, projects and physical resources retain their identities.
+A durable journal binds the source registration, HEAD, index, paths, manifest and local baseline;
+interrupted execution resumes without overwriting unrelated edits or a foreign Git index lock.
+
+To repair an earlier identity-only rename whose old subtree remains, explicitly select it:
+
+```sh
+yard host rename NEW --source-host-id OLD
+```
+
+This ingress validates the preserved source and local layers before loading the broken effective
+configuration, and restores missing cache files. It never guesses another owner's subtree.
+An exact completed recovery retry reports that settings are already migrated without another
+commit or confirmation. Identity collisions with registered remote owners are refused.
+Installed-runtime repair verifies sealed tooling, protected release metadata, ledger and links
+again under the update lock. Unfinished legacy migration remains blocked. Unfinished forward V2
+history admits only explicit source recovery when its exact sealed original owner supports the
+existing activation recovery capability; release history and authority remain unchanged. Source
+repair does not itself assert release readiness or execute the original release transition.
+
+Connected controllers refresh trusted owner inventory on active `status`, `yards` and `list`
+queries after the 30-second cache TTL. Thus an active query learns a same-key rename after cache
+expiry, plus its bounded SSH request time; an idle or offline controller has no wall-clock
+convergence guarantee. Offline queries report stale last-known data and reconnect queries retry
+adoption automatically. Operator SSH aliases, Destination and ProxyJump stay unchanged. Older
+controllers lacking authenticated adoption retain stale data or refuse the mismatch until updated;
+the owner inventory protocol remains unchanged. Changed pinned keys require explicit repair.
+
 ## Versioned private configuration
 
 Keep private desired settings in a separate clean Git checkout. Do not turn the entire

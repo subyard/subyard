@@ -2568,8 +2568,8 @@ func TestReadOnlyCoreInvocationsDoNotRecoverPendingOwnerState(t *testing.T) {
 					t.Fatal(err)
 				}
 				wantCode := 0
-				if recovery.name == "owner inventory" && invocation.name == "status" {
-					// Status owns recoverable controller metadata refreshes. A
+				if recovery.name == "owner inventory" && (invocation.name == "status" || invocation.name == "project list" || invocation.name == "yard list") {
+					// Active inventory queries own controller metadata refreshes. A
 					// malformed journal must fail closed without changing it.
 					wantCode = 1
 				}

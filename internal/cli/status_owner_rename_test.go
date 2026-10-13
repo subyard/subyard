@@ -393,3 +393,28 @@ func writeStatusOwnerResponses(t *testing.T, inventory domain.OwnerInventory) {
 	}
 	testkit.WriteFile(t, os.Getenv("SSH_RPC_RESPONSE"), framed.Bytes(), 0o600)
 }
+
+func TestActiveOwnerQueryAdoptsRenameAndPreservesEndpointAndRoute(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	inventory := inventoryResult("new-owner", "default", "Remote").inventory
+	_, trust := hostAddSSHFixture(t, inventory)
+	writeStatusOwnerResponses(t, inventory)
+	ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+	store := ownerinventory.Connections{Root: ownerRoot}
+	connection := ownerinventory.Connection{HostID: "old-owner", Destination: "owner-alias", Trust: &trust, Yards: map[string]ownerinventory.YardRoute{"default": {SSHHost: "yard-remote"}}}
+	if err := store.Register(connection, ownerinventory.Snapshot{FetchedAt: time.Unix(1, 0).UTC(), Inventory: inventoryResult("old-owner", "default", "Remote").inventory}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"yards"}, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: &testkit.Incus{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || !strings.Contains(stdout.String(), "new-owner/default") {
+		t.Fatalf("query code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	connections, err := store.ListReadOnly()
+	if err != nil || len(connections) != 1 || connections[0].Destination != connection.Destination || connections[0].HostID != "new-owner" || connections[0].Yards["default"].SSHHost != "yard-remote" {
+		t.Fatalf("connection=%+v err=%v", connections, err)
+	}
+}

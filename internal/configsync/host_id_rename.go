@@ -19,12 +19,16 @@ type HostIDRenamePlan struct {
 	OldHostID       string
 	NewHostID       string
 	ManifestChanged bool
+	AlreadyMigrated bool
 
 	hostIDDigest       string
 	manifestDigest     string
 	manifestBefore     []byte
 	manifestAfter      []byte
 	manifestWasPresent bool
+	source             *hostSourceRename
+	options            Options
+	sourceHostID       string
 }
 
 // StateDigest binds the owner identity and machine-local manifest baseline.
@@ -33,18 +37,26 @@ func (plan HostIDRenamePlan) StateDigest() string {
 		OldHostID, NewHostID, HostID, Manifest string
 		ManifestChanged                        bool
 	}{plan.OldHostID, plan.NewHostID, plan.hostIDDigest, plan.manifestDigest, plan.ManifestChanged})
+	if plan.source != nil {
+		payload, _ = json.Marshal(struct {
+			Baseline []byte
+			Source   *hostSourceRename
+		}{payload, plan.source})
+	}
 	return digestBytes(payload)
 }
 
 type hostIDRenameJournal struct {
-	SchemaVersion      int    `json:"schemaVersion"`
-	OldHostID          string `json:"oldHostId"`
-	NewHostID          string `json:"newHostId"`
-	HostIDDigest       string `json:"hostIdDigest"`
-	ManifestDigest     string `json:"manifestDigest,omitempty"`
-	ManifestWasPresent bool   `json:"manifestWasPresent"`
-	ManifestBefore     []byte `json:"manifestBefore,omitempty"`
-	ManifestAfter      []byte `json:"manifestAfter,omitempty"`
+	SchemaVersion      int               `json:"schemaVersion"`
+	OldHostID          string            `json:"oldHostId"`
+	NewHostID          string            `json:"newHostId"`
+	HostIDDigest       string            `json:"hostIdDigest"`
+	ManifestDigest     string            `json:"manifestDigest,omitempty"`
+	ManifestWasPresent bool              `json:"manifestWasPresent"`
+	ManifestBefore     []byte            `json:"manifestBefore,omitempty"`
+	ManifestAfter      []byte            `json:"manifestAfter,omitempty"`
+	Source             *hostSourceRename `json:"source,omitempty"`
+	payloadDigest      string
 }
 
 func HostIDRenameTransactionPath(configHome string) string {
@@ -52,6 +64,15 @@ func HostIDRenameTransactionPath(configHome string) string {
 }
 
 func PrepareHostIDRename(configHome, newHostID string) (HostIDRenamePlan, error) {
+	if _, exists, err := readSourceRecord(configHome); err != nil {
+		return HostIDRenamePlan{}, err
+	} else if exists {
+		return HostIDRenamePlan{}, errors.New("registered source rename requires validated source migration")
+	}
+	return prepareHostIDRename(configHome, newHostID, false)
+}
+
+func prepareHostIDRename(configHome, newHostID string, recovery bool) (HostIDRenamePlan, error) {
 	if !safeHostID(newHostID) {
 		return HostIDRenamePlan{}, fmt.Errorf("invalid new owner HostID %q", newHostID)
 	}
@@ -72,7 +93,7 @@ func PrepareHostIDRename(configHome, newHostID string) (HostIDRenamePlan, error)
 	if pending {
 		return HostIDRenamePlan{}, errors.New("owner HostID must be initialized before it can be renamed")
 	}
-	if oldHostID == newHostID {
+	if oldHostID == newHostID && !recovery {
 		return HostIDRenamePlan{}, errors.New("new owner HostID matches the current HostID")
 	}
 	identity, err := os.ReadFile(HostIDPath(configHome))
@@ -95,7 +116,7 @@ func PrepareHostIDRename(configHome, newHostID string) (HostIDRenamePlan, error)
 	if err != nil {
 		return HostIDRenamePlan{}, err
 	}
-	if manifest.HostID != oldHostID {
+	if manifest.HostID != oldHostID && !recovery {
 		return HostIDRenamePlan{}, fmt.Errorf(
 			"config sync manifest belongs to owner HostID %q, not %q", manifest.HostID, oldHostID,
 		)
@@ -114,6 +135,16 @@ func PrepareHostIDRename(configHome, newHostID string) (HostIDRenamePlan, error)
 }
 
 func ApplyHostIDRename(plan HostIDRenamePlan) (returnErr error) {
+	if plan.AlreadyMigrated {
+		current, err := PrepareHostIDRenameWithSource(plan.options, plan.NewHostID, plan.sourceHostID)
+		if err != nil {
+			return err
+		}
+		if !current.AlreadyMigrated {
+			return ErrPlanStale
+		}
+		return nil
+	}
 	if plan.ConfigHome == "" || !safeHostID(plan.OldHostID) || !safeHostID(plan.NewHostID) {
 		return errors.New("invalid owner HostID rename plan")
 	}
@@ -125,10 +156,26 @@ func ApplyHostIDRename(plan HostIDRenamePlan) (returnErr error) {
 		return err
 	}
 	defer unlock()
-	if err := recoverHostIDRenameLocked(plan.ConfigHome); err != nil {
-		return fmt.Errorf("recover previous owner HostID rename: %w", err)
+	if _, pending, err := AssessHostIDRenameRecovery(plan.ConfigHome); err != nil {
+		return err
+	} else if pending {
+		return ErrRecoveryPending
 	}
-	current, err := PrepareHostIDRename(plan.ConfigHome, plan.NewHostID)
+	identity, err := os.ReadFile(HostIDPath(plan.ConfigHome))
+	if err != nil {
+		return err
+	}
+	if digestBytes(identity) != plan.hostIDDigest {
+		return ErrPlanStale
+	}
+	var current HostIDRenamePlan
+	if plan.options.ConfigHome != "" {
+		lockedOptions := plan.options
+		lockedOptions.ConfigLocked = true
+		current, err = PrepareHostIDRenameWithSource(lockedOptions, plan.NewHostID, plan.sourceHostID)
+	} else {
+		current, err = PrepareHostIDRename(plan.ConfigHome, plan.NewHostID)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "matches the current HostID") {
 			return ErrPlanStale
@@ -139,22 +186,38 @@ func ApplyHostIDRename(plan HostIDRenamePlan) (returnErr error) {
 		current.manifestDigest != plan.manifestDigest || current.ManifestChanged != plan.ManifestChanged {
 		return ErrPlanStale
 	}
+	if plan.source != nil && !sameSourceRenameBaseline(plan.source, current.source) {
+		return ErrPlanStale
+	}
+	if plan.source != nil {
+		if err := finalizeSourceRename(&plan); err != nil {
+			return err
+		}
+	}
 	journal := hostIDRenameJournal{
 		SchemaVersion: hostIDRenameSchema, OldHostID: plan.OldHostID, NewHostID: plan.NewHostID,
 		HostIDDigest: plan.hostIDDigest, ManifestDigest: plan.manifestDigest,
 		ManifestWasPresent: plan.manifestWasPresent,
-		ManifestBefore:     plan.manifestBefore, ManifestAfter: plan.manifestAfter,
+		ManifestBefore:     plan.manifestBefore, ManifestAfter: plan.manifestAfter, Source: plan.source,
+	}
+	if plan.source != nil {
+		journal.SchemaVersion = 2
 	}
 	if err := writeHostIDRenameJournal(plan.ConfigHome, journal); err != nil {
 		return err
 	}
+	encodedJournal, _ := json.MarshalIndent(journal, "", "  ")
+	expectedJournalDigest := digestBytes(append(encodedJournal, '\n'))
 	defer func() {
 		if returnErr != nil {
-			if recoveryErr := recoverHostIDRenameLocked(plan.ConfigHome); recoveryErr != nil {
+			if recoveryErr := recoverHostIDRenameLocked(plan.ConfigHome, expectedJournalDigest); recoveryErr != nil {
 				returnErr = fmt.Errorf("%w; rollback failed: %v", returnErr, recoveryErr)
 			}
 		}
 	}()
+	if plan.source != nil {
+		return recoverHostIDRenameLocked(plan.ConfigHome, expectedJournalDigest)
+	}
 	if plan.manifestWasPresent {
 		if err := writeFileDurable(plan.ConfigHome, ManifestPath(plan.ConfigHome), plan.manifestAfter, 0o600); err != nil {
 			return err
@@ -168,24 +231,63 @@ func ApplyHostIDRename(plan HostIDRenamePlan) (returnErr error) {
 	return cleanupHostIDRename(plan.ConfigHome)
 }
 
+// HostIDRenameRecoveryPlan binds durable consent to exact journal bytes and type.
+// Callers fence this Target and, for Source plans, verify release authority.
+type HostIDRenameRecoveryPlan struct {
+	ConfigHome    string
+	Target        string
+	Source        bool
+	SchemaVersion int
+	payloadDigest string
+}
+
+func AssessHostIDRenameRecovery(configHome string) (HostIDRenameRecoveryPlan, bool, error) {
+	journal, pending, err := readHostIDRenameJournal(configHome)
+	if err != nil || !pending {
+		return HostIDRenameRecoveryPlan{}, pending, err
+	}
+	return HostIDRenameRecoveryPlan{ConfigHome: configHome, Target: journal.NewHostID, Source: journal.Source != nil, SchemaVersion: journal.SchemaVersion, payloadDigest: journal.payloadDigest}, true, nil
+}
 func RecoverHostIDRename(configHome string) error {
-	if _, err := os.Lstat(HostIDRenameTransactionPath(configHome)); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
+	plan, pending, err := AssessHostIDRenameRecovery(configHome)
+	if err != nil || !pending {
 		return err
 	}
-	unlock, err := config.LockRoot(configHome, true)
+	return RecoverHostIDRenameExact(plan)
+}
+func RecoverHostIDRenameExact(plan HostIDRenameRecoveryPlan) error {
+	if !validHexDigest(plan.payloadDigest, 64) {
+		return ErrPlanStale
+	}
+	unlock, err := config.LockRoot(plan.ConfigHome, true)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return recoverHostIDRenameLocked(configHome)
+	journal, pending, err := readHostIDRenameJournal(plan.ConfigHome)
+	if err != nil {
+		return fmt.Errorf("%w: recovery journal changed: %v", ErrPlanStale, err)
+	}
+	if !pending || journal.payloadDigest != plan.payloadDigest || journal.NewHostID != plan.Target || journal.SchemaVersion != plan.SchemaVersion || (journal.Source != nil) != plan.Source {
+		return ErrPlanStale
+	}
+	return recoverHostIDRenameJournalLocked(plan.ConfigHome, journal)
 }
 
-func recoverHostIDRenameLocked(configHome string) error {
+func recoverHostIDRenameLocked(configHome, expectedDigest string) error {
 	journal, exists, err := readHostIDRenameJournal(configHome)
 	if err != nil || !exists {
 		return err
+	}
+	if journal.payloadDigest != expectedDigest {
+		return ErrPlanStale
+	}
+	return recoverHostIDRenameJournalLocked(configHome, journal)
+}
+
+func recoverHostIDRenameJournalLocked(configHome string, journal hostIDRenameJournal) error {
+	if journal.Source != nil {
+		return recoverHostSourceRename(configHome, journal)
 	}
 	content, err := os.ReadFile(HostIDPath(configHome))
 	if err != nil {
@@ -219,6 +321,9 @@ func writeHostIDRenameJournal(configHome string, journal hostIDRenameJournal) er
 	if err != nil {
 		return err
 	}
+	if len(payload) > 64*1024*1024 {
+		return errors.New("owner HostID rename journal is too large")
+	}
 	return writeFileDurable(
 		configHome, HostIDRenameTransactionPath(configHome), append(payload, '\n'), 0o600,
 	)
@@ -229,6 +334,19 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	if err := validateConfigurationAncestors(configHome, path); err != nil {
 		return hostIDRenameJournal{}, false, err
 	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return hostIDRenameJournal{}, false, nil
+	}
+	if err != nil {
+		return hostIDRenameJournal{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return hostIDRenameJournal{}, false, errors.New("unsafe owner rename journal")
+	}
+	if err := validateOwnedMode(path, info, false); err != nil {
+		return hostIDRenameJournal{}, false, err
+	}
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return hostIDRenameJournal{}, false, nil
@@ -236,7 +354,7 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	if err != nil {
 		return hostIDRenameJournal{}, false, err
 	}
-	if len(payload) > 2*1024*1024 {
+	if len(payload) > 64*1024*1024 {
 		return hostIDRenameJournal{}, false, errors.New("owner HostID rename journal is too large")
 	}
 	var journal hostIDRenameJournal
@@ -248,8 +366,8 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	if err := requireJSONEOF(decoder); err != nil {
 		return hostIDRenameJournal{}, false, err
 	}
-	if journal.SchemaVersion != hostIDRenameSchema || !safeHostID(journal.OldHostID) ||
-		!safeHostID(journal.NewHostID) || journal.OldHostID == journal.NewHostID ||
+	if (journal.SchemaVersion != hostIDRenameSchema && journal.SchemaVersion != 2) || (journal.SchemaVersion == 2) != (journal.Source != nil) || !safeHostID(journal.OldHostID) ||
+		!safeHostID(journal.NewHostID) || journal.OldHostID == journal.NewHostID && journal.Source == nil ||
 		!validHexDigest(journal.HostIDDigest, 64) {
 		return hostIDRenameJournal{}, false, errors.New("owner HostID rename journal is invalid")
 	}
@@ -259,6 +377,7 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 			return hostIDRenameJournal{}, false, errors.New("owner HostID rename manifest journal is invalid")
 		}
 	}
+	journal.payloadDigest = digestBytes(payload)
 	return journal, true, nil
 }
 
@@ -268,4 +387,14 @@ func cleanupHostIDRename(configHome string) error {
 		return err
 	}
 	return syncDirectory(filepath.Dir(path))
+}
+
+func HostIDRenamePendingTarget(configHome string) (string, bool, error) {
+	journal, exists, err := readHostIDRenameJournal(configHome)
+	return journal.NewHostID, exists, err
+}
+
+func HostIDRenamePendingSource(configHome string) (bool, error) {
+	journal, _, err := readHostIDRenameJournal(configHome)
+	return journal.Source != nil, err
 }

@@ -414,18 +414,19 @@ func (cli *CLI) allOwnerInventories(
 	return append(results, remoteResults...)
 }
 
-// allOwnerInventoriesReadOnly resolves existing owner identities without
-// persisting cache refreshes or legacy-route normalization. A normal read uses
-// a fresh cache; force performs a live fetch while still leaving the cache
-// untouched.
+// Assessment reads preserve controller state until the owning operation is admitted.
 func (cli *CLI) allOwnerInventoriesReadOnly(
 	ctx context.Context, loaded config.Loaded, force bool,
 ) []ownerInventoryResult {
 	return cli.observeOwnerInventories(ctx, loaded, force, false)
 }
 
-// Status may refresh controller metadata for a previously verified owner. Other
-// read consumers keep strict identity checks and never adopt a host rename.
+// Active queries refresh authenticated controller metadata at the inventory TTL.
+func (cli *CLI) allOwnerInventoriesForQueries(ctx context.Context, loaded config.Loaded, force bool) []ownerInventoryResult {
+	return cli.observeOwnerInventories(ctx, loaded, force, true)
+}
+
+// Status shares the trusted refresh contract with ordinary active owner queries.
 func (cli *CLI) allOwnerInventoriesForStatus(
 	ctx context.Context, loaded config.Loaded,
 ) []ownerInventoryResult {

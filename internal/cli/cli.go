@@ -482,6 +482,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 	if core && definition.Handler == "@current-migration" {
 		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
 	}
+	if core && definition.Handler == "@host" {
+		if code, handled := cli.runRegisteredHostRename(ctx, yard, commandArguments, yes); handled {
+			return code
+		}
+	}
 	if core && definition.Handler == "@config" {
 		if action, rest := configEarlyInvocation(commandArguments); action == "repair-alias" {
 			return cli.runConfigAliasRepair(ctx, yard, rest, yes)
@@ -653,7 +658,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		} else {
 			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile"))
 			var results []ownerInventoryResult
-			if readOnlyRoute {
+			if readOnlyInvocation && !commandHelpRequested(commandArguments) {
+				results = cli.allOwnerInventoriesForQueries(ctx, base, false)
+			} else if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
 			} else {
 				results = cli.allOwnerInventories(ctx, base, false)
@@ -713,7 +720,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 2
 	}
 	if !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile")) {
-		if err := configsync.RecoverHostIDRename(loaded.Context.Paths.ConfigHome); err != nil {
+		if err := cli.recoverLocalHostRename(ctx, loaded); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
 		}
@@ -1600,7 +1607,7 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 		cli.errorf("yards --verbose and --json are mutually exclusive")
 		return 2
 	}
-	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, false)
+	results := cli.allOwnerInventoriesForQueries(ctx, loaded, false)
 	type yardOutput struct {
 		YardRef              domain.YardRef           `json:"yardRef"`
 		AccessKind           domain.AccessKind        `json:"accessKind"`
@@ -2017,7 +2024,12 @@ func (cli *CLI) runProjectList(
 			return 2
 		}
 	}
-	results := cli.allOwnerInventoriesReadOnly(ctx, loaded, live)
+	var results []ownerInventoryResult
+	if completion != "" {
+		results = cli.allOwnerInventoriesReadOnly(ctx, loaded, live)
+	} else {
+		results = cli.allOwnerInventoriesForQueries(ctx, loaded, live)
+	}
 	if completion != "" {
 		printOwnerCompletions(cli.options.Stdout, results, completion)
 		return 0

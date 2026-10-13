@@ -49,6 +49,11 @@ func BuildPlan(options Options) (Plan, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Plan{}, err
 	}
+	if _, err := os.Lstat(HostIDRenameTransactionPath(options.ConfigHome)); err == nil {
+		return Plan{}, ErrRecoveryPending
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Plan{}, err
+	}
 	hostID, initializeHostID, err := ResolveHostID(options.ConfigHome, options.Environment)
 	if err != nil {
 		return Plan{}, err
@@ -65,6 +70,9 @@ func BuildPlan(options Options) (Plan, error) {
 		return Plan{}, fmt.Errorf(
 			"managed configuration belongs to owner host %q, not %q", previous.HostID, hostID,
 		)
+	}
+	if err := guardHostSourceIdentity(source.root, hostID, previous); err != nil {
+		return Plan{}, err
 	}
 	allowedAssets := map[string]bool{}
 	for _, mapping := range options.FileSettings {

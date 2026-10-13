@@ -27,6 +27,7 @@ type hostOperation struct {
 	repair       *ownerinventory.RepairPlan
 	removal      *ownerinventory.RemovalPlan
 	rename       *configsync.HostIDRenamePlan
+	authority    *hostRenameAuthority
 	client       ownerinventory.Client
 	connection   ownerinventory.Connection
 	snapshot     ownerinventory.Snapshot
@@ -44,6 +45,9 @@ func (operation *hostOperation) stateDigest() string {
 	case operation.removal != nil:
 		return operation.removal.StateDigest()
 	default:
+		if operation.authority != nil {
+			return operationStateDigest(struct{ Rename, Tooling, Admission string }{operation.rename.StateDigest(), operation.authority.tooling, operation.authority.admission.Binding})
+		}
 		return operation.rename.StateDigest()
 	}
 }
@@ -57,6 +61,11 @@ func (cli *CLI) hostSnapshot(inventory domain.OwnerInventory) ownerinventory.Sna
 }
 
 func (cli *CLI) prepareHostOperation(ctx context.Context, loaded config.Loaded, arguments []string) (*hostOperation, error) {
+	sourceHostID := ""
+	if len(arguments) == 4 && arguments[0] == "rename" && arguments[2] == "--source-host-id" {
+		sourceHostID = arguments[3]
+		arguments = arguments[:2]
+	}
 	if len(arguments) != 2 {
 		return nil, fmt.Errorf("%w: host expects add <owner-endpoint>, list, rename, remove or repair", errHostUsage)
 	}
@@ -65,9 +74,20 @@ func (cli *CLI) prepareHostOperation(ctx context.Context, loaded config.Loaded, 
 		store: ownerinventory.Connections{Root: filepath.Join(loaded.Context.Paths.DataHome, "owner-inventory")}}
 	operation.step = domain.OperationStep{ID: "host." + verb, Decision: domain.StepApply}
 	if verb == "rename" {
-		plan, err := configsync.PrepareHostIDRename(loaded.Context.Paths.ConfigHome, target)
+		if err := guardLocalRenameOwner(operation.store, target); err != nil {
+			return nil, err
+		}
+		plan, err := configsync.PrepareHostIDRenameWithSource(configsync.Options{ConfigHome: loaded.Context.Paths.ConfigHome, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: loaded.Context.Paths.OperatorHome, Environment: cli.baseEnv, FileSettings: config.SyncableFileMappings(loaded)}, target, sourceHostID)
 		if err != nil {
 			return nil, fmt.Errorf("prepare owner HostID rename: %w", err)
+		}
+		if _, registered, err := configsync.ReadSourceRecord(plan.ConfigHome); err != nil {
+			return nil, err
+		} else if registered {
+			operation.authority, err = cli.observeHostRenameAuthority(ctx, plan.ConfigHome)
+			if err != nil {
+				return nil, err
+			}
 		}
 		operation.rename = &plan
 		operation.consequences = []string{
@@ -76,6 +96,7 @@ func (cli *CLI) prepareHostOperation(ctx context.Context, loaded config.Loaded, 
 			"migrate machine-local configuration references atomically",
 			"leave yard, Incus, storage and SSH runtime resource names unchanged",
 		}
+		operation.consequences = append(operation.consequences, plan.SourceConsequences()...)
 		operation.step.Target = "owner identity " + plan.OldHostID
 		operation.step.Observed, operation.step.Desired = plan.OldHostID, plan.NewHostID
 		operation.step.Preconditions = []string{"owner identity and configuration manifest match the captured baseline"}
@@ -243,6 +264,9 @@ func (prepared *preparedCommand) prepareHost(ctx context.Context, _ *initBootstr
 	if err != nil {
 		return err
 	}
+	if operation.authority != nil {
+		prepared.closeResource = func() error { operation.authority.close(); return nil }
+	}
 	prepared.exactState = operation.stateDigest()
 	prepared.policy.RemotePolicy = domain.RemoteOnController
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
@@ -293,7 +317,16 @@ func (operation *hostOperation) apply(ctx context.Context, cli *CLI, loaded conf
 			return err
 		}
 	default:
-		if err := configsync.ApplyHostIDRename(*operation.rename); err != nil {
+		apply := func() error {
+			return operation.store.WithAvailableLocalHostID(ctx, operation.rename.NewHostID, func() error { return configsync.ApplyHostIDRename(*operation.rename) })
+		}
+		var err error
+		if operation.authority != nil {
+			err = operation.authority.withLock(ctx, cli, apply)
+		} else {
+			err = apply()
+		}
+		if err != nil {
 			if errors.Is(err, configsync.ErrPlanStale) {
 				return fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}
