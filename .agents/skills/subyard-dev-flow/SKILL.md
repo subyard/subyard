@@ -216,17 +216,20 @@ global settings and existing runner infrastructure unchanged.
 
 ## Completion
 
-**Done means every agreed requirement and plan step is satisfied, and every
-required check has passed for the final changes.** Only then may the coordinator close or
-delete the task plan according to the governing task workflow.
+**Done means the agreed change is verified, required checks and review have passed,
+and the final code is ready to commit and hand to the operator.** Close or delete
+the development plan according to the governing task workflow.
 
-If steps remain, report **partial** and continue executable work. If no remaining
-step can proceed without missing input or access, report **blocked** and name what
-is needed. Keep unfinished steps in the plan; operator-only checks remain pending
-until their results arrive. Moving a step to another file or ending a session
-does not complete it.
+Production updates and post-deployment checks belong to the operator after handoff;
+exclude them from development plans and automatic follow-up or `check-*` tasks.
+Release publication retains its separate gates.
 
-Report what changed, what was actually checked, and what remains. A component or
+If implementation or required validation steps remain, report **partial** and continue
+executable work. If none can proceed without missing input or access, report **blocked**
+and name what is needed. Required external acceptance checks remain pending until their
+results arrive. Moving an in-scope step to another file or ending a session does not complete it.
+
+Report what changed, what was actually checked, and the operator handoff. A component or
 host-free pass proves only that scope; it does not prove the planned yard lifecycle
 or full release acceptance. End file-changing work with a short imperative
 suggested commit message.
