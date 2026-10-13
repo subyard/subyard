@@ -61,6 +61,10 @@ guest metadata observations before approval. Its generic metadata step atomicall
 missing canonical metadata before the installed project hooks run. Matching legacy metadata
 is preserved. Missing roots, unsafe ownership or paths, conflicting identity and stale
 observations stop initialization; guest directories never authorize additional projects.
+Legacy bind wrappers and sources may remain root-owned with the developer's group
+and without world-write access. Only captured missing metadata in a non-writable
+legacy bind wrapper uses privileged publication; the new file belongs to the developer
+with mode `0600`. Wrapper and source ownership and permissions remain unchanged.
 Read-only project inventory and status do not perform this repair.
 When missing metadata changes a profile's native hook catalog, its runtime observer
 can consume an optional stdin object with `schema: 1` and `missingMetadata` entries

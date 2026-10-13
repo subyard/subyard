@@ -209,28 +209,55 @@ func (plan *ProjectHookPlan) MetadataOperationStep(target string) *domain.Operat
 func (runtime Runtime) metadataRequest(ctx context.Context, mode string, plan *projectMetadataPlan) (projectMetadataObservation, error) {
 	payload, err := json.Marshal(struct {
 		Mode string `json:"mode"`
+		UID  int    `json:"uid"`
 		*projectMetadataPlan
-	}{mode, plan})
+	}{mode, runtime.Yard.DevUID, plan})
 	if err != nil {
 		return projectMetadataObservation{}, err
 	}
 	callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	user := uint32(runtime.Yard.DevUID)
+	if mode == "apply" && plan.needsPrivilegedMetadataPublication(runtime.Yard.DevUID) {
+		user = 0
+	}
 	result, err := runtime.Executor.Exec(callContext, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
 		Command: []string{"python3", "-B", "-c", projectMetadataProgram}, Stdin: payload,
-		User: uint32(runtime.Yard.DevUID), Group: uint32(runtime.Yard.DevUID),
+		User: user, Group: uint32(runtime.Yard.DevUID),
 	})
-	if err != nil {
-		return projectMetadataObservation{}, metadataFailure(plan, nil)
-	}
 	if result.ExitCode != 0 {
 		return projectMetadataObservation{}, metadataFailure(plan, result.Stdout)
+	}
+	if err != nil {
+		return projectMetadataObservation{}, metadataFailure(plan, nil)
 	}
 	var observation projectMetadataObservation
 	if len(result.Stdout) > 1<<20 || json.Unmarshal(result.Stdout, &observation) != nil || !profileRuntimeDigest.MatchString(observation.Projects) || len(observation.Expected) == 0 {
 		return observation, fmt.Errorf("invalid project metadata observation")
 	}
 	return observation, nil
+}
+
+// Only captured missing metadata in a legacy bind wrapper can require root.
+// The guest rechecks these exact facts before publishing a developer-owned file.
+func (plan *projectMetadataPlan) needsPrivilegedMetadataPublication(uid int) bool {
+	var entries []struct {
+		Root     []uint64        `json:"root"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if json.Unmarshal(plan.Expected, &entries) != nil || len(entries) != len(plan.Targets) {
+		return false
+	}
+	for index, entry := range entries {
+		var desired struct {
+			Mode domain.ProjectMode `json:"mode"`
+		}
+		if json.Unmarshal([]byte(plan.Targets[index].Payload), &desired) == nil && desired.Mode == domain.ProjectBind &&
+			string(entry.Metadata) == "null" && len(entry.Root) >= 3 && entry.Root[1] == 0 && entry.Root[2] == uint64(uid) && entry.Root[0]&0o022 == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // PrepareProjectMetadata captures only authoritative owner records. Guest directories

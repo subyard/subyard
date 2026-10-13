@@ -2,7 +2,8 @@
 import errno, hashlib, json, os, stat, sys
 
 request = json.load(sys.stdin)
-uid = os.getuid()
+uid = request['uid']
+gid = os.getgid()
 base = '/srv/workspaces'
 active_target = -1
 
@@ -73,13 +74,18 @@ def inspect(target):
     except FileNotFoundError: raise Refusal('missing_root')
     try:
         rs = os.fstat(fd)
-        if rs.st_uid != uid or rs.st_mode & 0o022:
+        # Historical bind attachment let Incus create a root-owned wrapper
+        # and can expose a root-owned source with the developer's mapped group.
+        # Only authoritative bind targets admit this layout; never normalize it.
+        def legacy_bind(s):
+            return desired['mode'] == 'bind' and s.st_uid == 0 and s.st_gid == gid and not s.st_mode & 0o002
+        if not (rs.st_uid == uid and not rs.st_mode & 0o022) and not legacy_bind(rs):
             raise Refusal('unsafe_root')
         try: src = os.open('src', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         except FileNotFoundError: raise Refusal('missing_source')
         try:
             ss = os.fstat(src)
-            if ss.st_uid != uid:
+            if (ss.st_uid != uid and not legacy_bind(ss)) or (legacy_bind(rs) and (ss.st_gid != gid or ss.st_mode & 0o002)):
                 raise Refusal('unsafe_source')
         finally: os.close(src)
         try: meta = os.open('.subyard-meta.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
@@ -133,6 +139,8 @@ def main():
                 out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
                 try:
                     os.fchmod(out, 0o600)
+                    if os.getuid() != uid:
+                        os.fchown(out, uid, gid)
                     with os.fdopen(os.dup(out), 'wb') as stream:
                         stream.write(target['payload'].encode()); stream.flush()
                     os.fsync(out)

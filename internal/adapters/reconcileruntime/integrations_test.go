@@ -392,6 +392,30 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if len(first) != 64 {
 		t.Fatalf("invalid desired scope fingerprint %q", first)
 	}
+	// Published assets without declarations used this payload for their scope.
+	// Keep it stable for authorized recovery journals.
+	entries, err := runtime.integrationArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range entries {
+		entries[index].Content = ""
+	}
+	legacyPayload, err := json.Marshal(struct {
+		UID       int                   `json:"uid"`
+		Allows    string                `json:"allows"`
+		Artifacts []integrationArtifact `json:"artifacts"`
+	}{UID: 1001, Allows: "true", Artifacts: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%x", sha256.Sum256(legacyPayload)); first != want {
+		t.Fatalf("declaration-free scope changed: got %s, want %s", first, want)
+	}
+	runtime.Integrations = []profile.IntegrationDefinition{}
+	if explicit, _, err := runtime.IntegrationScope(); err != nil || explicit != first {
+		t.Fatalf("explicit empty declarations changed scope: %s, %v", explicit, err)
+	}
 	testkit.WriteFile(t, filepath.Join(root, "instructions.md"), []byte("second\n"), 0o644)
 	second, secondPaths, err := runtime.IntegrationScope()
 	if err != nil {

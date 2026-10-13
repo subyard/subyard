@@ -28,7 +28,7 @@ func (fixture metadataFileExecutor) Exec(ctx context.Context, _, _ string, reque
 	if err != nil {
 		result.ExitCode = 1
 	}
-	return result, nil
+	return result, err
 }
 
 func TestPreparedProjectMetadataRepair(t *testing.T) {
@@ -431,6 +431,74 @@ func TestProjectMetadataFailureDoesNotExposeUntrustedOutput(t *testing.T) {
 	}
 }
 
+func TestProjectMetadataNativeExecutorFailure(t *testing.T) {
+	const private = "private transport details"
+	for _, scenario := range []struct {
+		name   string
+		result ports.InstanceExecResult
+		want   string
+		stale  bool
+	}{
+		{"native refusal", ports.InstanceExecResult{ExitCode: 1, Stdout: []byte(`{"error":{"reason":"unsafe_root","target":0,"stale":false}}`)}, "unsafe_root", false},
+		{"native stale", ports.InstanceExecResult{ExitCode: 1, Stdout: []byte(`{"error":{"reason":"stale_inputs","target":0,"stale":true}}`)}, "stale_inputs", true},
+		{"transport", ports.InstanceExecResult{}, "io_failure", false},
+		{"partial transport output", ports.InstanceExecResult{Stdout: []byte(`{"error":{"reason":"unsafe_root","target":0}}`)}, "io_failure", false},
+		{"unstructured exit", ports.InstanceExecResult{ExitCode: 1, Stdout: []byte(private)}, "io_failure", false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			scenario.result.Stderr = []byte(private)
+			executor := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: scenario.result, Err: errors.New(private)}}}
+			runtime := Runtime{Executor: executor}
+			_, err := runtime.metadataRequest(context.Background(), "inspect", &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample"}}})
+			var failure *ProjectMetadataError
+			if !errors.As(err, &failure) || failure.Reason != scenario.want || errors.Is(err, domain.ErrPlanStale) != scenario.stale || strings.Contains(err.Error(), private) {
+				t.Fatalf("incorrect native failure: %v", err)
+			}
+			if scenario.want != "io_failure" && failure.ProjectID != "sample" {
+				t.Fatalf("native target lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestProjectMetadataPublicationUsesCapturedOwnerFacts(t *testing.T) {
+	for _, scenario := range []struct {
+		name, mode, projectMode, metadata string
+		owner, group, permissions         int
+		wantUser                          uint32
+	}{
+		{"inspect", "inspect", "bind", "null", 0, 1000, 0o2755, 1000},
+		{"legacy publication", "apply", "bind", "null", 0, 1000, 0o2755, 0},
+		{"group writable", "apply", "bind", "null", 0, 1000, 0o2775, 1000},
+		{"developer owned", "apply", "bind", "null", 1000, 1000, 0o755, 1000},
+		{"non bind", "apply", "sync", "null", 0, 1000, 0o2755, 1000},
+		{"foreign group", "apply", "bind", "null", 0, 1001, 0o2755, 1000},
+		{"world writable", "apply", "bind", "null", 0, 1000, 0o2757, 1000},
+		{"existing metadata", "apply", "bind", "[]", 0, 1000, 0o2755, 1000},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			expected, err := json.Marshal([]any{map[string]any{"root": []int{0o40000 | scenario.permissions, scenario.owner, scenario.group}, "metadata": json.RawMessage(scenario.metadata)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, _ := json.Marshal(map[string]string{"mode": scenario.projectMode})
+			executor := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: []byte(`{"expected":[],"projects":"` + strings.Repeat("a", 64) + `"}`)}}}}
+			runtime := Runtime{Executor: executor, Yard: domain.Context{DevUID: 1000}}
+			_, err = runtime.metadataRequest(context.Background(), scenario.mode, &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample", Payload: string(payload)}}, projectMetadataObservation: projectMetadataObservation{Expected: expected}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := executor.ExecCalls[0].Request
+			var request struct {
+				UID int `json:"uid"`
+			}
+			if err := json.Unmarshal(call.Stdin, &request); err != nil || call.User != scenario.wantUser || call.Group != 1000 || request.UID != 1000 {
+				t.Fatalf("publication identity=%d/%d developer=%d err=%v", call.User, call.Group, request.UID, err)
+			}
+		})
+	}
+}
+
 func TestProjectMetadataFailureBoundsLegacyIdentity(t *testing.T) {
 	plan := &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/" + strings.Repeat("a", 10000)}}}
 	err := metadataFailure(plan, []byte(`{"error":{"reason":"io_failure","target":0}}`))
@@ -470,7 +538,7 @@ func TestProjectMetadataDispatcherParityWithDirectorySymlinks(t *testing.T) {
 				}
 			}
 			executor := &metadataHookExecutor{metadataFileExecutor: metadataFileExecutor{root}}
-			runtime := Runtime{RepositoryRoot: "../../..", Executor: executor, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}}
+			runtime := Runtime{RepositoryRoot: "../../..", Integrations: []profile.IntegrationDefinition{}, Executor: executor, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}}
 			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false)
 			if err != nil {
 				t.Fatal(err)
