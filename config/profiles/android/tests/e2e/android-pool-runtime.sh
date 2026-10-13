@@ -14,18 +14,12 @@ case "$lane" in full|diagnostics|recovery|viewer|viewer-native-debug|sdk-images|
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-# shellcheck source=tests/helpers/release-candidate.sh
-. "$root/tests/helpers/release-candidate.sh"
-if YARD_BIN="$(release_candidate_prepare "$root")"; then
-  unset YARD_ENGINE_PATH
-else
-  candidate_rc=$?
-  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
-  YARD_BIN="$root/.build/yard"
-fi
+# shellcheck source=config/profiles/android/tests/e2e/android-candidate.sh
+. "$root/config/profiles/android/tests/e2e/android-candidate.sh"
+YARD_BIN="$root/.build/yard"
+unset YARD_ENGINE_PATH
 for command in go incus sudo timeout; do command -v "$command" >/dev/null || exit 1; done
 sudo -n true
-[ -x "$YARD_BIN" ] || { "$root/dev/build-engine.sh"; YARD_BIN="$root/.build/yard"; }
 hold_seconds="${ANDROID_DIAGNOSTIC_HOLD_SECONDS:-0}"
 [[ "$hold_seconds" =~ ^[0-9]+$ ]] || { printf 'ANDROID_DIAGNOSTIC_HOLD_SECONDS must be an integer\n' >&2; exit 1; }
 hold_seconds=$((10#$hold_seconds))
@@ -43,15 +37,7 @@ incus() {
   fi
 }
 yard() {
-  # First init can enroll this user, but cannot update its parent shell's groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    local command
-    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
-    sg incus-admin -c "exec $command"
-  else
-    "$YARD_BIN" -Y "$YARD_NAME" "$@"
-  fi
+  android_candidate_command "$YARD_BIN" -Y "$YARD_NAME" "$@"
 }
 # shellcheck source=config/profiles/android/tests/e2e/android-pool-phases.sh
 . "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"
@@ -66,6 +52,7 @@ monitor_stop=''
 definition_checksum=''
 sdk_pool=''
 sdk_volume=''
+init_attempted=0
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 cleanup() {
@@ -98,7 +85,7 @@ cleanup() {
       timeout "$hold_seconds" bash -c 'while [ -f "$1" ]; do sleep 2; done' _ "$hold" || true
     fi
   fi
-  if yard teardown --yes > "$state/teardown.log" 2>&1; then
+  if [ "$init_attempted" = 0 ] || yard teardown --yes > "$state/teardown.log" 2>&1; then
     if [ "$lane" = full ] && [ -n "$project" ]; then
       if incus list --all-projects --format=json | python3 -c '
 import json, sys
@@ -171,6 +158,12 @@ if any(item["name"] == pool for item in json.load(sys.stdin)):
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 [ "$(sudo -n cat "$HOME/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker")" = subyard-e2e-platform-v1 ] || exit 1
+# Fresh state still needs the protected release transition before power publication.
+# Keep the installer, runtime, shell files and links inside this fixture's owned root.
+export YARD_RUNTIME_ROOT="$state/runtime"
+YARD_BIN="$(android_candidate_install "$root" "$state")"
+android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
+printf 'android candidate release-preflight=PASS\n'
 mkdir -p "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 ssh_port=$((30000 + ($$ % 10000)))
 while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do ssh_port=$((ssh_port + 1)); done
@@ -182,6 +175,7 @@ FORWARD_SSH_AGENT=0
 SSH_PORT=$ssh_port
 EOF
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+init_attempted=1
 yard init --yes
 project="$(yard config show INCUS_PROJECT | sed -n 's/^effective: //p')"
 instance="$(yard config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')"

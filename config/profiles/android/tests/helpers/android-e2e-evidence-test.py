@@ -1155,23 +1155,27 @@ assert '"state": "idle"' in output.getvalue()
 
 # Exercise real cleanup bodies with host operations replaced by bounded local stubs.
 with tempfile.TemporaryDirectory() as directory:
-    for initial, teardown, expected in ((23, 1, 23), (0, 1, 3), (0, 0, 0)):
+    for attempted, initial, teardown, expected in ((1, 23, 1, 23), (1, 0, 1, 3), (1, 0, 0, 0),
+                                                   (0, 23, 99, 23)):
         source = (E2E / 'android-pool-runtime.sh').read_text()
         cleanup = source[source.index('cleanup() {'):source.index('\ntrap cleanup EXIT')]
-        state = Path(directory) / f'owned-{initial}-{teardown}'
+        state = Path(directory) / f'owned-{attempted}-{initial}-{teardown}'
         state.mkdir()
         (state / '.marker').write_text('subyard-android-pool-runtime-v1\n')
         script = ('set -euo pipefail\n. "$1/android-pool-phases.sh"\n'
                   'android_fixture=runtime\nandroid_phase_begin check\n'
                   'state="$2"; project=""; instance=""; monitor_pid=""; monitor_stop=""; monitor_host_stop="$2/stop"; lane=diagnostics\n'
-                  'incus_binary=(false); hold_seconds=0; teardown_status="$3"\n'
-                  'yard() { return "$teardown_status"; }; sudo() { shift; "$@"; }\n' + cleanup +
+                  'incus_binary=(false); hold_seconds=0; teardown_status="$3"; init_attempted="$5"\n'
+                  'yard() { printf called > "$state/teardown-called"; return "$teardown_status"; }; sudo() { shift; "$@"; }\n' + cleanup +
                   '\ntrap cleanup EXIT\nexit "$4"\n')
-        result = subprocess.run(['bash', '-c', script, '_', str(E2E), str(state), str(teardown), str(initial)], capture_output=True, text=True)
+        result = subprocess.run(['bash', '-c', script, '_', str(E2E), str(state), str(teardown), str(initial), str(attempted)], capture_output=True, text=True)
         assert result.returncode == expected, result.stderr
         assert f'exit_code={initial}' in result.stdout
-        if teardown:
+        assert not state.exists()
+        if teardown and attempted:
             assert 'exit_code=3' in result.stdout
+        if not attempted:
+            assert 'android cleanup=passed' in result.stdout and 'exit_code=3' not in result.stdout
     for outcome, initial, expected in (('clean', 0, 0), ('clean', 23, 23),
                                        ('instance', 0, 3), ('project', 0, 3),
                                        ('state', 0, 3), ('user-file', 0, 3),
@@ -1194,7 +1198,7 @@ with tempfile.TemporaryDirectory() as directory:
 . "$1/android-pool-phases.sh"
 android_fixture=runtime; android_phase_begin check
 state="$2"; outcome="$3"; lane=full; YARD_NAME=fixture; project=fixture
-instance=fixture; monitor_pid=''; monitor_stop=''; monitor_host_stop="$state/stop"
+instance=fixture; monitor_pid=''; monitor_stop=''; monitor_host_stop="$state/stop"; init_attempted=1
 SUBYARD_CONFIG_HOME="$state/config"; hold_seconds=0
 sdk_pool=default; sdk_volume=yard-srv-fixture; incus_binary=("$state/fixture-incus")
 export BACKING_OUTCOME="$outcome"
