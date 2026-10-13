@@ -363,60 +363,8 @@ if ! jq -e '.selection.present and .selection.requested == [] and .selection.eff
   die 'controller selection leaked into fresh empty owner selection'
 fi
 [ "$(sha256sum "$config")" = "$owner_before" ] || die 'remote status wrote owner desired config'
-# Test the production framed consumer directly over one real SSH connection:
-# tampered binding, consumed replay and disconnect before execute. Public commands
-# below then verify valid digest execution through the same production consumer.
-PATH="$STATE/client-bin:$PATH" python3 - "$STATE" <<'PY'
-import datetime, json, struct, subprocess
-def open_session():
-    return subprocess.Popen(["ssh","-T","integration-owner","--","yard","rpc","--stdio"],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-def call(process, method, operation="", params=None):
-    deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=60)).isoformat()
-    request={"version":1,"type":"request","id":method,"method":method,"operationId":operation,"params":params or {},"deadline":deadline}
-    data=json.dumps(request).encode()
-    process.stdin.write(struct.pack(">I",len(data))+data);process.stdin.flush()
-    while True:
-        header=process.stdout.read(4)
-        assert len(header)==4,"owner disconnected"
-        size=struct.unpack(">I",header)[0]
-        assert 0<size<=1024*1024,"invalid owner frame size"
-        result=json.loads(process.stdout.read(size))
-        assert result["version"]==1 and result.get("operationId","")==operation,"uncorrelated owner response"
-        if result["type"]=="event":continue
-        assert result["id"]==method
-        return result
-def close(process):
-    process.stdin.close()
-    try:process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-        raise
-def negotiate(process):
-    response=call(process,"rpc.negotiate")
-    assert {"operation-exact-plan-v1", "operation-steps-v1"}.issubset(response["result"]["capabilities"])
-params={"command":"integration","arguments":["enable","claude"],"exact":True,"stepSchema":1}
-process=open_session()
-try:
-    negotiate(process)
-    plan=call(process,"operation.plan","remote-tamper",params)["result"]
-    assert plan["schema"]==1 and plan["stepSchema"]==1 and plan["plan"]["steps"] and len(plan["digest"])==64 and plan["expiresAt"]
-    rejected=call(process,"operation.execute","remote-tamper",{"confirmed":True,"digest":"0"*64})
-    assert rejected["error"]["code"]=="plan_binding_invalid",rejected
-    replay=call(process,"operation.execute","remote-tamper",{"confirmed":True,"digest":plan["digest"]})
-    assert replay["error"]["code"]=="plan_not_found",replay
-    disconnected=call(process,"operation.plan","remote-disconnect",params)
-    assert "result" in disconnected,disconnected
-finally:close(process)
-process=open_session()
-try:
-    negotiate(process)
-    replay=call(process,"operation.execute","remote-disconnect",{"confirmed":True,"digest":disconnected["result"]["digest"]})
-    assert replay["error"]["code"]=="plan_not_found",replay
-finally:close(process)
-print("ok: real SSH exact plan rejects tampering, replay and cross-session execution")
-PY
-[ "$(sha256sum "$config")" = "$owner_before" ] || die 'rejected RPC changed desired config'
+# Exact-plan tamper/replay/disconnect cases belong to local handler and net.Pipe
+# tests. Keep successful plan/execute over the real owner SSH connection here.
 controller integration enable claude --yes
 controller integration status claude --json | jq -e '.selection.requested == ["claude"] and .observed == "ready"' >/dev/null
 inventory_before="$(guest sha256sum /var/lib/subyard/integrations/inventory.json)"

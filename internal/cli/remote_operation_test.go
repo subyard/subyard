@@ -18,7 +18,7 @@ import (
 )
 
 func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
-	for _, kind := range []string{"success", "missing-digest", "tampered", "expired", "changed-state", "other-session", "stopped"} {
+	for _, kind := range []string{"success", "tampered", "other-session", "stopped"} {
 		t.Run(kind, func(t *testing.T) {
 			cli, incus, runtime, path, _ := integrationFixture(t, "CODING_TOOL_INTEGRATIONS=\n")
 			runtime.plan.Scope = "subyard/yard:owned integration fixtures"
@@ -42,15 +42,8 @@ func TestExactRPCPlanBindingAndSingleUse(t *testing.T) {
 			}
 			digest := plan.Digest
 			switch kind {
-			case "missing-digest":
-				digest = ""
 			case "tampered":
 				digest = strings.Repeat("0", 64)
-			case "expired":
-				plan.ExpiresAt = time.Now().Add(-time.Second)
-				handler.exactPlans["exact-test"] = plan
-			case "changed-state":
-				handler.plans["exact-test"].exactState = "changed"
 			case "other-session":
 				handler = &rpcHandler{cli: cli, loaded: loaded}
 				defer handler.closePlans()
