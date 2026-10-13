@@ -47,9 +47,8 @@ func compareAndSwapPersistentFileGuarded(
 	desired []byte,
 	guard func() error,
 	fault func(string) error,
-	localOptions ...bool,
+	local bool,
 ) (result error) {
-	local := len(localOptions) != 0 && localOptions[0]
 	defer func() {
 		var source *SourceError
 		if errors.As(result, &source) && source.Path == "" {
@@ -274,11 +273,7 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 	}, nil
 }
 
-func preparePersistentPendingAt(parent int, name string, desired []byte, modes ...uint32) error {
-	mode := uint32(0o600)
-	if len(modes) != 0 {
-		mode = modes[0]
-	}
+func preparePersistentPendingAt(parent int, name string, desired []byte, mode uint32) error {
 	fd, err := unix.Openat(
 		parent, name,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,

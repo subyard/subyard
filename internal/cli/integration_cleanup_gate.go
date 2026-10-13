@@ -29,7 +29,7 @@ func (cli *CLI) integrationCleanupSourceBindings(ctx context.Context, journal re
 	return proof.Binding, tooling, nil
 }
 
-func (cli *CLI) integrationCleanupRecoveryAuthority(ctx context.Context, yard, id string, outcome releasetransition.Outcome, journal releasetransition.JournalRecord) (string, string, error) {
+func (cli *CLI) integrationCleanupRecoveryAuthority(ctx context.Context, id string, outcome releasetransition.Outcome, journal releasetransition.JournalRecord) (string, string, error) {
 	if err := cli.checkPersistentSelectionInputs(); err != nil {
 		return "", "", err
 	}

@@ -14,13 +14,7 @@
           "status": "effective"
         }
       ],
-      "present": true,
-      "requested": [
-        "sample"
-      ],
-      "effective": [
-        "sample"
-      ]
+      "present": true
     },
     "profiles": [
       {

@@ -21,6 +21,8 @@ type IntegrationSelection struct {
 	Suppressed        bool                `json:"suppressed"`
 }
 
+var integrationMetadataSuffixes = [...]string{"COMMAND", "CHECK", "HEALTH", "CLEANUP", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"}
+
 func normalizeLegacySelection(name, value string) string {
 	if name == "AGENTS" && strings.TrimSpace(value) == "none" {
 		return ""
@@ -93,7 +95,7 @@ func ResolveIntegrationSelection(values map[string]string, requested []string) (
 		selected[agent] = true
 	}
 	knownAgent := func(agent string) bool {
-		for _, suffix := range []string{"COMMAND", "CHECK", "HEALTH", "CLEANUP", "CONFIG", "CONFIG_DEST", "DEPENDS", "PERSIST", "PROJECTS_CHANGED", "PROVISION", "RULES", "RULES_DEST"} {
+		for _, suffix := range integrationMetadataSuffixes {
 			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
 				return true
 			}

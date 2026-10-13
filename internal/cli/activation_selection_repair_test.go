@@ -371,6 +371,41 @@ func TestActivationSelectionRepairRejectsExpansionOverridesAndConsentDrift(t *te
 }
 
 func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *testing.T) {
+	t.Run("dependency-only-disable", func(t *testing.T) {
+		root, home, path, environment := activationSelectionRepairFixture(t, map[string]string{
+			"config/agents/wrapper/integration.json": `{"schema_version":1,"command":"synthetic-cli","depends":["base"]}`,
+			"config/agents/base/integration.json":    `{"schema_version":1,"command":"synthetic-cli"}`,
+		})
+		before := []byte("CODING_TOOL_INTEGRATIONS='wrapper'\n")
+		testkit.WriteFile(t, path, before, 0o640)
+		program, err := New(Options{RepositoryRoot: root, Environment: environment})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := program.loadSelectionRepair("default")
+		if err != nil || !slices.Equal(loaded.Integrations.Requested, []string{"wrapper"}) || !slices.Contains(loaded.Integrations.Effective, "base") {
+			t.Fatalf("dependency-only fixture: %#v %v", loaded.Integrations, err)
+		}
+		history := activationRepairHistory(t, root, home)
+		prompt := &testkit.Prompt{Answers: []bool{true}}
+		var stdout, stderr bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
+			Arguments: []string{"integration", "disable", "base"}, Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
+		if code != 2 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "disable its dependents explicitly first") {
+			t.Fatalf("dependency-only disable was not rejected before consent: code=%d prompts=%d %s %s", code, len(prompt.Requests), stdout.String(), stderr.String())
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o640 || !bytes.Equal(before, mustReadConfigFixture(t, path)) || !reflect.DeepEqual(history, activationRepairHistory(t, root, home)) {
+			t.Fatal("dependency-only disable changed inherited selection, its mode or protected history")
+		}
+		if _, err := os.Lstat(filepath.Join(home, "yards/default/config.env")); !os.IsNotExist(err) {
+			t.Fatal("dependency-only disable created a yard selection override")
+		}
+		loaded, err = program.loadSelectionRepair("default")
+		if err != nil || !slices.Equal(loaded.Integrations.Requested, []string{"wrapper"}) || !slices.Contains(loaded.Integrations.Effective, "base") {
+			t.Fatalf("dependency-only disable changed effective dependency: %#v %v", loaded.Integrations, err)
+		}
+	})
 	for _, arguments := range [][]string{
 		{"integration", "disable", "claude", "--yes"},
 		{"config", "set", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "yard", "--yes"},

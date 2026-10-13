@@ -411,8 +411,7 @@ func TestOwnerQueriesReloadPersistedSettingsWithoutChangingSession(t *testing.T)
 		}
 	}
 	profiles := query("profile.list").(ownerapi.ProfileList)
-	if !profiles.Selection.Present || profiles.Selection.Value != "" || len(profiles.Selection.Requested) != 0 ||
-		!slices.Equal(profiles.Selection.Effective, []string{"legacy"}) || len(profiles.Profiles) != 4 {
+	if !profiles.Selection.Present || profiles.Selection.Value != "" || len(profiles.Profiles) != 4 {
 		t.Fatalf("stale empty selection=%#v", profiles)
 	}
 	if !slices.ContainsFunc(profiles.Selection.Provenance, func(source ownerapi.SettingProvenance) bool {

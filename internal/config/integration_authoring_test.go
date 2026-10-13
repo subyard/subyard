@@ -200,7 +200,7 @@ func TestPersistentCASGuardHoldsLockBeforeMutation(t *testing.T) {
 		}
 		return rejected
 	}
-	if err := compareAndSwapPersistentFileGuarded(root, path, before, []byte("CODING_TOOL_INTEGRATIONS=''\n"), guard, nil); !errors.Is(err, rejected) || !called {
+	if err := compareAndSwapPersistentFileGuarded(root, path, before, []byte("CODING_TOOL_INTEGRATIONS=''\n"), guard, nil, false); !errors.Is(err, rejected) || !called {
 		t.Fatalf("guard=%v called=%v", err, called)
 	}
 	after, err := ReadPersistentFileSnapshot(root, path)

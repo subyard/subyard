@@ -86,7 +86,7 @@ func (cli *CLI) prepareConfigApplyRepairMode(
 	requireDrift bool,
 	selectedNames []string,
 ) (*configApplyRepairPermit, error) {
-	return cli.prepareActivationRepairMode(ctx, yard, allLocal, outcome, requireDrift, selectedNames, false)
+	return cli.prepareActivationRepair(ctx, yard, allLocal, outcome, requireDrift, selectedNames, false, "")
 }
 
 // Profile runtime init repair shares the completed-journal, ledger, link and lock guards of
@@ -98,14 +98,7 @@ func (cli *CLI) prepareProfileInitRepair(ctx context.Context, yard string, argum
 	if err != nil || request.mode != initReconcile || request.profile != "" {
 		return nil, err
 	}
-	return cli.prepareActivationRepairMode(ctx, yard, false, outcome, true, nil, true)
-}
-
-func (cli *CLI) prepareActivationRepairMode(
-	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
-	requireDrift bool, selectedNames []string, profileInit bool,
-) (*configApplyRepairPermit, error) {
-	return cli.prepareActivationRepair(ctx, yard, allLocal, outcome, requireDrift, selectedNames, profileInit, "")
+	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, nil, true, "")
 }
 
 func (cli *CLI) prepareActivationRepair(
@@ -140,7 +133,7 @@ func (cli *CLI) prepareActivationRepair(
 	}
 	var sourceBinding, toolingBinding string
 	if cleanupID != "" {
-		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, yard, cleanupID, outcome, journal)
+		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, cleanupID, outcome, journal)
 		if err != nil {
 			return nil, nil
 		}

@@ -51,9 +51,9 @@ func (loaded Loaded) IntegrationInventory() []ComponentSelection {
 		if !strings.HasPrefix(key, "AGENT_") {
 			continue
 		}
-		for _, suffix := range []string{"_COMMAND", "_PROVISION", "_CHECK", "_HEALTH", "_CLEANUP", "_CONFIG", "_CONFIG_DEST", "_DEPENDS", "_PERSIST", "_PROJECTS_CHANGED", "_RULES", "_RULES_DEST"} {
-			if strings.HasSuffix(key, suffix) {
-				names[strings.TrimSuffix(strings.TrimPrefix(key, "AGENT_"), suffix)] = false
+		for _, suffix := range integrationMetadataSuffixes {
+			if strings.HasSuffix(key, "_"+suffix) {
+				names[strings.TrimSuffix(strings.TrimPrefix(key, "AGENT_"), "_"+suffix)] = false
 				break
 			}
 		}

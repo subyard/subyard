@@ -18,8 +18,6 @@ import (
 type ProfileSelection struct {
 	Value      string              `json:"value"`
 	Present    bool                `json:"present"`
-	Requested  []string            `json:"requested"`
-	Effective  []string            `json:"effective"`
 	Provenance []SettingProvenance `json:"provenance"`
 }
 
@@ -68,7 +66,6 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 	declarations := loaded.Catalog.Profiles()
 	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"]
 	result.Selection.Present = explicit
-	result.Selection.Requested, result.Selection.Effective = []string{}, []string{}
 	_, _, sourceGroup := config.ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
 	for _, directory := range entries {
 		name := directory.Name()
@@ -124,12 +121,6 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 			entry.Reason = "selection-absent"
 		default:
 			entry.Reason = "excluded-by-replace-list"
-		}
-		if entry.Requested {
-			result.Selection.Requested = append(result.Selection.Requested, name)
-		}
-		if entry.Effective {
-			result.Selection.Effective = append(result.Selection.Effective, name)
 		}
 		for _, resource := range service.Resources.Definitions() {
 			if resource.Profile == name {

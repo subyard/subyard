@@ -148,7 +148,7 @@ func (plan *YardIntegrationWrite) Apply() error {
 	}
 	if plan.Before.Exists {
 		if !bytes.Equal(plan.Before.Content, plan.Content) {
-			if err := compareAndSwapPersistentFileGuarded(plan.root, plan.Path, plan.Before, plan.Content, plan.checkSourceAuthority, nil); err != nil {
+			if err := compareAndSwapPersistentFileGuarded(plan.root, plan.Path, plan.Before, plan.Content, plan.checkSourceAuthority, nil, false); err != nil {
 				return err
 			}
 		}

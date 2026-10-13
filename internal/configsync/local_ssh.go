@@ -18,23 +18,15 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		return nil, nil, func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(temporary) }
+	index := 0
 	write := func(path string, content []byte) error {
-		file, err := os.CreateTemp(temporary, "candidate-*")
-		if err != nil {
+		draft := filepath.Join(temporary, strconv.Itoa(index))
+		index++
+		if err := writeFileDurable(temporary, draft, content, 0o600); err != nil {
 			return err
 		}
-		err = file.Chmod(0o600)
-		if err == nil {
-			_, err = file.Write(content)
-		}
-		closeErr := file.Close()
-		if err == nil {
-			err = closeErr
-		}
-		if err == nil {
-			overrides[path] = file.Name()
-		}
-		return err
+		overrides[path] = draft
+		return nil
 	}
 	for path, candidate := range source.files {
 		if source.scalarPath[path] == "" {

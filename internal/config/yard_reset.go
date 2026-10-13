@@ -76,7 +76,7 @@ func ResetYardConfiguration(configHome, name string, check, removeOverrides, rem
 	if !reset {
 		marker := filepath.Base(YardResetMarkerPath(configHome, name))
 		pending := marker + ".pending"
-		if err := preparePersistentPendingAt(root, pending, []byte(yardResetMarkerContent)); err != nil {
+		if err := preparePersistentPendingAt(root, pending, []byte(yardResetMarkerContent), 0o600); err != nil {
 			return err
 		}
 		if err := unix.Renameat2(root, pending, root, marker, unix.RENAME_NOREPLACE); err != nil {

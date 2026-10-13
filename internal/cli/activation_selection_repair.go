@@ -127,25 +127,14 @@ func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string,
 	if err != nil || !available {
 		return false, 0
 	}
-	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
-	if err != nil {
-		return false, 0
-	}
-	snapshot, err := store.ReadCurrentJournal()
-	if err != nil || !snapshot.Exists {
-		return false, 0
-	}
-	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || journal.Checkpoint != releasetransition.JournalComplete {
-		return false, 0
-	}
-	fail := func(err error) (bool, int) { cli.errorf("config set: %v", err); return true, 1 }
 	// Integration provisioning or services can drift while config files remain
 	// current. A source-only reduction does not apply either kind of drift.
 	permit, err := cli.prepareConfigApplyRepairMode(ctx, yard, true, outcome, false, nil)
 	if err != nil || permit == nil {
-		return fail(errors.New("source reduction requires completed history with only materialized configuration drift"))
+		// The source-only fallback independently requires an interrupted journal.
+		return false, 0
 	}
+	fail := func(err error) (bool, int) { cli.errorf("config set: %v", err); return true, 1 }
 	runtime := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
 	defer runtime.Close()
 	configDir, tooling, err := runtime.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
@@ -190,7 +179,7 @@ func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string,
 		if _, err := cli.selectionRepairContent(yard, path, baseline.Content, selection); err != nil {
 			return err
 		}
-		if err := prepared.prepareConfigScalarRequest(ctx, "set", arguments[1:], request); err != nil {
+		if err := prepared.prepareConfigScalarRequest(ctx, "set", request); err != nil {
 			return err
 		}
 		execute := prepared.execute

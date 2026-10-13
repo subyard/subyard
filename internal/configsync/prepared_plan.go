@@ -190,28 +190,19 @@ func (plan Plan) CandidateConfigs() ([]config.Loaded, error) {
 	for path, candidate := range plan.desired {
 		source.files[path] = candidate
 	}
+	index := 0
 	for _, candidates := range []map[string]candidateFile{plan.desired, plan.localDesired} {
 		for path, candidate := range candidates {
 			logical := candidate.SourcePath
 			if logical == "" {
 				logical = filepath.Join(plan.options.ConfigHome, filepath.FromSlash(path))
 			}
-			draft, err := os.CreateTemp(temporary, "input-*")
-			if err != nil {
+			draft := filepath.Join(temporary, fmt.Sprint(index))
+			index++
+			if err := writeFileDurable(temporary, draft, candidate.Content, 0o600); err != nil {
 				return nil, err
 			}
-			err = draft.Chmod(0o600)
-			if err == nil {
-				_, err = draft.Write(candidate.Content)
-			}
-			closeErr := draft.Close()
-			if err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				return nil, err
-			}
-			options.validationOverrides[logical] = draft.Name()
+			options.validationOverrides[logical] = draft
 		}
 	}
 	var contexts []config.Loaded

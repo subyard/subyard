@@ -94,10 +94,10 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	if err != nil {
 		return fmt.Errorf("%w: %v", errConfigUsage, err)
 	}
-	return prepared.prepareConfigScalarRequest(ctx, action, arguments, request, protected...)
+	return prepared.prepareConfigScalarRequest(ctx, action, request, protected...)
 }
 
-func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, arguments []string, request configAuthoringRequest, protected ...bool) error {
+func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, request configAuthoringRequest, protected ...bool) error {
 	cli, loaded := prepared.CLI, prepared.Loaded
 	definition, err := loaded.Catalog.ValidateSettingName(request.scope, request.name, false)
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {

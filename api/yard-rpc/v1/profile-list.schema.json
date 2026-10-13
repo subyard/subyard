@@ -17,6 +17,9 @@
           "type": "string",
           "maxLength": 8192
         },
+        "present": {
+          "type": "boolean"
+        },
         "provenance": {
           "type": "array",
           "items": {
@@ -72,6 +75,20 @@
           },
           "selected": {
             "type": "boolean"
+          },
+          "requested": {
+            "type": "boolean"
+          },
+          "effective": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "sourceGroup": {
+            "type": "string",
+            "maxLength": 8192
           },
           "provisionable": {
             "type": "boolean"
