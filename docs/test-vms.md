@@ -633,6 +633,26 @@ the process exits. This mode records storage samples before filling, while full,
 Android/GPU, real credentials and external-service profiles use separate explicitly prerequisite-
 gated lanes. A generic dependency-free resource pass does not report those handlers green.
 
+### Fixture preflight
+
+Use the skill's [check order](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
+before an expensive affected lane. Inspect the fixture's changed assumptions at its owning boundary:
+required commands must be usable by the execution user, including the effective service user or
+Incus group when applicable. Probe the actual CLI/API operation the workload needs; a version
+string or successful unrelated operation does not establish that contract.
+
+Reuse product readiness and the fixture's existing preflight. P0 already runs capacity and
+dependency verification for every allocated guest; the broker verifies VM-agent/tool/transport
+readiness before granting a lease. Nested instances still need their own agent readiness.
+Add only a missing predicate needed by the affected fixture, before its expensive setup or workload.
+Reconcile the installed baseline through its product owner when necessary.
+
+Read-only broker status is planning evidence; atomic admission remains authoritative. Check nested
+workload requirements against the actual allocation and backing storage before creating instances
+or large fixture files. Keep readiness waits within a finite operation deadline with boot/service
+startup margin, and stop on terminal errors. Preserve the original failure and bounded diagnostics
+with the full log; polling must not reset the deadline or trigger a blind full retry.
+
 Orca has three real-host fixtures. Run each on VM1 of an explicitly selected available slot:
 
 ```sh
@@ -861,6 +881,8 @@ record per public run under its private controller state, including each phase's
 base fingerprint and allocation generation. It prints the evidence path; the latest 20 records are
 retained. Copy evidence needed for longer-lived tasks before that retention window expires.
 Evidence never contains lease credentials, guest endpoints, command payloads or ambient environment.
+Use [evidence handoff and cache cleanup](testing.md#evidence-handoff-and-cache-cleanup)
+for a verified copy outside `.build`; a controller-local path alone is not a durable handoff.
 
 The current task plan is the durable checklist: record passed, failed and pending segments, the
 exact tested source and baseline identities, and evidence paths. Reassess prior passes after relevant

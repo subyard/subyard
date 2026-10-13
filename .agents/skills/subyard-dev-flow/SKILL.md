@@ -62,6 +62,12 @@ coordinator, and do not create or close shared task files or start another full 
   case only for a distinct failure or observable contract not already covered. Assert outcomes;
   source-text assertions belong only to explicit source-level contracts. If a small change needs
   extensive fixtures, reconsider its implementation before adding test machinery.
+- Before an expensive affected VM check, run changed-component unit/contract checks, then the
+  smallest fixture preflight, then the affected E2E lane. Reuse a current applicable PASS;
+  a failed prerequisite stops dependent expensive checks. If no local check exists or it cannot
+  prove the physical contract, record that limit in one line and run the smallest owning VM
+  diagnostic. Use the VM guide's [fixture preflight](../../../docs/test-vms.md#fixture-preflight)
+  for commands, execution user, readiness and capacity; this does not require the full host-free suite.
 - For documentation, formatting and mechanical changes with unchanged behavior, inspect the diff
   and use relevant syntax, link or format validation. Do not automatically build, run the core
   suite or acquire VMs. Small behavioral changes normally need focused package or contract tests.
@@ -97,7 +103,9 @@ coordinator, and do not create or close shared task files or start another full 
   before the remaining required gates; a blocked check is incomplete, never passed.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
-  identities change; copy evidence needed beyond the runner's retention window.
+  identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)
+  before runner retention or removal of completed task-owned cache. A local private copy becomes
+  a durable handoff only after authorized synchronization or verified shared artifact storage.
 - Every lease gets disposable VMs. Never infer progress or reuse fixtures from a released VM.
   Run remaining independent `--lane` segments with their own fresh setup. P0 rejects cross-lease
   `--resume`; reboot continuation is valid only within the same active lease.
