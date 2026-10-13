@@ -80,7 +80,7 @@ export SUBYARD_SHELL_COVERAGE_LOG="$shell_log"
 while IFS= read -r test_name; do
   case "$test_name" in ''|'# '*) continue ;; esac
   printf '  [ .. ] process contract tests/%s\n' "$test_name"
-  YARD_ENGINE_PATH="$TEMP/yard" bash "$ROOT/tests/$test_name"
+  YARD_ENGINE_PATH="$TEMP/yard" bash "$ROOT/tests/$test_name" </dev/null
 done < "$ROOT/tests/suites/process.list"
 for process_list in "$ROOT"/config/profiles/*/tests/process.list; do
   [ -f "$process_list" ] || continue
@@ -92,7 +92,7 @@ for process_list in "$ROOT"/config/profiles/*/tests/process.list; do
     test_path="$profile_tests/$test_name"
     [ -f "$test_path" ] || die "missing profile process test ${test_path#"$ROOT/"}"
     printf '  [ .. ] process contract %s/%s\n' "${profile_tests#"$ROOT/"}" "$test_name"
-    YARD_ENGINE_PATH="$TEMP/yard" bash "$test_path"
+    YARD_ENGINE_PATH="$TEMP/yard" bash "$test_path" </dev/null
   done < "$process_list"
 done
 unset BASH_ENV GOCOVERDIR SUBYARD_COVERAGE_ROOT SUBYARD_SHELL_COVERAGE_LOG
