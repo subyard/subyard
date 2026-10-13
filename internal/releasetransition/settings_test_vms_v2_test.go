@@ -339,6 +339,29 @@ func TestTestVMSettingsV2InspectCreatesNothing(t *testing.T) {
 	}
 }
 
+func TestTestVMSettingsV2InspectEmptyYardsCreatesNothing(t *testing.T) {
+	configHome := testkit.TempDir(t)
+	yardsRoot := filepath.Join(configHome, "yards")
+	if err := os.Mkdir(yardsRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(yardsRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+	if err != nil || len(plan.Files) != 0 || len(plan.Blockers) != 0 {
+		t.Fatalf("empty yards plan = %#v, err=%v", plan, err)
+	}
+	entries, err := os.ReadDir(configHome)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "yards" {
+		t.Fatalf("Inspect created metadata: entries=%#v err=%v", entries, err)
+	}
+	entries, err = os.ReadDir(yardsRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("Inspect wrote empty yards: entries=%#v err=%v", entries, err)
+	}
+}
+
 func TestTestVMSettingsV2ResourceBoundFitsPublicPlanBound(t *testing.T) {
 	files := make(map[string]string, maximumSettingsV2Yards)
 	for index := 0; index < maximumSettingsV2Yards; index++ {

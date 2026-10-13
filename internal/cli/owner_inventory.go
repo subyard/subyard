@@ -505,7 +505,7 @@ func (cli *CLI) observeOwnerInventories(
 			}
 			snapshot, cacheErr := cache.Read(connection.HostID)
 			now := nowUTC(cli)
-			if cacheErr == nil && !force && now.Sub(snapshot.FetchedAt) <= ownerinventory.Freshness {
+			if cacheErr == nil && !force && snapshot.Fresh(now, ownerinventory.Freshness) {
 				remote[index] = ownerInventoryResult{
 					inventory: snapshot.Inventory, fetchedAt: snapshot.FetchedAt,
 				}

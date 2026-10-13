@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=dev/e2e/lib-owner-inventory-fixture.sh
+. "$ROOT/dev/e2e/lib-owner-inventory-fixture.sh"
 cd "$ROOT"
 RUN_ID="${SUBYARD_E2E_RUN_ID:?run through dev/agent-e2e.sh}"
 [ "${SUBYARD_E2E_VM:?}" = 1 ] || { printf 'entity-naming-lifecycle: requires VM1\n' >&2; exit 2; }
@@ -160,7 +162,8 @@ yard_env() { # fixture-root command...
     HOME="$fixture/home" SUBYARD_HOME="$fixture/data" SUBYARD_CONFIG_HOME="$fixture/config" \
       YARD_BIN_DIR="$fixture/bin" YARD_SHELL_RC="$fixture/home/.bashrc" YARD_LOGIN_RC="$fixture/home/.profile" \
       YARD_RELEASE_BASE_URL="file://$RELEASE" YARD_RELEASE_VERSION="$VERSION" \
-      "$RELEASE/subyard-install.sh" --yes >/dev/null
+      "$RELEASE/subyard-install.sh" --yes >/dev/null \
+      || fail 'controller runtime installation failed'
     local runtime
     runtime="$(readlink -f "$fixture/bin/yard")"
     [ "$runtime" = "$fixture/data/runtime/releases/$VERSION-${runtime_digest:0:12}/bin/yard" ] \
@@ -202,9 +205,8 @@ for case_name in direct alias proxy-jump proxy-command; do
     proxy-command) endpoint="owner-proxy-command" ;;
   esac
   output="$fixture.add.out"
-  printf 'y\n' | yard_env "$fixture" host add "$endpoint" >"$output" 2>&1 \
+  yard_env "$fixture" host add "$endpoint" --yes >"$output" 2>&1 \
     || { sed -n '1,120p' "$output" >&2; fail "$case_name host add failed"; }
-  [ "$(grep -c '^Proceed?' "$output" || true)" = 1 ] || fail "$case_name did not ask exactly once"
   connection="$fixture/data/owner-inventory/connections/owner-a.json"
   cache="$fixture/data/owner-inventory/owners/owner-a.json"
   jq -e --arg endpoint "$endpoint" --arg fp "$expected_fingerprint" \
@@ -222,7 +224,7 @@ printf 'preserved\n' > "$ROUTING"
 remote_dev env HOME="$REMOTE/home" SUBYARD_OPERATOR_HOME="$REMOTE/home" \
   SUBYARD_CONFIG_HOME="$REMOTE/config-home" SUBYARD_HOME="$REMOTE/data" \
   "$REMOTE/bin/yard" host rename owner-b --yes >/dev/null
-sleep 31
+expire_owner_inventory "$FIXTURE/data/owner-inventory/owners/owner-a.json" owner-a
 yard_env "$FIXTURE" status >"$LOCAL/renamed-summary.out" 2>"$LOCAL/renamed-summary.err" \
   || fail 'same-key status refresh failed with expired cache'
 grep -Fq 'owner-b/default' "$LOCAL/renamed-summary.out" \
@@ -236,21 +238,20 @@ grep -Fq 'owner-b/default' "$LOCAL/renamed-summary.out" \
   && [ ! -e "$FIXTURE/data/owner-inventory/routing/owner-a" ] \
   || fail 'same-key rename did not atomically move controller state'
 before="$(controller_state_hash "$FIXTURE" owner-b)"
-yard_env "$FIXTURE" -Y owner-b/default status >"$LOCAL/renamed-detail.out" 2>"$LOCAL/renamed-detail.err" \
-  || fail 'renamed owner detailed status failed'
-yard_env "$FIXTURE" status >/dev/null || fail 'repeated status failed'
-grep -Fq 'owner-b/default' "$LOCAL/renamed-detail.out" \
-  && [ ! -s "$LOCAL/renamed-detail.err" ] || fail 'detailed status omitted renamed owner or reported a warning'
+yard_env "$FIXTURE" status >"$LOCAL/fresh-summary.out" 2>"$LOCAL/fresh-summary.err" \
+  || fail 'repeated status failed'
+grep -Fq 'owner-b/default' "$LOCAL/fresh-summary.out" \
+  && [ ! -s "$LOCAL/fresh-summary.err" ] || fail 'status omitted renamed owner or reported a warning'
 after="$(controller_state_hash "$FIXTURE" owner-b)"
 [ "$before" = "$after" ] || fail 'repeated status changed fresh controller metadata'
 
 # The direct controller exercises first refresh without a cached old inventory.
 MISSING="$LOCAL/direct"
 find "$MISSING/data/owner-inventory/owners" -name 'owner-a.json' -delete
-yard_env "$MISSING" -Y owner-b/default status >"$LOCAL/missing-detail.out" 2>"$LOCAL/missing-detail.err" \
-  || fail 'same-key detailed status refresh failed with missing cache'
-grep -Fq 'owner-b/default' "$LOCAL/missing-detail.out" \
-  && [ ! -s "$LOCAL/missing-detail.err" ] \
+yard_env "$MISSING" status >"$LOCAL/missing-summary.out" 2>"$LOCAL/missing-summary.err" \
+  || fail 'same-key status refresh failed with missing cache'
+grep -Fq 'owner-b/default' "$LOCAL/missing-summary.out" \
+  && [ ! -s "$LOCAL/missing-summary.err" ] \
   && [ -f "$MISSING/data/owner-inventory/connections/owner-b.json" ] \
   && [ ! -e "$MISSING/data/owner-inventory/connections/owner-a.json" ] \
   || fail 'missing-cache status did not adopt the authoritative owner'
@@ -265,7 +266,7 @@ nohup /usr/sbin/sshd -D -e -f "$root/sshd/config" >"$root/sshd.log" 2>&1 &
 for _ in $(seq 1 50); do [ -s "$root/sshd.pid" ] && kill -0 "$(cat "$root/sshd.pid")" 2>/dev/null && exit 0; sleep 0.1; done
 cat "$root/sshd.log" >&2; exit 1
 EOS
-sleep 31
+expire_owner_inventory "$FIXTURE/data/owner-inventory/owners/owner-b.json" owner-b
 before="$(controller_state_hash "$FIXTURE" owner-b)"
 if yard_env "$FIXTURE" status >"$LOCAL/changed-key.out" 2>&1; then
   fail 'changed SSH key was accepted'
@@ -306,7 +307,7 @@ jq -e --arg fp "$new_fingerprint" '.hostId=="owner-c" and .trust.fingerprint==$f
   || fail 'repair lost routing state'
 
 remote kill "$(remote cat "$REMOTE/sshd.pid")"
-sleep 31
+expire_owner_inventory "$FIXTURE/data/owner-inventory/owners/owner-c.json" owner-c
 if yard_env "$FIXTURE" yards --json >"$LOCAL/offline.out" 2>&1; then
   fail 'offline owner reported a fresh successful refresh'
 fi

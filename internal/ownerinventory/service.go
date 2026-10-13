@@ -9,8 +9,6 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-const Freshness = 30 * time.Second
-
 type Result struct {
 	Inventory domain.OwnerInventory
 	FetchedAt time.Time
@@ -31,12 +29,8 @@ func (service Service) Read(ctx context.Context, hostID string, force bool) Resu
 	if service.Clock != nil {
 		now = service.Clock.Now()
 	}
-	ttl := service.TTL
-	if ttl <= 0 {
-		ttl = Freshness
-	}
 	cached, cacheErr := service.Cache.Read(hostID)
-	if cacheErr == nil && !force && now.Sub(cached.FetchedAt) <= ttl {
+	if cacheErr == nil && !force && cached.Fresh(now, service.TTL) {
 		return Result{Inventory: cached.Inventory, FetchedAt: cached.FetchedAt}
 	}
 	if service.Fetch == nil {

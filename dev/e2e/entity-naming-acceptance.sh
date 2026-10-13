@@ -34,7 +34,10 @@ cleanup_acceptance() {
   local rc=$? cleanup_failed=0
   trap - EXIT INT TERM
   set +e
-  [ -z "${GUEST_DIRS[1]:-}" ] || cleanup_guest 1 >/dev/null 2>&1 || cleanup_failed=1
+  local vm
+  for vm in 1 2; do
+    [ -z "${GUEST_DIRS[$vm]:-}" ] || cleanup_guest "$vm" >/dev/null 2>&1 || cleanup_failed=1
+  done
   if [ -n "${LEASE_KEEPER_PID:-}" ]; then
     kill "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
     wait "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
@@ -54,9 +57,24 @@ bundle="$LOCAL_TEMP/worktree.tar.gz"
 build_bundle "$ROOT" "$bundle"
 bundle_hash="$(sha256sum "$bundle" | awk '{print $1}')"
 printf 'evidence: source_bundle_sha256=%s\n' "$bundle_hash"
-prepare_guest 1 "$bundle" "$bundle_hash"
+for vm in 1 2; do
+  prepare_guest "$vm" "$bundle" "$bundle_hash"
+  guest "$vm" chown -R dev:dev "${GUEST_DIRS[$vm]}"
+  # The immutable base installs Incus without enrolling the fixture operator.
+  guest "$vm" /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
+    timeout --foreground --kill-after=10s 180s bash -s -- "${GUEST_DIRS[$vm]}" <<'EOS'
+set -euo pipefail
+root="$1"
+. "$root/src/tests/helpers/test-context.sh"
+setup_test_context "$root/incus-bootstrap"
+export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME=/home/dev
+bash "$root/src/scripts/01-install-incus.sh" --yes --zabbly
+EOS
+  guest "$vm" /usr/sbin/runuser -u dev -- env HOME=/home/dev \
+    timeout --foreground 30s incus info >/dev/null
+  printf 'evidence: VM%s dev Incus API preflight passed\n' "$vm"
+done
 guest_root="${GUEST_DIRS[1]}"
-guest 1 chown -R dev:dev "$guest_root"
 
 guest 1 dd "of=$guest_root/peer-key" status=none < "$GUEST_IDENTITY"
 guest 1 dd "of=$guest_root/peer-known-hosts" status=none < "$GUEST_KNOWN_HOSTS"

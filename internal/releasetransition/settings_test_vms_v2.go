@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -341,7 +342,7 @@ func (view posixV2SettingsSnapshotView) ListYards() ([]string, error) {
 		return nil, errors.New("persistent yards directory is unsafe")
 	}
 	entries, err := directory.ReadDir((maximumSettingsV2Yards * 2) + 1)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	if len(entries) > maximumSettingsV2Yards*2 {
