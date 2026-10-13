@@ -8,7 +8,8 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/public-config" "$tmp/config-home/yards" "$tmp/home"
+mkdir -p "$tmp/bin" "$tmp/public-config" "$tmp/home"
+install -d -m 0700 "$tmp/config-home" "$tmp/config-home/yards"
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
