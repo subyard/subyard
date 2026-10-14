@@ -174,7 +174,7 @@
     "orca-registration-tests": ["profiles:host-free"],
     "real-ssh-credential-contract": ["e2e:ssh-credential-peer"],
     "real-ssh-rpc-contract": ["e2e:ssh-rpc"],
-    "semantic-observation": ["go:adapters/reconcileruntime", "go:observation"],
+    "semantic-observation": ["go:observation", "go:ownerpublication"],
     "selector-self": [
       "go:test-impact-cli",
       "go:testimpact",

@@ -109,6 +109,37 @@ func TestDeferredPublicationRejectsContradictoryRecovery(t *testing.T) {
 	}
 }
 
+func TestDeferredPublicationRejectsLossyJSON(t *testing.T) {
+	contract, device := syntheticContract()
+	// A permissive decoder would replace malformed Unicode with this valid
+	// character and collapse duplicate keys into the otherwise owned receipt.
+	device["note"] = "�"
+	payload, err := json.Marshal(Receipt{Version: 1, Ownership: "exact-v1", Device: device})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, payload string }{
+		{"valid", string(payload)},
+		{"duplicate", strings.Replace(string(payload), `"version":1`, `"version":0,"version":1`, 1)},
+		{"escaped duplicate", strings.Replace(string(payload), `"version":1`, `"version":0,"\u0076ersion":1`, 1)},
+		{"nested duplicate", strings.Replace(string(payload), `"note":"�"`, `"note":"foreign","note":"�"`, 1)},
+		{"unpaired surrogate", strings.Replace(string(payload), "�", `\ud800`, 1)},
+		{"invalid UTF-8", strings.Replace(string(payload), "�", "\xff", 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: "exact-v1", Prefix + contract.Device: test.payload}}
+			_, devices, _, err := Plan(instance, []Contract{contract}, []netip.Addr{netip.MustParseAddr("192.0.2.12")})
+			if test.name == "valid" {
+				if err != nil || !maps.Equal(devices[contract.Device], device) {
+					t.Fatalf("valid receipt did not restore: %v", err)
+				}
+			} else if err == nil || err.Error() != `invalid deferred publication ownership for "optional"` {
+				t.Fatalf("invalid receipt recovery: %v", err)
+			}
+		})
+	}
+}
+
 func TestCanceledPublicationCannotRestoreWhenAddressReturns(t *testing.T) {
 	contract, device := syntheticContract()
 	instance := ports.InstanceInfo{LocalConfig: map[string]string{contract.Key: "exact-v1", "user.subyard.desired_power": "running"},

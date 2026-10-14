@@ -577,100 +577,6 @@ func (cli *CLI) configSyncLocalYards(loaded config.Loaded) []string {
 	return result
 }
 
-func (cli *CLI) materializeConfigSyncPlan(
-	ctx context.Context,
-	loaded config.Loaded,
-	plan configsync.Plan,
-	assumeYes bool,
-) error {
-	all := false
-	names := map[string]struct{}{}
-	for _, change := range plan.Changes {
-		applies := false
-		for _, application := range change.Applications {
-			if application == config.SettingConfigApply {
-				applies = true
-				break
-			}
-		}
-		if !applies {
-			continue
-		}
-		if name, scoped := configSyncPathYard(change.Path); scoped {
-			names[name] = struct{}{}
-		} else {
-			all = true
-		}
-	}
-	if !all && len(names) == 0 {
-		fmt.Fprintln(cli.options.Stdout,
-			"config sync --apply: no materialized file settings changed")
-		return nil
-	}
-	var targets []configTarget
-	var err error
-	if all {
-		targets, err = cli.localConfigTargets(loaded, true)
-	} else {
-		for _, name := range sortedSet(names) {
-			target, loadErr := cli.loadInventoryLoaded(name, loaded)
-			if loadErr != nil {
-				return fmt.Errorf("yard %s: %w", name, loadErr)
-			}
-			if target.Context.AccessKind != domain.AccessRemote {
-				targets = append(targets, configTarget{Name: name, Loaded: target})
-			}
-		}
-	}
-	if err != nil {
-		return err
-	}
-	selectedNames := make([]string, 0, len(targets))
-	for _, target := range targets {
-		selectedNames = append(selectedNames, target.Name)
-	}
-	selector := func() ([]configTarget, error) {
-		if all {
-			return cli.localConfigTargets(loaded, true)
-		}
-		refreshed := make([]configTarget, 0, len(selectedNames))
-		for _, name := range selectedNames {
-			target, err := cli.loadInventoryLoaded(name, loaded)
-			if err != nil {
-				return nil, fmt.Errorf("yard %s: %w", name, err)
-			}
-			refreshed = append(refreshed, configTarget{Name: name, Loaded: target})
-		}
-		return refreshed, nil
-	}
-	// The confirmed import can create config-only release drift. Admit its exact
-	// affected target set through the same protected repair path as config apply.
-	if len(targets) != 0 && !cli.releaseTransitionChild {
-		outcome, err := cli.inspectMutationGate(ctx, loaded.Context.YardName)
-		if err != nil {
-			return err
-		}
-		if outcome != nil {
-			permit, err := cli.prepareConfigApplyRepairMode(
-				ctx, loaded.Context.YardName, false, *outcome, true, selectedNames,
-			)
-			if err != nil {
-				return err
-			}
-			if permit == nil {
-				return fmt.Errorf("materialized configuration refresh blocked by release transition: %s; %s", outcome.Code, outcome.Retry)
-			}
-			previousPermit := cli.configApplyRepair
-			cli.configApplyRepair = permit
-			defer func() { cli.configApplyRepair = previousPermit }()
-		}
-	}
-	if code := cli.applyConfig(ctx, targets, assumeYes, selector); code != 0 {
-		return errors.New("materialized configuration refresh failed")
-	}
-	return nil
-}
-
 func configSyncPathYard(path string) (string, bool) {
 	path = strings.TrimPrefix(filepath.ToSlash(path), config.GitSettingsRelativePath+"/")
 	parts := strings.Split(path, "/")
@@ -1099,15 +1005,6 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	return command.Run()
 }
 
-func (cli *CLI) configTargetDrift(
-	ctx context.Context,
-	target configTarget,
-	check bool,
-) (string, bool, error) {
-	assessment, err := cli.assessConfigTarget(ctx, target, check)
-	return assessment.State, assessment.Changed, err
-}
-
 func (cli *CLI) assessConfigTarget(
 	ctx context.Context,
 	target configTarget,
@@ -1293,10 +1190,6 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 
 	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
 	return result, nil
-}
-
-func hashRegularFile(path string) (string, error) {
-	return config.HashRegularFile(path)
 }
 
 func validateManagedConfigTree(root string) error {

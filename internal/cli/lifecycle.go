@@ -289,18 +289,6 @@ func (cli *CLI) lifecyclePowerService() (application.PowerService, error) {
 	return application.PowerService{Instances: incusPort, Config: configWriter}, nil
 }
 
-func (cli *CLI) preparePowerIntent(ctx context.Context, yard domain.Context) (string, error) {
-	power, err := cli.lifecyclePowerService()
-	if err != nil {
-		return "", err
-	}
-	intent, err := power.Ensure(ctx, yard)
-	if err != nil {
-		return "", err
-	}
-	return intent.Desired, nil
-}
-
 func (execution *lifecycleExecution) binding() string {
 	return operationStateDigest(struct {
 		Action   string

@@ -143,7 +143,7 @@ func Deferred(instance ports.InstanceInfo) []string {
 }
 
 func strictJSON(payload []byte, target any) error {
-	if _, err := observation.Decode(payload); err != nil {
+	if err := observation.ValidateJSON(payload); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))

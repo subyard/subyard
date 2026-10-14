@@ -1200,7 +1200,7 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 				t.Fatal(err)
 			}
 		} else {
-			hash, err = hashRegularFile(asset.Source)
+			hash, err = config.HashRegularFile(asset.Source)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3475,7 +3475,7 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 		t.Fatal(err)
 	}
 	for _, asset := range assets {
-		hash, err := hashRegularFile(asset.Source)
+		hash, err := config.HashRegularFile(asset.Source)
 		if err != nil {
 			t.Fatal(err)
 		}

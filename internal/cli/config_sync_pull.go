@@ -224,14 +224,3 @@ func (adapter *configSyncPullAdapter) Run(
 		},
 	}, "", nil
 }
-
-func configSyncPlanNeedsMaterialization(plan configsync.Plan) bool {
-	for _, change := range plan.Changes {
-		for _, application := range change.Applications {
-			if application == config.SettingConfigApply {
-				return true
-			}
-		}
-	}
-	return false
-}

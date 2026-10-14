@@ -131,7 +131,7 @@ run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
 run_check build-native "$ROOT/dev/build-profiles.sh"
 run_check go-race check_go_race
 run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
-run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzDecode$' -fuzztime=1000x
+run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
 run_check build "$ROOT/dev/build-engine.sh"
 run_check build-layout check_build_layout
 run_check manifests check_manifests

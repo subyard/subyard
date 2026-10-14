@@ -477,7 +477,7 @@ once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
 
 The historical AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
-uses one package-owned Go producer for native projection and semantic hashes.
+used one package-owned Go producer for native projection and semantic hashes.
 Mount records form an unordered multiset; other arrays preserve order. Native
 helper executable bytes bind the package. Its optional closed failure transport
 retains the integration, yard and inspect/apply/verify phase without changing

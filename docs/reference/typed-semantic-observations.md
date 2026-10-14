@@ -1,11 +1,15 @@
 # Typed semantic observations
 
 Accepted: 2026-10-11. Historical scope: the now-retired AI Observer integration pilot.
-The generic canonicalizer remains supported; the active integration and its native producer
-were removed during dashboard replacement. Historical protected fingerprints retain their
-release recovery authority. This
-contract keeps the existing planner, integration catalog and desired-state
-authority. Source and artifact digests remain byte-exact.
+The active integration and its native producer were removed during dashboard replacement.
+The unused generic snapshot and fingerprint APIs have also been removed;
+`internal/observation` now provides only bounded strict JSON validation for owner
+publication receipts and contract snapshots. Its validation limits and accepted JSON
+language are unchanged. The canonical format below remains the historical sealed-owner
+contract: protected fingerprints retain their release recovery authority, and current
+code does not reinterpret them. Source and artifact digests remain byte-exact.
+
+The remaining sections describe the historical pilot and its acceptance contract.
 
 ## Producer and types
 
@@ -15,7 +19,7 @@ projection, desired context and semantic fingerprints. Planning and apply use
 the same constructor; retirement's second inspect uses the same container
 constructor. Python does not parse or reserialize protected native JSON.
 
-`internal/observation` provides closed immutable values, explicit ordered
+The pilot's `internal/observation` provided closed immutable values, explicit ordered
 sequences and unordered multisets, validated snapshots and semantic fingerprints.
 Fingerprinting accepts only snapshots, never raw JSON, slices, byte digests or
 advisory health. Constructors copy collections; returned canonical bytes are
