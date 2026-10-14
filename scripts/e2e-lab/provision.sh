@@ -132,8 +132,13 @@ disable_agent_sshd_policy() {
   systemctl reload ssh.service
 }
 
+# Optional output paths keep host-free callers inside their fixture.
+# shellcheck disable=SC2120
 reconcile_agent_sshd_policy() {
-  cat > /usr/local/libexec/subyard/test-vms-authorized-key <<'EOF'
+  local helper="${1:-/usr/local/libexec/subyard/test-vms-authorized-key}"
+  local sudoers="${2:-/etc/sudoers.d/subyard-test-vms-facade}"
+  local policy="${3:-/etc/ssh/sshd_config.d/90-subyard-e2e-agent.conf}"
+  cat > "$helper" <<'EOF'
 #!/bin/sh
 set -eu
 user="${1:-}"
@@ -145,15 +150,15 @@ case "$key_blob" in '' | *[!A-Za-z0-9+/=]*) exit 0 ;; esac
 printf 'restrict,command="sudo -n /usr/local/libexec/subyard/test-vms-inner _test-vms-facade" %s %s\n' \
   "$key_type" "$key_blob"
 EOF
-  chmod 0755 /usr/local/libexec/subyard/test-vms-authorized-key
-  cat > /etc/sudoers.d/subyard-test-vms-facade <<'EOF'
+  chmod 0755 "$helper"
+  cat > "$sudoers" <<'EOF'
 Defaults:subyard-e2e-agent env_keep += "SSH_ORIGINAL_COMMAND"
 subyard-e2e-agent ALL=(root) NOPASSWD: /usr/local/libexec/subyard/test-vms-inner _test-vms-facade
 EOF
-  chmod 0440 /etc/sudoers.d/subyard-test-vms-facade
-  visudo -cf /etc/sudoers.d/subyard-test-vms-facade >/dev/null
-  install -d -m 0755 /etc/ssh/sshd_config.d
-  cat > /etc/ssh/sshd_config.d/90-subyard-e2e-agent.conf <<'EOF'
+  chmod 0440 "$sudoers"
+  visudo -cf "$sudoers" >/dev/null
+  install -d -m 0755 "$(dirname "$policy")"
+  cat > "$policy" <<'EOF'
 # Managed by Subyard; key authentication only.
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -162,7 +167,7 @@ Match User subyard-e2e-agent
     AuthorizedKeysCommand /usr/local/libexec/subyard/test-vms-authorized-key %u %t %k
     AuthorizedKeysCommandUser nobody
 EOF
-  chmod 0644 /etc/ssh/sshd_config.d/90-subyard-e2e-agent.conf
+  chmod 0644 "$policy"
   sshd -t
   systemctl reload ssh.service
 }
@@ -242,11 +247,14 @@ legacy_slot_home_is_recognizable() {
   [ "$ssh_gid" = "$keys_gid" ] && [ "$ssh_gid" -ne 0 ]
 }
 
+# Optional output paths keep host-free callers inside their fixture.
+# shellcheck disable=SC2120
 reconcile_slot_accounts() {
   local slot user home primary entry actual_home actual_shell created
+  local homes="${1:-/var/lib/subyard/e2e-slots}"
   for slot in $(seq 1 "$E2E_VM_SLOT_COUNT"); do
     user="subyard-e2e-slot-$slot"
-    home="/var/lib/subyard/e2e-slots/$slot"
+    home="$homes/$slot"
     created=0
     if id -u "$user" >/dev/null 2>&1; then
       entry="$(getent passwd "$user")" \
@@ -312,8 +320,12 @@ reconcile_test_vm_state_directory() {
   fi
 }
 
+# Optional output paths keep host-free callers inside their fixture.
+# shellcheck disable=SC2120
 install_inner_firewall() {
-  cat > /usr/local/libexec/subyard/test-vms-firewall <<'EOF'
+  local helper="${1:-/usr/local/libexec/subyard/test-vms-firewall}"
+  local service="${2:-/etc/systemd/system/subyard-test-vms-firewall.service}"
+  cat > "$helper" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
@@ -339,8 +351,8 @@ RULES
   *) printf 'usage: test-vms-firewall apply|remove\n' >&2; exit 2 ;;
 esac
 EOF
-  chmod 0755 /usr/local/libexec/subyard/test-vms-firewall
-  cat > /etc/systemd/system/subyard-test-vms-firewall.service <<'EOF'
+  chmod 0755 "$helper"
+  cat > "$service" <<'EOF'
 [Unit]
 Description=Isolate disposable nested VMs from the privileged yard
 After=network-online.target incus.service
@@ -357,7 +369,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now subyard-test-vms-firewall.service
-  /usr/local/libexec/subyard/test-vms-firewall apply
+  "$helper" apply
 }
 
 disable_inner_firewall() {
@@ -423,100 +435,228 @@ EOF
   chmod 0644 /etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources
 }
 
+# Optional output paths keep host-free callers inside their fixture.
+# shellcheck disable=SC2120
+prepare_test_vm_config() {
+  local config_dir="${1:-/etc/subyard}"
+  : "${NESTED_E2E_VMS:=0}"
+  : "${DEV_USER:=dev}"
+  # The engine resolves admission budgets before streaming this adapter.
+  for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+    [ -n "${!e2e_budget_name:-}" ] || { printf 'missing %s\n' "$e2e_budget_name" >&2; exit 1; }
+  done
+  E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes
+  : "${E2E_VM_IMAGE:=images:debian/13/cloud}"
+  : "${E2E_VM_CPU:=4}"
+  : "${E2E_VM_MEMORY:=4GiB}"
+  : "${E2E_VM_DISK:=20GiB}"
+  : "${E2E_VM_SLOT_COUNT:=2}"
+  : "${E2E_VM_BOOT_TIMEOUT:=300}"
+  : "${E2E_VM_STATE_DIR:=/var/lib/subyard/test-vms}"
+  : "${E2E_BROKER_SOURCE:=test-yard}"
+  : "${E2E_AGENT_USER:=subyard-e2e-agent}"
+  : "${E2E_AGENT_HOME:=/var/lib/subyard/e2e-agent}"
+  : "${E2E_AGENT_PUBLIC_KEY:=}"
+
+  case "$NESTED_E2E_VMS" in 0 | 1) ;; *) printf 'invalid NESTED_E2E_VMS\n' >&2; exit 1 ;; esac
+  [[ "$DEV_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { printf 'invalid DEV_USER\n' >&2; exit 1; }
+  [[ "$E2E_VM_CPU" =~ ^[1-9][0-9]*$ ]] || { printf 'invalid E2E_VM_CPU\n' >&2; exit 1; }
+  [[ "$E2E_VM_MEMORY" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_MEMORY\n' >&2; exit 1; }
+  [[ "$E2E_VM_DISK" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_DISK\n' >&2; exit 1; }
+  for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
+    if [ "$e2e_budget_name" = E2E_DISK_BUDGET ] && [ "${!e2e_budget_name}" = 0GiB ]; then continue; fi
+    [[ "${!e2e_budget_name}" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] \
+      || { printf 'invalid %s\n' "$e2e_budget_name" >&2; exit 1; }
+  done
+  case "$E2E_VM_DISK" in
+    *GiB) e2e_disk_mib=$(( ${E2E_VM_DISK%GiB} * 1024 )) ;;
+    *MiB) e2e_disk_mib=${E2E_VM_DISK%MiB} ;;
+  esac
+  [ "$e2e_disk_mib" -ge 10240 ] \
+    || { printf 'E2E_VM_DISK must be at least 10GiB\n' >&2; exit 1; }
+  case "$E2E_VM_IMAGE" in '' | -* | *[!A-Za-z0-9._:/@+-]*) printf 'invalid E2E_VM_IMAGE\n' >&2; exit 1 ;; esac
+  [[ "$E2E_VM_SLOT_COUNT" =~ ^[1-9][0-9]*$ ]] \
+    || { printf 'invalid E2E_VM_SLOT_COUNT\n' >&2; exit 1; }
+  [[ "$E2E_VM_BOOT_TIMEOUT" =~ ^[0-9]+$ ]] \
+    && [ "$E2E_VM_BOOT_TIMEOUT" -ge 30 ] && [ "$E2E_VM_BOOT_TIMEOUT" -le 1800 ] \
+    || { printf 'invalid E2E_VM_BOOT_TIMEOUT\n' >&2; exit 1; }
+  case "$E2E_VM_STATE_DIR" in /var/lib/subyard/*) ;; *) printf 'unsafe E2E_VM_STATE_DIR\n' >&2; exit 1 ;; esac
+  case "$E2E_BROKER_SOURCE" in
+    ''|*$'\n'*|*$'\r'*|*$'\t'*) printf 'unsafe E2E_BROKER_SOURCE\n' >&2; exit 1 ;;
+  esac
+  [ "${#E2E_BROKER_SOURCE}" -le 96 ] || { printf 'unsafe E2E_BROKER_SOURCE\n' >&2; exit 1; }
+  case "$E2E_AGENT_USER" in '' | -* | *[!a-z0-9_-]*) printf 'invalid E2E_AGENT_USER\n' >&2; exit 1 ;; esac
+  case "$E2E_AGENT_HOME" in /var/lib/subyard/*) ;; *) printf 'unsafe E2E_AGENT_HOME\n' >&2; exit 1 ;; esac
+  if [ -n "$E2E_AGENT_PUBLIC_KEY" ]; then
+    [[ "$E2E_AGENT_PUBLIC_KEY" != *$'\n'* && "$E2E_AGENT_PUBLIC_KEY" != *$'\r'* ]] \
+      || { printf 'E2E_AGENT_PUBLIC_KEY must be one line\n' >&2; exit 1; }
+    [[ "$E2E_AGENT_PUBLIC_KEY" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/=]+([[:space:]].*)?$ ]] \
+      || { printf 'E2E_AGENT_PUBLIC_KEY must be an Ed25519 public key\n' >&2; exit 1; }
+    agent_key_check="$(mktemp)"
+    read -r agent_key_type agent_key_blob _agent_key_comment <<<"$E2E_AGENT_PUBLIC_KEY"
+    printf '%s %s\n' "$agent_key_type" "$agent_key_blob" > "$agent_key_check"
+    if ! ssh-keygen -l -f "$agent_key_check" >/dev/null 2>&1; then
+      rm -f "$agent_key_check"
+      printf 'E2E_AGENT_PUBLIC_KEY is not a valid Ed25519 public key\n' >&2
+      exit 1
+    fi
+    rm -f "$agent_key_check"
+  fi
+
+  install -d -m 0755 "$config_dir"
+  config_candidate="$(mktemp "$config_dir/.test-vms.env.XXXXXX")"
+  trap 'rm -f -- "$config_candidate"' EXIT
+  {
+    printf 'NESTED_E2E_VMS=%q\n' "$NESTED_E2E_VMS"
+    printf 'DEV_USER=%q\n' "$DEV_USER"
+    printf 'E2E_DISK_BUDGET=%q\n' "$E2E_DISK_BUDGET"
+    printf 'E2E_CACHE_BUDGET=%q\n' "$E2E_CACHE_BUDGET"
+    printf 'E2E_DISK_RESERVE=%q\n' "$E2E_DISK_RESERVE"
+    printf 'E2E_MEMORY_RESERVE=%q\n' "$E2E_MEMORY_RESERVE"
+    printf 'E2E_VM_OVERHEAD=%q\n' "$E2E_VM_OVERHEAD"
+    printf 'E2E_RECIPE_ROOT=%q\n' "$E2E_RECIPE_ROOT"
+    printf 'E2E_VM_IMAGE=%q\n' "$E2E_VM_IMAGE"
+    printf 'E2E_VM_CPU=%q\n' "$E2E_VM_CPU"
+    printf 'E2E_VM_MEMORY=%q\n' "$E2E_VM_MEMORY"
+    printf 'E2E_VM_DISK=%q\n' "$E2E_VM_DISK"
+    printf 'E2E_VM_SLOT_COUNT=%q\n' "$E2E_VM_SLOT_COUNT"
+    printf 'E2E_VM_BOOT_TIMEOUT=%q\n' "$E2E_VM_BOOT_TIMEOUT"
+    printf 'E2E_VM_STATE_DIR=%q\n' "$E2E_VM_STATE_DIR"
+    printf 'E2E_BROKER_SOURCE=%q\n' "$E2E_BROKER_SOURCE"
+    printf 'E2E_AGENT_USER=%q\n' "$E2E_AGENT_USER"
+    printf 'E2E_AGENT_HOME=%q\n' "$E2E_AGENT_HOME"
+    printf 'E2E_AGENT_PUBLIC_KEY=%q\n' "$E2E_AGENT_PUBLIC_KEY"
+  } > "$config_candidate"
+  chmod 0644 "$config_candidate"
+}
+
+version_ok() {
+  command -v incus >/dev/null 2>&1 \
+    && dpkg --compare-versions "$(incus --version 2>/dev/null)" ge 6.0.6
+}
+
+reconcile_inner_packages() {
+  if ! version_ok; then
+    reconcile_inner_zabbly_repo
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  run_with_progress "updating inner VM backend packages" apt-get update -qq
+  run_with_progress "installing inner Incus and QEMU" \
+    apt-get install -y -qq --no-install-recommends \
+      incus qemu-system-x86 qemu-utils ovmf openssh-client nftables genisoimage
+  command -v mkisofs >/dev/null 2>&1 \
+    || { printf 'mkisofs is required for VM cloud-init metadata disks\n' >&2; exit 1; }
+  version_ok || { printf 'Incus 6.0.6 or newer is required inside the yard\n' >&2; exit 1; }
+}
+
+reconcile_test_vm_access() {
+  getent group incus-admin >/dev/null 2>&1 || groupadd --system incus-admin
+  id -u "$DEV_USER" >/dev/null 2>&1 || { printf 'yard user is missing: %s\n' "$DEV_USER" >&2; exit 1; }
+  getent group yard >/dev/null 2>&1 || groupadd --system yard
+  remove_group_member "$DEV_USER" incus-admin
+  remove_group_member "$DEV_USER" yard
+  reconcile_test_vm_state_directory
+  reconcile_agent_account
+  reconcile_slot_accounts
+  reconcile_agent_sshd_policy
+  retire_agent_static_keys
+}
+
+# Optional output paths keep host-free callers inside their fixture.
+# shellcheck disable=SC2120
+reconcile_test_vm_broker() {
+  local system_dir="${1:-/etc/systemd/system}"
+  local config_path="${2:-/etc/subyard/test-vms.env}"
+  local worker="${3:-/usr/local/libexec/subyard/test-vms-inner}"
+  # This top-level slice contains only broker workers. The Go entrypoint
+  # execs systemd-run as the stdio transport; PID1 starts each real worker inside
+  # the slice. Existing SSH/lifecycle transport ceilings remain in place, and
+  # Incus guests and builders are daemon-created outside the process budget.
+  cat > "$system_dir/subyardtestvms.slice" <<'EOF'
+[Unit]
+Description=Subyard test VM broker process memory budget
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=2G
+MemorySwapMax=2G
+EOF
+
+  # Container images may reset LoadCredential in a type-wide LXC drop-in.
+  # Restore only this worker family's credential after that reset, preserving
+  # every other image/operator setting. %N binds the source to the exact unit.
+  install -d -m 0755 "$system_dir/subyard-test-vms-worker-.service.d"
+  cat > "$system_dir/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf" <<'EOF'
+[Service]
+LoadCredential=subyard-broker-request:/run/subyard-test-vms-workers/%N.json
+EOF
+  chmod 0644 "$system_dir/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf"
+
+  systemctl disable --now subyard-test-vms-gc.timer >/dev/null 2>&1 || true
+  rm -f "$system_dir/subyard-test-vms-gc.service" \
+    "$system_dir/subyard-test-vms-gc.timer"
+  cat > "$system_dir/subyard-test-vms-lease-reaper.service" <<'EOF'
+[Unit]
+Description=Fence expired Subyard test VM leases
+After=incus.service subyardtestvms.slice
+Requires=incus.service subyardtestvms.slice
+
+[Service]
+Type=oneshot
+Slice=subyardtestvms.slice
+ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
+EOF
+  cat > "$system_dir/subyard-test-vms-lease-reaper.timer" <<'EOF'
+[Unit]
+Description=Check Subyard test VM lease heartbeats
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  cat > "$system_dir/subyard-test-vms-broker.service" <<'EOF'
+[Unit]
+Description=Subyard test VM lease broker lifecycle
+After=incus.service subyardtestvms.slice
+Requires=incus.service subyardtestvms.slice
+
+[Service]
+Type=oneshot
+Slice=subyardtestvms.slice
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker broker-start
+ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
+ExecStop=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker drain-all
+TimeoutStopSec=10min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl start subyardtestvms.slice
+  # Apply changed limits to an already-active slice on a repeated setup.
+  systemctl set-property --runtime subyardtestvms.slice MemoryMax=2G MemorySwapMax=2G
+
+  SUBYARD_TEST_VMS_CONFIG="$config_candidate" \
+    "$worker" _test-vms-worker reconcile-pool --yes
+  mv -f -- "$config_candidate" "$config_path"
+  trap - EXIT
+
+  systemctl enable --now subyard-test-vms-lease-reaper.timer
+  systemctl enable --now subyard-test-vms-broker.service
+}
+
 # Production streams this file into L1 with `bash -s`, where BASH_SOURCE has no element 0. Treat
 # that as execution; return early only when a test explicitly sources the file from another script.
 [ "${BASH_SOURCE[0]:-$0}" = "$0" ] || return 0
 
 [ "$(id -u)" = 0 ] || { printf 'test-vms provision requires root inside the yard\n' >&2; exit 1; }
-: "${NESTED_E2E_VMS:=0}"
-: "${DEV_USER:=dev}"
-# The engine resolves admission budgets before streaming this adapter.
-for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
-  [ -n "${!e2e_budget_name:-}" ] || { printf 'missing %s\n' "$e2e_budget_name" >&2; exit 1; }
-done
-E2E_RECIPE_ROOT=/usr/local/libexec/subyard/e2e-recipes
-: "${E2E_VM_IMAGE:=images:debian/13/cloud}"
-: "${E2E_VM_CPU:=4}"
-: "${E2E_VM_MEMORY:=4GiB}"
-: "${E2E_VM_DISK:=20GiB}"
-: "${E2E_VM_SLOT_COUNT:=2}"
-: "${E2E_VM_BOOT_TIMEOUT:=300}"
-: "${E2E_VM_STATE_DIR:=/var/lib/subyard/test-vms}"
-: "${E2E_BROKER_SOURCE:=test-yard}"
-: "${E2E_AGENT_USER:=subyard-e2e-agent}"
-: "${E2E_AGENT_HOME:=/var/lib/subyard/e2e-agent}"
-: "${E2E_AGENT_PUBLIC_KEY:=}"
-
-case "$NESTED_E2E_VMS" in 0 | 1) ;; *) printf 'invalid NESTED_E2E_VMS\n' >&2; exit 1 ;; esac
-[[ "$DEV_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { printf 'invalid DEV_USER\n' >&2; exit 1; }
-[[ "$E2E_VM_CPU" =~ ^[1-9][0-9]*$ ]] || { printf 'invalid E2E_VM_CPU\n' >&2; exit 1; }
-[[ "$E2E_VM_MEMORY" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_MEMORY\n' >&2; exit 1; }
-[[ "$E2E_VM_DISK" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] || { printf 'invalid E2E_VM_DISK\n' >&2; exit 1; }
-for e2e_budget_name in E2E_DISK_BUDGET E2E_CACHE_BUDGET E2E_DISK_RESERVE E2E_MEMORY_RESERVE E2E_VM_OVERHEAD; do
-  if [ "$e2e_budget_name" = E2E_DISK_BUDGET ] && [ "${!e2e_budget_name}" = 0GiB ]; then continue; fi
-  [[ "${!e2e_budget_name}" =~ ^[1-9][0-9]*(MiB|GiB)$ ]] \
-    || { printf 'invalid %s\n' "$e2e_budget_name" >&2; exit 1; }
-done
-case "$E2E_VM_DISK" in
-  *GiB) e2e_disk_mib=$(( ${E2E_VM_DISK%GiB} * 1024 )) ;;
-  *MiB) e2e_disk_mib=${E2E_VM_DISK%MiB} ;;
-esac
-[ "$e2e_disk_mib" -ge 10240 ] \
-  || { printf 'E2E_VM_DISK must be at least 10GiB\n' >&2; exit 1; }
-case "$E2E_VM_IMAGE" in '' | -* | *[!A-Za-z0-9._:/@+-]*) printf 'invalid E2E_VM_IMAGE\n' >&2; exit 1 ;; esac
-[[ "$E2E_VM_SLOT_COUNT" =~ ^[1-9][0-9]*$ ]] \
-  || { printf 'invalid E2E_VM_SLOT_COUNT\n' >&2; exit 1; }
-[[ "$E2E_VM_BOOT_TIMEOUT" =~ ^[0-9]+$ ]] \
-  && [ "$E2E_VM_BOOT_TIMEOUT" -ge 30 ] && [ "$E2E_VM_BOOT_TIMEOUT" -le 1800 ] \
-  || { printf 'invalid E2E_VM_BOOT_TIMEOUT\n' >&2; exit 1; }
-case "$E2E_VM_STATE_DIR" in /var/lib/subyard/*) ;; *) printf 'unsafe E2E_VM_STATE_DIR\n' >&2; exit 1 ;; esac
-case "$E2E_BROKER_SOURCE" in
-  ''|*$'\n'*|*$'\r'*|*$'\t'*) printf 'unsafe E2E_BROKER_SOURCE\n' >&2; exit 1 ;;
-esac
-[ "${#E2E_BROKER_SOURCE}" -le 96 ] || { printf 'unsafe E2E_BROKER_SOURCE\n' >&2; exit 1; }
-case "$E2E_AGENT_USER" in '' | -* | *[!a-z0-9_-]*) printf 'invalid E2E_AGENT_USER\n' >&2; exit 1 ;; esac
-case "$E2E_AGENT_HOME" in /var/lib/subyard/*) ;; *) printf 'unsafe E2E_AGENT_HOME\n' >&2; exit 1 ;; esac
-if [ -n "$E2E_AGENT_PUBLIC_KEY" ]; then
-  [[ "$E2E_AGENT_PUBLIC_KEY" != *$'\n'* && "$E2E_AGENT_PUBLIC_KEY" != *$'\r'* ]] \
-    || { printf 'E2E_AGENT_PUBLIC_KEY must be one line\n' >&2; exit 1; }
-  [[ "$E2E_AGENT_PUBLIC_KEY" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/=]+([[:space:]].*)?$ ]] \
-    || { printf 'E2E_AGENT_PUBLIC_KEY must be an Ed25519 public key\n' >&2; exit 1; }
-  agent_key_check="$(mktemp)"
-  read -r agent_key_type agent_key_blob _agent_key_comment <<<"$E2E_AGENT_PUBLIC_KEY"
-  printf '%s %s\n' "$agent_key_type" "$agent_key_blob" > "$agent_key_check"
-  if ! ssh-keygen -l -f "$agent_key_check" >/dev/null 2>&1; then
-    rm -f "$agent_key_check"
-    printf 'E2E_AGENT_PUBLIC_KEY is not a valid Ed25519 public key\n' >&2
-    exit 1
-  fi
-  rm -f "$agent_key_check"
-fi
-
-install -d -m 0755 /etc/subyard
-config_candidate="$(mktemp /etc/subyard/.test-vms.env.XXXXXX)"
-trap 'rm -f -- "$config_candidate"' EXIT
-{
-  printf 'NESTED_E2E_VMS=%q\n' "$NESTED_E2E_VMS"
-  printf 'DEV_USER=%q\n' "$DEV_USER"
-  printf 'E2E_DISK_BUDGET=%q\n' "$E2E_DISK_BUDGET"
-  printf 'E2E_CACHE_BUDGET=%q\n' "$E2E_CACHE_BUDGET"
-  printf 'E2E_DISK_RESERVE=%q\n' "$E2E_DISK_RESERVE"
-  printf 'E2E_MEMORY_RESERVE=%q\n' "$E2E_MEMORY_RESERVE"
-  printf 'E2E_VM_OVERHEAD=%q\n' "$E2E_VM_OVERHEAD"
-  printf 'E2E_RECIPE_ROOT=%q\n' "$E2E_RECIPE_ROOT"
-  printf 'E2E_VM_IMAGE=%q\n' "$E2E_VM_IMAGE"
-  printf 'E2E_VM_CPU=%q\n' "$E2E_VM_CPU"
-  printf 'E2E_VM_MEMORY=%q\n' "$E2E_VM_MEMORY"
-  printf 'E2E_VM_DISK=%q\n' "$E2E_VM_DISK"
-  printf 'E2E_VM_SLOT_COUNT=%q\n' "$E2E_VM_SLOT_COUNT"
-  printf 'E2E_VM_BOOT_TIMEOUT=%q\n' "$E2E_VM_BOOT_TIMEOUT"
-  printf 'E2E_VM_STATE_DIR=%q\n' "$E2E_VM_STATE_DIR"
-  printf 'E2E_BROKER_SOURCE=%q\n' "$E2E_BROKER_SOURCE"
-  printf 'E2E_AGENT_USER=%q\n' "$E2E_AGENT_USER"
-  printf 'E2E_AGENT_HOME=%q\n' "$E2E_AGENT_HOME"
-  printf 'E2E_AGENT_PUBLIC_KEY=%q\n' "$E2E_AGENT_PUBLIC_KEY"
-} > "$config_candidate"
-chmod 0644 "$config_candidate"
+prepare_test_vm_config
 
 if [ "$NESTED_E2E_VMS" = 0 ]; then
   systemctl disable --now subyard-test-vms-gc.timer >/dev/null 2>&1 || true
@@ -535,119 +675,15 @@ for node in /dev/kvm /dev/vsock /dev/vhost-vsock /dev/net/tun; do
   [ -c "$node" ] || { printf 'nested VM device missing inside yard: %s\n' "$node" >&2; exit 1; }
 done
 
-version_ok() {
-  command -v incus >/dev/null 2>&1 \
-    && dpkg --compare-versions "$(incus --version 2>/dev/null)" ge 6.0.6
-}
-
-if ! version_ok; then
-  reconcile_inner_zabbly_repo
-fi
-
-export DEBIAN_FRONTEND=noninteractive
-run_with_progress "updating inner VM backend packages" apt-get update -qq
-run_with_progress "installing inner Incus and QEMU" \
-  apt-get install -y -qq --no-install-recommends \
-    incus qemu-system-x86 qemu-utils ovmf openssh-client nftables genisoimage
-command -v mkisofs >/dev/null 2>&1 \
-  || { printf 'mkisofs is required for VM cloud-init metadata disks\n' >&2; exit 1; }
-version_ok || { printf 'Incus 6.0.6 or newer is required inside the yard\n' >&2; exit 1; }
+reconcile_inner_packages
 # AppArmor 4.1 userspace emits AF_UNIX rules that the 6.8 kernel rejects with a type/protocol ABI
 # mismatch. Disable only the inner daemon's per-instance profiles. The trusted L1 container remains
 # confined by its L0 AppArmor profile and the inner daemon has no L0 socket or host paths.
 reconcile_inner_apparmor_compat
 
-getent group incus-admin >/dev/null 2>&1 || groupadd --system incus-admin
-id -u "$DEV_USER" >/dev/null 2>&1 || { printf 'yard user is missing: %s\n' "$DEV_USER" >&2; exit 1; }
-getent group yard >/dev/null 2>&1 || groupadd --system yard
-remove_group_member "$DEV_USER" incus-admin
-remove_group_member "$DEV_USER" yard
-reconcile_test_vm_state_directory
-reconcile_agent_account
-reconcile_slot_accounts
-reconcile_agent_sshd_policy
-retire_agent_static_keys
+reconcile_test_vm_access
 
 reconcile_inner_incus
 install_inner_firewall
 
-# This top-level slice contains only broker workers. The Go entrypoint
-# execs systemd-run as the stdio transport; PID1 starts each real worker inside
-# the slice. Existing SSH/lifecycle transport ceilings remain in place, and
-# Incus guests and builders are daemon-created outside the process budget.
-cat > /etc/systemd/system/subyardtestvms.slice <<'EOF'
-[Unit]
-Description=Subyard test VM broker process memory budget
-
-[Slice]
-MemoryAccounting=yes
-MemoryMax=2G
-MemorySwapMax=2G
-EOF
-
-# Container images may reset LoadCredential in a type-wide LXC drop-in.
-# Restore only this worker family's credential after that reset, preserving
-# every other image/operator setting. %N binds the source to the exact unit.
-install -d -m 0755 /etc/systemd/system/subyard-test-vms-worker-.service.d
-cat > /etc/systemd/system/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf <<'EOF'
-[Service]
-LoadCredential=subyard-broker-request:/run/subyard-test-vms-workers/%N.json
-EOF
-chmod 0644 /etc/systemd/system/subyard-test-vms-worker-.service.d/zzzz-subyard-credentials.conf
-
-systemctl disable --now subyard-test-vms-gc.timer >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/subyard-test-vms-gc.service \
-  /etc/systemd/system/subyard-test-vms-gc.timer
-cat > /etc/systemd/system/subyard-test-vms-lease-reaper.service <<'EOF'
-[Unit]
-Description=Fence expired Subyard test VM leases
-After=incus.service subyardtestvms.slice
-Requires=incus.service subyardtestvms.slice
-
-[Service]
-Type=oneshot
-Slice=subyardtestvms.slice
-ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
-EOF
-cat > /etc/systemd/system/subyard-test-vms-lease-reaper.timer <<'EOF'
-[Unit]
-Description=Check Subyard test VM lease heartbeats
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-cat > /etc/systemd/system/subyard-test-vms-broker.service <<'EOF'
-[Unit]
-Description=Subyard test VM lease broker lifecycle
-After=incus.service subyardtestvms.slice
-Requires=incus.service subyardtestvms.slice
-
-[Service]
-Type=oneshot
-Slice=subyardtestvms.slice
-RemainAfterExit=yes
-ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker broker-start
-ExecStart=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker gc
-ExecStop=/usr/local/libexec/subyard/test-vms-inner _test-vms-worker drain-all
-TimeoutStopSec=10min
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl start subyardtestvms.slice
-# Apply changed limits to an already-active slice on a repeated setup.
-systemctl set-property --runtime subyardtestvms.slice MemoryMax=2G MemorySwapMax=2G
-
-SUBYARD_TEST_VMS_CONFIG="$config_candidate" \
-  /usr/local/libexec/subyard/test-vms-inner _test-vms-worker reconcile-pool --yes
-mv -f -- "$config_candidate" /etc/subyard/test-vms.env
-trap - EXIT
-
-systemctl enable --now subyard-test-vms-lease-reaper.timer
-systemctl enable --now subyard-test-vms-broker.service
+reconcile_test_vm_broker

@@ -569,6 +569,71 @@ exec bash "$1/scripts/install-power-reconciler.sh" --yes
 	}
 }
 
+func TestTestVMStageInstallsHostSinkBeforeProducer(t *testing.T) {
+	for _, sinkFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sink-fails-%t", sinkFails), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			calls := filepath.Join(root, "calls")
+			engine := filepath.Join(root, "engine")
+			for _, name := range []string{"scripts/e2e-lab", "scripts/lib", "bin"} {
+				if err := os.MkdirAll(filepath.Join(root, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CALLS", calls)
+			testkit.WriteFile(t, engine, []byte("fixture engine\n"), 0700)
+			// Supply only the immutable assets the backend hashes before its first native request.
+			for _, name := range []string{
+				"scripts/e2e-lab/provision.sh", "scripts/e2e-lab/base.sh", "scripts/01-install-incus.sh",
+				"scripts/lib/runtime.sh", "scripts/lib/engine-context.sh", "scripts/lib/ui.sh",
+				"scripts/lib/host.sh", "scripts/lib/download.sh", "scripts/lib-power.sh",
+			} {
+				testkit.WriteFile(t, filepath.Join(root, name), []byte("fixture\n"), 0600)
+			}
+			testkit.WriteFile(t, filepath.Join(root, "scripts/install-test-vms-host-sink.sh"), []byte(`#!/bin/sh
+[ "$SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE" = "$SUBYARD_DISPATCHER_PATH" ] || exit 91
+printf 'sink\n' >> "$CALLS"
+exit "$SINK_RC"
+`), 0700)
+			testkit.WriteFile(t, filepath.Join(root, "bin/incus"), []byte(`#!/bin/sh
+printf 'producer\n' >> "$CALLS"
+exit 19
+`), 0700)
+			// ProcessRunner resolves executable names through the process PATH.
+			t.Setenv("PATH", filepath.Join(root, "bin")+":"+os.Getenv("PATH"))
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"subyard-test/yard-test": {Name: "yard-test", Project: "subyard-test", Status: "RUNNING",
+					Config: map[string]string{}},
+			}}
+			sinkRC := "0"
+			if sinkFails {
+				sinkRC = "18"
+			}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, ConfigWriter: incus,
+				Environment: []string{"PATH=" + os.Getenv("PATH"), "CALLS=" + calls,
+					"SINK_RC=" + sinkRC, "SUBYARD_DISPATCHER_PATH=" + engine, "NESTED_E2E_VMS=1"},
+				Yard: domain.Context{YardName: "test", IncusProject: "subyard-test", YardInstanceName: "yard-test",
+					NestedE2EVMs: true, Paths: domain.RuntimePaths{DataHome: filepath.Join(root, "data")}},
+			}
+			stageErr := runtime.ApplyStage(context.Background(), ports.ReconcileStageTestVMs)
+			if stageErr == nil {
+				t.Fatal("native fixture failure was lost")
+			}
+			got, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatalf("stage never reached sink: %v (read calls: %v)", stageErr, err)
+			}
+			want := "sink\nproducer\n"
+			if sinkFails {
+				want = "sink\n"
+			}
+			if string(got) != want {
+				t.Fatalf("test-vms stage calls = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestTestVMHostSinkProbeRequiresSelectedEngineUnitAndTimer(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")

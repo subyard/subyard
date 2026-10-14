@@ -341,6 +341,52 @@ func TestEnsureGuestToolsReconcilesZshOnRetainedVM(t *testing.T) {
 	}
 }
 
+// A retained guest can have the dependency marker but lose its SSH host keys.
+// Inspect adapter requests, rather than the source of the generated policy.
+func TestEnsureGuestToolsRepairsHostKeysBeforeSSHReadiness(t *testing.T) {
+	for _, repairFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repair-fails-%t", repairFails), func(t *testing.T) {
+			repaired, readiness := false, false
+			repairError := errors.New("host key repair failed")
+			runner := &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				joined := strings.Join(arguments, " ")
+				switch {
+				case strings.Contains(joined, "passwd --status dev"):
+					return []byte("dev P 2026-08-06 0 99999 7 -1\n"), nil, nil
+				case len(arguments) > 0 && strings.Contains(arguments[len(arguments)-1], "ssh-keygen -A"):
+					policy := arguments[len(arguments)-1]
+					repair := strings.Index(policy, "ssh-keygen -A\n")
+					validate := strings.Index(policy, "sshd -t\n")
+					reload := strings.Index(policy, "systemctl reload ssh")
+					if repair < 0 || validate <= repair || reload <= validate {
+						t.Fatalf("host-key repair must precede validation and reload: %q", policy)
+					}
+					if repairFails {
+						return nil, nil, repairError
+					}
+					repaired = true
+				case strings.Contains(joined, "sshd -T"):
+					readiness = true
+					if !repaired {
+						t.Fatal("SSH readiness ran before missing host keys were repaired")
+					}
+					return []byte("passwordauthentication no\n"), nil, nil
+				}
+				return nil, nil, nil
+			}}
+			runtime := &Runtime{Config: fixtureConfig(t), Runner: runner, Stdout: io.Discard, Now: time.Now}
+			err := runtime.ensureGuestTools(context.Background(), "e2e-vm-1")
+			if repairFails {
+				if !errors.Is(err, repairError) || readiness {
+					t.Fatalf("failed host-key repair reached readiness: err=%v readiness=%t", err, readiness)
+				}
+			} else if err != nil || !repaired || !readiness {
+				t.Fatalf("guest SSH reconciliation incomplete: err=%v repaired=%t readiness=%t", err, repaired, readiness)
+			}
+		})
+	}
+}
+
 func TestGuestToolchainTimeoutKillsTermIgnoringDescendant(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	const script = `trap '' TERM
