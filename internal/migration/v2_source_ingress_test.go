@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -8,8 +9,70 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
+
+func TestV2SourceIngressPreparedAssetRetainsLargeImportedBytesOnResume(t *testing.T) {
+	requireJQ(t)
+	fixture := newSourceInstallFixture(t, "# Stable launcher for a release-installed native Go control-plane engine.")
+	writeTestFile(t, filepath.Join(fixture.source, "private/config.env"), 0600, "DEV_SUDO=1\n")
+	writeTestFile(t, filepath.Join(fixture.data, "config.env"), 0600, "DEV_SUDO=1\n")
+	payload := strings.Repeat("large prepared asset\n", 450000)
+	if len(payload) <= 8<<20 || len(payload) >= maximumSourceIngressBytes {
+		t.Fatal("fixture is outside the imported asset compatibility range")
+	}
+	writeTestFile(t, filepath.Join(fixture.source, "private/agents/codex/repo.rules"), 0600, payload)
+	options := V2SourceIngressOptions{Descriptor: sourceIngressDescriptor(fixture), RepositoryRoot: filepath.Join(fixture.data, "runtime/releases/release-current"), RuntimeRoot: filepath.Join(fixture.data, "runtime"), ConfigHome: fixture.config, Environment: append(os.Environ(), "TEST_DATA_HOME="+fixture.data, "TEST_CONFIG_HOME="+fixture.config, "TEST_SOURCE_ROOT="+fixture.source)}
+	ingress, err := newV2SourceIngress(options, fixture.home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := ingress.Inspect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(fixture.config, "overrides/host/agents/codex/repo.rules")
+	before, matched, err := planned.Prospective.(releasetransition.V2PreparedInputReader).ReadPreparedInput(path)
+	if err != nil || !matched || !bytes.Equal(before.Content, []byte(payload)) {
+		t.Fatal("large prospective asset was narrowed", matched, err)
+	}
+	binding := releasetransition.V2IngressBinding{Transaction: "tx-source-large-001", Plan: releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64)), Releases: releasetransition.ReleasePair{From: "release-old", Target: "release-current"}}
+	for _, operation := range planned.Operations {
+		binding.Steps = append(binding.Steps, releasetransition.V2IngressStepBinding{Kind: operation.Kind, Expected: operation.Expected, Desired: operation.Desired, Checkpoint: releasetransition.StepIntent})
+	}
+	operation := planned.Operations[0]
+	step := releasetransition.V2IngressStep{Binding: binding, Kind: operation.Kind, Expected: operation.Expected, Desired: operation.Desired}
+	if err := ingress.Apply(context.Background(), step); err != nil {
+		t.Fatal(err)
+	}
+	if err := ingress.Verify(context.Background(), step); err != nil {
+		t.Fatal(err)
+	}
+	binding.Steps[0].Checkpoint = releasetransition.StepVerified
+	resumed, err := newV2SourceIngress(options, fixture.home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := resumed.Inspect(context.Background(), &binding)
+	if err != nil || recovered.Prospective == nil {
+		t.Fatal("bound interrupted import did not reconstruct", err)
+	}
+	if _, err := config.ReadPersistentFileSnapshot(fixture.config, path); err == nil {
+		t.Fatal("settings reader unexpectedly accepted the oversized asset")
+	}
+	after, matched, err := recovered.Prospective.(releasetransition.V2PreparedInputReader).ReadPreparedInput(path)
+	if err != nil || !matched || !bytes.Equal(after.Content, before.Content) {
+		t.Fatal("post-import prepared asset lost source reader compatibility", matched, err)
+	}
+	writeTestFile(t, path, 0600, payload+"unexpected drift\n")
+	if _, _, err := recovered.Prospective.(releasetransition.V2PreparedInputReader).ReadPreparedInput(path); err == nil {
+		t.Fatal("changed captured imported bytes retained approval")
+	}
+	if _, err := resumed.Inspect(context.Background(), &binding); err == nil {
+		t.Fatal("native ingress guard accepted changed imported bytes")
+	}
+}
 
 func TestV2SourceIngressPlansProspectiveSettingsAndResumesItsTwoLeafSteps(t *testing.T) {
 	requireJQ(t)

@@ -21,6 +21,22 @@ type ReconcileStep struct {
 	Conditional bool
 }
 
+func (reconciler Reconciler) observe(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
+	if observer, ok := reconciler.Runner.(ports.ReconcileStageObserver); ok {
+		return observer.ObserveStage(ctx, stage)
+	}
+	converged, err := reconciler.Runner.CheckStage(ctx, stage)
+	return ports.ReconcileStageObservation{Converged: converged}, err
+}
+
+func staleStage(stage ports.ReconcileStageID, observation ports.ReconcileStageObservation) error {
+	detail := ""
+	if domain.SafeName(observation.Owner) && observation.NativeExit > 0 && observation.NativeExit <= 255 {
+		detail = fmt.Sprintf(" (owner=%s native-exit=%d)", observation.Owner, observation.NativeExit)
+	}
+	return fmt.Errorf("%w: init stage %q now requires work%s", domain.ErrPlanStale, stage, detail)
+}
+
 type ReconcilePlan struct {
 	Steps []ReconcileStep
 }
@@ -55,12 +71,12 @@ func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
 	}
 	plan := ReconcilePlan{Steps: make([]ReconcileStep, 0, len(reconciler.Stages))}
 	for index, stage := range reconciler.Stages {
-		converged, err := reconciler.Runner.CheckStage(ctx, stage.ID)
+		observation, err := reconciler.observe(ctx, stage.ID)
 		if err != nil {
 			return ReconcilePlan{}, fmt.Errorf("check init stage %q: %w", stage.ID, err)
 		}
-		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: converged})
-		if !converged {
+		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: observation.Converged})
+		if !observation.Converged {
 			for _, dependent := range reconciler.Stages[index+1:] {
 				plan.Steps = append(plan.Steps, ReconcileStep{Stage: dependent, Conditional: true})
 			}
@@ -88,12 +104,12 @@ func (reconciler Reconciler) CheckApproved(ctx context.Context, approved Reconci
 		}
 		// Reject observed skip expansion before applying any approved stage.
 		if step.Converged {
-			converged, err := reconciler.Runner.CheckStage(ctx, stage.ID)
+			observation, err := reconciler.observe(ctx, stage.ID)
 			if err != nil {
 				return fmt.Errorf("check init stage %q: %w", stage.ID, err)
 			}
-			if !converged {
-				return fmt.Errorf("%w: init stage %q now requires work", domain.ErrPlanStale, stage.ID)
+			if !observation.Converged {
+				return staleStage(stage.ID, observation)
 			}
 		}
 	}
@@ -105,18 +121,18 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 		return err
 	}
 	for index, stage := range reconciler.Stages {
-		converged, err := reconciler.Runner.CheckStage(ctx, stage.ID)
+		observation, err := reconciler.observe(ctx, stage.ID)
 		if err != nil {
 			return fmt.Errorf("check init stage %q: %w", stage.ID, err)
 		}
-		if converged {
+		if observation.Converged {
 			if reconciler.Reporter != nil {
 				reconciler.Reporter.StageSkipped(stage)
 			}
 			continue
 		}
 		if approved.Steps[index].Converged {
-			return fmt.Errorf("%w: init stage %q now requires work", domain.ErrPlanStale, stage.ID)
+			return staleStage(stage.ID, observation)
 		}
 		if reconciler.Reporter != nil {
 			reconciler.Reporter.StageStarted(stage)

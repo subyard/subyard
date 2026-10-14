@@ -358,7 +358,8 @@ func (tracker *settingTracker) findYardFile(candidates []string, name string) (s
 			}
 			continue
 		}
-		if source, overridden := tracker.fileOverrides[candidate]; overridden {
+		source, overridden := tracker.fileOverrides[candidate]
+		if overridden {
 			if source == "" {
 				continue
 			}

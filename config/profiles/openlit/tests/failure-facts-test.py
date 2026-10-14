@@ -204,6 +204,44 @@ class FailureFactsTest(unittest.TestCase):
         self.assertEqual(value['pull_category'], 'other')
         self.assertNotIn('PRIVATE_SENTINEL', output.getvalue())
 
+    def test_docker_errors_retain_bounded_cause_without_private_values(self):
+        private = 'PRIVATE_SENTINEL'
+        messages = (
+            ('authorization', 'failed to fetch anonymous token: unexpected status from GET request to https://private.invalid/token: 401 Unauthorized', '401 Unauthorized'),
+            ('manifest', 'Error response from daemon: manifest unknown: manifest unknown', 'manifest unknown'),
+            ('rate-limit', 'toomanyrequests: You have reached your unauthenticated pull rate limit.', 'toomanyrequests'),
+            ('dns', 'failed to do request: Head "https://private.invalid/v2/": dial tcp: lookup private.invalid: no such host', 'no such host'),
+            ('tls', 'failed to do request: x509: certificate signed by unknown authority', 'x509: certificate signed by unknown authority'),
+            ('timeout', 'failed to do request: net/http: TLS handshake timeout', 'TLS handshake timeout'),
+            ('deadline', 'failed to resolve reference: context deadline exceeded', 'context deadline exceeded'),
+            ('network', 'failed to do request: dial tcp private.invalid:443: connect: connection refused', 'connection refused'),
+            ('oom', 'Error response from daemon: cannot allocate memory', 'cannot allocate memory'),
+        )
+        for category, message, excerpt in messages:
+            with self.subTest(category=category):
+                text = 'collector Error ' + message + '\nBearer ' + private + '\nHTTP/1.1 500 Private\n' + private
+                value = facts.pull_errors(text)
+                self.assertEqual(value[0]['service'], 'collector')
+                self.assertEqual(value[0]['category'], category)
+                self.assertEqual(value[0]['message'], excerpt)
+                encoded = json.dumps(value)
+                for forbidden in (private, 'private.invalid', 'https://', 'Bearer', 'HTTP/1.1', '500 Private'):
+                    self.assertNotIn(forbidden, encoded)
+        repeated = '\n'.join('collector Error failed to do request: connection refused' for _ in range(10000))
+        value = facts.pull_errors(repeated)
+        self.assertEqual(len(value), 1)
+        self.assertLess(len(json.dumps(value)), 1024)
+        value = facts.pull_errors('\n'.join('collector Error ' + message for _, message, _ in messages))
+        self.assertEqual(len(value), 3)
+        self.assertLess(len(json.dumps(value)), 1024)
+
+    def test_unknown_error_does_not_invent_pull_cause(self):
+        text = 'openlit Error PRIVATE_SENTINEL https://private.invalid/no%20such%20host/429\nError response from daemon: PRIVATE_SENTINEL\n'
+        value = facts.pull_errors(text)
+        self.assertTrue(all(error['category'] == 'unknown' for error in value))
+        self.assertEqual(value[-1]['message'], 'Error response from daemon')
+        self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
+
     def test_registry_codes_and_timeouts_do_not_expose_credentials(self):
         calls = []
         def run(argv, **options):
@@ -238,11 +276,20 @@ class FailureFactsTest(unittest.TestCase):
             with patch.object(Path, 'stat', stat), patch.object(facts, 'registries', return_value={}), patch.object(facts.subprocess, 'run', side_effect=run):
                 value = facts.failure(state, ['a', 'b', 'c'])
             self.assertEqual(value['pull_category'], 'timeout')
+            self.assertEqual(value['pull_errors'][-1]['message'], 'TLS handshake timeout')
+            self.assertEqual(value['pull_context'], {'operation': 'docker compose pull --quiet',
+                'exit_code': None, 'elapsed_seconds': None, 'log_tail_truncated': False})
             self.assertEqual(value['pull_progress'], [('clickhouse', 'Pulling'), ('collector', 'Error'), ('openlit', 'Pulling')])
             self.assertEqual(value['image_cache']['openlit'], {'inspect_exit': 1, 'state': 'unknown'})
             self.assertTrue(value['journal_categories']['kernel']['oom_present'])
             self.assertFalse(value['files_present']['receipt.json'])
             self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
+            (state/'pull.log').write_text('openlit Error PRIVATE_SENTINEL\n')
+            with patch.object(Path, 'stat', stat), patch.object(facts, 'registries', return_value={'ghcr': {'exit_code': 0, 'http_status': 401}}), patch.object(facts.subprocess, 'run', side_effect=run):
+                unknown = facts.failure(state, ['a', 'b', 'c'])
+            self.assertEqual(unknown['pull_category'], 'unknown')
+            self.assertTrue(unknown['journal_categories']['kernel']['oom_present'])
+            self.assertNotIn('PRIVATE_SENTINEL', json.dumps(unknown))
             # A symlinked runtime directory must not expose even pull-log facts.
             link = state/'link'
             link.symlink_to(state, target_is_directory=True)

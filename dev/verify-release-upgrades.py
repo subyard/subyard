@@ -730,7 +730,8 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
 
 
 def verify_activation_only_recovery(release, version, baseline, arch, root,
-                                    baseline_version=ACTIVATION_BASELINE, source_repair=False):
+                                    baseline_version=ACTIVATION_BASELINE, source_repair=False,
+                                    recovery_baseline=None):
     started = time.monotonic()
     fixture = Fixture(root / f"activation-only-{baseline_version}", release, version, baseline, arch,
                       baseline_version)
@@ -843,6 +844,45 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
     require(published.startswith(f"releases/{version}-") and "/" not in published[len("releases/"):],
             "installer returned an invalid recovery candidate identity")
     candidate = fixture.runtime / published / "bin/yard"
+    latest = candidate
+    original_registry = fixture.runtime / fixture.initial / "config/release-transition.json"
+    registry_advanced = digest(candidate.parent.parent / "config/release-transition.json") != digest(original_registry)
+    recovery_version = version
+    if registry_advanced:
+        # Delegation requires identical sealed registries and compiled catalogs.
+        # A latest runtime with a new migration cannot execute historical work.
+        refused = json.loads(fixture.run([str(latest), "migrate", "--check", "--json"]))
+        declined = run_process([str(latest), "migrate", "--yes"], fixture.env, timeout=60)
+        require(refused["outcome"]["status"] == "operator-action-required"
+                and refused.get("blockers") == blocked.get("blockers") and declined.returncode != 0
+                and snapshot(fixture.config) == config_before and fixture.journal.read_bytes() == journal_before
+                and os.readlink(fixture.runtime / "current") == fixture.initial
+                and not (fixture.runtime / "previous").exists() and not unexpected.exists(),
+                "cross-registry standalone caller changed or resumed original history")
+        cached = root / f"baseline-{SOURCE_BASELINE}"
+        directory = recovery_baseline or (cached if cached.is_dir() else None)
+        bridge = baseline_assets(root, directory, SOURCE_BASELINE, SOURCE_BASELINE_SHA256, arch)
+        contract = Fixture(root / "activation-recovery-bridge-contract", release, version,
+                           bridge, arch, SOURCE_BASELINE)
+        contract.run([str(contract.old_launcher), "migrate", "--yes"])
+        bridge_journal = json.loads(contract.journal.read_text())
+        require(bridge_journal["registryDigest"] == journal["registryDigest"]
+                and bridge_journal["catalogDigest"] == journal["catalogDigest"],
+                "pinned recovery bridge does not own the exact original registry and catalog")
+        bridge_bundle = bridge / f"subyard-{SOURCE_BASELINE}-linux-{arch}.tar.gz"
+        published_bridge = fixture.run(["bash", str(release / "subyard-install-runtime-release.sh"),
+                                        "--publish-only", "--runtime-root", str(fixture.runtime),
+                                        "--bundle", str(bridge_bundle), "--checksum", str(bridge_bundle) + ".sha256",
+                                        "--manifest", str(bridge_bundle) + ".manifest.json",
+                                        "--provenance", str(bridge_bundle) + ".provenance.json"]).strip()
+        require(published_bridge.startswith(f"releases/{SOURCE_BASELINE}-")
+                and "/" not in published_bridge[len("releases/"):], "recovery bridge identity is invalid")
+        candidate = fixture.runtime / published_bridge / "bin/yard"
+        require(digest(candidate.parent.parent / "config/release-transition.json") == digest(original_registry),
+                "published recovery bridge changed the original registry")
+        recovery_version = SOURCE_BASELINE
+        print(f"PASS: latest {version} refuses cross-registry recovery without mutation; "
+              f"pinned official {SOURCE_BASELINE} matches the original registry and catalog", flush=True)
     # A newer caller may resume the exact old scope, but the released owner has
     # never advertised the fresh-replacement contract. Changed inputs remain
     # excluded until their exactly known original bytes are restored.
@@ -895,13 +935,27 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
             "delegation changed runtime links or invoked a host mutation")
     ready = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
     require(ready["outcome"]["status"] == "ready", "original published owner cannot verify completed recovery")
-    print(f"PASS: unmodified released {ACTIVATION_BASELINE} activation-only journal resumes with {version} code and original assets",
+    print(f"PASS: unmodified released {ACTIVATION_BASELINE} activation-only journal resumes with {recovery_version} code and original assets",
           flush=True)
     fixture.update("--version", version, "--yes")
     fixture.complete(old=False)
     require(os.readlink(fixture.runtime / "previous") == fixture.initial
-            and ledger.read_bytes() == ledger_before and registration.read_bytes() == registration_before
+            and registration.read_bytes() == registration_before
             and not unexpected.exists(), "ordinary update changed retained state or invoked a host mutation")
+    if registry_advanced:
+        before_ledger, after_ledger = json.loads(ledger_before), json.loads(ledger.read_text())
+        require(before_ledger["domains"]["power-metadata"] == {"epoch": 1, "applied": []}
+                and after_ledger["domains"]["power-metadata"] == {
+                    "epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}
+                and {key: value for key, value in before_ledger.items() if key != "domains"}
+                == {key: value for key, value in after_ledger.items() if key != "domains"}
+                and {key: value for key, value in before_ledger["domains"].items() if key != "power-metadata"}
+                == {key: value for key, value in after_ledger["domains"].items() if key != "power-metadata"},
+                "ordinary update changed historical domains or failed the new publication reader boundary")
+        print(f"PASS: separately authorized ordinary update reaches {version} publication epoch 2 "
+              "and preserves every original non-publication ledger domain", flush=True)
+    else:
+        require(ledger.read_bytes() == ledger_before, "same-registry ordinary update changed migration ledger")
     print(f"PASS: released {ACTIVATION_BASELINE} ordinary updater reaches {version} after delegated recovery "
           f"({time.monotonic() - started:.1f}s)", flush=True)
 
@@ -1273,7 +1327,8 @@ def main():
                     verify(release, args.version, baseline, arch, root, SOURCE_BASELINE)
                     activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
                                                  ACTIVATION_BASELINE_SHA256, arch)
-                    verify_activation_only_recovery(release, args.version, activation, arch, root)
+                    verify_activation_only_recovery(release, args.version, activation, arch, root,
+                                                   recovery_baseline=baseline)
                     return
                 if args.only_source_repair:
                     source_baseline = baseline_assets(root, args.source_baseline_dir, SOURCE_BASELINE,
@@ -1305,7 +1360,8 @@ def main():
                         return
                 activation = baseline_assets(root, args.activation_baseline_dir, ACTIVATION_BASELINE,
                                              ACTIVATION_BASELINE_SHA256, arch)
-                verify_activation_only_recovery(release, args.version, activation, arch, root)
+                verify_activation_only_recovery(release, args.version, activation, arch, root,
+                                               recovery_baseline=args.source_baseline_dir)
             finally:
                 server.terminate()
                 try:

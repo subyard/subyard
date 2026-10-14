@@ -56,6 +56,10 @@ func PrepareRouteConsumerActivation(ctx context.Context, options Options) (state
 	if err != nil || prepared.State != StateCurrent {
 		return prepared.State, routeConfigDiagnostic(err, "owner registration preparation failed", CurrentYard, options.ConfigHome)
 	}
+	return prepareCanonicalRouteActivationBackend(ctx, options)
+}
+
+func prepareCanonicalRouteActivationBackend(ctx context.Context, options Options) (State, error) {
 	projects, err := inspectProjects(ctx, options)
 	if err != nil {
 		return "", err

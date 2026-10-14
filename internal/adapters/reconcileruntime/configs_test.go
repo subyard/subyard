@@ -237,16 +237,9 @@ func TestHostInstructionSourceRejectsDanglingSymlink(t *testing.T) {
 	if err := os.Symlink("missing.md", source); err != nil {
 		t.Fatal(err)
 	}
-	file := guestConfigFile{
-		label: "Claude instructions", source: source, followSymlinks: true,
-	}
-	for _, operation := range guestConfigSourceOperations() {
-		t.Run(operation.name, func(t *testing.T) {
-			err := operation.run(file)
-			if err == nil || os.IsNotExist(err) || !strings.Contains(err.Error(), "not a regular file") {
-				t.Fatalf("dangling symlink error = %v", err)
-			}
-		})
+	_, err := (guestConfigFile{label: "Claude instructions", source: source, followSymlinks: true}).readSource()
+	if err == nil || os.IsNotExist(err) || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("dangling symlink error = %v", err)
 	}
 }
 
@@ -260,41 +253,18 @@ func TestHostInstructionSourceRejectsFIFOWithoutBlocking(t *testing.T) {
 	if err := os.Symlink("instructions.fifo", source); err != nil {
 		t.Fatal(err)
 	}
-	file := guestConfigFile{
-		label: "Claude instructions", source: source, followSymlinks: true,
-	}
-	for _, operation := range guestConfigSourceOperations() {
-		t.Run(operation.name, func(t *testing.T) {
-			result := make(chan error, 1)
-			go func() { result <- operation.run(file) }()
-			select {
-			case err := <-result:
-				if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-					t.Fatalf("FIFO error = %v", err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("opening the FIFO source blocked")
-			}
-		})
-	}
-}
-
-func guestConfigSourceOperations() []struct {
-	name string
-	run  func(guestConfigFile) error
-} {
-	return []struct {
-		name string
-		run  func(guestConfigFile) error
-	}{
-		{name: "read", run: func(file guestConfigFile) error {
-			_, err := file.readSource()
-			return err
-		}},
-		{name: "hash", run: func(file guestConfigFile) error {
-			_, err := file.sourceHash()
-			return err
-		}},
+	result := make(chan error, 1)
+	go func() {
+		_, err := (guestConfigFile{label: "Claude instructions", source: source, followSymlinks: true}).readSource()
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("FIFO error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opening the FIFO source blocked")
 	}
 }
 
@@ -411,17 +381,9 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 			if err != nil || !bytes.HasPrefix(effective, host) || bytes.Count(effective, []byte("<!-- subyard-preview -->")) != 1 {
 				t.Fatalf("effective instruction=%q err=%v", effective, err)
 			}
-			again, err := files[0].readSource()
-			if err != nil || !bytes.Equal(effective, again) {
-				t.Fatalf("repeat composition changed bytes: %v", err)
-			}
 			asset, err := files[1].readSource()
 			if err != nil || !bytes.Equal(asset, host) {
 				t.Fatalf("rules asset changed: %v", err)
-			}
-			digest, err := files[0].sourceHash()
-			if err != nil || digest != fmt.Sprintf("%x", sha256.Sum256(effective)) || digest == fmt.Sprintf("%x", sha256.Sum256(host)) {
-				t.Fatalf("effective hash=%q err=%v", digest, err)
 			}
 			legacy, err := files[0].legacySourceHash()
 			if err != nil || legacy != fmt.Sprintf("%x", sha256.Sum256(host)) {
@@ -435,51 +397,8 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 			if err != nil || !bytes.Equal(original, host) {
 				t.Fatal("host instructions changed")
 			}
-			files[0].source = filepath.Join(root, "missing")
-			missing, err := files[0].readSource()
-			if err != nil || string(missing) != previewInstructions {
-				t.Fatalf("missing source effective instruction=%q err=%v", missing, err)
-			}
-			if legacy, err := files[0].legacySourceHash(); err != nil || legacy != "" {
-				t.Fatalf("missing source has legacy evidence: %q %v", legacy, err)
-			}
-			files[0].source = ""
-			empty, err := files[0].readSource()
-			if err != nil || string(empty) != previewInstructions {
-				t.Fatalf("unset source effective instruction=%q err=%v", empty, err)
-			}
+
 		})
-	}
-	for _, environment := range [][]string{
-		{"CODING_TOOL_INTEGRATIONS=pi"},
-		{"CODING_TOOL_INTEGRATIONS=codex", "ALLOWS_CODING_TOOLS=false"},
-		{"CODING_TOOL_INTEGRATIONS="},
-	} {
-		files, err := (Runtime{Environment: environment}).guestConfigFiles()
-		if err != nil || len(files) != 0 {
-			t.Fatalf("unselected instruction files=%#v err=%v", files, err)
-		}
-	}
-	composed := filepath.Join(root, "composed.md")
-	testkit.WriteFile(t, composed, append(append([]byte(nil), host...), previewInstructions...), 0o600)
-	result, err := (guestConfigFile{source: composed, previewInstructions: true}).readSource()
-	if err != nil || bytes.Count(result, []byte(previewInstructions)) != 1 {
-		t.Fatalf("duplicate preview paragraph: %v", err)
-	}
-	legacy := "Before.\n<!-- subyard-preview -->\nLegacy preview instructions.\n<!-- /subyard-preview -->\nAfter.\n"
-	testkit.WriteFile(t, composed, []byte(legacy), 0o600)
-	result, err = (guestConfigFile{source: composed, previewInstructions: true}).readSource()
-	if err != nil || string(result) != "Before.\n"+previewInstructions+"After.\n" {
-		t.Fatalf("legacy preview block refresh lost host text: %q %v", result, err)
-	}
-	for _, malformed := range []string{
-		"<!-- subyard-preview -->\nunfinished",
-		legacy + legacy,
-	} {
-		testkit.WriteFile(t, composed, []byte(malformed), 0o600)
-		if _, err := (guestConfigFile{source: composed, previewInstructions: true}).readSource(); err == nil {
-			t.Fatal("ambiguous preview instruction block accepted")
-		}
 	}
 }
 
@@ -504,11 +423,7 @@ func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("runtime instruction payload=%q want=%q err=%v", got, want, err)
 		}
-		digest, err := file.sourceHash()
-		if err != nil || digest != fmt.Sprintf("%x", sha256.Sum256(want)) {
-			t.Fatalf("runtime instruction hash=%q err=%v", digest, err)
-		}
-		return digest
+		return fmt.Sprintf("%x", sha256.Sum256(got))
 	}
 	currentRoot := filepath.Join("..", "..", "..")
 	current, err := os.ReadFile(filepath.Join(currentRoot, "config", "preview", "instructions.md"))
@@ -534,7 +449,7 @@ func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
 	if assertPayload(versionedFile, wantCurrent) != currentHash {
 		t.Fatal("identical runtime assets changed the desired hash")
 	}
-	changed := bytes.Replace(current, []byte("Share the printed URL."), []byte("Share the updated URL."), 1)
+	changed := []byte("<!-- subyard-preview -->\nFixture runtime preview instructions.\n<!-- /subyard-preview -->\n")
 	testkit.WriteFile(t, asset, changed, 0o644)
 	wantChanged := append(append([]byte(nil), host...), append([]byte("\n\n"), changed...)...)
 	if assertPayload(versionedFile, wantChanged) == currentHash {

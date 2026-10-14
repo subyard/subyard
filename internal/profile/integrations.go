@@ -1,18 +1,13 @@
 package profile
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
-
-	"github.com/Subyard/Subyard/internal/domain"
 )
 
 type PortDefault struct {
@@ -81,41 +76,28 @@ func LoadIntegrations(root string) ([]IntegrationDefinition, error) {
 	}
 	packages = append(packages, retired...)
 	result := make([]IntegrationDefinition, 0, len(packages))
-	keys, devices, names := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	metadataInputs := make([]IntegrationMetadata, 0, len(packages))
+	names := map[string]bool{}
 	for _, shipped := range packages {
-		var definition IntegrationDefinition
-		decoder := json.NewDecoder(bytes.NewReader(shipped.data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&definition); err != nil {
+		metadata, err := DecodeIntegration(shippedName(shipped.path), shipped.data)
+		if err != nil {
 			return nil, fmt.Errorf("integration declaration: %w", err)
 		}
-		if decoder.Decode(new(any)) != io.EOF {
-			return nil, errors.New("integration declaration has trailing data")
-		}
-		definition.Root, definition.Name = filepath.Dir(shipped.path), filepath.Base(filepath.Dir(shipped.path))
+		definition := metadata.definition()
+		definition.Root = filepath.Dir(shipped.path)
 		if names[definition.Name] || (filepath.Base(filepath.Dir(definition.Root)) == "retired-integrations") != definition.Retired {
 			return nil, errors.New("integration name collision or invalid retirement package")
 		}
 		names[definition.Name] = true
 		definition.validationInputs = []string{shipped.path}
-		if err := definition.validate(); err != nil {
+		if err := definition.validatePackage(); err != nil {
 			return nil, fmt.Errorf("integration %s: %w", definition.Name, err)
 		}
-		if definition.Lifecycle != nil {
-			for _, key := range definition.Lifecycle.InstanceConfigKeys {
-				if keys[key] {
-					return nil, errors.New("integration native key collision")
-				}
-				keys[key] = true
-			}
-			for _, name := range definition.Lifecycle.InstanceDevices {
-				if devices[name] {
-					return nil, errors.New("integration device collision")
-				}
-				devices[name] = true
-			}
-		}
+		metadataInputs = append(metadataInputs, metadata)
 		result = append(result, definition)
+	}
+	if err := ValidateMetadata(nil, metadataInputs); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -210,43 +192,7 @@ func (definition IntegrationDefinition) ValidationInputs() []string {
 	return slices.Clone(definition.validationInputs)
 }
 
-func (definition *IntegrationDefinition) validate() error {
-	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
-		return errors.New("unsupported integration schema or name")
-	}
-	if definition.Retired {
-		if definition.Lifecycle == nil || definition.Provision != "" || definition.Cleanup != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
-			return errors.New("retired integration permits only cleanup lifecycle metadata")
-		}
-		for _, name := range definition.RetiredSettings {
-			if !settingNamePattern.MatchString(name) {
-				return errors.New("invalid retired setting name")
-			}
-		}
-	} else if len(definition.RetiredSettings) != 0 || len(definition.RetiredRoutes) != 0 {
-		return errors.New("retired settings require retired integration")
-	}
-	packaged := definition.packageDefinition()
-	if err := packaged.validateExtensions(); err != nil {
-		return err
-	}
-	nativePaths := map[string]bool{}
-	for _, native := range definition.Native {
-		if !relative(native.Package) || !relative(native.Path) || nativePaths[native.Path] {
-			return errors.New("invalid or duplicate integration native artifact path")
-		}
-		nativePaths[native.Path] = true
-	}
-	seen := map[string]bool{}
-	for _, input := range definition.Inputs {
-		if !settingNamePattern.MatchString(input.Name) || seen[input.Name] || !textSafe(input.Value) {
-			return errors.New("invalid immutable input")
-		}
-		seen[input.Name] = true
-		if input.Type != "version" && input.Type != "image-reference" && input.Type != "sha256" && input.Type != "string" {
-			return errors.New("unsupported immutable input type")
-		}
-	}
+func (definition *IntegrationDefinition) validatePackage() error {
 	for _, path := range []string{definition.Provision, definition.Cleanup} {
 		if path != "" {
 			resolved, err := definition.ExecutablePath(path)
@@ -255,19 +201,6 @@ func (definition *IntegrationDefinition) validate() error {
 			}
 			definition.validationInputs = append(definition.validationInputs, resolved)
 		}
-	}
-	for _, command := range []string{definition.Command, definition.Check, definition.Health} {
-		if command != "" && strings.IndexFunc(command, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._/-", r))
-		}) >= 0 {
-			return errors.New("invalid integration command")
-		}
-	}
-	for _, dependency := range definition.Depends {
-		if !domain.SafeName(dependency) || seen[dependency] {
-			return errors.New("invalid duplicate dependency")
-		}
-		seen[dependency] = true
 	}
 	if lifecycle := definition.Lifecycle; lifecycle != nil {
 		resolved, err := definition.ExecutablePath(lifecycle.Handler)
@@ -280,46 +213,6 @@ func (definition *IntegrationDefinition) validate() error {
 				return err
 			}
 			definition.validationInputs = append(definition.validationInputs, filepath.Join(definition.Root, path))
-		}
-		seen := map[string]bool{}
-		for _, key := range lifecycle.InstanceConfigKeys {
-			if !strings.HasPrefix(key, "user.subyard.") || !textSafe(key) || seen[key] {
-				return errors.New("invalid integration native key")
-			}
-			seen[key] = true
-		}
-		for _, name := range lifecycle.InstanceDevices {
-			if !domain.SafeName(name) || seen[name] {
-				return errors.New("invalid integration native device")
-			}
-			seen[name] = true
-		}
-	}
-	for _, route := range definition.RetiredRoutes {
-		if definition.Lifecycle == nil || route.GuestPort < 1 || route.GuestPort > 65535 ||
-			!slices.Contains(definition.Lifecycle.InstanceConfigKeys, route.MarkerKey) || !slices.Contains(definition.Lifecycle.InstanceDevices, route.DeviceName) {
-			return errors.New("retired route is outside cleanup ownership")
-		}
-	}
-
-	if dashboard := definition.Dashboard; dashboard != nil {
-		if dashboard.Scheme != "http" && dashboard.Scheme != "https" || !strings.HasPrefix(dashboard.Path, "/") || !textSafe(dashboard.Path) || dashboard.GuestPort < 1 || dashboard.GuestPort > 65535 || !settingNamePattern.MatchString(dashboard.PortSetting) {
-			return errors.New("invalid integration dashboard")
-		}
-		if route := dashboard.ContainerRoute; route != nil {
-			if definition.Lifecycle == nil {
-				return errors.New("dashboard route requires lifecycle ownership")
-			}
-			ownsKey, ownsDevice := false, false
-			for _, key := range definition.Lifecycle.InstanceConfigKeys {
-				ownsKey = ownsKey || key == route.MarkerKey
-			}
-			for _, name := range definition.Lifecycle.InstanceDevices {
-				ownsDevice = ownsDevice || name == route.DeviceName
-			}
-			if !ownsKey || !ownsDevice {
-				return errors.New("dashboard route is outside lifecycle ownership")
-			}
 		}
 	}
 	return nil

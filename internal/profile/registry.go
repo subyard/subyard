@@ -2,17 +2,12 @@
 package profile
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/Subyard/Subyard/internal/domain"
 )
 
 type Native struct {
@@ -88,81 +83,38 @@ func Load(root string) ([]Definition, error) {
 		return nil, err
 	}
 	result := make([]Definition, 0, len(packages))
-	consumers := map[string]bool{}
-	setupPaths := map[string]bool{}
-	settingNames := map[string]bool{}
-	activationIDs := map[string]bool{}
+	metadataInputs := make([]Metadata, 0, len(packages))
 	for _, shipped := range packages {
 		path, data := shipped.path, shipped.data
-		var definition Definition
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&definition); err != nil {
+		metadata, err := Decode(shippedName(path), data)
+		if err != nil {
 			return nil, fmt.Errorf("profile declaration %s: %w", path, err)
 		}
-		if decoder.Decode(new(any)) != io.EOF {
-			return nil, errors.New("profile declaration has trailing data")
-		}
+		definition := metadata.definition()
 		definition.Root = filepath.Dir(path)
 		definition.validationInputs = []string{path}
-		definition.Name = filepath.Base(definition.Root)
-		if err := definition.validate(); err != nil {
+		if err := definition.validatePackage(); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", definition.Name, err)
 		}
-		for _, consumer := range definition.Consumers {
-			if consumers[consumer.ID] {
-				return nil, fmt.Errorf("duplicate profile credential consumer %s", consumer.ID)
-			}
-			consumers[consumer.ID] = true
-		}
-		if definition.Setup != nil {
-			if setupPaths[definition.Setup.ConfigFile] {
-				return nil, errors.New("profile setup configuration path collision")
-			}
-			setupPaths[definition.Setup.ConfigFile] = true
-		}
-		for _, setting := range definition.Settings {
-			if settingNames[setting.Name] {
-				return nil, fmt.Errorf("duplicate profile setting %s", setting.Name)
-			}
-			settingNames[setting.Name] = true
-		}
-		if definition.Runtime != nil {
-			if activationIDs[definition.Runtime.ActivationID] {
-				return nil, fmt.Errorf("duplicate profile runtime activation ID %s", definition.Runtime.ActivationID)
-			}
-			activationIDs[definition.Runtime.ActivationID] = true
-		}
+		metadataInputs = append(metadataInputs, metadata)
 		result = append(result, definition)
+	}
+	if err := ValidateMetadata(metadataInputs, nil); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
-func relative(path string) bool {
-	return path != "" && path != "." && !filepath.IsAbs(path) && filepath.Clean(path) == path &&
-		path != ".." && !strings.HasPrefix(path, "../") && !strings.ContainsAny(path, "\\\r\n\t")
+// ValidationInputs returns the package files actually inspected by Load.
+// Consumers can bind metadata and hook identity without duplicating validation.
+func (definition Definition) ValidationInputs() []string {
+	return slices.Clone(definition.validationInputs)
 }
-func textSafe(value string) bool {
-	return len(value) <= 4096 && !strings.ContainsAny(value, "\x00\x1b\r\n")
-}
-func (definition *Definition) validate() error {
-	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
-		return errors.New("unsupported profile schema or name")
-	}
-	for _, yard := range definition.DefaultYards {
-		if !domain.SafeName(yard) {
-			return errors.New("invalid default yard")
-		}
-	}
-	for key, value := range definition.DisabledWhen {
-		if key == "" || strings.IndexFunc(key, func(r rune) bool { return !(r == '_' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') }) >= 0 || !textSafe(value) {
-			return errors.New("invalid selection condition")
-		}
-	}
+
+func shippedName(path string) string { return filepath.Base(filepath.Dir(path)) }
+
+func (definition *Definition) validatePackage() error {
 	if definition.OwnerService != "" {
-		if !relative(definition.OwnerService) {
-			return errors.New("owner service path escapes profile")
-		}
 		info, err := os.Lstat(filepath.Join(definition.Root, definition.OwnerService))
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			return errors.New("owner service must be an executable regular file")
@@ -174,107 +126,22 @@ func (definition *Definition) validate() error {
 		}
 		definition.validationInputs = append(definition.validationInputs, resolved)
 	}
-	nativePaths := map[string]bool{}
-	for _, native := range definition.Native {
-		if !relative(native.Path) || !relative(native.Package) || nativePaths[native.Path] {
-			return errors.New("invalid or duplicate native artifact path")
-		}
-		nativePaths[native.Path] = true
-	}
 	for _, consumer := range definition.Consumers {
-		path := strings.ReplaceAll(consumer.Path, "{zone}", "zone")
-		if !domain.SafeName(consumer.ID) || consumer.ID == "none" ||
-			consumer.Zone != "*" && !domain.SafeName(consumer.Zone) || !relative(path) || strings.ContainsAny(path, "{}") {
-			return errors.New("invalid profile credential declaration")
-		}
-		if strings.Contains(consumer.Path, "{zone}") && (consumer.Zone != "*" || strings.Count(consumer.Path, "{zone}") != 1 || strings.Contains(filepath.Dir(consumer.Path), "{zone}")) {
-			return errors.New("credential zone placeholder requires a wildcard zone and a filename")
-		}
-		if consumer.Format != "file" && consumer.Format != "rsa-private-key" && consumer.Format != "rsa-private-key-with-settings" {
-			return errors.New("unsupported profile credential format")
-		}
-		if consumer.Format == "rsa-private-key-with-settings" && (definition.Setup == nil || !definition.Setup.SyncFields || definition.Setup.Consumer != consumer.ID) {
-			return errors.New("credential settings require a matching synchronized setup")
-		}
-		if consumer.LegacyPath != "" && (consumer.Format != "rsa-private-key-with-settings" || !relative(consumer.LegacyPath) || strings.ContainsAny(consumer.LegacyPath, "{}") || consumer.LegacyPath == consumer.Path) {
-			return errors.New("invalid legacy credential path")
-		}
 		if consumer.StopHandler != "" {
 			if err := definition.validateExecutable(consumer.StopHandler); err != nil {
 				return fmt.Errorf("credential stop handler: %w", err)
 			}
 		}
 	}
-	if len(definition.CredentialImportExclusions) > 32 {
-		return errors.New("too many profile credential import exclusions")
-	}
-	for _, fragments := range definition.CredentialImportExclusions {
-		if len(fragments) == 0 || len(fragments) > 8 {
-			return errors.New("credential import exclusion requires bounded directory fragments")
-		}
-		for _, fragment := range fragments {
-			if len(fragment) < 3 || len(fragment) > 256 || !strings.HasPrefix(fragment, "/") || !strings.HasSuffix(fragment, "/") {
-				return errors.New("credential import exclusion requires slash-delimited directory fragments")
-			}
-			for _, part := range strings.Split(fragment[1:len(fragment)-1], "/") {
-				if !domain.SafeID(part) {
-					return errors.New("invalid credential import exclusion directory fragment")
-				}
-			}
+	if definition.Runtime != nil {
+		if err := definition.validateExecutable(definition.Runtime.Handler); err != nil {
+			return fmt.Errorf("runtime handler: %w", err)
 		}
 	}
-	for _, path := range definition.ManagedPaths {
-		if path.Root != "data" && path.Root != "operator" {
-			return errors.New("invalid managed path root")
+	if definition.GuestEnvironment != nil {
+		if err := definition.validateExecutable(definition.GuestEnvironment.Handler); err != nil {
+			return fmt.Errorf("guest environment handler: %w", err)
 		}
-		if !relative(strings.ReplaceAll(path.Path, "{yard}", "yard")) || strings.ContainsAny(strings.ReplaceAll(path.Path, "{yard}", "yard"), "{}") {
-			return errors.New("invalid managed profile path")
-		}
-	}
-	if setup := definition.Setup; setup != nil {
-		if !relative(setup.ConfigFile) || setup.Title == "" || !textSafe(setup.Title) || !textSafe(setup.Followup) || !domain.SafeName(setup.Label) {
-			return errors.New("invalid setup declaration")
-		}
-		for _, line := range setup.Instructions {
-			if !textSafe(line) {
-				return errors.New("invalid setup instruction")
-			}
-		}
-		if len(setup.Fields) == 0 || len(setup.Fields) > 16 {
-			return errors.New("setup requires bounded fields")
-		}
-		names := map[string]bool{}
-		for _, field := range setup.Fields {
-			if !domain.SafeName(field.Name) || names[field.Name] || field.Label == "" || !textSafe(field.Label) {
-				return errors.New("invalid setup field")
-			}
-			names[field.Name] = true
-			if field.Kind != "numeric-string" && field.Kind != "positive-integer" {
-				return errors.New("unsupported setup field type")
-			}
-		}
-		if setup.KeyOverrideField != "" && (!domain.SafeName(setup.KeyOverrideField) || names[setup.KeyOverrideField]) {
-			return errors.New("invalid credential override field")
-		}
-		found := false
-		for _, consumer := range definition.Consumers {
-			found = found || consumer.ID == setup.Consumer && consumer.Zone == setup.Zone
-			if setup.SyncFields && consumer.ID == setup.Consumer && consumer.Format != "rsa-private-key-with-settings" {
-				return errors.New("synchronized setup requires a credential settings consumer")
-			}
-		}
-		if !found {
-			return errors.New("setup references undeclared credential consumer")
-		}
-	}
-	if err := definition.validateExtensions(); err != nil {
-		return err
 	}
 	return nil
-}
-
-// ValidationInputs returns the package files actually inspected by Load.
-// Consumers can bind metadata and hook identity without duplicating validation.
-func (definition Definition) ValidationInputs() []string {
-	return slices.Clone(definition.validationInputs)
 }

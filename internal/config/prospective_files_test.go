@@ -35,6 +35,11 @@ func TestProspectiveFilesRejectsInvalidSnapshotsAndScope(t *testing.T) {
 			if (err == nil) != wantValid {
 				t.Fatalf("snapshot validity = %v, err=%v", wantValid, err)
 			}
+			files.ReadPreparedInput = func(string) (PersistentFileSnapshot, bool, error) { return snapshot, true, nil }
+			_, err = files.readFile(path)
+			if (err == nil) != wantValid {
+				t.Fatalf("prepared snapshot validity = %v, err=%v", wantValid, err)
+			}
 		})
 	}
 	calls := 0

@@ -36,6 +36,40 @@ func TestV0173UpdateNamesStandaloneMigrationRecovery(t *testing.T) {
 	}
 }
 
+func TestV0173StandaloneRetryRequiresMatchingRegistry(t *testing.T) {
+	fixture := newV0173RecoveryFixture(t)
+	var registry releasetransition.RegistryV2
+	if err := json.Unmarshal(fixture.registry, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registry.MinimumEpochs["project-state"] = 2
+	registry.CurrentEpochs["project-state"] = 2
+	payload, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := mustReadFile(t, filepath.Join(fixture.candidate.root, "bin", "yard-engine"))
+	testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "config", "release-transition.json"), payload, 0o600)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256(engine), sha256.Sum256(payload))
+	testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
+	runtime := New(Config{RepositoryRoot: fixture.candidate.root, Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
+	defer runtime.Close()
+	protected, err := runtime.inspectProtectedTransition(context.Background(), fixture.runtimeRoot, fixture.configHome, "default", nil)
+	if err != nil || !isV0173ActivationOnlyBlocker(protected) {
+		t.Fatalf("original recovery prerequisite: %v", err)
+	}
+	runtime.setV0173StandaloneRetry(context.Background(), fixture.runtimeRoot, protected)
+	if !strings.Contains(protected.inspection.Outcome.Retry, "exact original migration registry and catalog") ||
+		strings.Contains(protected.inspection.Outcome.Retry, filepath.Join(fixture.candidate.root, "bin", "yard")) {
+		t.Fatalf("retry selected a different registry: %q", protected.inspection.Outcome.Retry)
+	}
+	store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
+	after, _ := store.ReadCurrentJournal()
+	if !sameProtectedSnapshot(fixture.journal, after) {
+		t.Fatal("recovery guidance changed the original authorized journal")
+	}
+}
+
 func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 	for _, scenario := range []string{"resume", "interrupted", "delegate changed", "source changed", "ledger changed", "journal changed", "scope changed"} {
 		t.Run(scenario, func(t *testing.T) {

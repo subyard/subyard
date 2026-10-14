@@ -35,8 +35,13 @@ printf 'docker %s\n' "$*" >>"$TEST_LOG"
 printf '%s\n' 'PRIVATE_PAYLOAD'
 printf '%s\n' 'PRIVATE_STDERR' >&2
 case "$*" in
-  info) exit "${TEST_API_EXIT:-0}" ;;
-  'version --format {{.Server.Version}}'|'container ls -a --format {{.Names}}')
+  'container ls -a --format {{.Names}}')
+    if [ "${TEST_API_HANG:-0}" = 1 ]; then
+      printf '%s\n' "$$" >"$TEST_API_PID"
+      exec sleep 30
+    fi
+    exit "${TEST_API_EXIT:-0}" ;;
+  info|'version --format {{.Server.Version}}')
     exit "${TEST_COMPARE_EXIT:-0}" ;;
   *) exit 99 ;;
 esac
@@ -79,6 +84,7 @@ services="$TMP/yard-services.sh"
 sed -n '/^# Services live /,/^EOS/{ /^# Services live /d; /^EOS/d; p; }' \
   "$ROOT/scripts/04-provision-subyard.sh" >"$services"
 export TEST_STARTED="$TMP/started"
+export TEST_API_PID="$TMP/api.pid"
 for TEST_SERVICE_FAIL in 0 1; do
   for TEST_API_EXIT in 0 1 124; do
    for TEST_COMPARE_EXIT in 0 1 124; do
@@ -93,8 +99,8 @@ for TEST_SERVICE_FAIL in 0 1; do
       [ "$status" = 1 ] || { printf 'FAIL: original provisioning failure changed\n' >&2; exit 1; }
     fi
     if [ "$TEST_SERVICE_FAIL" = 0 ]; then
-      [ "$(grep -Fxc 'docker info' "$TEST_LOG")" = 1 ] \
-        || { printf 'FAIL: service start did not verify Docker API\n' >&2; exit 1; }
+      [ "$(grep -Fxc 'docker container ls -a --format {{.Names}}' "$TEST_LOG")" = 1 ] \
+        || { printf 'FAIL: service start did not issue one inventory query\n' >&2; exit 1; }
     else
       ! grep -Fq 'docker ' "$TEST_LOG" \
         || { printf 'FAIL: failed service start reached Docker API\n' >&2; exit 1; }
@@ -114,29 +120,24 @@ failed_api = os.environ["TEST_SERVICE_FAIL"] == "0" and os.environ["TEST_API_EXI
 commands = (root / "log").read_text()
 if not failed_api:
     assert not records, records
-    assert "docker version" not in commands and "systemctl show" not in commands
+    assert "docker info" not in commands and "docker version" not in commands and "systemctl show" not in commands
     sys.exit(0)
 assert stderr.splitlines()[-1] == "Docker API is unavailable after service startup"
-assert len(records) == 5, records
-assert [r["probe"] for r in records] == ["info", "server-version", "container-enumeration",
-                                         "service-state", "service-state"]
-assert records[0]["exit"] == int(os.environ["TEST_API_EXIT"])
-assert records[0]["clock"] == "realtime" and records[0]["budget_ms"] == 10000
-assert "timeout 10 docker info\n" in commands
-assert "docker version --format {{.Server.Version}}\n" in commands
-assert "docker container ls -a --format {{.Names}}\n" in commands
-assert "timeout --kill-after=1 10 docker version --format {{.Server.Version}}\n" in commands
-assert "timeout --kill-after=1 10 docker container ls -a --format {{.Names}}\n" in commands
-assert "timeout --kill-after=1 3 systemctl show docker.service --property=" in commands
-assert "timeout --kill-after=1 3 systemctl show containerd.service --property=" in commands
+probes = {r['probe']: r for r in records if r['probe'] != 'service-state'}
+primary = probes['container-enumeration']
+assert primary['exit'] == int(os.environ['TEST_API_EXIT'])
+assert primary['clock'] == 'realtime' and primary['budget_ms'] == 10000
+assert primary['kill_after_ms'] == 1000
 comparison_exit = int(os.environ["TEST_COMPARE_EXIT"])
 for record in records:
     assert record["diagnostic"] == "docker-provision-startup"
     assert isinstance(record["elapsed_ms"], int) and record["elapsed_ms"] >= 0
-for record in records[1:]:
-    assert record["exit"] == comparison_exit
-assert [r["unit"] for r in records[3:]] == ["docker.service", "containerd.service"]
-for record in records[3:]:
+for probe in ('info', 'server-version'):
+    assert probes[probe]['exit'] == comparison_exit
+    assert probes[probe]['budget_ms'] == 10000 and probes[probe]['kill_after_ms'] == 1000
+services = {r['unit']: r for r in records if r['probe'] == 'service-state'}
+for unit in ('docker.service', 'containerd.service'):
+    record = services[unit]
     assert record["budget_ms"] == 3000 and record["kill_after_ms"] == 1000
     if comparison_exit:
         assert not record["state"]
@@ -151,5 +152,28 @@ PY
    done
   done
 done
+
+# A real inventory timeout stays fatal even when later diagnostics succeed.
+export TEST_SERVICE_FAIL=0 TEST_API_EXIT=0 TEST_COMPARE_EXIT=0 TEST_API_HANG=1
+rm -f "$TEST_STARTED"
+: >"$TEST_LOG"
+status=0
+bash -euo pipefail "$services" >"$TMP/stdout" 2>"$TMP/stderr" || status=$?
+[ "$status" = 1 ] || { printf 'FAIL: inventory timeout did not fail provisioning\n' >&2; exit 1; }
+! kill -0 "$(cat "$TEST_API_PID")" 2>/dev/null \
+  || { printf 'FAIL: inventory query survived its timeout\n' >&2; exit 1; }
+python3 - "$TMP" <<'PY'
+import json
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+stderr = (root / 'stderr').read_text()
+assert not (root / 'stdout').read_text() and 'PRIVATE' not in stderr
+probes = {r['probe']: r for line in stderr.splitlines() if line.startswith('{')
+          for r in [json.loads(line)] if r['probe'] != 'service-state'}
+assert probes['container-enumeration']['exit'] == 124
+assert probes['info']['exit'] == 0 and probes['server-version']['exit'] == 0
+assert (root / 'log').read_text().splitlines().count('docker container ls -a --format {{.Names}}') == 1
+PY
 
 printf 'ok: Docker forwarding and service readiness convergence\n'

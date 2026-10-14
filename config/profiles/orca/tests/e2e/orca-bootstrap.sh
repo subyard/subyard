@@ -78,7 +78,7 @@ case "$HANDLER_ACCEPTANCE" in
 esac
 [ -z "$HANDLER_ACCEPTANCE" ] || [ -n "$UPGRADE_FROM" ] \
   || die 'Orca handler acceptance requires a published predecessor'
-for command in git go incus jq python3 rg script sudo timeout; do
+for command in git go incus jq python3 rg script sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -90,6 +90,53 @@ incus() {
   else
     /usr/bin/incus "$@"
   fi
+}
+reexec_with_incus_group() {
+  local command
+  # Exported lane inputs survive sg; normalize them again before claiming STATE.
+  printf -v command 'exec bash %q' "$ROOT/config/profiles/orca/tests/e2e/orca-bootstrap.sh"
+  exec sg incus-admin -c "$command"
+}
+
+ensure_owner_incus() {
+  local platform_root="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus"
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  if ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
+    || ! /usr/bin/incus storage show default --project default >/dev/null 2>&1 \
+    || ! /usr/bin/incus network show incusbr0 --project default >/dev/null 2>&1; then
+    (
+      # Prepare only the host platform; the Orca yard remains uninitialized.
+      # shellcheck source=tests/helpers/test-context.sh
+      . "$ROOT/tests/helpers/test-context.sh"
+      setup_test_context "$platform_root/bootstrap"
+      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$ORIGINAL_HOME"
+      SUBYARD_USER="$(id -un)"
+      export SUBYARD_CONFIG_DIR="$ROOT/config"
+      export SUBYARD_CONFIG_HOME="$platform_root/config" SUBYARD_HOME="$platform_root/data"
+      export STORAGE_PATH="$platform_root/incus/storage"
+      export HOST_BASE="$platform_root/host-data" RESTRICTED_DISK_PATHS="$platform_root/host-data"
+      set -a
+      # shellcheck source=config/host.env
+      . "$ROOT/config/host.env"
+      set +a
+      bash "$ROOT/scripts/01-install-incus.sh" --yes
+    )
+  fi
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  # Public migration uses the native session, not the sudo-backed incus wrapper.
+  /usr/bin/incus query '/1.0/instances?project=default' >/dev/null \
+    || die 'owner Incus API is unavailable in the actual execution session'
+  /usr/bin/incus storage show default --project default >/dev/null \
+    || die 'owner default storage is unavailable after platform preparation'
+  /usr/bin/incus network show incusbr0 --project default >/dev/null \
+    || die 'owner default bridge is unavailable after platform preparation'
+  stage 'owner native Incus prerequisites are ready before public bootstrap'
 }
 yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
@@ -936,6 +983,9 @@ if [ -n "$RESUME_STATE" ]; then
       && [ "$((0$(stat -c %a "$file") & 022))" -eq 0 ] \
       || die 'resume secondary-yard configuration is unsafe'
   fi
+fi
+ensure_owner_incus
+if [ -n "$RESUME_STATE" ]; then
   STATE="$RESUME_STATE"
 else
   STATE="$(mktemp -d /var/tmp/subyard-orca-bootstrap.XXXXXX)"

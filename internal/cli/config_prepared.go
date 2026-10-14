@@ -157,7 +157,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		desired = config.PersistentFileSnapshot{}
 	}
 	prospectiveRequest := request
-	if request.sourceGuard != nil {
+	if request.sourceGuard != nil && slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
 		prospectiveRequest.action = "selection-repair"
 	}
 	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired)

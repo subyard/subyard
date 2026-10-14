@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -15,10 +16,10 @@ import (
 )
 
 func TestTestVMSettingsV2PlansAggregateCanonicalizeAndReset(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/hermes/config.env": "# retained\nYARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n",
-	})
-	plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+	}
+	plan, err := planSyntheticSettingsV2(files, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,9 +40,8 @@ func TestTestVMSettingsV2PlansAggregateCanonicalizeAndReset(t *testing.T) {
 	}
 	assertSettingsV2Decision(t, plan.Decisions, "hermes", "YARD_TEMPLATE", DecisionCanonicalize, "test-vms")
 	assertSettingsV2Decision(t, plan.Decisions, "hermes", "NESTED_E2E_VMS", DecisionReset, "unset")
-	actual, err := os.ReadFile(file.Path)
-	if err != nil || !bytes.Equal(actual, file.Expected.Content) {
-		t.Fatalf("Inspect changed source settings: %q, err=%v", actual, err)
+	if !bytes.Equal([]byte(files[file.Path]), file.Expected.Content) {
+		t.Fatal("planner changed input content")
 	}
 }
 
@@ -55,10 +55,10 @@ func TestTestVMSettingsV2PreservesCurrentAndUnrelatedSettings(t *testing.T) {
 		{name: "unrelated yard", content: "SSH_PORT=2224\nNESTED_E2E_VMS=0\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configHome := settingsV2Fixture(t, map[string]string{
+			files := map[string]string{
 				"yards/hermes/config.env": test.content,
-			})
-			plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+			}
+			plan, err := planSyntheticSettingsV2(files, nil, nil)
 			if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 0 {
 				t.Fatalf("plan = %#v, err=%v", plan, err)
 			}
@@ -67,45 +67,22 @@ func TestTestVMSettingsV2PreservesCurrentAndUnrelatedSettings(t *testing.T) {
 }
 
 func TestTestVMSettingsV2PreservesSupportedNonTargetTemplate(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/ordinary/config.env": "YARD_TEMPLATE=synthetic-other\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n",
 		"yards/hermes/config.env":   "YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\n",
-	})
-	candidateConfigDir := filepath.Join(configHome, "candidate", "config")
-	profilePath := filepath.Join(candidateConfigDir, "yards", "profiles", "synthetic-other.env")
-	if err := os.MkdirAll(filepath.Dir(profilePath), 0o700); err != nil {
-		t.Fatal(err)
 	}
-	testkit.WriteFile(t, profilePath, []byte("YARD_KIND=vm\n"), 0o600)
-	capability := newTestVMSettingsV2Capability(configHome, nil)
-	capability.candidateConfigDir = candidateConfigDir
-	plan, err := capability.Inspect()
+	plan, err := planSyntheticSettingsV2(files, nil, map[string]bool{"synthetic-other": true})
 	if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 1 || plan.Files[0].Yard != "hermes" {
 		t.Fatalf("mixed supported-template plan = %#v, err=%v", plan, err)
-	}
-	ordinaryPath := filepath.Join(configHome, "yards", "ordinary", "config.env")
-	ordinary, err := os.ReadFile(ordinaryPath)
-	if err != nil || string(ordinary) != "YARD_TEMPLATE=synthetic-other\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n" {
-		t.Fatalf("non-target settings changed: %q, err=%v", ordinary, err)
 	}
 	assertSettingsV2Decision(t, plan.Decisions, "ordinary", "YARD_TEMPLATE", DecisionPreserve, "preserved")
 }
 
 func TestTestVMSettingsV2IgnoresInheritedSettingsOnSupportedNonTarget(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/ordinary/config.env": "YARD_TEMPLATE=synthetic-other\n",
-	})
-	candidateConfigDir := filepath.Join(configHome, "candidate", "config")
-	profilePath := filepath.Join(candidateConfigDir, "yards", "profiles", "synthetic-other.env")
-	if err := os.MkdirAll(filepath.Dir(profilePath), 0o700); err != nil {
-		t.Fatal(err)
 	}
-	testkit.WriteFile(t, profilePath, []byte("YARD_KIND=vm\n"), 0o600)
-	capability := newTestVMSettingsV2Capability(
-		configHome, []string{"YARD_TEMPLATE", "NESTED_E2E_VMS"},
-	)
-	capability.candidateConfigDir = candidateConfigDir
-	plan, err := capability.Inspect()
+	plan, err := planSyntheticSettingsV2(files, []string{"YARD_TEMPLATE", "NESTED_E2E_VMS"}, map[string]bool{"synthetic-other": true})
 	if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 0 {
 		t.Fatalf("non-target inherited plan = %#v, err=%v", plan, err)
 	}
@@ -130,10 +107,10 @@ func TestTestVMSettingsV2DoesNotTrustInvalidCandidateTemplate(t *testing.T) {
 }
 
 func TestTestVMSettingsV2ResetsCurrentProfileOverride(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/hermes.env": "YARD_TEMPLATE=test-vms\nNESTED_E2E_VMS=0\n",
-	})
-	plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+	}
+	plan, err := planSyntheticSettingsV2(files, nil, nil)
 	if err != nil || len(plan.Blockers) != 0 || len(plan.Files) != 1 {
 		t.Fatalf("plan = %#v, err=%v", plan, err)
 	}
@@ -155,10 +132,10 @@ func TestTestVMSettingsV2BlocksUnknownDuplicateAndDynamicValues(t *testing.T) {
 		{name: "implicit nested value", content: "YARD_TEMPLATE=test-vms\n: ${NESTED_E2E_VMS:=0}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configHome := settingsV2Fixture(t, map[string]string{
+			files := map[string]string{
 				"yards/hermes/config.env": test.content,
-			})
-			plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+			}
+			plan, err := planSyntheticSettingsV2(files, nil, nil)
 			if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 				t.Fatalf("plan = %#v, err=%v", plan, err)
 			}
@@ -189,11 +166,11 @@ func TestTestVMSettingsV2BlocksUnknownDuplicateAndDynamicValues(t *testing.T) {
 
 func TestTestVMSettingsV2BlocksAmbiguousOwnership(t *testing.T) {
 	t.Run("nested and legacy registration", func(t *testing.T) {
-		configHome := settingsV2Fixture(t, map[string]string{
+		files := map[string]string{
 			"yards/hermes/config.env": "YARD_TEMPLATE=e2e-vms\n",
 			"yards/hermes.env":        "YARD_TEMPLATE=e2e-vms\n",
-		})
-		plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+		}
+		plan, err := planSyntheticSettingsV2(files, nil, nil)
 		if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 			t.Fatalf("plan = %#v, err=%v", plan, err)
 		}
@@ -222,8 +199,7 @@ func TestTestVMSettingsV2BlocksAmbiguousOwnership(t *testing.T) {
 			for path, content := range test.global {
 				files[path] = content
 			}
-			configHome := settingsV2Fixture(t, files)
-			plan, err := newTestVMSettingsV2Capability(configHome, test.inherited).Inspect()
+			plan, err := planSyntheticSettingsV2(files, test.inherited, nil)
 			if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 				t.Fatalf("plan = %#v, err=%v", plan, err)
 			}
@@ -232,12 +208,10 @@ func TestTestVMSettingsV2BlocksAmbiguousOwnership(t *testing.T) {
 }
 
 func TestTestVMSettingsV2BlocksInheritedTemplateWithoutDirectAssignment(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/hermes/config.env": "NESTED_E2E_VMS=0\n",
-	})
-	plan, err := newTestVMSettingsV2Capability(
-		configHome, []string{"YARD_TEMPLATE"},
-	).Inspect()
+	}
+	plan, err := planSyntheticSettingsV2(files, []string{"YARD_TEMPLATE"}, nil)
 	if err != nil || len(plan.Blockers) != 1 || len(plan.Files) != 0 {
 		t.Fatalf("inherited template plan = %#v, err=%v", plan, err)
 	}
@@ -423,10 +397,10 @@ func assertSettingsV2Decision(
 }
 
 func TestTestVMSettingsV2RejectsMalformedFileWithoutRawDiagnostic(t *testing.T) {
-	configHome := settingsV2Fixture(t, map[string]string{
+	files := map[string]string{
 		"yards/hermes/config.env": "YARD_TEMPLATE='private-should-not-leak\n",
-	})
-	plan, err := newTestVMSettingsV2Capability(configHome, nil).Inspect()
+	}
+	plan, err := planSyntheticSettingsV2(files, nil, nil)
 	if err != nil || len(plan.Blockers) != 1 {
 		t.Fatalf("malformed plan = %#v, err=%v", plan, err)
 	}
@@ -445,4 +419,59 @@ func TestTestVMSettingsV2InspectRejectsMissingConfigHome(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing config home error = %v", err)
 	}
+}
+
+// Semantic matrices operate on logical labels and byte snapshots. Native source
+// safety and no-create behavior are covered by the physical tests below.
+
+func planSyntheticSettingsV2(files map[string]string, command []string, supported map[string]bool) (settingsV2Plan, error) {
+	snapshot := func(label string) config.PersistentFileSnapshot {
+		content, exists := files[label]
+		return config.PersistentFileSnapshot{Exists: exists, Content: []byte(content)}
+	}
+	inherited, fingerprint, blocker, err := classifySettingsV2Inheritance([]settingsV2InheritedSnapshot{
+		{Role: "shared", Label: "overrides/shared/config.env", Snapshot: snapshot("overrides/shared/config.env")},
+		{Role: "host", Label: "config.env", Snapshot: snapshot("config.env")},
+	}, command)
+	if err != nil {
+		return settingsV2Plan{}, err
+	}
+	if blocker != nil {
+		return settingsV2Plan{Blockers: []Blocker{*blocker}}, nil
+	}
+	yards := map[string]bool{}
+	for label := range files {
+		parts := strings.Split(label, "/")
+		if len(parts) > 1 && parts[0] == "yards" {
+			yards[strings.TrimSuffix(parts[1], ".env")] = true
+		}
+	}
+	names := make([]string, 0, len(yards))
+	for name := range yards {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var plan settingsV2Plan
+	for _, yard := range names {
+		nested, legacy := settingsV2YardLabels(yard)
+		input := settingsV2YardSnapshot{Yard: yard, Nested: snapshot(nested), Legacy: snapshot(legacy)}
+		source, label, selectErr := selectSettingsV2Yard(input)
+		if selectErr == nil {
+			assignments, _ := config.ParsePersistentAssignments(label, source.Content)
+			for _, value := range assignments {
+				if value.Name == "YARD_TEMPLATE" {
+					input.TemplateSupported = supported[value.Value]
+				}
+			}
+		}
+		file, decisions, blocker := planSettingsV2Yard(input, inherited, fingerprint)
+		plan.Decisions = append(plan.Decisions, decisions...)
+		if blocker != nil {
+			plan.Blockers = append(plan.Blockers, *blocker)
+		}
+		if file != nil {
+			plan.Files = append(plan.Files, *file)
+		}
+	}
+	return plan, nil
 }

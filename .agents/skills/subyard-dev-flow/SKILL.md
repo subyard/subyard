@@ -104,8 +104,8 @@ coordinator, and do not create or close shared task files or start another full 
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)
-  before runner retention or removal of completed task-owned cache. A local private copy becomes
-  a durable handoff only after authorized synchronization or verified shared artifact storage.
+  before removal of completed task-owned cache. Keep logs and receipts while the task is active;
+  after verification and cleanup, retain only key results and limitations in the private reference.
 - Every lease gets disposable VMs. Never infer progress or reuse fixtures from a released VM.
   Run remaining independent `--lane` segments with their own fresh setup. P0 rejects cross-lease
   `--resume`; reboot continuation is valid only within the same active lease.

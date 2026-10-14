@@ -1,15 +1,18 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/projectruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -29,6 +32,91 @@ func (fixture metadataFileExecutor) Exec(ctx context.Context, _, _ string, reque
 		result.ExitCode = 1
 	}
 	return result, err
+}
+
+type metadataCopyExecutor struct{ metadataFileExecutor }
+
+func (fixture metadataCopyExecutor) Execute(ctx context.Context, _ domain.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	return fixture.Stream(ctx, domain.Context{}, request, bytes.NewReader(request.Stdin))
+}
+
+func (fixture metadataCopyExecutor) Stream(ctx context.Context, _ domain.Context, request ports.InstanceExecRequest, input io.Reader) (ports.InstanceExecResult, error) {
+	arguments := []string{"-c", `umask 0002; exec "$@"`, "project-copy-fixture"}
+	replace := strings.NewReplacer("/srv/workspaces", fixture.root, "/usr/local/libexec/subyard", fixture.root+"/absent-libexec", "/etc/subyard", fixture.root+"/absent-etc")
+	for _, argument := range request.Command {
+		arguments = append(arguments, replace.Replace(argument))
+	}
+	command := exec.CommandContext(ctx, "sh", arguments...)
+	command.Stdin = input
+	command.Env = os.Environ()
+	for key, value := range request.Environment {
+		command.Env = append(command.Env, key+"="+value)
+	}
+	output, err := command.CombinedOutput()
+	result := ports.InstanceExecResult{Stdout: output}
+	if failure := new(exec.ExitError); errors.As(err, &failure) {
+		result.ExitCode = failure.ExitCode()
+	}
+	return result, err
+}
+
+func TestRemoteProjectCopyCreationPassesNativeMetadataGuardWithSharedParent(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(testkit.TempDir(t), "workspaces")
+	if err := os.Mkdir(root, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, os.ModeSetgid|0o775); err != nil {
+		t.Fatal(err)
+	}
+	source := testkit.TempDir(t)
+	content := []byte("retain user source bytes and permissions")
+	testkit.WriteFile(t, filepath.Join(source, "payload"), content, 0o664)
+	record := domain.ProjectRecord{Schema: 1, IdentityVersion: 2, ProjectID: "copy", Name: "copy", HostPath: source, YardPath: "/srv/workspaces/copy/src", Mode: domain.ProjectSync, SSHHost: "yard", Target: "yard"}
+	fixture := metadataCopyExecutor{metadataFileExecutor{root}}
+	runner := application.ProjectActionRunner{Data: fixture, PreparedArchive: projectruntime.TarArchiver{}, Yard: domain.Context{AccessKind: domain.AccessRemote, YardName: "selected", DevUID: os.Getuid()}, Project: record}
+	action := domain.AdapterRequest{Schema: 1, OperationID: "copy-fixture", Adapter: "project", Action: "sync"}
+	if _, _, err := runner.Run(ctx, action, nil); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := application.ProjectMetadata(record, "selected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: filepath.Dir(record.YardPath), Payload: string(metadata)}}}
+	runtime := Runtime{Executor: fixture, Yard: domain.Context{YardName: "selected", DevUID: os.Getuid()}}
+	if _, err := runtime.metadataRequest(ctx, "inspect", plan); err != nil {
+		t.Fatalf("new remote copy violates native metadata admission: %v", err)
+	}
+	workspace := filepath.Join(root, record.ProjectID)
+	payload := filepath.Join(workspace, "src", "payload")
+	if info, err := os.Stat(payload); err != nil || info.Mode().Perm() != 0o664 {
+		t.Fatalf("copy changed archive payload permissions: %v %v", info, err)
+	}
+	// A later unsafe existing root remains a collision, never permission repair.
+	if err := os.Chmod(workspace, os.ModeSetgid|0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.metadataRequest(ctx, "inspect", plan); err == nil {
+		t.Fatal("native guard accepted the unsafe existing root")
+	} else {
+		var failure *ProjectMetadataError
+		if !errors.As(err, &failure) || failure.Reason != "unsafe_root" {
+			t.Fatalf("unexpected native refusal: %v", err)
+		}
+	}
+	if _, _, err := runner.Run(ctx, action, nil); err == nil {
+		t.Fatal("copy accepted the existing unsafe root")
+	}
+	if info, err := os.Stat(workspace); err != nil || info.Mode().Perm() != 0o775 || info.Mode()&os.ModeSetgid == 0 {
+		t.Fatalf("copy normalized an existing root: %v %v", info, err)
+	}
+	if got, err := os.ReadFile(payload); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("copy changed retained user payload: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, ".subyard-meta.json")); err != nil || !bytes.Equal(got, metadata) {
+		t.Fatalf("copy changed retained metadata: %q %v", got, err)
+	}
 }
 
 func TestPreparedProjectMetadataRepair(t *testing.T) {

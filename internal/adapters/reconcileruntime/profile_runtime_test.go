@@ -146,16 +146,26 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 		{name: "bad digest", output: `{"state":"current","actual":"abc","desired":"abc"}`},
 		{name: "unknown field", output: `{"state":"absent","actual":"","desired":"","extra":true}`},
 		{name: "trailing", output: `{"state":"absent","actual":"","desired":""} {}`},
-		{name: "oversize valid JSON", output: `{"state":"absent","actual":"","desired":""}` + strings.Repeat(" ", profileRuntimeOutputLimit)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			runtime := profileRuntimeFixture(t, "#!/bin/sh\nprintf '%s' \"$OUTPUT\"\n")
-			runtime.Environment = []string{"OUTPUT=" + test.output}
-			if _, err := runtime.ObserveProfileRuntimes(context.Background()); err == nil {
+			if _, err := decodeProfileRuntimeObservation([]byte(test.output)); err == nil {
 				t.Fatal("invalid handler output was accepted")
 			}
 		})
+	}
+}
+
+func TestObserveProfileRuntimeBoundsOutputAndUsesStrictDecoder(t *testing.T) {
+	for _, output := range []string{
+		`{"state":"absent","actual":"","desired":"","extra":true}`,
+		`{"state":"absent","actual":"","desired":""}` + strings.Repeat(" ", profileRuntimeOutputLimit),
+	} {
+		runtime := profileRuntimeFixture(t, "#!/bin/sh\nprintf '%s' \"$OUTPUT\"\n")
+		runtime.Environment = []string{"OUTPUT=" + output}
+		if _, err := runtime.ObserveProfileRuntimes(context.Background()); err == nil {
+			t.Fatal("invalid native output accepted")
+		}
 	}
 }
 

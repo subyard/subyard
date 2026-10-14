@@ -25,6 +25,7 @@ case "$VM:$PHASE" in 1:controller|2:owner-setup|2:owner-cleanup) ;; *) printf 'p
 STATE="/var/tmp/subyard-preview-$RUN_ID"
 MARKER="subyard-preview-acceptance-v1:$RUN_ID:$VM"
 NAME="pv-$RUN_ID"
+YARD_BIN="$STATE/bin/yard"
 NORMAL_PID='' HELPER_PID='' BUSY_PID=''
 trap 'printf "preview-lifecycle: failed phase=%s line=%s exit=%s\n" "$PHASE" "$LINENO" "$?" >&2' ERR
 fail() {
@@ -43,6 +44,8 @@ export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD
 export SUBYARD_REPOSITORY_ROOT="$ROOT" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export PATH="$STATE/bin:$ROOT/bin:/usr/local/bin:/usr/bin:/bin"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
 
 # shellcheck source=scripts/lib/host.sh
 . "$ROOT/scripts/lib/host.sh"
@@ -53,6 +56,54 @@ incus() {
   else
     /usr/bin/incus "$@"
   fi
+}
+reexec_with_incus_group() {
+  local command
+  # Exported lane inputs survive sg; reenter before claiming the fixture STATE.
+  printf -v command 'exec bash %q %q' "$ROOT/dev/e2e/preview-lifecycle.sh" "$PHASE"
+  exec sg incus-admin -c "$command"
+}
+ensure_owner_incus() {
+  local platform_root="$HOME/.cache/subyard-e2e-platform/incus"
+  [ ! -L "$HOME/.cache" ] && [ ! -L "$HOME/.cache/subyard-e2e-platform" ] \
+    && [ ! -L "$platform_root" ] || fail 'unsafe platform directory'
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  if ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
+    || ! /usr/bin/incus storage show default --project default >/dev/null 2>&1 \
+    || ! /usr/bin/incus network show incusbr0 --project default >/dev/null 2>&1; then
+    (
+      # Prepare only the host platform before the public release migration.
+      # shellcheck source=tests/helpers/test-context.sh
+      . "$ROOT/tests/helpers/test-context.sh"
+      setup_test_context "$platform_root/bootstrap"
+      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME"
+      SUBYARD_USER="$(id -un)"
+      export SUBYARD_CONFIG_DIR="$ROOT/config"
+      export SUBYARD_CONFIG_HOME="$platform_root/config" SUBYARD_HOME="$platform_root/data"
+      export STORAGE_PATH="$platform_root/incus/storage" YARD_KIND="$KIND"
+      export HOST_BASE="$platform_root/host-data" RESTRICTED_DISK_PATHS="$platform_root/host-data"
+      set -a
+      # shellcheck source=config/host.env
+      . "$ROOT/config/host.env"
+      set +a
+      bash "$ROOT/scripts/01-install-incus.sh" --yes
+    )
+  fi
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  # The installer uses the actual native session, without the sudo wrapper.
+  /usr/bin/incus query '/1.0/instances?project=default' >/dev/null \
+    || fail 'owner Incus API is unavailable in the actual execution session'
+  /usr/bin/incus storage show default --project default >/dev/null \
+    || fail 'owner default storage is unavailable after platform preparation'
+  /usr/bin/incus network show incusbr0 --project default >/dev/null \
+    || fail 'owner default bridge is unavailable after platform preparation'
+  printf 'preview owner native-Incus-preflight=PASS\n'
 }
 wait_vm_agent() {
   if [ "$KIND" = vm ]; then
@@ -74,10 +125,10 @@ yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' timeout --foreground 1800 "$ROOT/.build/yard" "$@"
+    printf -v command '%q ' timeout --foreground 1800 "$YARD_BIN" "$@"
     sg incus-admin -c "exec $command"
   else
-    timeout --foreground 1800 "$ROOT/.build/yard" "$@"
+    timeout --foreground 1800 "$YARD_BIN" "$@"
   fi
 }
 peer() {
@@ -101,13 +152,70 @@ stop_sessions() {
   done
   NORMAL_PID='' HELPER_PID='' BUSY_PID=''
 }
+cleanup_canonical_preset() {
+  python3 - "$STATE" "$MARKER" <<'PRESET_CLEANUP'
+import json, os, pathlib, stat, sys
+state, marker = pathlib.Path(sys.argv[1]), sys.argv[2]
+receipt = state / "canonical-preset.json"
+if not receipt.exists() and not receipt.is_symlink():
+    sys.exit(0)
+def identity(info):
+    return [info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink]
+def read_owned(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise ValueError()
+        return stream.read(4097)
+try:
+    info = state.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError()
+    if read_owned(state / ".marker") != (marker + "\n").encode():
+        raise ValueError()
+    payload = read_owned(receipt)
+    if len(payload) > 4096 or stat.S_IMODE(receipt.lstat().st_mode) != 0o600:
+        raise ValueError()
+    saved = json.loads(payload)
+    runtime = pathlib.Path(os.path.realpath(state / "bin/yard")).parent.parent
+    if runtime.parent != state / "runtime/releases" or saved["runtime"] != str(runtime):
+        raise ValueError()
+    parents = [state / "runtime", runtime.parent, runtime, runtime / "config", runtime / "config/yards", runtime / "config/yards/profiles"]
+    if [identity(path.lstat()) for path in parents] != saved["parents"] or any(not path.is_dir() or path.is_symlink() for path in parents):
+        raise ValueError()
+    descriptor = os.open(parents[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if identity(os.fstat(descriptor)) != saved["parents"][-1]:
+            raise ValueError()
+        name = "canonical-no-projects.env"
+        file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+        with os.fdopen(file, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o644 or identity(info) != saved["preset"] or stream.read(257) != b"ALLOWS_PROJECTS=false\n":
+                raise ValueError()
+        if identity(os.stat(name, dir_fd=descriptor, follow_symlinks=False)) != saved["preset"]:
+            raise ValueError()
+        os.unlink(name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    receipt.unlink()
+except (OSError, ValueError, KeyError, TypeError):
+    print("preview-lifecycle: refusing changed canonical preset cleanup", file=sys.stderr)
+    sys.exit(1)
+PRESET_CLEANUP
+}
 cleanup_state() {
   local failed=0 name instance project managed
   [ -e "$STATE" ] || return 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ "$(cat "$STATE/.marker" 2>/dev/null)" = "$MARKER" ] \
     || { printf 'preview-lifecycle: refusing unowned cleanup\n' >&2; return 1; }
   if [ -f "$STATE/project-role-config.backup" ]; then
-    install -m 0600 "$STATE/project-role-config.backup" "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env" || failed=1
+    if install -m 0600 "$STATE/project-role-config.backup" "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env"; then
+      cleanup_canonical_preset || failed=1
+    else
+      failed=1
+    fi
   fi
   stop_sessions
   if [ -f "$STATE/isolation-enabled" ]; then
@@ -189,6 +297,7 @@ if [ "$KIND" = vm ] && ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 >/dev/null
 fi
 [ -x "$ROOT/.build/yard" ] || make -C "$ROOT" build > /dev/null
+ensure_owner_incus
 install -d -m 0700 "$STATE" "$STATE/bin" "$STATE/config/yards" "$STATE/data" "$HOME/.ssh"
 printf '%s\n' "$MARKER" > "$STATE/.marker"
 if [ -f "$HOME/.ssh/config" ]; then
@@ -211,6 +320,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Commit the isolated release baseline before any real yard initialization.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+FIXTURE_CONFIG_ROOT="$(dirname "$(dirname "$(readlink -f "$YARD_BIN")")")/config"
+case "$FIXTURE_CONFIG_ROOT" in "$YARD_RUNTIME_ROOT/"*/config) ;; *) fail 'fixture launcher is outside the owned installed runtime' ;; esac
+printf 'preview candidate release-preflight=PASS\n'
 
 if [ "$KIND" = vm ]; then
   # The bounded readiness helper executes Incus under timeout, outside shell functions.
@@ -622,9 +739,10 @@ environment = {
     "SUBYARD_REPOSITORY_ROOT": root, "SUBYARD_NO_AUDIT": "1",
     "SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE": "1",
     "STORAGE_PATH": "/home/dev/.cache/subyard-e2e-platform/incus/incus/storage",
-    "PATH": root+"/bin:/usr/local/bin:/usr/bin:/bin",
+    "YARD_RUNTIME_ROOT": state+"/runtime",
+    "PATH": state+"/bin:"+root+"/bin:/usr/local/bin:/usr/bin:/bin",
 }
-pathlib.Path(state, "owner-env").write_text("\n".join(
+pathlib.Path(state, "owner-env").write_text("unset YARD_ENGINE_PATH\n"+"\n".join(
     "export "+key+"="+shlex.quote(value) for key,value in environment.items())+"\n")
 pathlib.Path(state, "owner-shell").write_text(
     "#!/bin/bash\nset -euo pipefail\nexport BASH_ENV="+shlex.quote(state+"/owner-env")+
@@ -721,13 +839,33 @@ if [ "$CANONICAL" = 1 ]; then
 set -euo pipefail
 state="$1" run="$2" name="$3"
 [ "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2" ]
-root="$(cat "$state/source-root")"
-case "$root" in /var/tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
-preset="$root/config/yards/profiles/canonical-no-projects.env"
+runtime="$(dirname "$(dirname "$(readlink -f "$state/bin/yard")")")"
+case "$runtime" in "$state/runtime/"*) ;; *) exit 2 ;; esac
+preset="$runtime/config/yards/profiles/canonical-no-projects.env"
 [ ! -e "$preset" ] && [ ! -L "$preset" ]
 install -d -m 0755 "${preset%/*}"
-printf 'ALLOWS_PROJECTS=false\n' > "$preset"
-chmod 0644 "$preset"
+python3 - "$state" "$runtime" "$preset" <<'PRESET_RECEIPT'
+import json, os, pathlib, stat, sys
+state, runtime, preset = map(pathlib.Path, sys.argv[1:])
+def identity(info):
+    return [info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink]
+descriptor = os.open(preset, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+os.fchmod(descriptor, 0o644)
+with os.fdopen(descriptor, "wb") as stream:
+    stream.write(b"ALLOWS_PROJECTS=false\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+parents = [state / "runtime", runtime.parent, runtime, runtime / "config", runtime / "config/yards", runtime / "config/yards/profiles"]
+record = {"runtime": str(runtime), "parents": [identity(path.lstat()) for path in parents], "preset": identity(preset.lstat())}
+owner = (state / ".marker").stat()
+descriptor = os.open(state / "canonical-preset.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+os.fchmod(descriptor, 0o600)
+os.fchown(descriptor, owner.st_uid, owner.st_gid)
+with os.fdopen(descriptor, "w") as stream:
+    json.dump(record, stream)
+    stream.flush()
+    os.fsync(stream.fileno())
+PRESET_RECEIPT
 cp "$state/config/yards/$name/config.env" "$state/project-role-config.backup"
 chmod 0600 "$state/project-role-config.backup"
 chown dev:dev "$state/project-role-config.backup"

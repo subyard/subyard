@@ -158,6 +158,10 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 	}
 	observation.observationScope = scope
 	observation.checkpointConsent = consent
+	if err := transition.prepareSourceActivationScope(ctx, observation, checkpointSource); err != nil {
+		return err
+	}
+	scope = observation.observationScope
 	if !stable || !resume || journal.ObservationScope == scope {
 		return nil
 	}

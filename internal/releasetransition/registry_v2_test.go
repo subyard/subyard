@@ -258,10 +258,10 @@ func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
 		registry.MinimumEpochs["owner-registration"] != 1 ||
 		registry.CurrentEpochs["owner-registration"] != 2 || len(registry.Migrations) != 4 ||
 		registry.Migrations[0].ID != "canonicalize-test-vms-settings-v2" ||
-		registry.Migrations[1].ID != "canonicalize-test-yard-owner-v2" || registry.Migrations[3].Kind != localSSHPortMigration {
+		registry.Migrations[2].ID != "canonicalize-test-yard-owner-v2" || registry.Migrations[3].Kind != localSSHPortMigration {
 		t.Fatalf("published registry = %#v", registry)
 	}
-	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 2 || registry.Migrations[2].Kind != "owner-publication-state-v1" {
+	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 2 || registry.Migrations[1].Kind != "owner-publication-state-v1" {
 		t.Fatalf("published power reader boundary = %#v", registry)
 	}
 	for _, domain := range []string{"project-state"} {

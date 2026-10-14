@@ -95,8 +95,22 @@ type integrationObservation struct {
 func (runtime Runtime) IntegrationScope() (string, []string, error) {
 	return runtime.integrationScopePhase("inspect")
 }
+
+// IntegrationScopeWithSourceReader computes only desired identity from prepared
+// source bytes. Mutation and native observation readers are unchanged.
+func (runtime Runtime) IntegrationScopeWithSourceReader(reader func(config.MaterializedAsset) ([]byte, error)) (string, []string, error) {
+	if reader == nil {
+		return "", nil, errors.New("prospective integration source reader is unavailable")
+	}
+	return runtime.integrationScopeWithSourceReader("inspect", reader)
+}
+
 func (runtime Runtime) integrationScopePhase(phase string) (string, []string, error) {
-	entries, err := runtime.integrationArtifactsPhase(phase)
+	return runtime.integrationScopeWithSourceReader(phase, runtime.SourceReader)
+}
+
+func (runtime Runtime) integrationScopeWithSourceReader(phase string, reader func(config.MaterializedAsset) ([]byte, error)) (string, []string, error) {
+	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
 		return "", nil, err
 	}
@@ -109,7 +123,7 @@ func (runtime Runtime) integrationScopePhase(phase string) (string, []string, er
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
-	sourceBinding, err := runtime.integrationSourceBindingPhase(phase)
+	sourceBinding, _, err := runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	if err != nil {
 		return "", nil, err
 	}
@@ -172,7 +186,11 @@ func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
 	return runtime.integrationArtifactsPhase("inspect")
 }
 func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArtifact, error) {
-	files, err := runtime.guestConfigFiles()
+	return runtime.integrationArtifactsWithSourceReader(phase, runtime.SourceReader)
+}
+
+func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader func(config.MaterializedAsset) ([]byte, error)) ([]integrationArtifact, error) {
+	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +245,7 @@ func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArt
 		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
 		for _, definition := range definitions {
 			if definition.Name == id {
-				binding, err := runtime.integrationPackageBinding(definition)
+				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 				if err != nil {
 					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 				}
@@ -236,13 +254,7 @@ func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArt
 		}
 		provision := runtime.environmentValue("AGENT_" + id + "_PROVISION")
 		if provision != "" {
-			var payload []byte
-			var err error
-			if runtime.SourceReader != nil {
-				payload, err = runtime.SourceReader(config.MaterializedAsset{Source: provision})
-			} else {
-				payload, err = os.ReadFile(provision)
-			}
+			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
 			if err != nil {
 				return nil, err
 			}
@@ -363,11 +375,14 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 	return runtime.observeIntegrationsPhase(ctx, "inspect")
 }
 func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase string) (IntegrationPlan, integrationObservation, error) {
+	return runtime.observeIntegrationsWithSourceReader(ctx, phase, runtime.SourceReader)
+}
+func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (IntegrationPlan, integrationObservation, error) {
 	instance, err := runtime.integrationPrecondition(ctx)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
-	entries, err := runtime.integrationArtifactsPhase(phase)
+	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
@@ -376,12 +391,12 @@ func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase strin
 		return IntegrationPlan{}, observed, err
 	}
 	plan := IntegrationPlan{Changed: observed.Changed}
-	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsPhase(phase)
+	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	if err != nil {
 		return plan, observed, err
 	}
 	plan.facts = slices.Clone(observed.Facts)
-	scope, _, err := runtime.integrationScopePhase(phase)
+	scope, _, err := runtime.integrationScopeWithSourceReader(phase, reader)
 	if err != nil {
 		return plan, observed, err
 	}
@@ -418,7 +433,7 @@ func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase strin
 		if definition.Lifecycle == nil {
 			continue
 		}
-		observation, err := runtime.observeIntegrationLifecyclePhase(ctx, definition, phase)
+		observation, err := runtime.observeIntegrationLifecycleWithSourceReader(ctx, definition, phase, reader)
 		if err != nil {
 			return plan, observed, err
 		}
@@ -427,7 +442,7 @@ func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase strin
 		plan.Changed = plan.Changed || !fact.AtDesired
 		fingerprints = append(fingerprints, observation.Actual, observation.Desired, fact.Desired)
 	}
-	files, err := runtime.guestConfigFiles()
+	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return plan, observed, err
 	}
@@ -544,6 +559,9 @@ func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase strin
 // PrepareLegacyIntegrationAdoption returns an opt-in runtime only for an
 // existing running yard with exact selected legacy artifacts to adopt.
 func (runtime Runtime) PrepareLegacyIntegrationAdoption(ctx context.Context) (Runtime, IntegrationPlan, error) {
+	return runtime.prepareLegacyIntegrationAdoptionWithSourceReader(ctx, runtime.SourceReader)
+}
+func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx context.Context, reader func(config.MaterializedAsset) ([]byte, error)) (Runtime, IntegrationPlan, error) {
 	if ready, err := runtime.incusReady(ctx); err != nil || !ready {
 		return runtime, IntegrationPlan{}, err
 	}
@@ -570,7 +588,7 @@ func (runtime Runtime) PrepareLegacyIntegrationAdoption(ctx context.Context) (Ru
 	if !absent {
 		return runtime, IntegrationPlan{}, nil
 	}
-	entries, err := candidate.integrationArtifacts()
+	entries, err := candidate.integrationArtifactsWithSourceReader("inspect", reader)
 	if err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
@@ -578,7 +596,7 @@ func (runtime Runtime) PrepareLegacyIntegrationAdoption(ctx context.Context) (Ru
 	if err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
-	files, err := candidate.guestConfigFiles()
+	files, err := candidate.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
@@ -659,6 +677,24 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 
 func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
 	plan, _, err := runtime.observeIntegrations(ctx)
+	return plan, err
+}
+
+// PrepareSourceIntegrationPlan retains the full native ownership, adoption and
+// readiness plan while projecting only prepared source content.
+func (runtime Runtime) PrepareSourceIntegrationPlan(ctx context.Context, reader func(config.MaterializedAsset) ([]byte, error), allowAdoption bool) (IntegrationPlan, error) {
+	if reader == nil {
+		return IntegrationPlan{}, errors.New("prospective integration source reader is unavailable")
+	}
+	candidate := runtime
+	if allowAdoption {
+		var err error
+		candidate, _, err = runtime.prepareLegacyIntegrationAdoptionWithSourceReader(ctx, reader)
+		if err != nil {
+			return IntegrationPlan{}, err
+		}
+	}
+	plan, _, err := candidate.observeIntegrationsWithSourceReader(ctx, "inspect", reader)
 	return plan, err
 }
 

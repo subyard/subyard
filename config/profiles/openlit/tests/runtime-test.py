@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 PROFILE = Path(__file__).resolve().parents[1]
 ROOT = PROFILE.parents[2]

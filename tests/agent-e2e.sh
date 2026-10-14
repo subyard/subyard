@@ -4109,13 +4109,16 @@ run_activation_repair_contract() (
     > "$ROOT/config/systemd/subyard-power-reconcile.service.in"
   cp "$ROOT/config/systemd/subyard-power-reconcile.service.in" \
     "$candidate_runtime/config/systemd/subyard-power-reconcile.service.in"
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    '[ "$#" = 1 ] && [ "$1" = _publication-contracts ] || exit 64' \
-    'printf "eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n"' \
-    > "$candidate_runtime/bin/yard-engine"
+  cat > "$candidate_runtime/bin/yard-engine" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" = 1 ] && [ "$1" = _publication-contracts ] || exit 64
+[ -f "$SUBYARD_REPOSITORY_ROOT/config/systemd/subyard-power-reconcile.service.in" ] || exit 65
+[ "$SUBYARD_CONFIG_HOME" = "$OPERATOR_HOME/.config/subyard" ] || exit 66
+printf 'eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n'
+EOF
   chmod 0755 "$candidate_runtime/bin/yard-engine"
+  export OPERATOR_HOME
   printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.8\n' > "$OLD_UNIT_FIXTURE"
   printf '{"ledger":"stable"}\n' > "$V2_LEDGER"
   printf '%s\n' \
@@ -4760,6 +4763,35 @@ source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
     && grep -Fxq 'inner Incus is inactive' "$TMP/source-broker-failure" \
     || fail 'source fixture lost its readiness bound or doctor diagnostic'
 ) || fail 'source fixture broker readiness regression'
+(
+  eval "$(sed -n '/^current_migration_ready() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+  eval "$(sed -n '/^current_migration_readiness_diagnostics() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+  report='{"schemaVersion":1,"current":"approved-release","outcome":{"target":"approved-release","status":"ready","reachedGoal":true}}'
+  current_migration_ready approved-release <<<"$report" || fail 'ready current release was rejected'
+  preserved="$(jq '.decisions = [{resource:"observed-resource",decision:"preserve",result:"retained"}]' <<<"$report")"
+  current_migration_ready approved-release <<<"$preserved" || fail 'informational preservation blocked readiness'
+  pending="$(jq '.outcome.status = "migration-required" | .outcome.reachedGoal = false |
+    .domains = [{pending:["unfinished-migration"]}] |
+    .decisions = [{resource:"repairable-resource",decision:"canonicalize"}]' <<<"$report")"
+  if current_migration_ready approved-release <<<"$pending"; then
+    fail 'current readiness accepted unfinished work'
+  fi
+  for invalid in 'not-json' "$report$report" \
+    "$(jq '.current = "other-release" | .outcome.target = "other-release"' <<<"$report")"; do
+    if current_migration_ready approved-release <<<"$invalid"; then
+      fail 'current readiness accepted invalid or unapproved release evidence'
+    fi
+  done
+  unsafe="$(jq '.outcome.status = "private-status-marker" | .outcome.message = "private-message-marker" |
+    .decisions[0].resource = "private-resource-marker"' <<<"$preserved")"
+  diagnostic="$(current_migration_readiness_diagnostics approved-release <<<"$unsafe" 2>&1)"
+  [[ "$diagnostic" != *private-* ]] || fail 'current readiness diagnostic disclosed raw report fields'
+  jq -e '.schema_valid and .current_matches and .target_matches and
+    .status == "unknown" and .reached_goal' <<<"$diagnostic" >/dev/null \
+    || fail 'current readiness diagnostic lost semantic facts'
+  [ "$(current_migration_readiness_diagnostics approved-release <<<not-json 2>&1)" = \
+    'current migration readiness report is invalid' ] || fail 'invalid readiness diagnostic exposed parser output'
+) || fail 'source-upgrade final readiness regression'
 (
   SOURCE_ROOT="$TMP/source-registration/src"
   OPERATOR_HOME="$TMP/source-registration/operator"

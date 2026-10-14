@@ -144,32 +144,36 @@ type v2Work struct {
 }
 
 type v2Observation struct {
-	goal                    Goal
-	links                   ReleaseLinks
-	ledger                  LedgerV2
-	ledgerSnapshot          ProtectedSnapshot
-	migrationLedgerSnapshot MigrationLedgerSnapshot
-	checkpointSnapshot      ProtectedSnapshot
-	checkpointAuthority     bool
-	checkpointConsent       bool
-	checkpointConversion    bool
-	checkpointCompaction    bool
-	journal                 *JournalRecord
-	journalSnapshot         ProtectedSnapshot
-	assessment              domain.ActionAssessment
-	decisions               []RedactedDecision
-	blockers                []Blocker
-	observations            []ResourceObservation
-	intents                 []PlannerStepIntent
-	work                    []v2Work
-	activationScope         []v2ActivationScope
-	prospectiveSettings     V2SettingsSnapshotView
-	activationConsequences  []string
-	activationWarnings      []string
-	observationScope        Fingerprint
-	activationFixed         bool
-	replacement             *JournalReplacement
-	supersededJournal       *JournalRecord
+	goal                             Goal
+	links                            ReleaseLinks
+	ledger                           LedgerV2
+	ledgerSnapshot                   ProtectedSnapshot
+	migrationLedgerSnapshot          MigrationLedgerSnapshot
+	checkpointSnapshot               ProtectedSnapshot
+	checkpointAuthority              bool
+	checkpointConsent                bool
+	checkpointConversion             bool
+	checkpointCompaction             bool
+	journal                          *JournalRecord
+	journalSnapshot                  ProtectedSnapshot
+	assessment                       domain.ActionAssessment
+	decisions                        []RedactedDecision
+	blockers                         []Blocker
+	observations                     []ResourceObservation
+	intents                          []PlannerStepIntent
+	work                             []v2Work
+	activationScope                  []v2ActivationScope
+	activationConsequences           []string
+	activationWarnings               []string
+	activationObservationFailure     error
+	observationScope                 Fingerprint
+	activationFixed                  bool
+	prospectiveSettings              V2SettingsSnapshotView
+	sourceActivationView             *V2SourceActivationView
+	sourceActivationPrepared         bool
+	sourceActivationCheckpointSource Fingerprint
+	replacement                      *JournalReplacement
+	supersededJournal                *JournalRecord
 }
 
 type v2ActivationScope struct {
@@ -878,6 +882,11 @@ func (transition *V2Transition) Converge(
 			return outcome, convergeErr
 		}
 	}
+	if observation.sourceActivationPrepared {
+		if outcome, err := transition.verifyPreparedSourceActivation(ctx, observation, *journal); err != nil || outcome.Code != "" {
+			return outcome, err
+		}
+	}
 
 	if transition.options.Releases.From == transition.options.Releases.Target {
 		if journal.Checkpoint == JournalAuthorized || journal.Checkpoint == JournalMigrating {
@@ -943,8 +952,12 @@ func (transition *V2Transition) Converge(
 		}
 	}
 	if journal.Checkpoint == JournalReconciling {
+		var expectedActivation []v2ActivationScope
+		if observation.sourceActivationPrepared || !pendingSourceActivationWork(observation) {
+			expectedActivation = observation.activationScope
+		}
 		if outcome, reconcileErr := transition.reconcileActivation(
-			ctx, *journal,
+			ctx, *journal, expectedActivation,
 		); reconcileErr != nil || outcome.Code != "" {
 			return outcome, reconcileErr
 		}
@@ -1849,6 +1862,7 @@ func (transition *V2Transition) observeFresh(
 		transition.appendFreshIngressWork(observation, *ingressAfterSettings)
 	}
 	observation.prospectiveSettings = settingsView
+	transition.retainSourceActivationView(observation, settingsView)
 	return nil
 }
 
@@ -2185,6 +2199,7 @@ func (transition *V2Transition) observeResume(
 			})
 		}
 	}
+	transition.retainSourceActivationView(observation, ownerSettingsView)
 	return nil
 }
 
@@ -2816,17 +2831,15 @@ func (transition *V2Transition) observeYard(
 	if !domain.SafeName(yard) {
 		return config.PersistentFileSnapshot{}, "", invalid("journal yard is unsafe")
 	}
-	nestedPath := filepath.Join(transition.options.ConfigHome, "yards", yard, "config.env")
-	legacyPath := filepath.Join(transition.options.ConfigHome, "yards", yard+".env")
-	nested, nestedErr := config.ReadPersistentFileSnapshot(transition.options.ConfigHome, nestedPath)
-	legacy, legacyErr := config.ReadPersistentFileSnapshot(transition.options.ConfigHome, legacyPath)
-	if nestedErr != nil || legacyErr != nil || nested.Exists == legacy.Exists {
+	input, _, err := observeSettingsV2Yard(transition.options.ConfigHome, nil, yard)
+	if err != nil {
 		return config.PersistentFileSnapshot{}, "", errors.New("journaled yard settings ownership is ambiguous")
 	}
-	if nested.Exists {
-		return nested, nestedPath, nil
+	snapshot, label, err := selectSettingsV2Yard(input)
+	if err != nil {
+		return config.PersistentFileSnapshot{}, "", err
 	}
-	return legacy, legacyPath, nil
+	return snapshot, filepath.Join(transition.options.ConfigHome, filepath.FromSlash(label)), nil
 }
 
 func (transition *V2Transition) observeSettingsWork(
@@ -2853,13 +2866,11 @@ func (transition *V2Transition) settingsAwaitSourceImport(file settingsV2FilePla
 	if !file.Expected.Exists || file.Path != nestedPath {
 		return false, nil
 	}
-	legacyPath := filepath.Join(transition.options.ConfigHome, "yards", file.Yard+".env")
-	nested, nestedErr := config.ReadPersistentFileSnapshot(transition.options.ConfigHome, nestedPath)
-	legacy, legacyErr := config.ReadPersistentFileSnapshot(transition.options.ConfigHome, legacyPath)
-	if nestedErr != nil || legacyErr != nil {
-		return false, errors.Join(nestedErr, legacyErr)
+	observed, _, err := observeSettingsV2Yard(transition.options.ConfigHome, nil, file.Yard)
+	if err != nil {
+		return false, err
 	}
-	return !nested.Exists && !legacy.Exists, nil
+	return settingsV2AwaitSourceImport(file.Expected, file.Path == nestedPath, observed), nil
 }
 
 func (transition *V2Transition) migration(id string) (MigrationDefinitionV2, bool) {
@@ -2929,6 +2940,9 @@ func (transition *V2Transition) observeActivation(
 			actual, err = reconciler.Observe(ctx, transition.options.Releases, observation.links)
 		}
 		if err != nil {
+			if observation.activationObservationFailure == nil {
+				observation.activationObservationFailure = err
+			}
 			observation.activationFixed = false
 			observation.blockers = append(
 				observation.blockers,
@@ -3064,6 +3078,7 @@ func (transition *V2Transition) currentObservationScope(
 func (transition *V2Transition) reconcileActivation(
 	ctx context.Context,
 	journal JournalRecord,
+	expected []v2ActivationScope,
 ) (Outcome, error) {
 	for index, reconciler := range transition.options.Reconcilers {
 		if reconciler == nil {
@@ -3103,6 +3118,9 @@ func (transition *V2Transition) reconcileActivation(
 				fmt.Sprintf("activation reconciler %q has an invalid observed state", id),
 				"run yard update --check",
 			), nil
+		}
+		if expected != nil && (index >= len(expected) || expected[index].ID != id || expected[index].Desired != before.Desired) {
+			return sourceActivationStaleOutcome(links, journal), nil
 		}
 		if err := reconciler.Reconcile(ctx, links); err != nil {
 			phase := "reconcile"
@@ -3144,6 +3162,9 @@ func (transition *V2Transition) reconcileActivation(
 				transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
 				fmt.Sprintf("activation reconciler %q reported an invalid state during verification", id),
 				"run yard migrate --check"), nil
+		}
+		if expected != nil && actual.Desired != expected[index].Desired {
+			return sourceActivationStaleOutcome(links, journal), nil
 		}
 		if !actual.Converged {
 			return v2RecoveringOutcome(links, journal.Goal.Target,

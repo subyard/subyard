@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -49,6 +50,40 @@ func TestSecurityAssessmentDoesNotRenderDrift(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `proxy device "sample-relay" is not loopback-only or declared by an active resource`) {
 		t.Fatalf("security operation omitted its diagnostic: %q", stderr.String())
+	}
+}
+
+func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
+	root := testkit.TempDir(t)
+	script := filepath.Join(root, "scripts/profile-services.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(root, "events")
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1' >&2\nexit 1\n"), 0o700)
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped"}}}}}
+	observed, failure := runtime.ObserveStage(context.Background(), ports.ReconcileStageProfileServices)
+	data, readErr := os.ReadFile(events)
+	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || readErr != nil || string(data) != "--check:1" {
+		t.Fatalf("original single stopped check changed: %#v %v %q %v", observed, failure, data, readErr)
+	}
+	for _, code := range []int{1, 17} {
+		err := exec.Command("bash", "-c", "exit "+strconv.Itoa(code)).Run()
+		output := fmt.Sprintf("profile service check owner=sample native-exit=%d\n", code)
+		observation, observedErr := profileServiceObservation(output, false, err)
+		if observation.Converged || observation.Owner != "sample" || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
+			t.Fatalf("native disposition lost: %#v %v", observation, observedErr)
+		}
+		for _, invalid := range []string{"private-canary", output + "private-canary\n", "profile service check owner=../private-canary native-exit=1"} {
+			_, failure := profileServiceObservation(invalid, false, err)
+			if failure == nil || strings.Contains(failure.Error(), "private-canary") {
+				t.Fatalf("dispatcher failure classified as drift or leaked: %v", failure)
+			}
+		}
+	}
+	observation, err := profileServiceObservation("", false, nil)
+	if err != nil || !observation.Converged {
+		t.Fatalf("successful check changed: %#v %v", observation, err)
 	}
 }
 
@@ -959,8 +994,36 @@ func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
 			if (readErr == nil) != test.wantCalled {
 				t.Fatalf("integration ownership handler called=%v, want=%v", readErr == nil, test.wantCalled)
 			}
-			if len(incus.ExecCalls) != 1 || strings.Join(incus.ExecCalls[0].Request.Command, " ") != "sh -c command -v docker >/dev/null && timeout 10 docker info >/dev/null" {
-				t.Fatalf("Docker substrate check = %#v", incus.ExecCalls)
+			if len(incus.ExecCalls) != 1 {
+				t.Fatalf("Docker substrate checks = %d, want one", len(incus.ExecCalls))
+			}
+			if test.wantErr == nil {
+				// Execute the captured guest probe: inventory is the required operation,
+				// while daemon-wide info must not decide readiness or expose native output.
+				bin := testkit.TempDir(t)
+				testkit.WriteFile(t, filepath.Join(bin, "docker"), []byte(`#!/bin/sh
+printf 'PRIVATE inventory names\n'
+printf 'PRIVATE native diagnostics\n' >&2
+case "${1:-}:${2:-}" in
+container:ls) exit "$PROBE_EXIT" ;;
+*) exit 99 ;;
+esac
+`), 0o700)
+				command := incus.ExecCalls[0].Request.Command
+				probe := exec.Command(command[0], command[1:]...)
+				probe.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "PROBE_EXIT="+strconv.Itoa(test.step.Result.ExitCode))
+				output, err := probe.CombinedOutput()
+				exitCode := 0
+				if err != nil {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) {
+						t.Fatal(err)
+					}
+					exitCode = exit.ExitCode()
+				}
+				if exitCode != test.step.Result.ExitCode || len(output) != 0 {
+					t.Fatalf("native inventory probe: exit=%d want=%d output_bytes=%d", exitCode, test.step.Result.ExitCode, len(output))
+				}
 			}
 		})
 	}
@@ -982,10 +1045,11 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	payload := []byte("fixture\n")
 	testkit.WriteFile(t, instructions, payload, 0o600)
 	previewSource := filepath.Join("..", "..", "..", "config", "preview", "instructions.md")
-	digest, err := (guestConfigFile{source: instructions, previewInstructions: true, previewSource: previewSource}).sourceHash()
+	effective, err := (guestConfigFile{source: instructions, previewInstructions: true, previewSource: previewSource}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(effective))
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},
 		ExecSteps:  steps("regular file|755|0:0", digest),
@@ -1019,10 +1083,11 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
-	linkedDigest, err := (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true, previewSource: previewSource}).sourceHash()
+	effective, err = (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true, previewSource: previewSource}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
+	linkedDigest := fmt.Sprintf("%x", sha256.Sum256(effective))
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	assertStage(t, runtime, "provision", true, "symlinked host instructions")
 	runtime.Environment = []string{
@@ -1752,5 +1817,84 @@ func TestNetworkStageCapturesKernelActorBeforeElevatedScript(t *testing.T) {
 		if err != nil || string(data) != actor.Username+"\n--yes\n--operator-uid="+strconv.Itoa(os.Getuid())+"\n" {
 			t.Fatalf("kernel actor not retained in script identity and argv: %v", err)
 		}
+	}
+}
+
+func TestPowerStageKeepsCurrentActorAndPinnedRepository(t *testing.T) {
+	actor, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignUID := "0"
+	if os.Getuid() == 0 {
+		foreignUID = "65534"
+	}
+	foreign, err := user.LookupId(foreignUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := testkit.TempDir(t)
+	repository := filepath.Join(fixture, "repository")
+	if err := os.MkdirAll(filepath.Join(repository, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(fixture, "actor")
+	testkit.WriteFile(t, filepath.Join(repository, "scripts", "install-power-reconciler.sh"), []byte(
+		"#!/bin/sh\nprintf '%s\\n' \"$SUBYARD_USER\" \"$SUBYARD_CONFIG_HOME\" > \"$ACTOR_MARKER\"\n"), 0o700)
+	pin, err := os.Open(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	if err := os.Rename(repository, filepath.Join(fixture, "retained")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repository, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(repository, "scripts", "install-power-reconciler.sh"), []byte("#!/bin/sh\nexit 99\n"), 0o700)
+	configHome := filepath.Join(fixture, "config")
+	if err := os.Mkdir(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{
+		RepositoryRoot: fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), pin.Fd()),
+		Environment: []string{"SUDO_USER=" + foreign.Username, "USER=" + foreign.Username,
+			"SUBYARD_CONFIG_HOME=" + configHome, "ACTOR_MARKER=" + marker},
+	}
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStagePower); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != actor.Username+"\n"+configHome+"\n" {
+		t.Fatalf("pinned power adapter did not retain the approved actor and config: %q, %v", data, err)
+	}
+}
+
+func TestPowerStageRefusesDifferentExplicitActorBeforeScript(t *testing.T) {
+	foreignUID := "0"
+	if os.Getuid() == 0 {
+		foreignUID = "65534"
+	}
+	foreign, err := user.LookupId(foreignUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "mutation")
+	testkit.WriteFile(t, filepath.Join(root, "scripts", "install-power-reconciler.sh"), []byte(
+		"#!/bin/sh\nprintf mutation > \"$ACTOR_MARKER\"\n"), 0o700)
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{
+		"SUBYARD_USER=" + foreign.Username, "ACTOR_MARKER=" + marker,
+	}}
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStagePower); err == nil ||
+		!strings.Contains(err.Error(), "differs from the current caller") {
+		t.Fatalf("different explicit power actor was not refused: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("power adapter executed before actor refusal")
 	}
 }

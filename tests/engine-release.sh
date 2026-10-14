@@ -351,6 +351,34 @@ jq -e '.domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-p
   "$standalone_ledger" >/dev/null \
   || fail 'fresh bootstrap published entrypoints before the optional publication reader boundary'
 standalone_ledger_before="$(sha256sum "$standalone_ledger")"
+# Exercise the same generic bootstrap used by fresh optional-profile fixtures,
+# including real installer publication and its protected reader admission.
+(
+  fixture="$TMP/profile-bootstrap-source"
+  state="$TMP/profile-bootstrap-state"
+  install -d "$fixture/.subyard-acceptance/release" "$state/home"
+  cp -a "$release/." "$fixture/.subyard-acceptance/release/"
+  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) exit 1 ;; esac
+  runtime_file="subyard-1.0.0-test-linux-$arch.tar.gz"
+  checksum="$(sha256sum "$release/$runtime_file" | awk '{print $1}')"
+  printf '{"version":"1.0.0-test","runtime_file":"%s","runtime_sha256":"%s"}\n' \
+    "$runtime_file" "$checksum" > "$fixture/.subyard-acceptance/candidate.json"
+  export HOME="$state/home" SUBYARD_OPERATOR_HOME="$state/home"
+  export SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
+  export YARD_RUNTIME_ROOT="$state/runtime" SHELL=/bin/bash
+  unset YARD_ENGINE_PATH
+  # shellcheck source=tests/helpers/release-candidate.sh
+  . "$ROOT/tests/helpers/release-candidate.sh"
+  launcher="$(release_candidate_install "$fixture" "$state")"
+  [ "$launcher" = "$state/bin/yard" ] && [ -x "$launcher" ] \
+    || fail 'profile fixture bootstrap did not publish its isolated launcher'
+  "$launcher" _publication-contracts >/dev/null \
+    || fail 'profile fixture bootstrap left the protected publication reader uncommitted'
+  [ -f "$state/bashrc" ] && [ -f "$state/profile" ] \
+    && [ ! -e "$HOME/.bashrc" ] && [ ! -e "$HOME/.profile" ] \
+    && [ ! -e "$HOME/.local/bin/yard" ] \
+    || fail 'profile fixture bootstrap wrote outside its explicit startup and binary paths'
+)
 grep -Fq 'Subyard CLI login PATH' "$standalone_home/.profile" \
   && grep -Fq 'Subyard CLI interactive PATH' "$standalone_home/.bashrc" \
   && grep -Fq 'Subyard CLI completion' "$standalone_home/.bashrc" \

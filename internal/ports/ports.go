@@ -202,6 +202,17 @@ type ReconcileStageRunner interface {
 	VerifyStage(context.Context, ReconcileStageID) (bool, error)
 }
 
+// ReconcileStageObserver optionally retains finite facts from the same check.
+type ReconcileStageObserver interface {
+	ObserveStage(context.Context, ReconcileStageID) (ReconcileStageObservation, error)
+}
+
+type ReconcileStageObservation struct {
+	Converged  bool
+	Owner      string
+	NativeExit int
+}
+
 type InitPlatform interface {
 	ReconcileStageRunner
 	Preflight(context.Context, bool) error

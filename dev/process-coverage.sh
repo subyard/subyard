@@ -63,6 +63,7 @@ chmod 0600 "$shell_hook"
 printf '  [ .. ] package coverage bundle=%s\n' "$bundle_hash"
 (
   cd "$ROOT"
+  bash "$ROOT/dev/build-profiles.sh"
   go test -cover -covermode=atomic -coverpkg=./... ./... \
     -args -test.gocoverdir="$package_cov"
   go build -cover -covermode=atomic -coverpkg=./... -buildvcs=false -trimpath \

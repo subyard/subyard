@@ -1,10 +1,11 @@
 package tests
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -32,6 +33,32 @@ func TestNativePrepareAcceptsHashedIncusContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	devicePayload, err := os.ReadFile(filepath.Join(output, "down-device.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := os.ReadFile(filepath.Join(output, "down-receipt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := registry.Lookup("orca")
+	lines := strings.Split(strings.TrimSuffix(string(devicePayload), "\n"), "\n")
+	if definition.Proxy == nil || lines[0] != definition.Proxy.Device+":" {
+		t.Fatal("native route lost its declared proxy device")
+	}
+	device := make(map[string]string)
+	for _, line := range lines[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ": ")
+		if !ok {
+			t.Fatalf("invalid native fixture device field: %q", line)
+		}
+		device[key] = value
+	}
+	if len(device) != 4 || device["type"] != "proxy" || device["bind"] != "host" ||
+		device["connect"] != definition.Proxy.Connect || string(receipt) != definition.Proxy.OwnershipValue(device) {
+		t.Fatal("native route receipt does not bind the declared device")
+	}
+	wantRoute := fmt.Sprintf("receipt:device:%x:%x", sha256.Sum256(devicePayload), sha256.Sum256([]byte(string(receipt)+"\n\n")))
 	for _, observation := range []string{"up", "up-noop", "restart", "down", "down-noop", "restart-verified", "sync", "sync-verified"} {
 		verb := strings.TrimSuffix(strings.TrimSuffix(observation, "-verified"), "-noop")
 		payload, err := os.ReadFile(filepath.Join(output, observation+".json"))
@@ -77,8 +104,8 @@ func TestNativePrepareAcceptsHashedIncusContext(t *testing.T) {
 			if observation == "restart-verified" && (step.Decision != domain.StepSkip || step.Observed != step.Desired) {
 				t.Fatalf("native restart guard/verify did not converge: %#v", step)
 			}
-			if observation == "down" && step.ID == "route" && !regexp.MustCompile(`^receipt:device:[0-9a-f]{64}:[0-9a-f]{64}$`).MatchString(step.Observed) {
-				t.Fatalf("native route fingerprint was lost: %q", step.Observed)
+			if observation == "down" && step.ID == "route" && step.Observed != wantRoute {
+				t.Fatalf("native route device or ownership fingerprint was lost: got %q, want %q", step.Observed, wantRoute)
 			}
 		}
 		if verb == "up" {

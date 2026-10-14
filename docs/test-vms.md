@@ -884,10 +884,12 @@ broker lease time for final checks.
 Each phase prints its bundle hash and duration. The runner keeps one bounded, redacted JSON evidence
 record per public run under its private controller state, including each phase's result, source hash,
 base fingerprint and allocation generation. It prints the evidence path; the latest 20 records are
-retained. Copy evidence needed for longer-lived tasks before that retention window expires.
+retained. Copy records still needed by an active task into its own `.build` output before that
+retention window expires.
 Evidence never contains lease credentials, guest endpoints, command payloads or ambient environment.
 Use [evidence handoff and cache cleanup](testing.md#evidence-handoff-and-cache-cleanup)
-for a verified copy outside `.build`; a controller-local path alone is not a durable handoff.
+to retain concise key findings and remove completed task-owned artifacts. Logs remain temporary;
+permanent artifact storage is not required.
 
 The current task plan is the durable checklist: record passed, failed and pending segments, the
 exact tested source and baseline identities, and evidence paths. Reassess prior passes after relevant

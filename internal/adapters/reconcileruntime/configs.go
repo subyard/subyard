@@ -1,7 +1,6 @@
 package reconcileruntime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -19,7 +18,7 @@ import (
 )
 
 type guestConfigFile struct {
-	sourceReader        func(config.MaterializedAsset) ([]byte, error)
+	readAsset           func(config.MaterializedAsset) ([]byte, error)
 	integration         string
 	label               string
 	source              string
@@ -145,6 +144,15 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 		if execErr != nil && result.ExitCode == 0 {
 			return false, execErr
 		}
+		desiredHash := fmt.Sprintf("%x", sha256.Sum256(payload))
+		if file.ownedFormat != "" {
+			desiredHash, err = configmaterial.DesiredDigestFor(file.ownedFormat, payload)
+			if err != nil {
+				return false, err
+			}
+		}
+		desired := config.DesiredMaterializedArtifact{Name: file.label, Destination: file.destination, OwnedFormat: file.ownedFormat, DesiredHash: desiredHash}
+		observation := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if file.ownedFormat != "" {
 			if execErr != nil || result.ExitCode != 0 {
 				return false, fmt.Errorf("observe %s: structured configuration unavailable", file.label)
@@ -153,20 +161,14 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 			if err != nil {
 				return false, err
 			}
-			if !observed.Converged {
-				return false, nil
-			}
-		} else {
-			if execErr != nil {
-				if result.ExitCode != 0 {
-					return false, nil
-				}
-				return false, execErr
-			}
-			fields := strings.Fields(string(result.Stdout))
-			if result.ExitCode != 0 || len(fields) == 0 || fields[0] != fmt.Sprintf("%x", sha256.Sum256(payload)) {
-				return false, nil
-			}
+			observation.Fingerprint, observation.OwnedConverged = observed.Fingerprint, observed.Converged
+		}
+		assessed, err := config.AssessMaterializedArtifact(desired, observation)
+		if err != nil {
+			return false, err
+		}
+		if !assessed.Converged {
+			return false, nil
 		}
 	}
 
@@ -231,88 +233,73 @@ func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
 }
 
 func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
+	return runtime.guestConfigFilesWithSourceReader(runtime.SourceReader)
+}
+
+func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.MaterializedAsset) ([]byte, error)) ([]guestConfigFile, error) {
 	user := runtime.devUser()
 	home := "/home/" + user
 	files := []guestConfigFile{}
-	instructions := map[string]guestConfigFile{
-		"claude": {label: "Claude instructions", source: runtime.environmentValue("HOST_CLAUDE_MD"),
-			destination: home + "/.claude/CLAUDE.md", followSymlinks: true, previewInstructions: true},
-		"codex": {label: "Codex instructions", source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"),
-			destination: home + "/.codex/AGENTS.md", followSymlinks: true, previewInstructions: true},
-		"opencode": {label: "OpenCode instructions", source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"),
-			destination: home + "/.config/opencode/AGENTS.md", followSymlinks: true, previewInstructions: true},
-	}
 	values := make(map[string]string)
 	for _, entry := range runtime.Environment {
 		if key, value, ok := strings.Cut(entry, "="); ok {
 			values[key] = value
 		}
 	}
-	assets, err := config.MaterializedAssets(values, user)
+	declaredInstructions := []config.MaterializationSource{
+		{Integration: "claude", Label: "Claude instructions", PreviewInstructions: true,
+			Asset: config.MaterializedAsset{Name: "claude.instructions", Source: runtime.environmentValue("HOST_CLAUDE_MD"), Destination: home + "/.claude/CLAUDE.md", FollowSymlinks: true}},
+		{Integration: "codex", Label: "Codex instructions", PreviewInstructions: true,
+			Asset: config.MaterializedAsset{Name: "codex.instructions", Source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"), Destination: home + "/.codex/AGENTS.md", FollowSymlinks: true}},
+		{Integration: "opencode", Label: "OpenCode instructions", PreviewInstructions: true,
+			Asset: config.MaterializedAsset{Name: "opencode.instructions", Source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"), Destination: home + "/.config/opencode/AGENTS.md", FollowSymlinks: true}},
+	}
+	sources, err := config.SelectMaterializationSources(values, user, config.MaterializationRuntime, declaredInstructions)
 	if err != nil {
 		return nil, err
 	}
-	for _, agent := range strings.Fields(values["CODING_TOOL_INTEGRATIONS"]) {
-		if instruction, ok := instructions[agent]; ok && values["ALLOWS_CODING_TOOLS"] != "false" {
-			instruction.integration = agent
-			instruction.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
-			files = append(files, instruction)
+	for _, source := range sources {
+		asset := source.Asset
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		if file.previewInstructions {
+			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
-		for _, asset := range assets {
-			if !strings.HasPrefix(asset.Name, agent+".") {
-				continue
-			}
-			files = append(files, guestConfigFile{integration: agent, label: strings.Replace(asset.Name, ".", " ", 1), source: asset.Source, destination: asset.Destination, ownedFormat: asset.OwnedFormat})
-		}
+		files = append(files, file)
 	}
 
-	for index := range files {
-		files[index].sourceReader = runtime.SourceReader
-	}
 	return files, nil
 }
 
+func (file guestConfigFile) readSourceAsset(asset config.MaterializedAsset) ([]byte, error) {
+	if file.readAsset != nil {
+		return file.readAsset(asset)
+	}
+	return asset.ReadSource()
+}
+
 func (file guestConfigFile) readSource() ([]byte, error) {
-	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}
-	var payload []byte
-	var err error
-	if file.sourceReader != nil {
-		payload, err = file.sourceReader(asset)
-	} else {
-		payload, err = asset.ReadSource()
-	}
-	if !file.previewInstructions {
-		return payload, err
-	}
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+	payload, sourceErr := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
+	if sourceErr != nil && !os.IsNotExist(sourceErr) {
+		return nil, sourceErr
 	}
 	// Older published runtimes lack this asset; preserve their exact desired bytes.
 	preview := []byte(previewInstructions)
-	if file.previewSource != "" {
-		asset, err := (config.MaterializedAsset{Source: file.previewSource}).ReadSource()
+	if file.previewInstructions && file.previewSource != "" {
+		asset, err := file.readSourceAsset(config.MaterializedAsset{Source: file.previewSource})
 		if err == nil {
 			preview = asset
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
 	}
-	// Refresh the generated block when a host instruction source includes an older copy.
-	start, end := []byte("<!-- subyard-preview -->"), []byte("<!-- /subyard-preview -->")
-	if begin := bytes.Index(payload, start); begin >= 0 {
-		finish := bytes.Index(payload[begin:], end)
-		if finish < 0 || bytes.Count(payload, start) != 1 || bytes.Count(payload, end) != 1 {
-			return nil, errors.New("ambiguous static preview instruction block")
-		}
-		finish += begin + len(end)
-		updated := append([]byte(nil), payload[:begin]...)
-		updated = append(updated, bytes.TrimSuffix(preview, []byte("\n"))...)
-		return append(updated, payload[finish:]...), nil
+	payload, present, err := config.PrepareMaterializationContent(config.MaterializationRuntime, file.previewInstructions, config.MaterializationContent{Present: sourceErr == nil, Payload: payload}, preview)
+	if err != nil {
+		return nil, err
 	}
-	if len(payload) != 0 {
-		payload = append(payload, '\n', '\n')
+	if !present {
+		return nil, sourceErr
 	}
-	return append(payload, preview...), nil
+	return payload, nil
 }
 
 const previewInstructions = `<!-- subyard-preview -->
@@ -320,28 +307,13 @@ For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` 
 <!-- /subyard-preview -->
 `
 
-func (file guestConfigFile) sourceHash() (string, error) {
-	payload, err := file.readSource()
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
-}
-
 // The unchanged host digest is evidence for consented initial legacy adoption;
 // the effective payload remains the desired managed identity.
 func (file guestConfigFile) legacySourceHash() (string, error) {
 	if !file.previewInstructions {
 		return "", nil
 	}
-	asset := config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks}
-	var payload []byte
-	var err error
-	if file.sourceReader != nil {
-		payload, err = file.sourceReader(asset)
-	} else {
-		payload, err = asset.ReadSource()
-	}
+	payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
 	if os.IsNotExist(err) {
 		return "", nil
 	}

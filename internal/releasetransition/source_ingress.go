@@ -28,9 +28,19 @@ type V2SettingsSnapshotView interface {
 	ReadSnapshot(path string) (config.PersistentFileSnapshot, error)
 }
 
-// V2ProspectiveActivationObserver plans desired configuration against the
-// validated ingress/settings result while observing actual runtime state.
-// It is optional; ordinary observations retain the existing contract.
+// V2PreparedInputPaths exposes the finite logical inputs already bound by source
+// preparation. It grants no authority and snapshots come from the final view.
+type V2PreparedInputPaths interface {
+	PreparedInputPaths() ([]string, error)
+}
+
+// V2PreparedInputReader reads only a path already captured by source/settings
+// preparation. Unmatched assets retain their owning native reader and policy.
+type V2PreparedInputReader interface {
+	ReadPreparedInput(string) (config.PersistentFileSnapshot, bool, error)
+}
+
+// V2ProspectiveActivationObserver plans desired configuration against the validated settings result.
 type V2ProspectiveActivationObserver interface {
 	ObserveProspective(context.Context, ReleasePair, ReleaseLinks, V2SettingsSnapshotView) (V2ActivationObservation, error)
 }

@@ -155,21 +155,20 @@ func (runtime Runtime) previewRouteConvergedForHost(host string, instance ports.
 		(deferred || maps.Equal(device, instance.LocalDevices[previewroute.DeviceName])) && maps.Equal(device, previewroute.Device(host, port, guest))
 }
 
-// Keep an installed owner endpoint exact while its interface is temporarily absent.
+// Keep a valid deferred owner endpoint exact until its publication recovers.
 func (runtime Runtime) previewHost(ctx context.Context) string {
 	if runtime.Incus != nil {
 		instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 		if err == nil {
 			marker := instance.LocalConfig[previewroute.Key]
-			device := instance.Devices[previewroute.DeviceName]
 			if value := instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName]; value != "" {
 				var receipt ownerpublication.Receipt
-				if json.Unmarshal([]byte(value), &receipt) == nil && receipt.Ownership == marker {
-					device = receipt.Device
+				if json.Unmarshal([]byte(value), &receipt) == nil && receipt.Version == 1 && receipt.Ownership == marker &&
+					len(instance.Devices[previewroute.DeviceName]) == 0 && len(instance.LocalDevices[previewroute.DeviceName]) == 0 {
+					if host, _, _ := previewroute.Owned(marker, receipt.Device); host != "" {
+						return host
+					}
 				}
-			}
-			if host, _, _ := previewroute.Owned(marker, device); host != "" {
-				return host
 			}
 		}
 	}

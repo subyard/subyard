@@ -190,43 +190,23 @@ writer has stopped and relevant checks have finished; a long-run handoff alone d
 
 ### Evidence handoff and cache cleanup
 
-After native completion and runner cleanup, copy evidence needed by another checkout or agent
-outside `.build`, before controller retention expires. Use an existing synchronized private reference
-or shared artifact store; keep public source free of private run data. Retain one canonical set of
-original redacted receipts, events, full native terminal objects, launch/candidate bindings and the
-complete logs needed to interpret the result. Preserve failed, interrupted, blocked and incomplete
-states and unavailable measurements. Copying evidence does not import a PASS onto another candidate.
+Logs, receipts, native terminal objects and candidate bundles are temporary task artifacts.
+Retain the original redacted records, launch bindings and complete logs while the task is active,
+including failed, interrupted, blocked and incomplete outcomes and unavailable measurements.
+If controller retention would expire during the task, copy the needed records into its own
+output directory under `.build` and verify their hashes. Never reconstruct missing artifacts.
+Copying records does not import a PASS onto another candidate.
 
-Use existing copy and SHA-256 tools, with an explicit file list from the completed run. For example,
-from a run directory whose selected artifacts have these names, use a new destination outside the cache:
+After checks, review and runner cleanup, retain only concise key findings in the owning reference
+or private overlay: the tested scope, source/candidate and baseline identities, outcomes, remaining
+limits and any necessary reproduction steps. Do not commit task logs, receipts or bundles to Git.
+Permanent log storage or copies outside the task cache are not required.
 
-```sh
-(
-set -e
-evidence_dir=/path/to/private/reference/test-efficiency/RUN
-mkdir -m 0700 -- "$evidence_dir"
-sha256sum -- receipt.json events.jsonl native-terminal.json launch.json logs/check.log > SHA256SUMS
-cp --parents -- receipt.json events.jsonl native-terminal.json launch.json logs/check.log SHA256SUMS "$evidence_dir/"
-(cd "$evidence_dir" && sha256sum --check --strict SHA256SUMS)
-)
-```
-
-Select actual native filenames and all required logs, including referenced siblings; missing artifacts
-remain missing rather than reconstructed. Record the source/candidate and run identities, original
-outcome, relative evidence links and hashes in the owning reference. For large logs in shared storage,
-retain an accessible sibling link, SHA-256 and explicit retention expiry beside the compact reference.
-Read back and hash the copied bytes. Synchronize private evidence only with commit/push authorization,
-or use already accessible shared storage, then verify access and hashes from another checkout/reader.
-A local private copy alone leaves durable handoff pending.
-
-Once that read-back succeeds, stop task-owned temporary helpers and remove only explicitly identified,
-completed task-owned cache directories. Confirm that their runners/leases have finished and that no
-registered live worktree or running application uses those paths. Preserve active sibling runs and
-shared build outputs; never clear the whole `.build` as a handoff step. Keep the sole original until
-the durable copy is verified. On the next otherwise-required run, use the existing
-[single-observer protocol](#launch-and-observe-long-checks) and verify that failure/incomplete status,
-native terminal and cleanup/release evidence remain readable without its removed cache. A safe
-historical failed sample can verify the copy/read-back procedure without a new VM acceptance run.
+Then stop task-owned temporary helpers and remove only explicitly identified, completed task-owned
+cache directories. Confirm that their runners and leases have finished and that no registered live
+worktree or running application uses those paths. Preserve active sibling runs and shared build
+outputs; never clear the whole `.build` as a handoff step. Keep original records until their review
+and concise findings are complete. Cache cleanup does not require another VM acceptance run.
 
 ### Report deviations from the guide
 
@@ -463,9 +443,9 @@ failed checks and changed bindings reject the declaration. This cannot defer loc
 The [publication contract](reference/release-publication.md) describes the explicit exception
 for these bound external deferrals; publication defaults to actual passing external evidence.
 
-Acceptance receipts and logs stay in the local output directory during execution and are not committed
-to the public repository. Preserve required handoff evidence using the
-[copy/read-back procedure](#evidence-handoff-and-cache-cleanup). For actual publication, use the
+Acceptance receipts and logs stay in the local output directory while the task is active and are not
+committed to Git. Follow the [task evidence and cleanup policy](#evidence-handoff-and-cache-cleanup)
+before removing completed outputs. For actual publication, use the
 [release preparation and publication commands](reference/release-publication.md): their `accept`
 entrypoint imports exact CI assets without repackaging and retains the same collector gates.
 Release publication requires the trusted operator's complete sanitized acceptance attestation,

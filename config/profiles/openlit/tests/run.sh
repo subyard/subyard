@@ -30,3 +30,6 @@ PY
 OPENLIT_DB_PASSWORD=synthetic docker compose -f "$root/config/profiles/openlit/compose.yaml" config --quiet
 systemd-analyze verify "$root/config/profiles/openlit/subyard-openlit.service" "$root/config/profiles/openlit/subyard-openlit-trace-cutover.service" "$root/config/profiles/openlit/subyard-openlit-trace-cutover.timer"
 bash "$root/config/profiles/openlit/tests/e2e/acceptance.sh" --help >/dev/null
+if [ "$#" -gt 0 ]; then
+  python3 -B "$root/config/profiles/openlit/tests/packaged-runtime.py" "$@"
+fi

@@ -578,18 +578,14 @@ func TestResolveE2EVMCPU(t *testing.T) {
 }
 
 func TestEnvFileRejectsCommands(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "unsafe.env")
-	writeFixture(t, file, "VALUE=$(id)\n")
-	if err := applyEnvFile(file, environment{}); err == nil {
+	if _, err := EvaluateAssignments(strings.NewReader("VALUE=$(id)\n"), "unsafe.env", nil); err == nil {
 		t.Fatal("command substitution was accepted")
 	}
 }
 
 func TestSingleQuotedValueIsLiteral(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "literal.env")
-	writeFixture(t, file, "VALUE='$HOME'\n")
-	values := environment{"HOME": "/operator"}
-	if err := applyEnvFile(file, values); err != nil {
+	values, err := EvaluateAssignments(strings.NewReader("VALUE='$HOME'\n"), "literal.env", map[string]string{"HOME": "/operator"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if values["VALUE"] != "$HOME" {
@@ -623,9 +619,7 @@ func TestNormalizeAgentPersistLinksUsesExactSelection(t *testing.T) {
 }
 
 func TestReadAssignmentsOverPreservesExplicitProfileOverrides(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "profile.conf")
-	writeFixture(t, file, "IMAGE_DOCKERFILE=\"${IMAGE_DOCKERFILE:-}\"\nPROJECT_ENV_BASE_IMAGE=ubuntu:24.04\n")
-	values, err := ReadAssignmentsOver(file, map[string]string{"IMAGE_DOCKERFILE": "docker/dev.Dockerfile"})
+	values, err := EvaluateAssignments(strings.NewReader("IMAGE_DOCKERFILE=\"${IMAGE_DOCKERFILE:-}\"\nPROJECT_ENV_BASE_IMAGE=ubuntu:24.04\n"), "profile.conf", map[string]string{"IMAGE_DOCKERFILE": "docker/dev.Dockerfile"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,10 +629,8 @@ func TestReadAssignmentsOverPreservesExplicitProfileOverrides(t *testing.T) {
 }
 
 func TestLegacyYardSettingsNormalizeAtLayerBoundary(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config.env")
-	writeFixture(t, file, "YARD_TYPE=remote\nINSTANCE_TYPE=vm\nINSTANCE_NAME=yard-demo\nREMOTE_DEST=dev@owner.example\nREMOTE_YARD=demo\nBASE_IMAGE=images:debian/13\nYARD_PROFILES=sample-device\nAGENTS=codex\n")
 	values := environment{"ACCESS_KIND": "local", "YARD_KIND": "container"}
-	if err := applyEnvFileValidated(file, values, ScopeHost, false, nil); err != nil {
+	if err := (Catalog{}).applyEnvReaderValidated(strings.NewReader("YARD_TYPE=remote\nINSTANCE_TYPE=vm\nINSTANCE_NAME=yard-demo\nREMOTE_DEST=dev@owner.example\nREMOTE_YARD=demo\nBASE_IMAGE=images:debian/13\nYARD_PROFILES=sample-device\nAGENTS=codex\n"), "config.env", values, ScopeHost, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
@@ -663,9 +655,7 @@ func TestLegacyYardSettingsNormalizeAtLayerBoundary(t *testing.T) {
 }
 
 func TestLegacyAndCanonicalSettingConflictFailsClosed(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config.env")
-	writeFixture(t, file, "ACCESS_KIND=local\nYARD_TYPE=remote\n")
-	if err := applyEnvFileValidated(file, environment{}, ScopeHost, false, nil); err == nil ||
+	if err := (Catalog{}).applyEnvReaderValidated(strings.NewReader("ACCESS_KIND=local\nYARD_TYPE=remote\n"), "config.env", environment{}, ScopeHost, false, nil); err == nil ||
 		!strings.Contains(err.Error(), "conflicting") {
 		t.Fatalf("conflicting canonical and legacy settings were accepted: %v", err)
 	}
@@ -854,16 +844,14 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 }
 
 func TestMultilineAndNestedDefaults(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config.env")
-	writeFixture(t, file, `ROOT=/srv/test
+	values, err := EvaluateAssignments(strings.NewReader(`ROOT=/srv/test
 A="${A:-
 one
 two
 }"
 B="${B:-${A}/three}"
-`)
-	values := environment{}
-	if err := applyEnvFile(file, values); err != nil {
+`), "config.env", nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if values["A"] != "\none\ntwo\n" || values["B"] != "\none\ntwo\n/three" {

@@ -165,6 +165,10 @@ func inspectBrokerRuntime(
 	if err != nil {
 		return brokerRuntime{}, err
 	}
+	return inspectBrokerRuntimeLoaded(ctx, options, yard, loaded)
+}
+
+func inspectBrokerRuntimeLoaded(ctx context.Context, options Options, yard string, loaded config.Loaded) (brokerRuntime, error) {
 	projects, err := inspectProjects(ctx, options)
 	if err != nil {
 		return brokerRuntime{}, err

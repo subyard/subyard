@@ -14,15 +14,17 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-// configApplyRepairPermit admits config apply or bounded runtime init repair behind
-// a verified, completed release transition. It is deliberately local
+// configApplyRepairPermit admits bounded ordinary operations behind a verified,
+// completed release transition. It is deliberately local
 // to the CLI: no environment value or public command can manufacture it.
 type configApplyRepairPermit struct {
 	yard                string
@@ -43,6 +45,7 @@ type configApplyRepairPermit struct {
 	sourceBinding       string
 	toolingBinding      string
 	cleanupPlanBinding  string
+	teardownInputs      *ownerInputBaseline
 }
 
 type configApplyRepairFacts struct {
@@ -55,6 +58,8 @@ type configApplyRepairFacts struct {
 	Direction        releasetransition.Direction   `json:"direction"`
 	OtherActivations []configApplyActivationFact   `json:"other_activations"`
 	ConfigTargets    []configApplyTargetFact       `json:"config_targets"`
+	TeardownInputs   string                        `json:"teardown_inputs,omitempty"`
+	TeardownPlans    map[string]string             `json:"teardown_plans,omitempty"`
 }
 
 type configApplyActivationFact struct {
@@ -65,9 +70,18 @@ type configApplyActivationFact struct {
 }
 
 type configApplyTargetFact struct {
-	Name               string `json:"name"`
-	DesiredFingerprint string `json:"desired_fingerprint"`
+	Name                 string               `json:"name"`
+	DesiredFingerprint   string               `json:"desired_fingerprint"`
+	TeardownRuntimeState teardownRuntimeState `json:"teardown_runtime_state,omitempty"`
 }
+
+type teardownRuntimeState string
+
+const (
+	teardownRuntimeAbsent  teardownRuntimeState = "absent"
+	teardownRuntimeStopped teardownRuntimeState = "stopped"
+	teardownRuntimeRunning teardownRuntimeState = "running"
+)
 
 func (cli *CLI) prepareConfigApplyRepair(
 	ctx context.Context,
@@ -101,10 +115,33 @@ func (cli *CLI) prepareProfileInitRepair(ctx context.Context, yard string, argum
 	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, nil, true, "")
 }
 
+// Teardown grants new destructive authority only for the ordinarily assessed
+// local target. Completed release history remains immutable; reset stays gated.
+func (cli *CLI) prepareTeardownRepair(ctx context.Context, yard string, arguments []string, outcome releasetransition.Outcome) (*configApplyRepairPermit, error) {
+	execution, err := prepareTeardownExecution(arguments)
+	if err != nil || execution.resetConfig || !configApplyRepairGateShape(outcome) {
+		return nil, err
+	}
+	loaded, err := cli.loadContext(yard)
+	if err != nil || loaded.Context.AccessKind != domain.AccessLocal {
+		return nil, errors.New("completed-history teardown requires the local source owner")
+	}
+	inputs, err := cli.captureOwnerInputs(loaded, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, []string{yard}, false, "", inputs)
+}
+
 func (cli *CLI) prepareActivationRepair(
 	ctx context.Context, yard string, allLocal bool, outcome releasetransition.Outcome,
 	requireDrift bool, selectedNames []string, profileInit bool, cleanupID string,
+	teardownInputs ...*ownerInputBaseline,
 ) (*configApplyRepairPermit, error) {
+	var teardown *ownerInputBaseline
+	if len(teardownInputs) != 0 {
+		teardown = teardownInputs[0]
+	}
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil {
 		return nil, err
@@ -134,6 +171,12 @@ func (cli *CLI) prepareActivationRepair(
 	var sourceBinding, toolingBinding string
 	if cleanupID != "" {
 		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, cleanupID, outcome, journal)
+		if err != nil {
+			return nil, nil
+		}
+	}
+	if teardown != nil {
+		sourceBinding, toolingBinding, err = cli.integrationCleanupSourceBindings(ctx, journal)
 		if err != nil {
 			return nil, nil
 		}
@@ -198,6 +241,9 @@ func (cli *CLI) prepareActivationRepair(
 		Direction:     journal.Goal.Direction,
 		CleanupSource: sourceBinding, CleanupTooling: toolingBinding,
 	}
+	if teardown != nil {
+		facts.TeardownInputs, facts.TeardownPlans = teardown.binding(), map[string]string{}
+	}
 	var driftedNames []string
 	requestedDesired := make(map[string]string, len(requested))
 	selectedRuntimes := make(map[string]ports.RuntimeObservation, len(requested))
@@ -206,9 +252,26 @@ func (cli *CLI) prepareActivationRepair(
 		if assessErr != nil {
 			return nil, nil
 		}
-		facts.ConfigTargets = append(facts.ConfigTargets, configApplyTargetFact{
+		targetFact := configApplyTargetFact{
 			Name: target.Name, DesiredFingerprint: assessment.DesiredFingerprint,
-		})
+		}
+		if teardown != nil {
+			incus, _ := operation.statusPorts()
+			instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
+			switch {
+			case errors.Is(err, ports.ErrInstanceNotFound):
+				targetFact.TeardownRuntimeState = teardownRuntimeAbsent
+			case err != nil:
+				return nil, nil
+			case strings.EqualFold(instance.Status, "stopped"):
+				targetFact.TeardownRuntimeState = teardownRuntimeStopped
+			case strings.EqualFold(instance.Status, "running"):
+				targetFact.TeardownRuntimeState = teardownRuntimeRunning
+			default:
+				return nil, nil
+			}
+		}
+		facts.ConfigTargets = append(facts.ConfigTargets, targetFact)
 		if _, selected := requested[target.Name]; selected {
 			requestedDesired[target.Name] = assessment.DesiredFingerprint
 		}
@@ -238,7 +301,25 @@ func (cli *CLI) prepareActivationRepair(
 			}
 		}
 		changed := assessment.Changed
-		if profileInit {
+		if teardown != nil {
+			if target.Name == yard && (operationStateDigest(target.Loaded.Context) != operationStateDigest(teardown.initial.Context) ||
+				integrationConfigurationFingerprint(target.Loaded) != integrationConfigurationFingerprint(teardown.initial)) {
+				return nil, nil
+			}
+			// Match materialized release readiness: native integrations need a running target.
+			// Known unavailable targets retain source validation and an exact state binding.
+			if targetFact.TeardownRuntimeState == teardownRuntimeRunning {
+				plan, err := operation.integrationRuntime(target.Loaded).IntegrationPlan(ctx)
+				if err != nil || !validConfigApplyActivationObservation(releasetransition.V2ActivationObservation{
+					Actual: releasetransition.Fingerprint(plan.Fingerprint), Desired: releasetransition.Fingerprint(plan.Scope),
+				}) {
+					return nil, nil
+				}
+				facts.TeardownPlans[target.Name] = plan.StateBinding()
+				changed = changed || plan.Changed
+			}
+		}
+		if profileInit || teardown != nil {
 			contracts, err := profileActivationPlatform(&operation, target).ObserveProfileRuntimes(ctx)
 			if err != nil {
 				return nil, nil
@@ -247,6 +328,26 @@ func (cli *CLI) prepareActivationRepair(
 				contract, exists := contracts[id]
 				if !exists {
 					return nil, nil
+				}
+				if teardown != nil {
+					switch contract.State {
+					case ports.RuntimeStateAbsent, ports.RuntimeStateDeferred:
+						if contract.Actual != "" || contract.Desired != "" || contract.HookBinding != "" {
+							return nil, nil
+						}
+					case ports.RuntimeStateCurrent, ports.RuntimeStateStale:
+						if !validConfigApplyActivationObservation(releasetransition.V2ActivationObservation{
+							Actual: releasetransition.Fingerprint(firstNonempty(contract.Actual, contract.Desired)), Desired: releasetransition.Fingerprint(contract.Desired),
+						}) || contract.State == ports.RuntimeStateCurrent && contract.Actual != contract.Desired ||
+							contract.State == ports.RuntimeStateStale && contract.Actual == contract.Desired ||
+							contract.HookBinding != "" && !validConfigApplyActivationObservation(releasetransition.V2ActivationObservation{
+								Actual: releasetransition.Fingerprint(contract.HookBinding), Desired: releasetransition.Fingerprint(contract.Desired),
+							}) {
+							return nil, nil
+						}
+					default:
+						return nil, nil
+					}
 				}
 				if _, selected := requested[target.Name]; selected {
 					selectedRuntimes[target.Name+"/"+id] = contract
@@ -286,8 +387,8 @@ func (cli *CLI) prepareActivationRepair(
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
 			return nil, nil
 		}
-		if _, runtime := reconciler.(*profileRuntimeActivationReconciler); profileInit && runtime {
-			// Bind the target contract, allowing only its observed drift to shrink.
+		if _, runtime := reconciler.(*profileRuntimeActivationReconciler); (profileInit || teardown != nil) && runtime {
+			// Per-target contracts bind profile drift; teardown requires an exact locked recheck.
 			observation.Actual, observation.Converged = observation.Desired, true
 		}
 		if stage, ok := reconciler.(*activationStageReconciler); profileInit && ok && stage.stage == ports.ReconcileStageTestVMs {
@@ -353,6 +454,7 @@ func (cli *CLI) prepareActivationRepair(
 		profileInit:         profileInit,
 		cleanupID:           cleanupID, sourceBinding: sourceBinding, toolingBinding: toolingBinding,
 		cleanupPlanBinding: facts.CleanupPlan,
+		teardownInputs:     teardown,
 	}, nil
 }
 
@@ -414,13 +516,21 @@ func (cli *CLI) lockConfigApplyRepair(
 	if err != nil {
 		return nil, err
 	}
+	if permit.teardownInputs != nil {
+		if err := permit.teardownInputs.check(ctx, cli); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
 	refreshed, err := cli.prepareActivationRepair(
 		ctx, permit.yard, permit.allLocal, permit.gate, false, permit.selectedTargetNames, permit.profileInit, permit.cleanupID,
+		permit.teardownInputs,
 	)
 	if err != nil || refreshed == nil ||
 		refreshed.factsFingerprint != permit.factsFingerprint ||
 		refreshed.journal.Fingerprint != permit.journal.Fingerprint ||
 		!bytes.Equal(refreshed.journal.Payload, permit.journal.Payload) ||
+		permit.teardownInputs != nil && !maps.Equal(permit.selectedRuntimes, refreshed.selectedRuntimes) ||
 		!configApplyDriftSubset(refreshed.driftedTargetNames, permit.driftedTargetNames) ||
 		!validRuntimeRepairTransition(permit.selectedRuntimes, refreshed.selectedRuntimes) {
 		unlock()
@@ -471,6 +581,47 @@ func (cli *CLI) finishConfigApplyRepair(
 	ctx context.Context,
 	permit *configApplyRepairPermit,
 ) error {
+	if err := cli.checkConfigApplyRepairHistory(permit); err != nil {
+		return err
+	}
+	outcome, err := cli.inspectMutationGate(ctx, permit.yard)
+	if err != nil {
+		return err
+	}
+	if outcome != nil {
+		return fmt.Errorf("materialized configuration did not restore release readiness: %s", outcome.Code)
+	}
+	return nil
+}
+
+func (cli *CLI) finishTeardownRepair(ctx context.Context, permit *configApplyRepairPermit) error {
+	if err := cli.checkConfigApplyRepairHistory(permit); err != nil {
+		return err
+	}
+	journal, err := releasetransition.ParseJournal(permit.journal.Payload)
+	if err != nil {
+		return domain.ErrPlanStale
+	}
+	source, tooling, err := cli.integrationCleanupSourceBindings(ctx, journal)
+	if err != nil || source != permit.sourceBinding || tooling != permit.toolingBinding {
+		return domain.ErrPlanStale
+	}
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return domain.ErrPlanStale
+	}
+	links, err := releasetransition.NewRuntimeLinkStore(options.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	observed, err := links.Observe()
+	if err != nil || observed.Active != permit.gate.Active || !sameConfigApplyReleaseID(observed.Previous, normalizedCompletedConfigApplyPair(journal.Releases).Previous) {
+		return domain.ErrPlanStale
+	}
+	return nil
+}
+
+func (cli *CLI) checkConfigApplyRepairHistory(permit *configApplyRepairPermit) error {
 	if permit == nil {
 		return errors.New("config apply release repair permit is required")
 	}
@@ -507,13 +658,6 @@ func (cli *CLI) finishConfigApplyRepair(
 	if ledger.Fingerprint != permit.ledger.Fingerprint ||
 		!bytes.Equal(ledger.Payload, permit.ledger.Payload) {
 		return errors.New("config apply changed the completed release ledger")
-	}
-	outcome, err := cli.inspectMutationGate(ctx, permit.yard)
-	if err != nil {
-		return err
-	}
-	if outcome != nil {
-		return fmt.Errorf("materialized configuration did not restore release readiness: %s", outcome.Code)
 	}
 	return nil
 }

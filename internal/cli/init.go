@@ -633,6 +633,38 @@ func (execution *initExecution) hooksOnly() bool {
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
+func (execution *initExecution) actionFacts(action domain.ActionID) string {
+	actionLabel, mode, firstPending := "unknown", "unknown", "none"
+	switch action {
+	case "yard.init.reconcile", "yard.init.project-hooks", "yard.init.configs", "yard.init.reset":
+		actionLabel = string(action)
+	}
+	switch execution.mode {
+	case initReconcile:
+		mode = "reconcile"
+	case initConfigs:
+		mode = "configs"
+	case initReset:
+		mode = "reset"
+	}
+	for _, step := range execution.plan.Steps {
+		if step.Converged {
+			continue
+		}
+		firstPending = "unknown"
+		for _, stage := range application.InitStages(execution.loaded.Context) {
+			if step.Stage.ID == stage.ID {
+				firstPending = string(stage.ID)
+				break
+			}
+		}
+		break
+	}
+	return fmt.Sprintf("action=%s hooks_only=%t setup=%t provision_changed=%t mode=%s pending=%d first_pending=%s bootstrap=%t host_id_pending=%t selection=%t ingress=%t ingress_deferred=%t",
+		actionLabel, execution.hooksOnly(), execution.profileSetup != nil, execution.profileProvisionChanged(), mode, execution.plan.Pending(), firstPending,
+		execution.bootstrap != nil, execution.hostIDPending, execution.integrationSelection != nil, execution.orphanIngress != nil, execution.orphanIngressDeferred)
+}
+
 func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *CLI) error {
 	if cli.profileInitRepair == nil {
 		return nil

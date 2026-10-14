@@ -110,6 +110,27 @@ PYCONFIG
   exit 10
 fi
 
+# Downloads are bounded independently of the provision operation. Curl resets file
+# output between retries, so a partial manifest/archive cannot reach its consumer.
+android_download() {
+  local status=0 stage="$3" started=$SECONDS output_bytes=unknown
+  printf 'android provision: download stage=%s state=start\n' "$stage" >&2
+  timeout --signal=TERM --kill-after=1s 300s \
+    curl --fail --silent --location --retry 3 --retry-all-errors --retry-delay 1 \
+      --connect-timeout 15 --max-time 120 --retry-max-time 300 \
+      --output "$2" "$1" || status=$?
+  [ "$status" -ne 0 ] || return 0
+  # This is the final attempt's output, not aggregate progress across retries.
+  if [ -f "$2" ] && [ ! -L "$2" ]; then
+    output_bytes="$(stat -c %s -- "$2" 2>/dev/null)" || output_bytes=unknown
+    case "$output_bytes" in ''|*[!0-9]*) output_bytes=unknown ;; esac
+  fi
+  printf 'android provision: download stage=%s state=failed exit=%s elapsed_seconds=%s last_output_bytes=%s\n' \
+    "$stage" "$status" "$((SECONDS - started))" "$output_bytes" >&2
+  rm -f -- "$2"
+  return "$status"
+}
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl unzip util-linux python3 socat systemd cage xwayland slirp4netns iproute2 \
@@ -135,8 +156,8 @@ export SUBYARD_ANDROID_SDK_LOCKED=1
 # 1. JDK — Debian 13 has no openjdk-17; Temurin from Adoptium (redirects to the current GA).
 if [ ! -x "$JDK_HOME/bin/java" ]; then
   rm -rf "$JDK_HOME"; mkdir -p "$JDK_HOME"
-  curl -fsSL -o /tmp/jdk.tgz \
-    "https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse"
+  android_download \
+    "https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse" /tmp/jdk.tgz jdk
   tar -xzf /tmp/jdk.tgz -C "$JDK_HOME" --strip-components=1; rm -f /tmp/jdk.tgz
 fi
 export JAVA_HOME="$JDK_HOME" PATH="$JDK_HOME/bin:$PATH"
@@ -151,13 +172,16 @@ export ANDROID_HOME="$ANDROID_SDK_ROOT" ANDROID_SDK_ROOT
 
 # 3. cmdline-tools — CMDLINE_TOOLS_URL, else newest from Google's manifest (numeric sort, not lexical).
 if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+  tmp="$(mktemp -d)"
   url="${CMDLINE_TOOLS_URL:-}"
   if [ -z "$url" ]; then
-    rev="$(curl -fsSL https://dl.google.com/android/repository/repository2-3.xml \
-      | grep -oE 'commandlinetools-linux-[0-9]+_latest\.zip' | sort -t- -k3 -n | tail -1)"
+    android_download https://dl.google.com/android/repository/repository2-3.xml "$tmp/repository.xml" catalog \
+      || { status=$?; rm -rf -- "$tmp"; exit "$status"; }
+    rev="$(grep -oE 'commandlinetools-linux-[0-9]+_latest\.zip' "$tmp/repository.xml" | sort -t- -k3 -n | tail -1)"
     url="https://dl.google.com/android/repository/${rev}"
   fi
-  tmp="$(mktemp -d)"; curl -fsSL -o "$tmp/clt.zip" "$url"
+  android_download "$url" "$tmp/clt.zip" cmdline-tools \
+    || { status=$?; rm -rf -- "$tmp"; exit "$status"; }
   unzip -q "$tmp/clt.zip" -d "$tmp/x"
   install -d "$ANDROID_SDK_ROOT/cmdline-tools"
   mv "$tmp/x/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"; rm -rf "$tmp"

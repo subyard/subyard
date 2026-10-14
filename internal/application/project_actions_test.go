@@ -460,7 +460,7 @@ func TestProjectSyncStreamsArchiveAndWritesMetadata(t *testing.T) {
 	}
 	if len(data.requests) != 5 || data.requests[0].Command[0] != "mkdir" ||
 		data.requests[1].Command[0] != "install" || data.requests[2].Command[0] != "tar" ||
-		string(data.requests[2].Stdin) != "archive" || data.requests[3].Command[0] != "tee" ||
+		string(data.requests[2].Stdin) != "archive" || len(data.requests[3].Stdin) == 0 ||
 		data.requests[4].Command[4] != projectHooksDispatcher {
 		t.Fatalf("unexpected sync sequence: %#v", data.requests)
 	}
@@ -478,7 +478,7 @@ func TestProjectSyncReservesLocalWorkspaceAsRootBeforeAssigningOwnership(t *test
 		t.Fatal(err)
 	}
 	root := filepath.Dir(record.YardPath)
-	if got := data.requests[0]; !slices.Equal(got.Command, []string{"mkdir", "--", root}) ||
+	if got := data.requests[0]; !slices.Equal(got.Command, []string{"mkdir", "-m", "0755", "--", root}) ||
 		got.User != 0 || got.Group != 0 {
 		t.Fatalf("local reservation was not privileged and exclusive: %#v", got)
 	}
@@ -604,7 +604,7 @@ func TestProjectBindUsesIncusDeviceAndWritesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(devices.ensured) != 1 || devices.ensured[0] != "ws-demo-12345678" ||
-		len(data.requests) != 3 || data.requests[1].Command[0] != "tee" ||
+		len(data.requests) != 3 || len(data.requests[1].Stdin) == 0 ||
 		data.requests[2].Command[4] != projectHooksDispatcher {
 		t.Fatalf("unexpected bind sequence: calls=%#v devices=%#v", data.requests, devices.ensured)
 	}
@@ -946,7 +946,7 @@ func TestProjectCloneChecksPreparedRevisionBeforeMetadata(t *testing.T) {
 				t.Fatal("different cloned revision accepted")
 			}
 			for _, request := range data.requests {
-				if request.Command[0] == "tee" {
+				if len(request.Stdin) != 0 {
 					t.Fatal("unverified clone metadata published")
 				}
 			}

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 import sys
 import tomllib

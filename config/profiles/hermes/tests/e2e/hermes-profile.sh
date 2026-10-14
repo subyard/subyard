@@ -5,13 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
-if YARD_BIN="$(release_candidate_prepare "$ROOT")"; then
-  unset YARD_ENGINE_PATH
-else
-  candidate_rc=$?
-  [ "$candidate_rc" = 1 ] || exit "$candidate_rc"
-  YARD_BIN="$ROOT/.build/yard"
-fi
+YARD_BIN=''
 STATE=""
 YARD=""
 TAILSCALE_IP=""
@@ -21,11 +15,6 @@ die() { printf 'hermes-profile-e2e: %s\n' "$*" >&2; exit 2; }
 for command in curl ip python3 sg sudo tar timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
-if [ ! -x "$YARD_BIN" ]; then
-  command -v go >/dev/null 2>&1 || die "Go is required in the leased VM"
-  "$ROOT/dev/build-engine.sh"; YARD_BIN="$ROOT/.build/yard"
-fi
-[ "$YARD_BIN" != "$ROOT/.build/yard" ] || "$ROOT/dev/build-profiles.sh"
 
 yard() {
   local name="$1"
@@ -178,6 +167,10 @@ export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
+YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+printf 'hermes candidate release-preflight=PASS\n'
 {
   printf '%s\n' \
     'ENVIRONMENT_PROFILES=openclaw' \

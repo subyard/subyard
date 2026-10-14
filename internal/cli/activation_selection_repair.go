@@ -120,9 +120,37 @@ func (cli *CLI) runActivationSelectionRepair(ctx context.Context, yard, handler 
 	return true, cli.runConfigSourceRepair(ctx, yard, request, yes)
 }
 
-// Completed history confers no activation authority. Admit only an ordinary
-// desired-source reduction while all other activation resources remain current.
+// A completed transition may leave desired source drift. Admit only explicit
+// local scalar authoring; this never grants activation or historical recovery.
+func (cli *CLI) runCompletedConfigScalarAuthoring(ctx context.Context, yard string, arguments []string, yes bool, outcome releasetransition.Outcome) (bool, int) {
+	arguments = configArguments(arguments)
+	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset"}, arguments[0]) {
+		return false, 0
+	}
+	request, err := parseConfigAuthoringRequest(arguments[0], arguments[1:], yes)
+	if err != nil || request.storage != "--local" || slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
+		return false, 0
+	}
+	definition, err := cli.catalog.ValidateSettingName(request.scope, request.name, false)
+	if err != nil || definition.Kind != config.SettingScalar || definition.Sensitive {
+		return false, 0
+	}
+	if request.action == "set" {
+		if err := cli.catalog.ValidateSetting(request.scope, request.name, request.value, false); err != nil {
+			return false, 0
+		}
+	}
+	return cli.runCompletedScalarAuthoring(ctx, yard, request, nil, outcome)
+}
+
+// Completed selection authoring additionally requires an effective reduction.
 func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string, selection configAliasRepairRequest, outcome releasetransition.Outcome) (bool, int) {
+	choice := selection.choices[0]
+	request := configAuthoringRequest{action: "set", name: choice.name, value: choice.value, scope: selection.scope, assumeYes: selection.yes}
+	return cli.runCompletedScalarAuthoring(ctx, yard, request, &selection, outcome)
+}
+
+func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, request configAuthoringRequest, selection *configAliasRepairRequest, outcome releasetransition.Outcome) (bool, int) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
 		return false, 0
@@ -134,7 +162,7 @@ func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string,
 		// The source-only fallback independently requires an interrupted journal.
 		return false, 0
 	}
-	fail := func(err error) (bool, int) { cli.errorf("config set: %v", err); return true, 1 }
+	fail := func(err error) (bool, int) { cli.errorf("config %s: %v", request.action, err); return true, 1 }
 	runtime := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
 	defer runtime.Close()
 	configDir, tooling, err := runtime.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
@@ -161,25 +189,29 @@ func (cli *CLI) runCompletedSelectionAuthoring(ctx context.Context, yard string,
 		return fail(err)
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal {
-		return fail(errors.New("source reduction requires the local source owner"))
+		return fail(errors.New("source authoring requires the local source owner"))
 	}
-	choice := selection.choices[0]
-	request := configAuthoringRequest{action: "set", name: choice.name, value: choice.value, scope: selection.scope,
-		sourceBinding: operationStateDigest([]string{proof.Binding, tooling, permit.factsFingerprint}), sourceGuard: guard}
-	arguments := []string{"set", choice.name, choice.value, "--scope", string(selection.scope), "--local"}
-	code := cli.runPreparedConfigMutation(ctx, loaded, arguments, selection.yes, func(prepared *preparedCommand) error {
-		path, err := configScalarAuthoringPath(loaded, selection.scope)
-		if err != nil {
-			return err
+	request.sourceBinding, request.sourceGuard = operationStateDigest([]string{proof.Binding, tooling, permit.factsFingerprint}), guard
+	arguments := []string{request.action, request.name}
+	if request.action == "set" {
+		arguments = append(arguments, request.value)
+	}
+	arguments = append(arguments, "--scope", string(request.scope), "--local")
+	code := cli.runPreparedConfigMutation(ctx, loaded, arguments, request.assumeYes, func(prepared *preparedCommand) error {
+		if selection != nil {
+			path, err := configScalarAuthoringPath(loaded, request.scope)
+			if err != nil {
+				return err
+			}
+			baseline, err := readConfigAuthoringTarget(path)
+			if err != nil {
+				return err
+			}
+			if _, err := cli.selectionRepairContent(yard, path, baseline.Content, *selection); err != nil {
+				return err
+			}
 		}
-		baseline, err := readConfigAuthoringTarget(path)
-		if err != nil {
-			return err
-		}
-		if _, err := cli.selectionRepairContent(yard, path, baseline.Content, selection); err != nil {
-			return err
-		}
-		if err := prepared.prepareConfigScalarRequest(ctx, "set", request); err != nil {
+		if err := prepared.prepareConfigScalarRequest(ctx, request.action, request); err != nil {
 			return err
 		}
 		execute := prepared.execute

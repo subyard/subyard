@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,37 +33,6 @@ type configTargetAssessment struct {
 	Changed                 bool
 	DesiredFingerprint      string
 	MaterializedFingerprint string
-}
-
-type configDesiredSnapshot struct {
-	Name             string                       `json:"name"`
-	AccessKind       domain.AccessKind            `json:"access_kind"`
-	YardKind         domain.YardKind              `json:"yard_kind"`
-	IncusProject     string                       `json:"incus_project"`
-	YardInstanceName string                       `json:"yard_instance_name"`
-	DevUser          string                       `json:"dev_user"`
-	DevUID           int                          `json:"dev_uid"`
-	Assets           []configDesiredAssetSnapshot `json:"assets,omitempty"`
-}
-
-type configDesiredAssetSnapshot struct {
-	Name        string `json:"name"`
-	Destination string `json:"destination"`
-	Scope       string `json:"scope,omitempty"`
-	Role        string `json:"role,omitempty"`
-	DesiredHash string `json:"desired_hash"`
-}
-
-type configMaterializedSnapshot struct {
-	State  string                            `json:"state"`
-	Assets []configMaterializedAssetSnapshot `json:"assets,omitempty"`
-}
-
-type configMaterializedAssetSnapshot struct {
-	Name        string `json:"name"`
-	GuestExit   int    `json:"guest_exit"`
-	GuestHash   string `json:"guest_hash,omitempty"`
-	GuestOutput string `json:"guest_output,omitempty"`
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1005,93 +973,95 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	return command.Run()
 }
 
-func (cli *CLI) assessConfigTarget(
-	ctx context.Context,
-	target configTarget,
-	check bool,
-) (configTargetAssessment, error) {
-	desired := configDesiredSnapshot{
-		Name:             target.Name,
-		AccessKind:       target.Loaded.Context.AccessKind,
-		YardKind:         target.Loaded.Context.YardKind,
-		IncusProject:     target.Loaded.Context.IncusProject,
-		YardInstanceName: target.Loaded.Context.YardInstanceName,
-		DevUser:          target.Loaded.Context.DevUser,
-		DevUID:           target.Loaded.Context.DevUID,
-	}
-	materialized := configMaterializedSnapshot{}
-	finish := func(state string, changed bool) (configTargetAssessment, error) {
-		materialized.State = state
-		desiredPayload, err := json.Marshal(desired)
-		if err != nil {
-			return configTargetAssessment{}, err
-		}
-		materializedPayload, err := json.Marshal(materialized)
-		if err != nil {
-			return configTargetAssessment{}, err
-		}
-		desiredDigest := sha256.Sum256(desiredPayload)
-		materializedDigest := sha256.Sum256(materializedPayload)
-		return configTargetAssessment{
-			Target: target, State: state, Changed: changed,
-			DesiredFingerprint:      fmt.Sprintf("%x", desiredDigest[:]),
-			MaterializedFingerprint: fmt.Sprintf("%x", materializedDigest[:]),
-		}, nil
+func materializationDesired(target configTarget, check bool, reader func(config.MaterializedAsset) ([]byte, error)) (config.MaterializationTarget, []configAsset, [][]byte, error) {
+	desired := config.MaterializationTarget{
+		Name: target.Name, AccessKind: target.Loaded.Context.AccessKind, YardKind: target.Loaded.Context.YardKind,
+		IncusProject: target.Loaded.Context.IncusProject, YardInstanceName: target.Loaded.Context.YardInstanceName,
+		DevUser: target.Loaded.Context.DevUser, DevUID: target.Loaded.Context.DevUID,
 	}
 	if target.Loaded.Context.AccessKind == domain.AccessRemote {
-		return finish("remote (settings only; consumers not checked)", false)
+		return desired, nil, nil, nil
 	}
 	var assets []configAsset
-	var desiredHashes []string
 	var desiredPayloads [][]byte
 	if check {
 		var err error
 		assets, err = effectiveConfigAssets(target.Loaded)
 		if err != nil {
-			return configTargetAssessment{}, err
+			return desired, nil, nil, err
 		}
-		desiredHashes = make([]string, 0, len(assets))
 		for _, asset := range assets {
-			payload, err := target.Loaded.ProspectiveFiles.ReadAsset(config.MaterializedAsset{Source: asset.Source})
+			if reader == nil {
+				reader = target.Loaded.ProspectiveFiles.ReadAsset
+			}
+			payload, sourceErr := reader(config.MaterializedAsset{Source: asset.Source})
+			if sourceErr != nil && !os.IsNotExist(sourceErr) {
+				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, sourceErr)
+			}
+			payload, _, err := config.PrepareMaterializationContent(config.MaterializationConfigAssets, false, config.MaterializationContent{Present: sourceErr == nil, Payload: payload}, nil)
 			if err != nil {
-				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+				if sourceErr != nil {
+					err = sourceErr
+				}
+				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, err)
 			}
 			hostHash := fmt.Sprintf("%x", sha256.Sum256(payload))
 			if asset.OwnedFormat != "" {
 				hostHash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, payload)
 			}
 			if err != nil {
-				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
+				return desired, nil, nil, fmt.Errorf("%s: %w", asset.Name, err)
 			}
-			desired.Assets = append(desired.Assets, configDesiredAssetSnapshot{
+			desired.Assets = append(desired.Assets, config.DesiredMaterializedArtifact{
 				Name: asset.Name, Destination: asset.Destination,
-				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash,
+				Scope: asset.Scope, Role: asset.Role, DesiredHash: hostHash, OwnedFormat: asset.OwnedFormat,
 			})
-			desiredHashes = append(desiredHashes, hostHash)
 			desiredPayloads = append(desiredPayloads, payload)
 		}
+	}
+	return desired, assets, desiredPayloads, nil
+}
+
+func (cli *CLI) assessConfigTarget(
+	ctx context.Context,
+	target configTarget,
+	check bool,
+) (configTargetAssessment, error) {
+	desired, assets, desiredPayloads, err := materializationDesired(target, check, target.Loaded.ProspectiveFiles.ReadAsset)
+	if err != nil {
+		return configTargetAssessment{}, err
+	}
+	facts := []config.MaterializedArtifactAssessment{}
+	finish := func(state string) (configTargetAssessment, error) {
+		assessment, err := config.AssessMaterialization(desired, state, check, facts)
+		if err != nil {
+			return configTargetAssessment{}, err
+		}
+		return configTargetAssessment{Target: target, State: assessment.State, Changed: assessment.Changed,
+			DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint}, nil
+	}
+	if target.Loaded.Context.AccessKind == domain.AccessRemote {
+		return finish("remote (settings only; consumers not checked)")
 	}
 	incus, executor := cli.statusPorts()
 	info, err := incus.Instance(ctx, target.Loaded.Context.IncusProject,
 		target.Loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
-		return finish("absent", false)
+		return finish("absent")
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return finish("absent", false)
+		return finish("absent")
 	}
 	if err != nil {
 		return configTargetAssessment{}, err
 	}
 	if !strings.EqualFold(info.Status, "running") {
-		return finish("stopped", false)
+		return finish("stopped")
 	}
 	if !check {
-		return finish("running", false)
+		return finish("running")
 	}
-	changed := false
 	for index, asset := range assets {
-		hostHash := desiredHashes[index]
 		request := ports.InstanceExecRequest{
 			Command: []string{"sha256sum", "--", asset.Destination},
 			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
@@ -1106,6 +1076,7 @@ func (cli *CLI) assessConfigTarget(
 		if err != nil && result.ExitCode == 0 {
 			return configTargetAssessment{}, err
 		}
+		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if asset.OwnedFormat != "" {
 			if err != nil || result.ExitCode != 0 {
 				return configTargetAssessment{}, fmt.Errorf("%s: structured configuration observation failed", asset.Name)
@@ -1114,39 +1085,15 @@ func (cli *CLI) assessConfigTarget(
 			if err != nil {
 				return configTargetAssessment{}, fmt.Errorf("%s: %w", asset.Name, err)
 			}
-			materialized.Assets = append(materialized.Assets, configMaterializedAssetSnapshot{
-				Name: asset.Name, GuestOutput: "owned-" + asset.OwnedFormat, GuestHash: observation.Fingerprint,
-			})
-			changed = changed || !observation.Converged
-			continue
+			observed.Fingerprint, observed.OwnedConverged = observation.Fingerprint, observation.Converged
 		}
-
-		materializedAsset := configMaterializedAssetSnapshot{
-			Name: asset.Name, GuestExit: result.ExitCode,
+		fact, err := config.AssessMaterializedArtifact(desired.Assets[index], observed)
+		if err != nil {
+			return configTargetAssessment{}, err
 		}
-		if result.ExitCode != 0 {
-			materializedAsset.GuestOutput = "unavailable"
-			changed = true
-			materialized.Assets = append(materialized.Assets, materializedAsset)
-			continue
-		}
-		fields := strings.Fields(string(result.Stdout))
-		if len(fields) == 0 {
-			materializedAsset.GuestOutput = "malformed"
-			changed = true
-		} else {
-			materializedAsset.GuestOutput = "sha256"
-			materializedAsset.GuestHash = fields[0]
-			if fields[0] != hostHash {
-				changed = true
-			}
-		}
-		materialized.Assets = append(materialized.Assets, materializedAsset)
+		facts = append(facts, fact)
 	}
-	if changed {
-		return finish("drift", true)
-	}
-	return finish("converged", false)
+	return finish("running")
 }
 
 func sameConfigTargetSet(
@@ -1173,12 +1120,13 @@ func sameConfigTargetSet(
 }
 
 func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
-	assets, err := config.MaterializedAssets(loaded.Environment, loaded.Context.DevUser)
+	assets, err := config.SelectMaterializationSources(loaded.Environment, loaded.Context.DevUser, config.MaterializationConfigAssets, nil)
 	if err != nil {
 		return nil, err
 	}
 	var result []configAsset
-	for _, materialized := range assets {
+	for _, selected := range assets {
+		materialized := selected.Asset
 		asset := configAsset{Name: materialized.Name, Source: materialized.Source, Destination: materialized.Destination, OwnedFormat: materialized.OwnedFormat}
 		if trace, ok := loaded.Settings[materialized.Setting]; ok {
 			if resolution, found := effectiveSettingResolution(trace); found {

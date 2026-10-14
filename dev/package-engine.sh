@@ -125,6 +125,7 @@ while IFS= read -r -d '' relative; do
   # Public runtime assets need fixed modes regardless of the checkout's umask.
   mode=0644
   [ ! -x "$REPO/$relative" ] || mode=0755
+  [ "$relative" != internal/adapters/configmaterial/tomli_w.py ] || mode=0644
   install -m "$mode" -- "$REPO/$relative" "$bundle_stage/$relative"
 done < "$runtime_list"
 rm -f -- "$runtime_list"

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -48,8 +49,11 @@ func TestIntegrationCatalogFailsClosed(t *testing.T) {
 		`{"schema_version":1,"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped"],"application":"yard-init","minimum":1024,"maximum":65535,"default_from":{"setting":"SAMPLE_PORT","offset":0}}]}`,
 		`{"schema_version":1,"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped"],"application":"yard-init","minimum":1024,"maximum":65535,"default_from":{"setting":"HOST_BASE","offset":0}}]}`,
 	} {
-		root := integrationCatalogFixture(t, declaration)
-		if _, err := LoadCatalog(root); err == nil {
+		metadata, err := profile.DecodeIntegration("sample", []byte(declaration))
+		if err == nil {
+			_, err = BuildCatalog(nil, []profile.IntegrationMetadata{metadata})
+		}
+		if err == nil {
 			t.Fatalf("invalid declaration accepted: %s", declaration)
 		}
 	}

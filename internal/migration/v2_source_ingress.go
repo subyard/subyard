@@ -420,16 +420,8 @@ func (ingress *V2SourceIngress) verifyImportedResources(
 			!safeRelativePath(filepath.FromSlash(entry.Destination)) {
 			return errors.New("source ingress manifest has an unsafe destination")
 		}
-		expected, err := sourceIngressEntryPayload(
-			ingress.options.Descriptor, ingress.options.ConfigHome, ingress.recoveryRoot, entry,
-		)
-		if err != nil {
+		if _, err := ingress.readImportedEntry(entry); err != nil {
 			return err
-		}
-		path := filepath.Join(ingress.options.ConfigHome, filepath.FromSlash(entry.Destination))
-		actual, mode, err := readSourceIngressFile(path)
-		if err != nil || mode != 0o600 || !bytes.Equal(actual, expected) {
-			return fmt.Errorf("source ingress imported result changed: %s", entry.Destination)
 		}
 	}
 	if err := ingress.verifyLegacyArchive(
@@ -441,6 +433,22 @@ func (ingress *V2SourceIngress) verifyImportedResources(
 		"legacy-operator-overlay",
 		filepath.Join(ingress.options.Descriptor.DataHome, "operator-overlay"), true,
 	)
+}
+
+func (ingress *V2SourceIngress) readImportedEntry(entry SourceInstallEntry) ([]byte, error) {
+	if entry.DestinationRoot != DestinationConfigHome || !safeRelativePath(filepath.FromSlash(entry.Destination)) {
+		return nil, errors.New("source ingress manifest has an unsafe destination")
+	}
+	expected, err := sourceIngressEntryPayload(ingress.options.Descriptor, ingress.options.ConfigHome, ingress.recoveryRoot, entry)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(ingress.options.ConfigHome, filepath.FromSlash(entry.Destination))
+	actual, mode, err := readSourceIngressFile(path)
+	if err != nil || mode != 0o600 || !bytes.Equal(actual, expected) {
+		return nil, fmt.Errorf("source ingress imported result changed: %s", entry.Destination)
+	}
+	return actual, nil
 }
 
 func (ingress *V2SourceIngress) verifyLegacyArchive(
@@ -830,6 +838,18 @@ func (view *sourceSettingsView) ListYards() ([]string, error) {
 	return result, nil
 }
 
+func (view *sourceSettingsView) PreparedInputPaths() ([]string, error) {
+	paths := make([]string, 0, len(view.state.manifest.Entries))
+	for _, entry := range view.state.manifest.Entries {
+		if !safeRelativePath(entry.Destination) {
+			return nil, errors.New("prepared source input path is unsafe")
+		}
+		paths = append(paths, filepath.Join(view.ingress.options.ConfigHome, filepath.FromSlash(entry.Destination)))
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths), nil
+}
+
 func (view *sourceSettingsView) ReadSnapshot(path string) (config.PersistentFileSnapshot, error) {
 	if view.state.imported {
 		return config.ReadPersistentFileSnapshot(view.ingress.options.ConfigHome, path)
@@ -852,6 +872,26 @@ func (view *sourceSettingsView) ReadSnapshot(path string) (config.PersistentFile
 		return config.PersistentFileSnapshot{Exists: true, Content: payload}, nil
 	}
 	return config.ReadPersistentFileSnapshot(view.ingress.options.ConfigHome, path)
+}
+
+func (view *sourceSettingsView) ReadPreparedInput(path string) (config.PersistentFileSnapshot, bool, error) {
+	relative, err := filepath.Rel(view.ingress.options.ConfigHome, path)
+	if err != nil || !safeRelativePath(relative) {
+		return config.PersistentFileSnapshot{}, false, nil
+	}
+	for _, entry := range view.state.manifest.Entries {
+		if filepath.Clean(filepath.FromSlash(entry.Destination)) != relative {
+			continue
+		}
+		var payload []byte
+		if view.state.imported {
+			payload, err = view.ingress.readImportedEntry(entry)
+		} else {
+			payload, err = sourceIngressEntryPayload(view.ingress.options.Descriptor, view.ingress.options.ConfigHome, view.ingress.recoveryRoot, entry)
+		}
+		return config.PersistentFileSnapshot{Exists: err == nil, Content: payload}, true, err
+	}
+	return config.PersistentFileSnapshot{}, false, nil
 }
 
 // V2CompatibilityIngress combines the two closed historical ingress sources

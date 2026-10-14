@@ -429,6 +429,11 @@ func TestActivationSelectionRepairTypedDisableAndSetShareSourceOnlyBoundary(t *t
 
 func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI, string, string) {
 	t.Helper()
+	return completedSourceAuthoringFixture(t, len(migrateSSH) != 0 && migrateSSH[0], nil)
+}
+
+func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string) (*CLI, string, string) {
+	t.Helper()
 	f := newConfigApplyRepairFixture(t, false)
 	oldRoot := f.cli.options.RepositoryRoot
 	runtimeRoot := f.cli.env["YARD_RUNTIME_ROOT"]
@@ -473,7 +478,9 @@ func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI,
 			t.Fatal(err)
 		}
 	}
-	for relative, content := range activationProfileRepairAssets() {
+	assets := activationProfileRepairAssets()
+	maps.Copy(assets, extraAssets)
+	for relative, content := range assets {
 		mode := os.FileMode(0o600)
 		if strings.HasSuffix(relative, ".sh") {
 			mode = 0o700
@@ -520,7 +527,7 @@ func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrateSSH) != 0 && migrateSSH[0] {
+	if migrateSSH {
 		// Generate actual SSH pin and ledger evidence under compact authority,
 		// with the compatibility projection retained at settings epoch two.
 		if err := os.Remove(f.journalPath); err != nil {
@@ -551,7 +558,7 @@ func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI,
 	if err := store.ConvertMigrationLedger(ledger, registry, digest, registry, digest); err != nil {
 		t.Fatal(err)
 	}
-	if len(migrateSSH) != 0 && migrateSSH[0] {
+	if migrateSSH {
 		links, err := releasetransition.NewRuntimeLinkStore(runtimeRoot)
 		if err != nil {
 			t.Fatal(err)
@@ -716,6 +723,143 @@ func TestCompletedSelectionAuthoringPreservesHistoryAndDefersActivation(t *testi
 			}
 			if resolved.Environment[name] != desired {
 				t.Fatalf("desired source %q want %q", resolved.Environment[name], desired)
+			}
+		})
+	}
+}
+
+func TestCompletedScalarAuthoringUsesPreparedLocalSourceBoundary(t *testing.T) {
+	for _, scenario := range []string{"unset", "set", "decline", "source after consent", "history after consent", "checkpoint after consent", "tooling after consent", "invalid prospective", "corrupt history", "unfinished history", "unknown setting", "Git source", "implicit local"} {
+		t.Run(scenario, func(t *testing.T) {
+			program, ready, home := completedSourceAuthoringFixture(t, true, map[string]string{
+				"config/profiles/fixture-selected/profile.json": `{"schema_version":1,"selected_provision_only":true,"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","yard"],"application":"yard-init","minimum":1024,"maximum":65535,"default":"18080"}]}`,
+			})
+			path := filepath.Join(home, "yards/named/config.env")
+			before := []byte("# retain captured SSH setting\nSSH_PORT=2241\nCODING_TOOL_INTEGRATIONS=codex\nSAMPLE_PORT=28080\n")
+			if scenario == "invalid prospective" {
+				path = filepath.Join(home, "config.env")
+				before = []byte("# retain scoped paths\nHOST_BASE=/srv/retained\nRESTRICTED_DISK_PATHS=/srv/retained\n")
+			}
+			testkit.WriteFile(t, path, before, 0o640)
+			loaded, err := program.loadSelectionRepair("named")
+			if err != nil {
+				t.Fatal(err)
+			}
+			physical := &selectionOnlyIntegrationExecutor{source: loaded.Environment["AGENT_codex_RULES"], serviceDrift: true}
+			options := program.options
+			options.Executor = physical
+			options.Config = &recordingConfigApplier{}
+			options.Arguments = []string{"@named", "config", "unset", "SAMPLE_PORT", "--scope", "yard", "--local"}
+			if scenario == "set" {
+				options.Arguments = []string{"@named", "config", "set", "SAMPLE_PORT", "29080", "--scope", "yard", "--local"}
+			} else if scenario == "invalid prospective" {
+				options.Arguments = []string{"@named", "config", "unset", "HOST_BASE", "--scope", "host", "--local"}
+			} else if scenario == "unknown setting" {
+				options.Arguments[3] = "UNKNOWN_SETTING"
+			} else if scenario == "Git source" {
+				options.Arguments[len(options.Arguments)-1] = "--git"
+			} else if scenario == "implicit local" {
+				options.Arguments = options.Arguments[:len(options.Arguments)-1]
+			}
+			journalPath := filepath.Join(home, "release-transition/v2/journal.json")
+			checkpointPath := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
+			if scenario == "corrupt history" {
+				testkit.WriteFile(t, journalPath, []byte("{invalid\n"), 0o600)
+			} else if scenario == "unfinished history" {
+				journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, journalPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				journal.Checkpoint = releasetransition.JournalReconciling
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, journalPath, payload, 0o600)
+			}
+			history := activationRepairHistory(t, options.RepositoryRoot, home)
+			checkpoint := mustReadConfigFixture(t, checkpointPath)
+			gitPath := filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env")
+			gitBefore := mustReadConfigFixture(t, gitPath)
+			prompt := &callbackPrompt{callback: func() {
+				if !bytes.Equal(before, mustReadConfigFixture(t, path)) || physical.mutations != 0 {
+					t.Fatal("source authoring changed state before consent")
+				}
+				switch scenario {
+				case "source after consent":
+					testkit.WriteFile(t, path, bytes.Replace(before, []byte("SAMPLE_PORT=28080"), []byte("SAMPLE_PORT=30080"), 1), 0o640)
+					before = mustReadConfigFixture(t, path)
+				case "history after consent":
+					testkit.WriteFile(t, journalPath, append(mustReadConfigFixture(t, journalPath), '\n'), 0o600)
+					history = activationRepairHistory(t, options.RepositoryRoot, home)
+				case "checkpoint after consent":
+					testkit.WriteFile(t, checkpointPath, append(checkpoint, '\n'), 0o600)
+					checkpoint = mustReadConfigFixture(t, checkpointPath)
+				case "tooling after consent":
+					if err := os.Chmod(filepath.Join(options.RepositoryRoot, "config/commands.registry"), 0o640); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}
+			options.Prompt = prompt
+			decline := &testkit.Prompt{Answers: []bool{false}}
+			if scenario == "decline" {
+				options.Prompt = decline
+			}
+			var output bytes.Buffer
+			options.Stdout, options.Stderr = &output, &output
+			code := runAliasRepairFixture(t, options)
+			approved := scenario == "unset" || scenario == "set"
+			if (code == 0) != approved {
+				t.Fatalf("completed scalar source authoring: code=%d approved=%t output=%s", code, approved, output.String())
+			}
+			if scenario == "invalid prospective" && !strings.Contains(output.String(), "prospective configuration:") {
+				t.Fatalf("invalid draft did not reach prospective validation: %s", output.String())
+			}
+			prompts := len(prompt.requests) + len(decline.Requests)
+			wantPrompt := approved || scenario == "decline" || strings.Contains(scenario, "after consent")
+			if (prompts == 1) != wantPrompt || prompts > 1 {
+				t.Fatalf("prepared consent boundary: prompts=%d output=%s", prompts, output.String())
+			}
+			after := mustReadConfigFixture(t, path)
+			expected := before
+			if approved {
+				var value *string
+				if scenario == "set" {
+					port := "29080"
+					value = &port
+				}
+				expected, err = config.EditPersistentAssignmentContent(path, before, "SAMPLE_PORT", value)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0o640 || !bytes.Equal(after, expected) {
+				t.Fatal("scalar source authoring changed unapproved bytes or mode")
+			}
+			if !reflect.DeepEqual(history, activationRepairHistory(t, options.RepositoryRoot, home)) || !bytes.Equal(checkpoint, mustReadConfigFixture(t, checkpointPath)) {
+				t.Fatal("scalar source authoring changed protected history or runtime links")
+			}
+			if !bytes.Equal(gitBefore, mustReadConfigFixture(t, gitPath)) {
+				t.Fatal("local scalar source authoring changed inherited Git settings")
+			}
+			if approved {
+				resolved, err := program.loadSelectionRepair("named")
+				port := "18080"
+				if scenario == "set" {
+					port = "29080"
+				}
+				if err != nil || resolved.Environment["SAMPLE_PORT"] != port || resolved.Context.SSHPort != 2241 {
+					t.Fatalf("approved scalar intent or captured SSH setting changed: %v", err)
+				}
+			}
+			platform := options.InitPlatform.(*initPlatformFixture)
+			if physical.mutations != 0 || len(options.Config.(*recordingConfigApplier).yards) != 0 || len(platform.applied) != 0 || platform.projectHooks != 0 {
+				t.Fatal("scalar source authoring performed activation or reconciliation")
+			}
+			if _, err := os.Stat(ready); !os.IsNotExist(err) {
+				t.Fatal("scalar source authoring restored activation readiness")
 			}
 		})
 	}

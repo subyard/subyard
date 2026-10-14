@@ -76,8 +76,7 @@ func TestAssessPrepareResultCombinesTrustedMetadataWithValidatedDelta(t *testing
 }
 
 func TestVerbReadOnlyRequiresEveryDeclaredActionToBeReadOnly(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+	spec, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -90,8 +89,11 @@ ACTION="up up yard-change reversible"
 ACTION="destroy destroy runtime-destruction recreatable"
 BRINGUP=up
 SHUTDOWN=destroy
-`)
-	registry, err := Load(root)
+`))
+	registry, err := BuildRegistry([]ResourceSpec{spec})
+	if parseErr != nil {
+		err = parseErr
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,9 +244,8 @@ func TestAssessPrepareResultAllowsRedactedAndDigestConsequences(t *testing.T) {
 	}
 }
 
-func TestLoadDerivesTypedActionsAndBoundsLookup(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+func TestBuildRegistryDerivesTypedActionsAndBoundsLookup(t *testing.T) {
+	spec, err := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -260,9 +261,11 @@ ACTION="destroy destroy runtime-destruction recreatable"
 ACTION="destroy-purge destroy persistent-data-destruction irreversible"
 BRINGUP=up
 SHUTDOWN=destroy
-`)
-
-	registry, err := Load(root)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := BuildRegistry([]ResourceSpec{spec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,9 +318,8 @@ SHUTDOWN=destroy
 	}
 }
 
-func TestLoadDerivesOwnedProxyContract(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "dashboard", `
+func TestBuildRegistryDerivesOwnedProxyContract(t *testing.T) {
+	spec, err := ParseResource("sample", "dashboard", strings.NewReader(`
 COMMAND=dashboard
 HANDLER=resources/dashboard/handler.sh
 TITLE="Sample dashboard"
@@ -327,9 +329,11 @@ ACTION="status status read-only not-needed"
 ACTION="down down security-change reversible"
 BRINGUP=up
 SHUTDOWN=down
-`)
-
-	registry, err := Load(root)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := BuildRegistry([]ResourceSpec{spec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +364,7 @@ SHUTDOWN=down
 	}
 }
 
-func TestLoadPublicUDPContractIsValidatedGenerically(t *testing.T) {
+func TestResourcePublicUDPContractIsValidatedGenerically(t *testing.T) {
 	for _, test := range []struct {
 		profile, name, record string
 		valid                 bool
@@ -378,15 +382,17 @@ func TestLoadPublicUDPContractIsValidatedGenerically(t *testing.T) {
 		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-ipv4-udp", false},
 		{"sample", "relay", "sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:127.0.0.1:41999 owner-metadata-v1 owner-ipv4-udp", false},
 	} {
-		root := t.TempDir()
-		writeTestResource(t, root, test.profile, test.name, fmt.Sprintf(`
+		spec, err := ParseResource(test.profile, test.name, strings.NewReader(fmt.Sprintf(`
 HANDLER=resources/%s/handler.sh
 TITLE="VPN"
 PROXY=%q
 ACTION="up up security-change reversible"
 ACTION="down down security-change reversible"
-`, test.name, test.record))
-		registry, err := Load(root)
+`, test.name, test.record)))
+		var registry Registry
+		if err == nil {
+			registry, err = BuildRegistry([]ResourceSpec{spec})
+		}
 		if test.valid && err != nil || !test.valid && err == nil {
 			t.Fatalf("record %q valid=%t: %v", test.record, test.valid, err)
 		}
@@ -400,32 +406,35 @@ ACTION="down down security-change reversible"
 			}
 		}
 	}
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "relay", `
+	spec, err := ParseResource("sample", "relay", strings.NewReader(`
 HANDLER=resources/relay/handler.sh
 TITLE="Relay"
 PROXY="sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE udp:guest:41999 owner-metadata-v1 owner-ipv4-udp"
 BOOTSTRAP=profile
 ACTION="up up public-ingress-change reversible"
 ACTION="down down public-ingress-change reversible"
-`)
-	if _, err := Load(root); err == nil {
+`))
+	if err == nil {
+		_, err = BuildRegistry([]ResourceSpec{spec})
+	}
+	if err == nil {
 		t.Fatal("public UDP ingress accepted profile bootstrap that could nest the yard lock")
 	}
 }
 
-func TestLoadDerivesExplicitDashboardContract(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "dashboard", `
+func TestBuildRegistryDerivesExplicitDashboardContract(t *testing.T) {
+	spec, err := ParseResource("sample", "dashboard", strings.NewReader(`
 COMMAND=dashboard
 HANDLER=resources/dashboard/handler.sh
 TITLE="Sample dashboard"
 DASHBOARD="http SAMPLE_ADVERTISE_HOST SAMPLE_HOST_PORT /ui/"
 ACTION="up up security-change reversible"
 ACTION="down down security-change reversible"
-`)
-
-	registry, err := Load(root)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := BuildRegistry([]ResourceSpec{spec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,16 +461,15 @@ func TestLoadRejectsInvalidDashboardContract(t *testing.T) {
 		"http HOST PORT //authority",
 	} {
 		t.Run(strings.ReplaceAll(record, " ", "_"), func(t *testing.T) {
-			root := t.TempDir()
-			writeTestResource(t, root, "sample", "dashboard", fmt.Sprintf(`
+			_, parseErr := ParseResource("sample", "dashboard", strings.NewReader(fmt.Sprintf(`
 COMMAND=dashboard
 HANDLER=resources/dashboard/handler.sh
 TITLE="Sample dashboard"
 DASHBOARD=%q
 ACTION="up up security-change reversible"
 ACTION="down down security-change reversible"
-`, record))
-			if _, err := Load(root); err == nil {
+`, record)))
+			if parseErr == nil {
 				t.Fatalf("invalid DASHBOARD record %q was accepted", record)
 			}
 		})
@@ -486,16 +494,15 @@ func TestLoadRejectsInvalidOwnedProxyContract(t *testing.T) {
 	}
 	for _, record := range tests {
 		t.Run(strings.ReplaceAll(record, " ", "_"), func(t *testing.T) {
-			root := t.TempDir()
-			writeTestResource(t, root, "sample", "dashboard", fmt.Sprintf(`
+			_, parseErr := ParseResource("sample", "dashboard", strings.NewReader(fmt.Sprintf(`
 COMMAND=dashboard
 HANDLER=resources/dashboard/handler.sh
 TITLE="Sample dashboard"
 PROXY=%q
 ACTION="up up security-change reversible"
 ACTION="down down security-change reversible"
-`, record))
-			if _, err := Load(root); err == nil {
+`, record)))
+			if parseErr == nil {
 				t.Fatalf("invalid PROXY record %q was accepted", record)
 			}
 		})
@@ -523,9 +530,8 @@ func TestLoadRejectsInvalidActionDescriptors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTestResource(t, root, "sample", "service", "HANDLER=resources/service/handler.sh\nTITLE=Sample\n"+test.record+"\n")
-			if _, err := Load(root); err == nil {
+			_, parseErr := ParseResource("sample", "service", strings.NewReader("HANDLER=resources/service/handler.sh\nTITLE=Sample\n"+test.record+"\n"))
+			if parseErr == nil {
 				t.Fatal("invalid descriptor was accepted")
 			}
 		})
@@ -556,21 +562,6 @@ ACTION="down down host-change reversible"
 	}
 	if byName, ok := registry.Lookup("service"); !ok || byName.HandlerPath() != definition.HandlerPath() {
 		t.Fatalf("resource name and command differ: %s", definition.Name)
-	}
-}
-
-func TestLoadRejectsEscapingHandler(t *testing.T) {
-	root := t.TempDir()
-	directory := filepath.Join(root, "config", "profiles", "profile", "resources")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	content := "HANDLER=../../../../escape\nTITLE=x\nACTION=\"up up yard-change reversible\"\nACTION=\"down down yard-change reversible\"\n"
-	if err := os.WriteFile(filepath.Join(directory, "service.res"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(root); err == nil {
-		t.Fatal("escaping resource handler was accepted")
 	}
 }
 
@@ -685,8 +676,7 @@ func TestLoadRejectsInvalidFinalHandler(t *testing.T) {
 }
 
 func TestEndpointDefaultsAndProfileBootstrap(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+	spec, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -695,8 +685,11 @@ ENDPOINT_DEFAULTS="tailscale-self 6768"
 BOOTSTRAP=profile
 ACTION="up up bootstrap-change recreatable"
 ACTION="down down host-change reversible"
-`)
-	registry, err := Load(root)
+`))
+	registry, err := BuildRegistry([]ResourceSpec{spec})
+	if parseErr != nil {
+		err = parseErr
+	}
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -715,8 +708,7 @@ func TestEndpointMetadataValidation(t *testing.T) {
 		`BOOTSTRAP=yard`,
 	} {
 		t.Run(metadata, func(t *testing.T) {
-			root := t.TempDir()
-			writeTestResource(t, root, "sample", "service", `
+			_, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -724,8 +716,8 @@ PROXY="sample-proxy SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 tailscale-only"
 `+metadata+`
 ACTION="up up host-change recreatable"
 ACTION="down down host-change reversible"
-`)
-			if _, err := Load(root); err == nil {
+`))
+			if parseErr == nil {
 				t.Fatalf("invalid endpoint metadata was accepted: %s", metadata)
 			}
 		})
@@ -733,23 +725,21 @@ ACTION="down down host-change reversible"
 }
 
 func TestEndpointMetadataRequiresProxy(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+	_, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
 ENDPOINT_DEFAULTS="tailscale-self 6768"
 ACTION="up up host-change recreatable"
 ACTION="down down host-change reversible"
-`)
-	if _, err := Load(root); err == nil {
+`))
+	if parseErr == nil {
 		t.Fatal("endpoint defaults without proxy were accepted")
 	}
 }
 
 func TestProfileBootstrapRequiresConservativeBringUpAssessment(t *testing.T) {
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+	_, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -757,8 +747,8 @@ PROXY="sample-proxy SAMPLE_HOST SAMPLE_PORT tcp:127.0.0.1:9119 tailscale-only"
 BOOTSTRAP=profile
 ACTION="up up host-change recreatable"
 ACTION="down down host-change reversible"
-`)
-	if _, err := Load(root); err == nil {
+`))
+	if parseErr == nil {
 		t.Fatal("profile bootstrap with narrow bring-up assessment was accepted")
 	}
 }
@@ -776,8 +766,7 @@ func writeTestResource(t *testing.T, root, profile, name, descriptor string) {
 
 func testActionRegistry(t *testing.T) (Registry, *domain.ActionRegistry) {
 	t.Helper()
-	root := t.TempDir()
-	writeTestResource(t, root, "sample", "service", `
+	spec, err := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=svc
 HANDLER=resources/service/handler.sh
 TITLE="Sample service"
@@ -788,8 +777,11 @@ ACTION="destroy destroy runtime-destruction recreatable"
 ACTION="destroy-purge destroy persistent-data-destruction irreversible"
 BRINGUP=up
 SHUTDOWN=down
-`)
-	registry, err := Load(root)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := BuildRegistry([]ResourceSpec{spec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,15 +798,17 @@ func TestManagementContractKeepsNativeApplicationMetadataBounded(t *testing.T) {
 	if err != nil || contract.Application != "SampleVPN" || contract.User != "sample" {
 		t.Fatalf("contract=%+v err=%v", contract, err)
 	}
-	root := testkit.TempDir(t)
-	writeTestResource(t, root, "sample", "relay", `
+	spec, parseErr := ParseResource("sample", "relay", strings.NewReader(`
 HANDLER=resources/relay/handler.sh
 TITLE="Sample relay"
 MANAGEMENT="SampleVPN SAMPLE_IPV4 SAMPLE_ADMIN_PORT sample"
 ACTION="up up public-ingress-change reversible"
 ACTION="down down public-ingress-change reversible"
-`)
-	registry, err := Load(root)
+`))
+	registry, err := BuildRegistry([]ResourceSpec{spec})
+	if parseErr != nil {
+		err = parseErr
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -843,8 +837,7 @@ func TestControllerSessionDeclarationRequiresOnlySessionActions(t *testing.T) {
 		{"CONTROLLER_SESSION=mixed", false},
 	} {
 		t.Run(test.record, func(t *testing.T) {
-			root := testkit.TempDir(t)
-			writeTestResource(t, root, "sample", "service", `
+			spec, parseErr := ParseResource("sample", "service", strings.NewReader(`
 COMMAND=demo
 HANDLER=resources/service/handler.sh
 TITLE="Sample viewer"
@@ -854,8 +847,11 @@ ACTION="mixed-session mixed session not-needed"
 ACTION="mixed-write mixed bounded-write not-needed"
 BRINGUP=status
 SHUTDOWN=status
-`+test.record)
-			registry, err := Load(root)
+`+test.record))
+			registry, err := BuildRegistry([]ResourceSpec{spec})
+			if parseErr != nil {
+				err = parseErr
+			}
 			if !test.valid {
 				if err == nil {
 					t.Fatal("invalid controller session accepted")

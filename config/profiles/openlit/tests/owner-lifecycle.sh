@@ -84,6 +84,53 @@ if AGENT_codex_CONFIG="$state/conflict.toml" bash "$root/config/profiles/openlit
   echo 'FAIL: template conflict accepted' >&2; exit 1
 fi
 [ ! -s "$state/calls" ]
+
+# Released-updater observations use this profile's exact transport, with no guest execution.
+# Retain the owning guest double for the independent elevated-pause scenario.
+cp "$state/bin/incus" "$state/incus-owner-fixture"
+python3 - "$root" "$state" <<'PY'
+import json, os, pathlib, runpy, subprocess, sys
+
+root, state = map(pathlib.Path, sys.argv[1:])
+control, rejected = state/'control.json', state/'rejected'
+control.write_text(json.dumps({'instances': [{'info': {'status': 'Running'}}]}))
+control.chmod(0o600)
+harness = runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
+harness['write_observation_incus'](state/'bin', control, rejected)
+profile = root/'config/profiles/openlit'
+environment = dict(os.environ, INCUS_PROJECT='subyard', YARD_INSTANCE_NAME='yard',
+                   ENVIRONMENT_PROFILES='')
+for agents in ('', 'claude', 'codex', 'claude codex'):
+    result = subprocess.run(['bash', str(profile/'runtime.sh'), 'observe'],
+                            env=dict(environment, CODING_TOOL_INTEGRATIONS=agents),
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {'state': 'absent', 'actual': '', 'desired': ''}
+    assert not rejected.exists()
+before = control.read_bytes()
+result = subprocess.run(['bash', str(profile/'runtime.sh'), 'apply', 'fixture-operation',
+                         'a'*64, 'b'*64], env=environment,
+                        capture_output=True, timeout=30)
+# The dashboard's fresh observation refuses stale bindings before any host write.
+assert result.returncode != 0 and not result.stdout
+assert b'dashboard/runtime conflict or failed verification' in result.stderr
+assert control.read_bytes() == before and not rejected.exists()
+commands = runpy.run_path(str(profile/'tests/release-observation.py'))['read_only_commands'](profile)
+command = commands[0][0]
+changed_script = command.copy(); changed_script[9] += '\n'
+apply = command.copy(); apply[11] = 'refresh'; apply += ['a'*64, 'b'*64]
+selected = command.copy(); selected[12] = '1'
+foreign = command.copy(); foreign[1] = 'foreign'
+for arguments in (changed_script, apply, selected, foreign):
+    rejected.unlink(missing_ok=True)
+    result = subprocess.run([str(state/'bin/incus'), *arguments], input=b'',
+                            capture_output=True, timeout=10)
+    assert result.returncode == 99 and rejected.exists()
+    assert not result.stdout
+print('ok: released-updater observes OpenLIT absence and rejects changed transport, apply, selected and foreign calls')
+PY
+cp "$state/incus-owner-fixture" "$state/bin/incus"
+chmod 0755 "$state/bin/incus"
 printf 'ok: OpenLIT lifecycle transport, stopped preservation and template-conflict refusal\n'
 
 # Exercise the real elevation projection, owner controller and tar-delivered guest

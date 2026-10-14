@@ -14,6 +14,9 @@ type ProspectiveFiles struct {
 	Root         string
 	Yards        []string
 	ReadSnapshot func(string) (PersistentFileSnapshot, error)
+	// ReadPreparedInput keeps uncaptured paths on their native reader. Captured
+	// snapshots retain the same bounds and identity validation as ReadSnapshot.
+	ReadPreparedInput func(string) (PersistentFileSnapshot, bool, error)
 }
 
 func (files *ProspectiveFiles) snapshot(path string) (PersistentFileSnapshot, bool, error) {
@@ -34,7 +37,17 @@ func (files *ProspectiveFiles) snapshot(path string) (PersistentFileSnapshot, bo
 	if clean != path {
 		return PersistentFileSnapshot{}, true, errors.New("invalid prospective configuration path")
 	}
-	snapshot, err := files.ReadSnapshot(path)
+	var snapshot PersistentFileSnapshot
+	var err error
+	if files.ReadPreparedInput != nil {
+		var matched bool
+		snapshot, matched, err = files.ReadPreparedInput(path)
+		if !matched && err == nil {
+			return PersistentFileSnapshot{}, false, nil
+		}
+	} else {
+		snapshot, err = files.ReadSnapshot(path)
+	}
 	if err != nil {
 		return PersistentFileSnapshot{}, true, err
 	}

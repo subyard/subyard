@@ -12,6 +12,28 @@ import (
 	"strings"
 )
 
+// ServiceCheckError contains only a validated public owner and native status.
+type ServiceCheckError struct {
+	Owner      string
+	NativeExit int
+	cause      error
+}
+
+func (failure *ServiceCheckError) Error() string {
+	return fmt.Sprintf("profile service check owner=%s native-exit=%d", failure.Owner, failure.NativeExit)
+}
+func (failure *ServiceCheckError) Unwrap() error { return failure.cause }
+
+// ServiceCheckExit preserves ordinary drift and native failures separately from
+// dispatcher failures. Other service verbs retain their existing exit policy.
+func ServiceCheckExit(err error) int {
+	var failure *ServiceCheckError
+	if errors.As(err, &failure) && failure.NativeExit > 0 && failure.NativeExit <= 255 {
+		return failure.NativeExit
+	}
+	return 2
+}
+
 // RunServices is a physical leaf behind the core operation's approval. Hooks
 // belong to shipped profiles; secret values never travel in the command line.
 func RunServices(ctx context.Context, root string, arguments []string, environment map[string]string, stdout, stderr io.Writer) error {
@@ -64,7 +86,17 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		command.Env = env
 		command.Stdout = output
 		command.Stderr = stderr
+		if action == "--check" {
+			command.Stdout, command.Stderr = io.Discard, io.Discard
+		}
 		if err := command.Run(); err != nil {
+			if action == "--check" {
+				var exit *exec.ExitError
+				if errors.As(err, &exit) && exit.ExitCode() > 0 {
+					return &ServiceCheckError{Owner: definition.Name, NativeExit: exit.ExitCode(), cause: err}
+				}
+				return errors.New("profile service check unavailable")
+			}
 			return fmt.Errorf("profile %s owner service %s failed: %w", definition.Name, action, err)
 		}
 		return nil

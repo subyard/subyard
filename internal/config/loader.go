@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,8 +31,8 @@ type LoadOptions struct {
 	// FileOverrides substitutes retained draft files while keeping logical paths
 	// and normal registration, precedence and resource-endpoint resolution.
 	// An empty source marks a logical file absent.
-	FileOverrides    map[string]string
 	ProspectiveFiles *ProspectiveFiles
+	FileOverrides    map[string]string
 	YardDirs         []string
 }
 
@@ -302,7 +304,8 @@ func load(
 		if exists {
 			yardPresent = true
 			templateSource = path
-			if err := tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), probe, ScopeYard, options.SyncSource || path == gitYard, nil, tracker.prospectiveReader()); err != nil {
+			source := tracker.fileSource(path)
+			if err := tracker.catalog.applyEnvFileValidatedFrom(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, tracker.prospectiveReader()); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -728,14 +731,15 @@ func normalizeAgentAssetPaths(
 			}
 			continue
 		}
-		info, err := os.Lstat(tracker.fileSource(path))
+		source := tracker.fileSource(path)
+		info, err := os.Lstat(source)
 		if err != nil {
 			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return tracker.sourceError(name, "must name a regular non-symlink file", nil)
 		}
-		file, err := os.Open(tracker.fileSource(path))
+		file, err := os.Open(source)
 		if err != nil {
 			return tracker.sourceError(name, "file setting source is not openable", err)
 		}
@@ -899,7 +903,8 @@ func applyEnvFileTrackedValidated(
 	scope SettingScope,
 	requireSyncable bool,
 ) error {
-	return tracker.catalog.applyEnvFileValidatedFrom(path, tracker.fileSource(path), values, scope, requireSyncable,
+	source := tracker.fileSource(path)
+	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
 		}, tracker.prospectiveReader())
@@ -916,17 +921,28 @@ func (settings Catalog) applyEnvFileValidated(
 }
 
 func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
+	if len(readers) != 0 && readers[0] != nil {
+		payload, err := readers[0](source)
+		if err != nil {
+			return sourceAccessError(path, "scalar settings", err)
+		}
+		return settings.applyEnvReaderValidated(bytes.NewReader(payload), path, values, scope, requireSyncable, observer)
+	}
+	file, err := os.Open(source)
+	if err != nil {
+		return sourceAccessError(path, "scalar settings", err)
+	}
+	defer file.Close()
+	return settings.applyEnvReaderValidated(file, path, values, scope, requireSyncable, observer)
+}
+
+func (settings Catalog) applyEnvReaderValidated(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
-	if err := applyEnvFileObservedRetired(source, probe, func(name, value string, line int) {
+	var content bytes.Buffer
+	if err := applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, func(name, value string, line int) {
 		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, settings.retiredSetting, readers...); err != nil {
-		var diagnostic *SourceError
-		if source != path && errors.As(err, &diagnostic) {
-			copy := *diagnostic
-			copy.Path = path
-			return &copy
-		}
+	}, settings.retiredSetting); err != nil {
 		return err
 	}
 	normalized := make([]observedAssignment, 0, len(assignments))
@@ -962,17 +978,7 @@ func (settings Catalog) applyEnvFileValidatedFrom(path, source string, values en
 	for _, assignment := range assignments {
 		syncable := requireSyncable
 		if syncable && assignment.name == "SSH_PORT" {
-			var content []byte
-			var err error
-			if len(readers) != 0 && readers[0] != nil {
-				content, err = readers[0](source)
-			} else {
-				content, err = os.ReadFile(source)
-			}
-			if err == nil {
-				err = LegacyGitSSHPort(path, content)
-			}
-			if err != nil {
+			if err := LegacyGitSSHPort(path, content.Bytes()); err != nil {
 				return sourceContext(path, assignment.line, "SSH_PORT", "scalar settings", err)
 			}
 			syncable = false
@@ -1414,4 +1420,28 @@ func validateE2EConfig(values environment) error {
 
 func applyEnvFileValidated(path string, values environment, scope SettingScope, syncable bool, observer assignmentObserver) error {
 	return (Catalog{}).applyEnvFileValidated(path, values, scope, syncable, observer)
+}
+
+// LayerAssignment retains the source line for every evaluated assignment,
+// including effects from parameter defaults.
+type LayerAssignment struct {
+	Name, Value string
+	Line        int
+}
+type LayerEvaluation struct {
+	Values      map[string]string
+	Assignments []LayerAssignment
+}
+
+// EvaluateLayer evaluates and validates one scalar layer atomically, preserving
+// assignment order, scopes and legacy conflict checks without opening source.
+func (settings Catalog) EvaluateLayer(reader io.Reader, source string, base map[string]string, scope SettingScope, requireSyncable bool) (LayerEvaluation, error) {
+	result := LayerEvaluation{Values: cloneEnvironment(base)}
+	err := settings.applyEnvReaderValidated(reader, source, result.Values, scope, requireSyncable, func(name, value string, line int) {
+		result.Assignments = append(result.Assignments, LayerAssignment{Name: name, Value: value, Line: line})
+	})
+	if err != nil {
+		return LayerEvaluation{}, err
+	}
+	return result, nil
 }

@@ -163,6 +163,8 @@ type preparedCommand struct {
 	policy           domain.CommandPolicy
 	assess           commandAssessment
 	refresh          commandAssessment
+	initExecution    *initExecution
+	initFacts        string
 	steps            func() []domain.OperationStep
 	stepsComplete    bool
 	execute          func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error)
@@ -351,6 +353,10 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 			return domain.AdapterResult{}, err
 		}
 		if action != prepared.Plan.Assessment.Action {
+			if prepared.initExecution != nil {
+				return domain.AdapterResult{}, fmt.Errorf("%w: structured action changed after confirmation: approved={%s} current={%s}",
+					domain.ErrPlanStale, prepared.initFacts, prepared.initExecution.actionFacts(action))
+			}
 			return domain.AdapterResult{}, fmt.Errorf("%w: structured action changed after confirmation", domain.ErrPlanStale)
 		}
 		if prepared.steps != nil {
@@ -429,7 +435,14 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	prepared.steps = execution.operationSteps
 	prepared.stepsComplete = cli.options.InitPlatform == nil
 	prepared.policy.Consequences = execution.consequences()
-	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
+	prepared.initExecution = execution
+	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		action, delta, err := execution.actionPlan()
+		if err == nil {
+			prepared.initFacts = execution.actionFacts(action)
+		}
+		return action, delta, err
+	}
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		if err := execution.inputBaseline.check(ctx, cli); err != nil {
 			return "", domain.ActionDelta{}, err
@@ -715,13 +728,28 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 		}
 		if prepared.exactState == "" {
 			prepared.exactState = execution.binding()
+			if permit := prepared.CLI.teardownRepair; permit != nil {
+				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
+			}
 		}
 		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 	}
 	prepared.refresh = prepared.assess
 	prepared.steps = func() []domain.OperationStep { return execution.steps(prepared.Loaded.Context) }
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		return prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
+		permit := prepared.CLI.teardownRepair
+		if permit != nil {
+			unlock, err := prepared.CLI.lockConfigApplyRepair(ctx, permit)
+			if err != nil {
+				return domain.AdapterResult{}, err
+			}
+			defer unlock()
+		}
+		result, err := prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
+		if err == nil && result.Status == "ok" && permit != nil {
+			err = prepared.CLI.finishTeardownRepair(ctx, permit)
+		}
+		return result, err
 	}
 	return nil
 }

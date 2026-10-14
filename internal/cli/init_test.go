@@ -1484,13 +1484,35 @@ func TestNativeInitModesStayInOneConfirmedWorkflow(t *testing.T) {
 	}
 }
 
+type initRecheckPlatformFixture struct {
+	*initPlatformFixture
+	lateExpansion bool
+	projectChecks int
+}
+
+func (fixture *initRecheckPlatformFixture) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
+	if fixture.lateExpansion && stage == ports.ReconcileStageProject {
+		fixture.projectChecks++
+		if fixture.projectChecks == 1 {
+			return true, nil
+		}
+	}
+	return fixture.initPlatformFixture.CheckStage(ctx, stage)
+}
+
 func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
-	for _, shrink := range []bool{true, false} {
-		t.Run(fmt.Sprintf("shrink=%t", shrink), func(t *testing.T) {
+	for _, scenario := range []struct {
+		name          string
+		shrink        bool
+		lateExpansion bool
+	}{{name: "shrink", shrink: true}, {name: "expansion"}, {name: "late expansion", lateExpansion: true}} {
+		t.Run(scenario.name, func(t *testing.T) {
 			root, environment, stateDirectory := preparationParityFixture(t)
 			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
-			platform := fixture.(*initPlatformFixture)
-			platform.converged[ports.ReconcileStageProject] = !shrink
+			const canary = "PRIVATE_INIT_DIAGNOSTIC_CANARY"
+			environment = append(environment, "FIXTURE_PRIVATE_CANARY="+canary)
+			platform := &initRecheckPlatformFixture{initPlatformFixture: fixture.(*initPlatformFixture)}
+			platform.converged[ports.ReconcileStageProject] = !scenario.shrink
 			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root,
 				Incus: incus, ProjectData: data, InitPlatform: platform})
 			if err != nil {
@@ -1511,14 +1533,23 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			platform.converged[ports.ReconcileStageProject] = shrink
+			platform.converged[ports.ReconcileStageProject] = scenario.shrink
+			platform.lateExpansion = scenario.lateExpansion
 			_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
-			if shrink {
+			if scenario.shrink {
 				if err != nil || platform.projectHooks != 1 || len(platform.applied) != 0 {
 					t.Fatalf("safe shrink did not run only hooks: error=%v hooks=%d applied=%v", err, platform.projectHooks, platform.applied)
 				}
 			} else if !errors.Is(err, domain.ErrPlanStale) || platform.projectHooks != 0 || len(platform.applied) != 0 {
 				t.Fatalf("unconfirmed expansion was accepted: error=%v hooks=%d applied=%v", err, platform.projectHooks, platform.applied)
+			}
+			if scenario.lateExpansion {
+				message := err.Error()
+				if !strings.Contains(message, "approved={action=yard.init.project-hooks") ||
+					!strings.Contains(message, "current={action=yard.init.reconcile") ||
+					!strings.Contains(message, "first_pending=project") || strings.Contains(message, canary) {
+					t.Fatalf("refusal omitted safe planning facts or leaked private input: %s", message)
+				}
 			}
 		})
 	}

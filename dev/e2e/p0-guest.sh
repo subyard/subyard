@@ -672,6 +672,7 @@ owner() (
 	trap owner_cleanup EXIT
   prepare_owner_go_cache
 	YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+	# Source-root init binds package-owned native artifacts as well as the engine.
 	dev/build-profiles.sh >/dev/null
 	ensure_owner_incus
 	bash dev/e2e/p0-real-incus.sh

@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
@@ -225,6 +224,7 @@ type activationApplicability struct {
 
 type activationStageReconciler struct {
 	prospective          func(releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error)
+	sourceActivation     func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error)
 	id                   string
 	stage                ports.ReconcileStageID
 	inspectApplicability func(context.Context) (activationApplicability, error)
@@ -245,7 +245,8 @@ type routeConsumerActivationPort interface {
 }
 
 type routeConsumerActivationReconciler struct {
-	port routeConsumerActivationPort
+	sourceActivation func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error)
+	port             routeConsumerActivationPort
 }
 
 func (*routeConsumerActivationReconciler) ID() string { return "test-yard-route-consumers" }
@@ -402,7 +403,8 @@ func (cli *CLI) routeConsumerActivationReconciler(
 		return &routeConsumerActivationReconciler{port: routeConsumerActivationError{err: err}}
 	}
 	return &routeConsumerActivationReconciler{
-		port: &testYardRouteConsumerActivation{options: options},
+		sourceActivation: cli.prepareRouteSourceActivation(request),
+		port:             &testYardRouteConsumerActivation{options: options},
 	}
 }
 
@@ -572,7 +574,8 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 			}
 			return cli.brokerActivationWithFiles(request, projected), nil
 		},
-		id: "test-vm-broker", stage: ports.ReconcileStageTestVMs,
+		sourceActivation: cli.prepareBrokerSourceActivation(request),
+		id:               "test-vm-broker", stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
 			values, err := options()
 			if err != nil {
@@ -757,17 +760,19 @@ func inspectPowerActivationApplicability(
 }
 
 type materializedConfigActivationReconciler struct {
-	cli              *CLI
-	yard             string
-	configHome       string
-	goal             releasetransition.Goal
-	artifactDigest   releasetransition.Fingerprint
-	registryDigest   releasetransition.Fingerprint
-	sourceIngress    bool
-	allLocal         bool
-	scopeResolved    bool
-	integrationPlans map[string]reconcileruntime.IntegrationPlan
-	recoveryApply    *configApplyExecution
+	cli                       *CLI
+	yard                      string
+	configHome                string
+	goal                      releasetransition.Goal
+	artifactDigest            releasetransition.Fingerprint
+	registryDigest            releasetransition.Fingerprint
+	allLocal                  bool
+	scopeResolved             bool
+	integrationPlans          map[string]reconcileruntime.IntegrationPlan
+	sourceIngress             bool
+	projectedIntegrationPlans bool
+	projectedUnavailable      map[string]projectedIntegrationUnavailable
+	recoveryApply             *configApplyExecution
 }
 
 type releaseTransitionConfigApplier struct{ cli *CLI }
@@ -867,6 +872,9 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	if reconciler == nil || reconciler.cli == nil {
 		return releasetransition.V2ActivationObservation{}, errors.New("materialized config reconciler is unavailable")
 	}
+	if err := reconciler.verifyProjectedUnavailable(ctx); err != nil {
+		return releasetransition.V2ActivationObservation{}, err
+	}
 	yard := reconciler.yard
 	if yard == "" {
 		yard = "default"
@@ -889,15 +897,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}
 	}
-	type targetFingerprint struct {
-		Name         string `json:"name"`
-		Fingerprint  string `json:"fingerprint"`
-		State        string `json:"state,omitempty"`
-		Integrations string `json:"integrations,omitempty"`
-	}
-	desired := make([]targetFingerprint, 0, len(targets))
-	actual := make([]targetFingerprint, 0, len(targets))
-	converged := true
+	activationTargets := make([]config.MaterializationActivationTarget, 0, len(targets))
 	consequences := []string{}
 	captureIntegrationPlans := reconciler.integrationPlans == nil
 	if captureIntegrationPlans {
@@ -947,38 +947,14 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 				}
 			}
 			consequences = append(consequences, "yard "+target.Name+": reconcile selected integration packages, configs, links, hooks and services")
-			converged = false
 		}
-		desired = append(desired, targetFingerprint{
-			Name: target.Name, Fingerprint: assessment.DesiredFingerprint, Integrations: integrationScope,
+		activationTargets = append(activationTargets, config.MaterializationActivationTarget{
+			Name: target.Name, Assessment: config.MaterializationAssessment{State: assessment.State, Changed: assessment.Changed, DesiredFingerprint: assessment.DesiredFingerprint, MaterializedFingerprint: assessment.MaterializedFingerprint},
+			IntegrationScope: integrationScope, IntegrationFingerprint: integration.Fingerprint, IntegrationChanged: integration.Changed,
 		})
-		actual = append(actual, targetFingerprint{
-			Name: target.Name, Fingerprint: operationStateDigest([]string{assessment.MaterializedFingerprint, integration.Fingerprint}),
-			State: assessment.State,
-		})
-		converged = converged && !assessment.Changed
 	}
-	sort.Slice(desired, func(i, j int) bool { return desired[i].Name < desired[j].Name })
-	sort.Slice(actual, func(i, j int) bool { return actual[i].Name < actual[j].Name })
-	desiredPayload, err := json.Marshal(desired)
-	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
-	}
-	actualPayload, err := json.Marshal(actual)
-	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
-	}
-	if converged {
-		actualPayload = desiredPayload
-	}
-	desiredDigest := sha256.Sum256(desiredPayload)
-	actualDigest := sha256.Sum256(actualPayload)
-	return releasetransition.V2ActivationObservation{
-		Actual:       releasetransition.Fingerprint(fmt.Sprintf("%x", actualDigest[:])),
-		Desired:      releasetransition.Fingerprint(fmt.Sprintf("%x", desiredDigest[:])),
-		Converged:    converged,
-		Consequences: consequences,
-	}, nil
+	assessed := config.AssessMaterializationActivation(activationTargets)
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences}, nil
 }
 
 func (reconciler *materializedConfigActivationReconciler) resolveScope(
@@ -1492,16 +1468,27 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 		return err
 	}
 	defer unlock()
-	platform, _, err := prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, operation.initPlatform(target.Loaded, nil))
-	if err != nil {
-		return err
+	platform := operation.initPlatform(target.Loaded, nil)
+	if !reconciler.projectedIntegrationPlans {
+		platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
+		if err != nil {
+			return err
+		}
 	}
 	runtime := platform.(reconcileruntime.Runtime)
+	if reconciler.projectedIntegrationPlans {
+		runtime.AdoptLegacyIntegrations = approved.AdoptionFingerprint != ""
+		runtime.LegacyIntegrationFingerprint = approved.AdoptionFingerprint
+	}
 	plan, err := runtime.IntegrationPlan(ctx)
 	if err != nil {
 		return err
 	}
-	if plan.Fingerprint != approved.Fingerprint {
+	if reconciler.projectedIntegrationPlans {
+		if err := reconcileruntime.CheckIntegrationPlan(approved, plan); err != nil {
+			return err
+		}
+	} else if plan.Fingerprint != approved.Fingerprint {
 		return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
 	}
 	return runtime.ApplyIntegrations(ctx, plan)

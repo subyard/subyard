@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exact route ownership and combined assessment behavior."""
 import contextlib
+import ctypes
 import io
 import subprocess
 import importlib.util
@@ -8,6 +9,9 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -252,7 +256,7 @@ class DashboardTest(unittest.TestCase):
                 # while remaining inside the cold apply's existing inner budgets.
                 subprocess.run([sys.executable,'-c','import time; time.sleep(2.5)'],check=True,timeout=options['timeout']/100)
             return b''
-        with patch.object(dashboard,'run',side_effect=transport):
+        with patch.object(dashboard,'run',side_effect=transport),patch.object(dashboard,'cold_run',side_effect=transport):
             for mode in ('apply','observe','pause','resume','refresh'):
                 self.assertEqual(ORIGINAL_GUEST(mode,True,'dev','claude codex',''), '')
                 self.assertEqual(dashboard.PHASE,'guest-'+mode)
@@ -264,6 +268,166 @@ class DashboardTest(unittest.TestCase):
         with patch.object(dashboard.subprocess,'run',side_effect=error),contextlib.redirect_stderr(captured):
             with self.assertRaises(subprocess.CalledProcessError): ORIGINAL_RUN('incus')
         self.assertEqual(captured.getvalue(),'openlit: guest progress=image-pull\nopenlit: guest image-pull exit=124\n')
+
+
+class ColdTransportTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory(prefix='openlit-cold-',dir='/tmp')
+        self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name); self.root.chmod(0o700)
+        self.profile=self.root/'checkout/config/profiles/openlit'
+        self.profile.mkdir(parents=True,mode=0o700); self.profile.chmod(0o700)
+        self.bin=self.root/'bin'; self.bin.mkdir(mode=0o700); self.bin.chmod(0o700)
+        self.published=self.root/'published'
+        def write(path,text,mode=0o600):
+            path.write_text(text); path.chmod(mode)
+        self.write=write
+        write(self.bin/'incus', '#!/usr/bin/env python3\nimport os,sys\na=sys.argv[sys.argv.index("--")+1:]; os.execvp(a[0],a)\n',0o700)
+        for name in dashboard.FILES: write(self.profile/name,'')
+        library=self.profile.parents[2]/'internal/adapters/configmaterial'
+        library.mkdir(parents=True,mode=0o700); library.chmod(0o700); write(library/'tomli_w.py','')
+        # Exercise the owning pull command, with only its seconds scaled. Incus
+        # is a real exec transport: stdin and cancellation cross a native pipe.
+        source=(PROFILE/'guest.sh').read_text()
+        pull=source[source.index('  if [ "$missing" = 1 ]; then'):source.index('\npublish_asset()')]
+        pull=pull.rsplit('\nfi',1)[0].replace('pull_limit=240','pull_limit=0.24').replace('pull_limit=20','pull_limit=0.02')
+        write(self.profile/'guest.sh', '#!/bin/bash\nset -euo pipefail\nmode=$1\nmissing=1\nroot='+str(self.profile)+'\nstate='+str(self.root)+'\nstage(){ :; }\ndie(){ exit 1; }\n'+pull+'\ntouch '+str(self.published)+'\n')
+        write(self.bin/'docker','#!/bin/bash\nsleep 0.3\n',0o700)
+        self.patchers=[patch.object(dashboard,'ROOT',self.profile),
+            patch.object(dashboard,'ENV',{'INCUS_PROJECT':'fixture','YARD_INSTANCE_NAME':'yard'}),
+            patch.dict(os.environ,{'PATH':str(self.bin)+os.pathsep+os.environ['PATH']}),
+            patch.dict(dashboard.GUEST_TIMEOUTS,{'apply':0.9}),
+            patch.object(dashboard,'COLD_CANCEL_SECONDS',0.2,create=True),
+            patch.object(dashboard,'COLD_KILL_SECONDS',0.05,create=True)]
+        for p in self.patchers: p.start(); self.addCleanup(p.stop)
+
+    def test_cold_pull_crosses_old_leaf_budget_with_normal_input_eof(self):
+        with patch.dict(dashboard.GUEST_TIMEOUTS, {'apply':5}):
+            dashboard.guest('apply',True,'dev','claude codex','')
+        self.assertTrue(self.published.exists())
+
+    def hanging_pull(self):
+        self.pids=self.root/'children'
+        self.write(self.bin/'docker', '#!/usr/bin/env python3\nimport os,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nchild=os.fork()\nif child==0:\n while True: time.sleep(1)\nopen('+repr(str(self.pids))+',"w").write(str(os.getpid())+" "+str(child)+" "+str(os.getppid()))\nwhile True: time.sleep(1)\n',0o700)
+        # Reap this fixture's orphaned descendants ourselves instead of relying
+        # on the test host's init. Production's direct child is reaped remotely.
+        libc=ctypes.CDLL(None,use_errno=True)
+        previous=ctypes.c_int()
+        self.assertEqual(libc.prctl(37,ctypes.byref(previous),0,0,0),0)
+        self.assertEqual(libc.prctl(36,1,0,0,0),0)
+        self.addCleanup(lambda: libc.prctl(36,previous.value,0,0,0))
+        self.addCleanup(self.reap_helpers)
+
+    def reap_helpers(self):
+        if not self.pids.exists(): return
+        pending=set(map(int,self.pids.read_text().split()))
+        end=time.monotonic()+1
+        while pending and time.monotonic()<end:
+            for pid in list(pending):
+                try:
+                    if os.waitpid(pid,os.WNOHANG)[0]: pending.remove(pid)
+                except ChildProcessError:
+                    try: os.kill(pid,0)
+                    except ProcessLookupError: pending.remove(pid)
+            if pending: time.sleep(0.01)
+        if pending:
+            for pid in pending:
+                try: os.kill(pid,9)
+                except ProcessLookupError: pass
+            for pid in pending:
+                try: os.waitpid(pid,0)
+                except ChildProcessError: pass
+        self.assertFalse(bool(pending),'guest cancellation left a live owned descendant')
+
+    def test_hung_aggregate_kills_descendants_before_publication(self):
+        self.hanging_pull()
+        started=time.monotonic()
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            dashboard.guest('apply',True,'dev','claude codex','')
+        self.assertEqual(caught.exception.returncode,124)
+        self.assertLess(time.monotonic()-started,1.4)
+        self.assertTrue(self.pids.exists())
+        self.assertFalse(self.published.exists())
+        self.reap_helpers()
+
+    def test_nested_phase_timeout_cannot_escape_cold_group(self):
+        self.hanging_pull()
+        source=(PROFILE/'guest.sh').read_text()
+        compose=source[source.index('compose() {'):source.index('\nnative()')]
+        self.write(self.profile/'guest.sh','#!/bin/bash\nset -euo pipefail\nmode=$1\nroot='+str(self.profile)+'\nstate='+str(self.root)+'\n'+compose+'\ncompose config --images\n: # Keep Bash alive; do not optimize the nested timeout into exec.\ntouch '+str(self.published)+'\n')
+        with self.assertRaises(subprocess.SubprocessError):
+            dashboard.guest('apply',True,'dev','claude codex','')
+        self.assertTrue(self.pids.exists())
+        self.assertFalse(self.published.exists())
+        self.reap_helpers()
+
+    def test_stopped_cold_leader_stage_is_removed_after_forced_kill(self):
+        self.hanging_pull()
+        stage_marker=self.root/'archive-stage'
+        self.write(self.profile/'guest.sh','#!/bin/bash\nset -euo pipefail\numask 077\nprintf "%s" "$(dirname "${BASH_SOURCE[0]}")" > '+str(stage_marker)+'\nchmod 600 '+str(stage_marker)+'\ndocker &\nfor attempt in {1..100}; do [ ! -e '+str(self.pids)+' ] || break; sleep 0.005; done\nleader="$(python3 -c \'import os; print(os.getpgrp())\')"\nkill -STOP "$leader"\nwait\n: # Keep the inner Bash alive while its child ignores TERM.\n')
+        try:
+            with self.assertRaises(subprocess.SubprocessError):
+                dashboard.guest('apply',True,'dev','claude codex','')
+            self.assertTrue(stage_marker.exists())
+            stage=Path(stage_marker.read_text())
+            self.assertEqual(stage.parent,Path('/tmp'))
+            self.assertTrue(stage.name.startswith('subyard-openlit.'))
+            self.reap_helpers()
+            self.assertFalse(stage.exists(),'forced KILL left the owned cold archive directory')
+        finally:
+            # Baseline RED cleanup is test-owned and occurs only after the
+            # product result is measured; it must not make that result pass.
+            if stage_marker.exists():
+                stage=Path(stage_marker.read_text())
+                if stage.exists():
+                    self.assertFalse(stage.is_symlink())
+                    self.assertEqual(stage.stat().st_uid,os.getuid())
+                    self.assertEqual(stage.stat().st_mode&0o777,0o700)
+                    import shutil
+                    shutil.rmtree(stage)
+
+    def test_real_caller_cancel_closes_transport_and_reaps_guest_group(self):
+        self.hanging_pull()
+        done=threading.Event()
+        def cancel():
+            end=time.monotonic()+1
+            while not done.wait(0.005) and time.monotonic()<end:
+                if self.pids.exists():
+                    os.kill(os.getpid(),15)
+                    return
+        timer=threading.Thread(target=cancel)
+        timer.start()
+        started=time.monotonic()
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                dashboard.guest('apply',True,'dev','claude codex','')
+            self.assertEqual(caught.exception.code,143)
+        finally:
+            done.set(); timer.join(timeout=1)
+        self.assertLess(time.monotonic()-started,0.8)
+        self.assertTrue(self.pids.exists())
+        self.assertFalse(self.published.exists())
+        self.reap_helpers()
+
+    def test_refresh_retains_its_pull_subdeadline(self):
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            dashboard.guest('refresh',True,'dev','claude codex','')
+        self.assertEqual(caught.exception.returncode,1)
+        self.assertFalse(self.published.exists())
+
+    def test_cold_budget_is_not_reset_for_host_publication(self):
+        def observe(*args):
+            ORIGINAL_RUN(sys.executable,'-c','import time; time.sleep(0.1)')
+            return {},{'state':'stale','actual':'a','desired':'b'},{},{},''
+        def fresh_route(*args):
+            ORIGINAL_RUN(sys.executable,'-c','import time; time.sleep(0.8)')
+            return {},{},''
+        started=time.monotonic()
+        with patch.object(dashboard,'observe',side_effect=observe),patch.object(dashboard,'route',side_effect=fresh_route),patch.object(dashboard,'publish') as publish,patch.object(sys,'argv',['dashboard.py','apply','1','dev','claude codex']):
+            with self.assertRaises(subprocess.TimeoutExpired): dashboard.main()
+            publish.assert_not_called()
+        self.assertLess(time.monotonic()-started,1.3)
+        self.assertIsNone(dashboard.COLD_DEADLINE)
 
 
 if __name__=='__main__': unittest.main()

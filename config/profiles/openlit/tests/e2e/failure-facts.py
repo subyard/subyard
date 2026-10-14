@@ -22,16 +22,8 @@ def pull_projection(log, images):
     with log.open('rb') as source:
         source.seek(max(0, size-65536))
         text = source.read(65536).decode(errors='replace')
-    lower = text.lower()
-    category = next((category for category, terms in (
-        ('authorization', ('unauthorized', 'denied')),
-        ('rate-limit', ('too many requests', 'rate limit', '429')),
-        ('timeout', ('timed out', 'timeout', 'deadline exceeded')),
-        ('dns', ('no such host', 'lookup')),
-        ('tls', ('tls handshake', 'x509:', 'certificate')),
-        ('network', ('connection refused', 'network is unreachable', 'cannot connect',
-                     'connection reset', 'unexpected eof'))
-    ) if any(term in lower for term in terms)), 'other')
+    errors = pull_errors(text)
+    category = next((row['category'] for row in errors if row['category'] != 'unknown'), 'other')
     services = {}
     layers = {}
     status_pattern = '('+'|'.join(re.escape(value) for value in STATUSES)+')'
@@ -71,7 +63,7 @@ def pull_projection(log, images):
     for value in layers.values():
         counts[value['status']] = counts.get(value['status'], 0)+1
     measured = [row for row in layers.values() if 'downloaded_bytes' in row]
-    return {'pull_log_bytes': size, 'pull_category': category,
+    return {'pull_log_bytes': size, 'pull_category': category, 'pull_errors': errors,
             'pull_progress': sorted(set(re.findall(r'\b(clickhouse|openlit|collector)\s+(Pulling|Pulled|Error)\b', text))),
             'service_progress': services,
             'layer_progress': {'observed_count': len(layers), 'status_counts': counts,
@@ -226,6 +218,39 @@ def pull_context(phase, images, directory=Path('/tmp/subyard-openlit-pull-diagno
         value['product'] = failure(Path('/var/lib/subyard/openlit'), images)
     print('openlit_e2e_pull_context='+json.dumps(value, sort_keys=True), flush=True)
     return 0 if phase != 'before' or value['cold_cache_observed'] else 2
+def pull_errors(text):
+    errors = []
+    for line in text.splitlines():
+        # Match only fixed Docker error phrases; variable URLs, credentials,
+        # image names and response bodies never become diagnostic output.
+        line = re.sub(r'https?://[^\s"\']+|Bearer\s+\S+', '', line, flags=re.I)
+        service = re.match(r'\s*(clickhouse|openlit|collector)\s+Error\b', line)
+        phase = re.search(r'\b(failed to fetch anonymous token|failed to resolve reference|failed to do request|error response from daemon)\b', line, re.I)
+        category, message = 'unknown', None
+        for kind, pattern in (
+            ('rate-limit', r'429 Too Many Requests|toomanyrequests|pull rate limit'),
+            ('authorization', r'401 Unauthorized|403 Forbidden|unauthorized: authentication required|pull access denied|denied: requested access to the resource is denied'),
+            ('manifest', r'manifest unknown|no matching manifest'),
+            ('deadline', r'context deadline exceeded'),
+            ('timeout', r'TLS handshake timeout|i/o timeout|Client\.Timeout exceeded while awaiting headers|connection timed out'),
+            ('dns', r'no such host|temporary failure in name resolution'),
+            ('tls', r'x509: certificate signed by unknown authority|x509: certificate has expired|remote error: tls'),
+            ('oom', r'out of memory|cannot allocate memory|OOMKilled'),
+            ('network', r'connection refused|network is unreachable|connection reset by peer|unexpected EOF|cannot connect to the Docker daemon'),
+        ):
+            match = re.search(pattern, line, re.I)
+            if match:
+                category, message = kind, match.group(0)
+                break
+        if message is None and phase is None and service is None:
+            continue
+        detail = {'service': service.group(1) if service else 'unknown',
+                  'operation': phase.group(0).lower() if phase else 'unknown',
+                  'category': category, 'message': message or (phase.group(0) if phase else 'unknown')}
+        if detail not in errors:
+            errors.append(detail)
+            errors = errors[-3:]
+    return errors
 
 
 def failure(state, images):
@@ -237,6 +262,12 @@ def failure(state, images):
     log = state/'pull.log'
     if value['files_present']['pull.log']:
         value.update(pull_projection(log, images))
+        # The owning native leaf still has no retained exit or timing record.
+        value['pull_context'] = {'operation': 'docker compose pull --quiet',
+                                 'exit_code': None, 'elapsed_seconds': None,
+                                 'log_tail_truncated': value['pull_log_bytes'] > 65536}
+        value['pull_category'] = next((row['category'] for row in value['pull_errors']
+                                       if row['category'] != 'unknown'), 'unknown')
     value['registry_transport'] = registries()
     value['image_cache'] = cache(images)
     value['journal_categories'] = journals()

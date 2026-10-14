@@ -152,6 +152,25 @@ func (catalog CapabilityCatalog) Digest() Fingerprint {
 	return catalog.digest
 }
 
+// SupportsSourceMetadata admits read-only history from exact supported catalogs
+// with unchanged compiled semantics. The registry stays within its owner's catalog.
+func (catalog CapabilityCatalog) SupportsSourceMetadata(source Fingerprint, registry RegistryV2) bool {
+	if source == catalog.Digest() {
+		return registry.Validate(catalog) == nil
+	}
+	historical, supported := SupportedBuiltinCatalog(source)
+	if !supported {
+		return false
+	}
+	for _, descriptor := range historical.descriptors {
+		current, exists := catalog.descriptor(descriptor.Kind)
+		if !exists || current != descriptor {
+			return false
+		}
+	}
+	return registry.Validate(historical) == nil
+}
+
 func (catalog CapabilityCatalog) supportsV0111PostActivationRecovery(source Fingerprint) bool {
 	if source == catalog.Digest() {
 		return true

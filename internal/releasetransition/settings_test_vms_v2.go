@@ -90,6 +90,22 @@ func (view *settingsV2OverlayView) ListYards() ([]string, error) {
 	return view.base.ListYards()
 }
 
+func (view *settingsV2OverlayView) PreparedInputPaths() ([]string, error) {
+	var paths []string
+	if inventory, ok := view.base.(V2PreparedInputPaths); ok {
+		var err error
+		paths, err = inventory.PreparedInputPaths()
+		if err != nil {
+			return nil, err
+		}
+	}
+	for path := range view.snapshots {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths), nil
+}
+
 func (view *settingsV2OverlayView) ReadSnapshot(
 	path string,
 ) (config.PersistentFileSnapshot, error) {
@@ -98,6 +114,17 @@ func (view *settingsV2OverlayView) ReadSnapshot(
 		return snapshot, nil
 	}
 	return view.base.ReadSnapshot(path)
+}
+
+func (view *settingsV2OverlayView) ReadPreparedInput(path string) (config.PersistentFileSnapshot, bool, error) {
+	if snapshot, exists := view.snapshots[path]; exists {
+		snapshot.Content = slices.Clone(snapshot.Content)
+		return snapshot, true, nil
+	}
+	if reader, ok := view.base.(V2PreparedInputReader); ok {
+		return reader.ReadPreparedInput(path)
+	}
+	return config.PersistentFileSnapshot{}, false, nil
 }
 
 func newTestVMSettingsV2Capability(
@@ -122,8 +149,10 @@ func newTestVMSettingsV2Capability(
 }
 
 func (capability *testVMSettingsV2Capability) Inspect() (settingsV2Plan, error) {
-	if capability == nil || capability.configHome == "" ||
-		!filepath.IsAbs(capability.configHome) {
+	if capability == nil || capability.configHome == "" {
+		return settingsV2Plan{}, errors.New("absolute settings migration config home is required")
+	}
+	if _, native := capability.snapshotView.(posixV2SettingsSnapshotView); native && !filepath.IsAbs(capability.configHome) {
 		return settingsV2Plan{}, errors.New("absolute settings migration config home is required")
 	}
 	if blocker := capability.validateCatalog(); blocker != nil {
@@ -226,70 +255,37 @@ func (capability *testVMSettingsV2Capability) observeInheritedSettings() (
 	*Blocker,
 	error,
 ) {
-	result := make(map[string]struct{})
-	type inheritedResource struct {
-		Role     string   `json:"role"`
-		Settings []string `json:"settings"`
+	resources := []settingsV2InheritedSnapshot{
+		{Role: "shared", Label: "overrides/shared/config.env"},
+		{Role: "host", Label: "config.env"},
 	}
-	resources := []struct {
-		role string
-		path string
-	}{
-		{"shared", filepath.Join(capability.configHome, "overrides", "shared", "config.env")},
-		{"host", filepath.Join(capability.configHome, "config.env")},
-	}
-	observed := make([]inheritedResource, 0, len(resources))
-	for _, resource := range resources {
-		snapshot, err := capability.snapshotView.ReadSnapshot(resource.path)
+	for index := range resources {
+		resource := &resources[index]
+		path := filepath.Join(capability.configHome, filepath.FromSlash(resource.Label))
+		snapshot, err := capability.snapshotView.ReadSnapshot(path)
 		if err != nil {
-			if _, rootErr := os.Lstat(capability.configHome); rootErr != nil {
-				return nil, "", nil, rootErr
+			// Only the native view may inspect root identity. Synthetic/prospective
+			// observers must never fall through to the physical config home.
+			if _, native := capability.snapshotView.(posixV2SettingsSnapshotView); native {
+				if _, rootErr := os.Lstat(capability.configHome); rootErr != nil {
+					return nil, "", nil, rootErr
+				}
 			}
-			return nil, "", &Blocker{
-				Code: CodePreconditionBlocked, Resource: "settings.inherited",
-				Message: capability.sourceDiagnostic(resource.path, "", 0, "inherited persistent settings cannot be observed safely", err),
-				Retry:   "run yard -Y default config status",
-			}, nil
+			return nil, "", &Blocker{Code: CodePreconditionBlocked, Resource: "settings.inherited", Message: capability.sourceDiagnostic(path, "", 0, "inherited persistent settings cannot be observed safely", err), Retry: "run yard -Y default config status"}, nil
 		}
-		entry := inheritedResource{Role: resource.role, Settings: []string{}}
-		if !snapshot.Exists {
-			observed = append(observed, entry)
-			continue
+		resource.Snapshot = snapshot
+		// Preserve source-order failure precedence before observing the next
+		// resource. Classification stays pure and bounded to two sources.
+		_, _, blocker, classifyErr := classifySettingsV2Inheritance(resources[:index+1], nil)
+		if classifyErr != nil || blocker != nil {
+			return nil, "", blocker, classifyErr
 		}
-		assignments, err := capability.parseAssignment(resource.path, snapshot.Content)
-		if err != nil {
-			return nil, "", &Blocker{
-				Code: CodePreconditionBlocked, Resource: "settings.inherited",
-				Message: capability.sourceDiagnostic(resource.path, "", 0, "inherited persistent settings cannot be classified safely", err),
-				Retry:   "run yard -Y default config status",
-			}, nil
-		}
-		for _, assignment := range assignments {
-			if affectedSettingsV2ID(assignment.Name) {
-				result[assignment.Name] = struct{}{}
-				entry.Settings = append(entry.Settings, assignment.Name)
-			}
-		}
-		sort.Strings(entry.Settings)
-		entry.Settings = slices.Compact(entry.Settings)
-		observed = append(observed, entry)
 	}
 	command := make([]string, 0, len(capability.inherited))
 	for setting := range capability.inherited {
-		if affectedSettingsV2ID(setting) {
-			command = append(command, setting)
-		}
+		command = append(command, setting)
 	}
-	sort.Strings(command)
-	payload, err := json.Marshal(struct {
-		SchemaVersion int                 `json:"schemaVersion"`
-		Resources     []inheritedResource `json:"resources"`
-		Command       []string            `json:"commandSettingIds"`
-	}{1, observed, command})
-	if err != nil {
-		return nil, "", nil, err
-	}
-	return result, fingerprintPayload(payload), nil, nil
+	return classifySettingsV2Inheritance(resources, command)
 }
 
 func (capability *testVMSettingsV2Capability) persistentYardNames() ([]string, error) {
@@ -371,137 +367,35 @@ func (view posixV2SettingsSnapshotView) ListYards() ([]string, error) {
 }
 
 func (capability *testVMSettingsV2Capability) inspectYard(
-	yard string,
-	inherited map[string]struct{},
-	inheritance Fingerprint,
+	yard string, inherited map[string]struct{}, inheritance Fingerprint,
 ) (*settingsV2FilePlan, []RedactedDecision, *Blocker) {
-	nestedPath := filepath.Join(capability.configHome, "yards", yard, "config.env")
-	legacyPath := filepath.Join(capability.configHome, "yards", yard+".env")
-	nested, nestedErr := capability.snapshotView.ReadSnapshot(nestedPath)
-	legacy, legacyErr := capability.snapshotView.ReadSnapshot(legacyPath)
-	if nestedErr != nil {
-		return nil, nil, capability.sourceBlocker(yard, nestedPath, "", 0, "persistent yard settings are unsafe", nestedErr)
-	}
-	if legacyErr != nil {
-		return nil, nil, capability.sourceBlocker(yard, legacyPath, "", 0, "persistent yard settings are unsafe", legacyErr)
-	}
-	if nested.Exists && legacy.Exists {
-		return nil, nil, &Blocker{
-			Code: CodePreconditionBlocked, Resource: "yard." + yard,
-			Message: fmt.Sprintf("yard %s has duplicate registrations: yards/%s/config.env and yards/%s.env", yard, yard, yard),
-			Retry:   fmt.Sprintf("run the verified candidate's yard -Y default config repair-registration %s, then run yard update --check", yard),
-		}
-	}
-	if !nested.Exists && !legacy.Exists {
-		return nil, nil, nil
-	}
-	path, snapshot := nestedPath, nested
-	if legacy.Exists {
-		path, snapshot = legacyPath, legacy
-	}
-	assignments, err := capability.parseAssignment(path, snapshot.Content)
+	input, errPath, err := observeSettingsV2Yard(capability.configHome, capability.snapshotView, yard)
 	if err != nil {
-		return nil, nil, capability.sourceBlocker(yard, path, "", 0, "persistent yard settings cannot be parsed safely", err)
+		return nil, nil, capability.sourceBlocker(yard, errPath, "", 0, "persistent yard settings are unsafe", err)
 	}
-	byName := map[string][]config.PersistentAssignment{}
-	for _, assignment := range assignments {
-		if affectedSettingsV2ID(assignment.Name) {
-			byName[assignment.Name] = append(byName[assignment.Name], assignment)
+	// The native template loader stays at the observation boundary. The planner
+	// receives only its support fact, including failure to validate candidate bytes.
+	snapshot, label, selectErr := selectSettingsV2Yard(input)
+	if selectErr == nil {
+		assignments, parseErr := capability.parseAssignment(label, snapshot.Content)
+		if parseErr == nil {
+			var templates []config.PersistentAssignment
+			for _, assignment := range assignments {
+				if assignment.Name == "YARD_TEMPLATE" {
+					templates = append(templates, assignment)
+				}
+			}
+			template, present, safe := exactDirectSettingsV2Value(templates)
+			if safe && present && template != "" && template != "e2e-vms" && template != "test-vms" {
+				input.TemplateSupported = config.IsSupportedYardTemplate(capability.candidateConfigDir, template)
+			}
 		}
 	}
-	blocker := func(key, reason string) *Blocker {
-		line := 0
-		if values := byName[key]; len(values) != 0 {
-			line = values[0].Line
-		}
-		return capability.sourceBlocker(yard, path, key, line, reason, nil)
+	file, decisions, blocker := planSettingsV2Yard(input, inherited, inheritance)
+	if file != nil {
+		file.Path = filepath.Join(capability.configHome, filepath.FromSlash(file.Path))
 	}
-	template, templatePresent, safe := exactDirectSettingsV2Value(byName["YARD_TEMPLATE"])
-	if !safe {
-		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			blocker("YARD_TEMPLATE", "YARD_TEMPLATE is ambiguous")
-	}
-	if !templatePresent {
-		if _, exists := inherited["YARD_TEMPLATE"]; exists {
-			return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE has inherited ownership")
-		}
-		return nil, nil, nil
-	}
-	if template == "" {
-		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionPreserve, "preserved")}, nil
-	}
-	if template != "e2e-vms" && template != "test-vms" {
-		if config.IsSupportedYardTemplate(capability.candidateConfigDir, template) {
-			return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionPreserve, "preserved")}, nil
-		}
-		return nil, []RedactedDecision{settingsV2Decision(yard, "YARD_TEMPLATE", DecisionBlock, "blocked")},
-			blocker("YARD_TEMPLATE", "YARD_TEMPLATE is not supported by this migration")
-	}
-	if _, exists := inherited["YARD_TEMPLATE"]; exists {
-		return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE has inherited ownership")
-	}
-	nestedValue, nestedPresent, safe := exactDirectSettingsV2Value(byName["NESTED_E2E_VMS"])
-	if !safe {
-		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS is ambiguous")
-	}
-	if _, exists := inherited["NESTED_E2E_VMS"]; exists {
-		return nil, nil, blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS has inherited ownership")
-	}
-	if nestedPresent && nestedValue != "0" && nestedValue != "1" {
-		return nil, []RedactedDecision{settingsV2Decision(yard, "NESTED_E2E_VMS", DecisionBlock, "blocked")},
-			blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS is not supported by this migration")
-	}
-
-	decisions := make([]RedactedDecision, 0, 2)
-	desired := slices.Clone(snapshot.Content)
-	changed := false
-	fileDecision := DecisionCanonicalize
-	if template == "e2e-vms" {
-		value := "test-vms"
-		desired, err = config.EditPersistentAssignmentContent(path, desired, "YARD_TEMPLATE", &value)
-		if err != nil {
-			return nil, nil, blocker("YARD_TEMPLATE", "YARD_TEMPLATE cannot be edited safely")
-		}
-		changed = true
-		decisions = append(decisions, settingsV2Decision(
-			yard, "YARD_TEMPLATE", DecisionCanonicalize, "test-vms",
-		))
-	} else {
-		decisions = append(decisions, settingsV2Decision(
-			yard, "YARD_TEMPLATE", DecisionPreserve, "preserved",
-		))
-	}
-	if nestedPresent && nestedValue == "0" {
-		desired, err = config.EditPersistentAssignmentContent(path, desired, "NESTED_E2E_VMS", nil)
-		if err != nil {
-			return nil, nil, blocker("NESTED_E2E_VMS", "NESTED_E2E_VMS cannot be reset safely")
-		}
-		changed = true
-		fileDecision = DecisionReset
-		decisions = append(decisions, settingsV2Decision(
-			yard, "NESTED_E2E_VMS", DecisionReset, "unset",
-		))
-	} else {
-		decisions = append(decisions, settingsV2Decision(
-			yard, "NESTED_E2E_VMS", DecisionPreserve, "preserved",
-		))
-	}
-	if !changed {
-		return nil, decisions, nil
-	}
-	desiredSnapshot := config.PersistentFileSnapshot{Exists: true, Content: desired}
-	return &settingsV2FilePlan{
-		Yard: yard, Path: path, Expected: snapshot, Desired: desired,
-		Inheritance:         inheritance,
-		ExpectedFingerprint: settingsV2ResourceFingerprint(snapshot, inheritance),
-		DesiredFingerprint:  settingsV2ResourceFingerprint(desiredSnapshot, inheritance),
-		Decision:            fileDecision,
-		Before: []settingsV2BeforeValue{
-			{Setting: "YARD_TEMPLATE", Present: templatePresent, Value: template},
-			{Setting: "NESTED_E2E_VMS", Present: nestedPresent, Value: nestedValue},
-		},
-	}, decisions, nil
+	return file, decisions, blocker
 }
 
 func exactDirectSettingsV2Value(
@@ -580,4 +474,25 @@ func (plan settingsV2FilePlan) validate() error {
 		return fmt.Errorf("invalid typed settings file plan for yard %q", plan.Yard)
 	}
 	return nil
+}
+
+// observeSettingsV2Yard is the single native/prospective layout observation adapter.
+func observeSettingsV2Yard(home string, view V2SettingsSnapshotView, yard string) (settingsV2YardSnapshot, string, error) {
+	if !domain.SafeName(yard) {
+		return settingsV2YardSnapshot{}, "", invalid("journal yard is unsafe")
+	}
+	if view == nil {
+		view = posixV2SettingsSnapshotView{configHome: home}
+	}
+	nestedLabel, legacyLabel := settingsV2YardLabels(yard)
+	nestedPath, legacyPath := filepath.Join(home, filepath.FromSlash(nestedLabel)), filepath.Join(home, filepath.FromSlash(legacyLabel))
+	nested, nestedErr := view.ReadSnapshot(nestedPath)
+	legacy, legacyErr := view.ReadSnapshot(legacyPath)
+	if nestedErr != nil {
+		return settingsV2YardSnapshot{}, nestedPath, errors.Join(nestedErr, legacyErr)
+	}
+	if legacyErr != nil {
+		return settingsV2YardSnapshot{}, legacyPath, legacyErr
+	}
+	return settingsV2YardSnapshot{Yard: yard, Nested: nested, Legacy: legacy}, "", nil
 }

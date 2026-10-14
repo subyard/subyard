@@ -358,7 +358,7 @@ func (runner ProjectActionRunner) writeMetadata(ctx context.Context) error {
 	}
 	directory := filepath.Dir(runner.Project.YardPath)
 	write := ports.InstanceExecRequest{
-		Command: []string{"tee", filepath.Join(directory, ".subyard-meta.json")},
+		Command: []string{"sh", "-c", `umask 077; exec tee -- "$1"`, "subyard", filepath.Join(directory, ".subyard-meta.json")},
 		Stdin:   metadata, User: dev, Group: dev,
 	}
 	if err := runner.execute(ctx, "write project metadata", write); err != nil {
@@ -418,7 +418,7 @@ func (runner ProjectActionRunner) sync(ctx context.Context) error {
 	}
 	directory := filepath.Dir(runner.Project.YardPath)
 	dev := uint32(runner.Yard.DevUID)
-	reserve := ports.InstanceExecRequest{Command: []string{"mkdir", "--", directory}}
+	reserve := ports.InstanceExecRequest{Command: []string{"mkdir", "-m", "0755", "--", directory}}
 	create := ports.InstanceExecRequest{
 		Command: []string{"install", "-d", "--", runner.Project.YardPath}, User: dev, Group: dev,
 	}

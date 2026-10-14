@@ -11,6 +11,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -42,30 +43,24 @@ esac
 }
 
 func TestPreparedProfileRuntimeAllowsConvergenceAndRejectsDesiredDrift(t *testing.T) {
-	for _, converged := range []bool{true, false} {
-		t.Run(fmt.Sprint(converged), func(t *testing.T) {
-			root := testkit.TempDir(t)
-			state := filepath.Join(root, "observation")
-			runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\ncat \"$STATE\"\n")
-			runtime.Environment = []string{"STATE=" + state}
-			testkit.WriteFile(t, state, []byte(fmt.Sprintf(`{"state":"stale","actual":%q,"desired":%q}`, testRuntimeOldDigest, testRuntimeNewDigest)), 0o600)
-			plan, err := runtime.PrepareProfileRuntimes(context.Background(), false, false)
-			if err != nil {
-				t.Fatal(err)
+	approved := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: testRuntimeOldDigest, Desired: testRuntimeNewDigest}
+	for _, test := range []struct {
+		name    string
+		current ports.RuntimeObservation
+		stale   bool
+	}{
+		{"unchanged", approved, false},
+		{"converged", ports.RuntimeObservation{State: ports.RuntimeStateCurrent, Actual: testRuntimeNewDigest, Desired: testRuntimeNewDigest}, false},
+		{"desired drift", ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: testRuntimeNewDigest, Desired: testRuntimeOldDigest}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan := &ProfileRuntimePlan{definitions: []profile.Definition{{Runtime: &profile.RuntimeHook{ActivationID: "synthetic-runtime"}}}, approved: map[string]ports.RuntimeObservation{"synthetic-runtime": approved}}
+			err := plan.checkObservations(map[string]ports.RuntimeObservation{"synthetic-runtime": test.current})
+			if errors.Is(err, domain.ErrPlanStale) != test.stale {
+				t.Fatalf("observation policy: %v", err)
 			}
-			runtime.RuntimePlan = plan
-			if converged {
-				testkit.WriteFile(t, state, []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, testRuntimeNewDigest, testRuntimeNewDigest)), 0o600)
-			} else {
-				testkit.WriteFile(t, state, []byte(fmt.Sprintf(`{"state":"stale","actual":%q,"desired":%q}`, testRuntimeNewDigest, testRuntimeOldDigest)), 0o600)
-			}
-			err = runtime.CheckProfileRuntimePlan(context.Background())
-			if converged {
-				if err != nil || plan.OperationSteps("project/yard")[0].Decision != domain.StepSkip {
-					t.Fatalf("convergence rejected: %v", err)
-				}
-			} else if !errors.Is(err, domain.ErrPlanStale) {
-				t.Fatalf("desired drift accepted: %v", err)
+			if !test.stale && test.current.State == ports.RuntimeStateCurrent && plan.OperationSteps("project/yard")[0].Decision != domain.StepSkip {
+				t.Fatal("convergence expanded work")
 			}
 		})
 	}

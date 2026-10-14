@@ -43,7 +43,7 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 			return proof, errors.New("source repair requires a canonical protected journal")
 		}
 		originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
-		if journal.RegistryDigest != digest || !supportedCatalog || journal.SourceIngress != nil {
+		if journal.RegistryDigest != digest || !supportedCatalog || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
 			return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
 		}
 		for _, migration := range registry.Migrations {

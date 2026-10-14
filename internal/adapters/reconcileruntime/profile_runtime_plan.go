@@ -197,6 +197,12 @@ func (runtime Runtime) CheckProfileRuntimePlan(ctx context.Context) error {
 		return err
 	}
 
+	return plan.checkObservations(observations)
+}
+
+// checkObservations applies stale-plan policy to captured native facts only.
+func (plan *ProfileRuntimePlan) checkObservations(observations map[string]ports.RuntimeObservation) error {
+
 	for _, definition := range plan.definitions {
 		id := definition.Runtime.ActivationID
 		approved, current := plan.approved[id], observations[id]

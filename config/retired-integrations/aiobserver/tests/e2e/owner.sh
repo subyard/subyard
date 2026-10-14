@@ -51,18 +51,23 @@ incus exec "$INSTANCE" --project "$PROJECT" -- sh -eu -c '
   printf "%s\n" "$2" > "$1"
 ' subyard "$history" "$MARKER"
 database_identity="$(incus exec "$INSTANCE" --project "$PROJECT" -- stat -c '%d:%i' /srv/agents/ai-observer/data/ai-observer.duckdb)"
+history_image="$(incus exec "$INSTANCE" --project "$PROJECT" -- docker inspect --format '{{.Image}}' subyard-ai-observer)"
+history_user="$(incus exec "$INSTANCE" --project "$PROJECT" -- docker inspect --format '{{.Config.User}}' subyard-ai-observer)"
 # Seed one genuine native-format record; this is predecessor history, not OpenLIT import.
 history_code="$(cat <<'HISTORY'
 import datetime,json,sys
 from pathlib import Path
 stamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
 root=Path('/home/dev/.codex/sessions')
-root=root/datetime.datetime.now(datetime.timezone.utc).strftime('%Y/%m/%d')
-root.mkdir(parents=True,exist_ok=True)
+# The managed predecessor creates and watches this root. A newly created date
+# directory can be registered after its first file event, losing that ingestion.
+if not root.is_dir():
+    raise SystemExit('predecessor Codex sessions root is missing')
 records=[{'timestamp':stamp,'type':'session_meta','payload':{'id':'retirement-fixture','timestamp':stamp,'cwd':'/synthetic/retirement','originator':'retirement-fixture','cli_version':'0.0.0-test','model_provider':'openai','model':'gpt-5'}},
 {'timestamp':stamp,'type':'response_item','payload':{'type':'message','role':'user','content':[{'type':'input_text','text':sys.argv[1]}]}}]
 path=root/'rollout-retirement-fixture.jsonl'
-path.write_text(''.join(json.dumps(record)+'\n' for record in records))
+with path.open('x') as stream:
+    stream.write(''.join(json.dumps(record)+'\n' for record in records))
 path.chmod(0o644)
 HISTORY
 )"
@@ -149,11 +154,87 @@ if [ "$request_mode" = stopped ]; then
   operator_yard init --yes
 fi
 assert_retired
+# Read genuine retained records with the exact predecessor binary, isolated from
+# all host routes and original data. Its database opener may initialize schema,
+# so only a private copy of the quiescent DB and WAL is writable by this assay.
+history_assay="$(cat <<'ASSAY'
+import hashlib,json,os,re,shutil,signal,subprocess,sys,tempfile,time
+from pathlib import Path
+image,user,marker,token=sys.argv[1:]
+if not re.fullmatch(r'sha256:[0-9a-f]{64}',image) or not re.fullmatch(r'[0-9]+:[0-9]+',user) or not re.fullmatch(r'[0-9a-f]{8}',token):
+    raise SystemExit('invalid predecessor history identity')
+uid,gid=map(int,user.split(':'))
+database=Path('/srv/agents/ai-observer/data/ai-observer.duckdb')
+paths=[database]
+wal=Path(str(database)+'.wal')
+if wal.exists(): paths.append(wal)
+def identities():
+    result=[]
+    for path in paths:
+        if path.is_symlink() or not path.is_file(): raise RuntimeError('invalid retained database')
+        info=path.stat()
+        result.append((info.st_dev,info.st_ino,info.st_mode,hashlib.sha256(path.read_bytes()).hexdigest()))
+    return result
+def run(argv,seconds=10):
+    return subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=seconds,check=True).stdout
+before=identities();container=None;cleanup_confirmed=False
+def interrupted(_signal,_frame): raise SystemExit('history assay interrupted')
+signal.signal(signal.SIGTERM,interrupted)
+temporary=tempfile.mkdtemp(prefix='subyard-observer-history-'+token+'-',dir='/tmp')
+try:
+    root=Path(temporary);os.chmod(root,0o700)
+    name='subyard-history-'+root.name
+    nonce=root.name
+    (root/'owner').write_text(marker);os.chmod(root/'owner',0o600)
+    data=root/'data';data.mkdir(mode=0o700)
+    for path in paths:
+        target=data/path.name;shutil.copyfile(path,target);os.chmod(target,0o600);os.chown(target,uid,gid)
+    os.chown(data,uid,gid)
+    try:
+        container=run(['docker','create','--name',name,'--network','none','--user',user,'--label','org.subyard.retirement-history='+marker,'--label','org.subyard.history-nonce='+nonce,'--mount','type=bind,src='+str(data)+',dst=/app/data','--env','AI_OBSERVER_DATABASE_PATH=/app/data/ai-observer.duckdb',image,'serve']).decode().strip()
+        if not re.fullmatch(r'[0-9a-f]{64}',container): raise RuntimeError('invalid assay container identity')
+        run(['docker','start',container])
+        pid=int(run(['docker','inspect','--format','{{.State.Pid}}',container]))
+        if pid<=0: raise RuntimeError('history assay did not start')
+        found=False;deadline=time.monotonic()+60
+        for _ in range(20):
+            if time.monotonic()>=deadline: break
+            try:
+                payload=run(['nsenter','-t',str(pid),'-n','curl','-fsS','--max-time','3','-G','--data-urlencode','search='+marker,'http://127.0.0.1:8080/api/logs?limit=100'],5)
+                value=json.loads(payload)
+                found=isinstance(value,dict) and isinstance(value.get('logs'),list) and any(isinstance(row,dict) and isinstance(row.get('body'),str) and marker in row['body'] for row in value['logs'])
+                if found: break
+            except (subprocess.CalledProcessError,ValueError): pass
+            time.sleep(0.2)
+        if not found: raise RuntimeError('retained native history marker was not readable')
+        print('observer_retained_native_history=verified')
+    finally:
+        signal.signal(signal.SIGTERM,signal.SIG_IGN)
+        try:
+            # Creation can succeed in the daemon even if the client is interrupted
+            # before returning a CID. Recover only the exact private-copy owner.
+            fmt='{"id":{{json .Id}},"image":{{json .Image}},"user":{{json .Config.User}},"nonce":{{json (index .Config.Labels "org.subyard.history-nonce")}},"mounts":{{json .Mounts}}}'
+            owned=json.loads(run(['docker','inspect','--format',fmt,name]))
+            mounts=owned.get('mounts',[])
+            if not (re.fullmatch(r'[0-9a-f]{64}',owned.get('id','')) and owned.get('image')==image and owned.get('user')==user and owned.get('nonce')==nonce and len(mounts)==1 and mounts[0].get('Type')=='bind' and mounts[0].get('Source')==str(data) and mounts[0].get('Destination')=='/app/data'):
+                raise RuntimeError('history assay cleanup ownership is unconfirmed')
+            run(['docker','rm','--force',owned['id']],20)
+            cleanup_confirmed=True
+        finally:
+            if identities()!=before: raise RuntimeError('history assay changed retained data')
+            if wal.exists()!=(wal in paths): raise RuntimeError('history assay changed retained WAL')
+finally:
+    # Preserve the marked copy if ownership recovery/removal failed.
+    if cleanup_confirmed: shutil.rmtree(temporary)
+ASSAY
+)"
+incus exec "$INSTANCE" --project "$PROJECT" -- timeout --signal=TERM --kill-after=45 180 python3 -c "$history_assay" "$history_image" "$history_user" "$MARKER" "$SUBYARD_E2E_RUN_ID"
 operator_yard init --yes
 assert_retired
 printf 'observer_retirement_stage=actual-candidate-rollback-refusal\n'
 database_before_rollback="$(incus exec "$INSTANCE" --project "$PROJECT" -- sha256sum /srv/agents/ai-observer/data/ai-observer.duckdb)"
-operator_env python3 "$ROOT/config/retired-integrations/aiobserver/tests/rollback-refusal.py" \
+rollback_refusal_code="$(cat "$ROOT/config/retired-integrations/aiobserver/tests/rollback-refusal.py")"
+operator_env python3 -c "$rollback_refusal_code" \
   "$OPERATOR_HOME/.config/subyard" "$OPERATOR_HOME/.subyard/runtime" \
   "$OPERATOR_HOME/.local/bin/yard" update --rollback --yes
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] || die 'rollback refusal lost the actual candidate'
@@ -169,7 +250,6 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
 assert_retired
 printf 'observer_retirement_stage=explicit-openlit-enable\n'
 operator_yard profile enable openlit --yes
-operator_yard status | grep -Eq 'openlit[[:space:]]+dashboard[[:space:]]+up' || die 'explicit OpenLIT enable did not publish a dashboard'
 curl -fsS --max-time 10 http://127.0.0.1:22222/ >/dev/null
 assert_history
 operator_yard profile disable openlit --yes

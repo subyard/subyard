@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -170,14 +171,54 @@ func Load(root string) (Registry, error) {
 	if err != nil {
 		return Registry{}, err
 	}
-	registry := Registry{byCommand: make(map[string]int), byName: make(map[string]int)}
-	qualifiedActions := make(map[domain.ActionID]struct{})
-	proxyDevices := make(map[string]struct{})
+	specs := make([]ResourceSpec, 0, len(files))
+	bindings := make([]string, 0, len(files))
 	for _, file := range files {
-		definition, actionDefinitions, err := loadDefinition(root, file)
+		definition, actions, err := loadDefinition(root, file)
 		if err != nil {
 			return Registry{}, err
 		}
+		bindings = append(bindings, definition.path)
+		definition.path = ""
+		specs = append(specs, ResourceSpec{definition: definition, actions: actions, valid: true})
+	}
+	registry, err := BuildRegistry(specs)
+	if err != nil {
+		return Registry{}, err
+	}
+	for i := range registry.definitions {
+		registry.definitions[i].path = bindings[i]
+	}
+	return registry, nil
+}
+
+// ResourceSpec contains semantic resource and action contracts without a handler binding.
+type ResourceSpec struct {
+	definition Definition
+	actions    []domain.ActionDefinition
+	valid      bool
+}
+
+func (spec ResourceSpec) Definition() Definition { return cloneDefinition(spec.definition) }
+func cloneActionDefinitions(actions []domain.ActionDefinition) []domain.ActionDefinition {
+	actions = slices.Clone(actions)
+	for i := range actions {
+		actions[i].Impacts = slices.Clone(actions[i].Impacts)
+	}
+	return actions
+}
+
+// BuildRegistry indexes validated specifications without resolving handlers.
+func BuildRegistry(specs []ResourceSpec) (Registry, error) {
+	registry := Registry{byCommand: make(map[string]int), byName: make(map[string]int)}
+	qualifiedActions := make(map[domain.ActionID]struct{})
+	proxyDevices := make(map[string]struct{})
+	for _, spec := range specs {
+		if !spec.valid {
+			return Registry{}, fmt.Errorf("missing validated resource specification")
+		}
+		definition := cloneDefinition(spec.definition)
+		actionDefinitions := cloneActionDefinitions(spec.actions)
 		if _, duplicate := registry.byCommand[definition.Command]; duplicate {
 			return Registry{}, fmt.Errorf("duplicate resource command %q", definition.Command)
 		}
@@ -319,12 +360,36 @@ func cloneDefinition(definition Definition) Definition {
 func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, error) {
 	profile := filepath.Base(filepath.Dir(filepath.Dir(path)))
 	name := strings.TrimSuffix(filepath.Base(path), ".res")
-	if !domain.SafeName(profile) || !domain.SafeName(name) {
-		return Definition{}, nil, fmt.Errorf("invalid resource identity in %s", path)
-	}
-	values, err := readDescriptor(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Definition{}, nil, err
+	}
+	defer file.Close()
+	spec, err := parseResource(profile, name, file, path)
+	if err != nil {
+		return Definition{}, nil, err
+	}
+	definition := spec.Definition()
+	binding, err := resolveResourceHandler(root, path, definition)
+	if err != nil {
+		return Definition{}, nil, err
+	}
+	definition.path = binding
+	return definition, cloneActionDefinitions(spec.actions), nil
+}
+
+// ParseResource validates descriptor syntax and semantics from a reader. It does
+// not require a package directory or an executable handler.
+func ParseResource(profile, name string, reader io.Reader) (ResourceSpec, error) {
+	return parseResource(profile, name, reader, profile+"/resources/"+name+".res")
+}
+func parseResource(profile, name string, reader io.Reader, path string) (ResourceSpec, error) {
+	if !domain.SafeName(profile) || !domain.SafeName(name) {
+		return ResourceSpec{}, fmt.Errorf("invalid resource identity in %s", path)
+	}
+	values, err := readDescriptor(reader, path)
+	if err != nil {
+		return ResourceSpec{}, err
 	}
 	command := defaultValue(values.singletons["COMMAND"], name)
 	bringUp := defaultValue(values.singletons["BRINGUP"], "up")
@@ -333,40 +398,40 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	title := values.singletons["TITLE"]
 	proxy, err := parseProxyContract(profile, name, values.singletons["PROXY"], path)
 	if err != nil {
-		return Definition{}, nil, err
+		return ResourceSpec{}, err
 	}
 	dashboard, err := parseDashboardContract(values.singletons["DASHBOARD"], path)
 	if err != nil {
-		return Definition{}, nil, err
+		return ResourceSpec{}, err
 	}
 	management, err := parseManagementContract(values.singletons["MANAGEMENT"], path)
 	if err != nil {
-		return Definition{}, nil, err
+		return ResourceSpec{}, err
 	}
 	endpoint, err := parseEndpointDefaults(values.singletons["ENDPOINT_DEFAULTS"], path)
 	if err != nil {
-		return Definition{}, nil, err
+		return ResourceSpec{}, err
 	}
 	bootstrap, err := parseBootstrap(values.singletons["BOOTSTRAP"], path)
 	if err != nil {
-		return Definition{}, nil, err
+		return ResourceSpec{}, err
 	}
 	if (endpoint != nil || bootstrap) && proxy == nil {
-		return Definition{}, nil, fmt.Errorf("endpoint defaults and profile bootstrap require PROXY in %s", path)
+		return ResourceSpec{}, fmt.Errorf("endpoint defaults and profile bootstrap require PROXY in %s", path)
 	}
 	if proxy != nil && proxy.IsOwnerIPv4Ingress() && bootstrap {
-		return Definition{}, nil, fmt.Errorf("public ingress requires an already initialized yard in %s", path)
+		return ResourceSpec{}, fmt.Errorf("public ingress requires an already initialized yard in %s", path)
 	}
 	startup := values.singletons["STARTUP"]
 	if startup != "" && startup != "bringup" {
-		return Definition{}, nil, fmt.Errorf("invalid STARTUP record %q in %s", startup, path)
+		return ResourceSpec{}, fmt.Errorf("invalid STARTUP record %q in %s", startup, path)
 	}
 	if startup != "" && (proxy == nil || proxy.AddressPolicy != ProxyAddressOwnerIPv4UDP || bootstrap) {
-		return Definition{}, nil, fmt.Errorf("startup requires a public UDP resource without bootstrap in %s", path)
+		return ResourceSpec{}, fmt.Errorf("startup requires a public UDP resource without bootstrap in %s", path)
 	}
 	if !domain.SafeName(command) || !domain.SafeName(bringUp) || !domain.SafeName(shutdown) ||
 		handler == "" || title == "" || len(values.actions) == 0 {
-		return Definition{}, nil, fmt.Errorf("resource descriptor is incomplete: %s", path)
+		return ResourceSpec{}, fmt.Errorf("resource descriptor is incomplete: %s", path)
 	}
 	declarations := make([]actionDeclaration, 0, len(values.actions))
 	actionDefinitions := make([]domain.ActionDefinition, 0, len(values.actions))
@@ -375,23 +440,23 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 	for _, record := range values.actions {
 		fields := strings.Fields(record)
 		if len(fields) != 4 {
-			return Definition{}, nil, fmt.Errorf("invalid ACTION record %q in %s", record, path)
+			return ResourceSpec{}, fmt.Errorf("invalid ACTION record %q in %s", record, path)
 		}
 		localID, verb, class, recoveryName := fields[0], fields[1], fields[2], fields[3]
 		if !domain.SafeName(localID) || !domain.SafeName(verb) {
-			return Definition{}, nil, fmt.Errorf("invalid resource action %q in %s", record, path)
+			return ResourceSpec{}, fmt.Errorf("invalid resource action %q in %s", record, path)
 		}
 		if _, duplicate := localIDs[localID]; duplicate {
-			return Definition{}, nil, fmt.Errorf("duplicate resource action local ID %q in %s", localID, path)
+			return ResourceSpec{}, fmt.Errorf("duplicate resource action local ID %q in %s", localID, path)
 		}
 		localIDs[localID] = struct{}{}
 		effect, impacts, ok := assessmentClass(class)
 		if !ok {
-			return Definition{}, nil, fmt.Errorf("unknown resource assessment class %q in %s", class, path)
+			return ResourceSpec{}, fmt.Errorf("unknown resource assessment class %q in %s", class, path)
 		}
 		recovery, ok := recoveryClass(recoveryName)
 		if !ok {
-			return Definition{}, nil, fmt.Errorf("unknown resource recovery class %q in %s", recoveryName, path)
+			return ResourceSpec{}, fmt.Errorf("unknown resource recovery class %q in %s", recoveryName, path)
 		}
 		qualified := domain.ActionID("resource." + profile + "." + name + "." + localID)
 		actionDefinition := domain.ActionDefinition{
@@ -399,7 +464,7 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 			Impacts: slices.Clone(impacts), Recovery: recovery,
 		}
 		if _, err := domain.NewActionRegistry([]domain.ActionDefinition{actionDefinition}); err != nil {
-			return Definition{}, nil, fmt.Errorf("invalid resource action %q in %s: %w", localID, path, err)
+			return ResourceSpec{}, fmt.Errorf("invalid resource action %q in %s: %w", localID, path, err)
 		}
 		declarations = append(declarations, actionDeclaration{localID: localID, verb: verb, action: qualified})
 		actionDefinitions = append(actionDefinitions, actionDefinition)
@@ -408,55 +473,65 @@ func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, e
 		}
 	}
 	if !slices.Contains(verbs, bringUp) || !slices.Contains(verbs, shutdown) {
-		return Definition{}, nil, fmt.Errorf("resource lifecycle verbs are missing in %s", path)
+		return ResourceSpec{}, fmt.Errorf("resource lifecycle verbs are missing in %s", path)
 	}
 	if bootstrap && !bootstrapAction(actionDefinitions, declarations, bringUp) {
-		return Definition{}, nil, fmt.Errorf("profile bootstrap bring-up must use bootstrap-change with recoverable mutation in %s", path)
+		return ResourceSpec{}, fmt.Errorf("profile bootstrap bring-up must use bootstrap-change with recoverable mutation in %s", path)
 	}
 	if startup != "" && !startupAction(actionDefinitions, declarations, bringUp) {
-		return Definition{}, nil, fmt.Errorf("startup bring-up must use public-ingress-change with reversible mutation in %s", path)
+		return ResourceSpec{}, fmt.Errorf("startup bring-up must use public-ingress-change with reversible mutation in %s", path)
 	}
 	controllerSessions := strings.Fields(values.singletons["CONTROLLER_SESSION"])
 	for index, verb := range controllerSessions {
 		if !slices.Contains(verbs, verb) || slices.Contains(controllerSessions[:index], verb) {
-			return Definition{}, nil, fmt.Errorf("invalid CONTROLLER_SESSION verb %q in %s", verb, path)
+			return ResourceSpec{}, fmt.Errorf("invalid CONTROLLER_SESSION verb %q in %s", verb, path)
 		}
 		for actionIndex, declaration := range declarations {
 			if declaration.verb == verb && actionDefinitions[actionIndex].Effect != domain.ActionSession {
-				return Definition{}, nil, fmt.Errorf("CONTROLLER_SESSION requires session actions in %s", path)
+				return ResourceSpec{}, fmt.Errorf("CONTROLLER_SESSION requires session actions in %s", path)
 			}
 		}
 	}
-	profileRoot := filepath.Join(root, "config", "profiles", profile)
+	profileRoot := filepath.Join("/", "profiles", profile)
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return Definition{}, nil, fmt.Errorf("resource handler escapes profile: %s", path)
+		return ResourceSpec{}, fmt.Errorf("resource handler escapes profile: %s", path)
+	}
+	return ResourceSpec{definition: Definition{
+		Profile: profile, Name: name, Command: command, Handler: handler,
+		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title,
+		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", ControllerSessions: controllerSessions, actions: declarations,
+	}, actions: actionDefinitions, valid: true}, nil
+}
+
+func resolveResourceHandler(root, path string, definition Definition) (string, error) {
+	profileRoot := filepath.Join(root, "config", "profiles", definition.Profile)
+	handlerPath := filepath.Clean(filepath.Join(profileRoot, definition.Handler))
+	relative, err := filepath.Rel(profileRoot, handlerPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("resource handler escapes profile: %s", path)
 	}
 	info, err := os.Lstat(handlerPath)
 	if err != nil {
-		return Definition{}, nil, fmt.Errorf("inspect resource handler %s: %w", handlerPath, err)
+		return "", fmt.Errorf("inspect resource handler %s: %w", handlerPath, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
-		return Definition{}, nil, fmt.Errorf("resource handler is not an executable regular file: %s", handlerPath)
+		return "", fmt.Errorf("resource handler is not an executable regular file: %s", handlerPath)
 	}
 	resolvedProfileRoot, err := filepath.EvalSymlinks(profileRoot)
 	if err != nil {
-		return Definition{}, nil, fmt.Errorf("resolve resource profile %s: %w", profileRoot, err)
+		return "", fmt.Errorf("resolve resource profile %s: %w", profileRoot, err)
 	}
 	resolvedHandlerPath, err := filepath.EvalSymlinks(handlerPath)
 	if err != nil {
-		return Definition{}, nil, fmt.Errorf("resolve resource handler %s: %w", handlerPath, err)
+		return "", fmt.Errorf("resolve resource handler %s: %w", handlerPath, err)
 	}
 	resolvedRelative, err := filepath.Rel(resolvedProfileRoot, resolvedHandlerPath)
 	if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
-		return Definition{}, nil, fmt.Errorf("resource handler escapes resolved profile: %s", path)
+		return "", fmt.Errorf("resource handler escapes resolved profile: %s", path)
 	}
-	return Definition{
-		Profile: profile, Name: name, Command: command, Handler: handler,
-		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title, path: resolvedHandlerPath,
-		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", ControllerSessions: controllerSessions, actions: declarations,
-	}, actionDefinitions, nil
+	return resolvedHandlerPath, nil
 }
 
 func parseEndpointDefaults(record, path string) (*EndpointDefaults, error) {
@@ -711,18 +786,13 @@ func recoveryClass(value string) (domain.RecoveryClass, bool) {
 	}
 }
 
-func readDescriptor(path string) (descriptorValues, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return descriptorValues{}, err
-	}
-	defer file.Close()
+func readDescriptor(reader io.Reader, path string) (descriptorValues, error) {
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
 		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {}, "CONTROLLER_SESSION": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	line := 0
 	for scanner.Scan() {
 		line++

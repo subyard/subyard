@@ -74,9 +74,17 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 		defer file.Close()
 		input = file
 	}
+	return applyEnvReaderObservedRetired(input, path, values, observer, retired)
+}
+
+func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
+	return applyEnvReaderObservedRetired(reader, source, values, observer, isRetiredSetting)
+}
+
+func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, retired func(string) bool) error {
 	discardRetiredSettings(values)
 
-	scanner := bufio.NewScanner(input)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	var record strings.Builder
 	quote := byte(0)
@@ -105,15 +113,15 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 			}
 		}
 		if err := applyRecordRetired(record.String(), values, recordObserver, retired); err != nil {
-			return sourceContext(path, recordLine, recordSettingKey(record.String()), "scalar settings", err)
+			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
 		}
 		record.Reset()
 	}
 	if err := scanner.Err(); err != nil {
-		return sourceError(path, lineNumber+1, "", "scalar settings", "cannot read config within the line size bound", err)
+		return sourceError(source, lineNumber+1, "", "scalar settings", "cannot read config within the line size bound", err)
 	}
 	if quote != 0 || record.Len() != 0 {
-		return sourceError(path, recordLine, recordSettingKey(record.String()), "scalar settings", "unterminated quoted assignment", nil)
+		return sourceError(source, recordLine, recordSettingKey(record.String()), "scalar settings", "unterminated quoted assignment", nil)
 	}
 	return nil
 }
@@ -355,4 +363,14 @@ func ValidVariable(value string) bool {
 func variableChar(char byte, first bool) bool {
 	return char == '_' || (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') ||
 		(!first && char >= '0' && char <= '9')
+}
+
+// EvaluateAssignments evaluates a layer sequentially over a copy of base.
+// Source is a diagnostic label; evaluation never opens it.
+func EvaluateAssignments(reader io.Reader, source string, base map[string]string) (map[string]string, error) {
+	values := cloneEnvironment(base)
+	if err := applyEnvReaderObserved(reader, source, values, nil); err != nil {
+		return nil, err
+	}
+	return values, nil
 }

@@ -51,21 +51,24 @@ func TestRegistryRejectsUnsafeDeclarations(t *testing.T) {
 		`{"schema_version":1,"consumers":[{"id":"fixture","zone":"*","path":"fixture/{zone}.env","format":"file","stop_handler":"../escape"}]}`,
 	} {
 		t.Run(data, func(t *testing.T) {
-			root := testkit.TempDir(t)
-			path := fixture(t, root, "fixture", "", Definition{})
-			testkit.WriteFile(t, path, []byte(data), 0o600)
-			if _, err := Load(root); err == nil {
+			if _, err := Decode("fixture", []byte(data)); err == nil {
 				t.Fatal("accepted unsafe descriptor")
 			}
 		})
 	}
-	root := testkit.TempDir(t)
-	consumer := Consumer{ID: "fixture-key", Zone: "global", Path: "fixture/key", Format: "file"}
-	fixture(t, root, "one", "", Definition{Consumers: []Consumer{consumer}})
-	fixture(t, root, "two", "", Definition{Consumers: []Consumer{consumer}})
-	if _, err := Load(root); err == nil {
+	consumer := `{"schema_version":1,"consumers":[{"id":"fixture-key","zone":"global","path":"fixture/key","format":"file"}]}`
+	one, err := Decode("one", []byte(consumer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := Decode("two", []byte(consumer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateMetadata([]Metadata{one, two}, nil); err == nil {
 		t.Fatal("accepted duplicate consumer")
 	}
+
 }
 
 func TestProfileExtensionsLoadAndValidate(t *testing.T) {
@@ -105,9 +108,11 @@ func TestProfileExtensionRejectsInvalidAndDuplicateDeclarations(t *testing.T) {
 	}
 	for i, setting := range invalid {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			root := testkit.TempDir(t)
-			fixture(t, root, "fixture", "", Definition{Settings: []Setting{setting}})
-			if _, err := Load(root); err == nil {
+			data, err := json.Marshal(Definition{SchemaVersion: 1, Settings: []Setting{setting}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Decode("fixture", data); err == nil {
 				t.Fatalf("accepted invalid setting %+v", setting)
 			}
 		})
@@ -120,20 +125,27 @@ func TestProfileExtensionRejectsInvalidAndDuplicateDeclarations(t *testing.T) {
 		{"activation", Definition{Runtime: &RuntimeHook{ActivationID: "same", Handler: "runtime.sh"}}, Definition{Runtime: &RuntimeHook{ActivationID: "same", Handler: "runtime.sh"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := testkit.TempDir(t)
+			metadata := []Metadata{}
 			for _, name := range []string{"one", "two"} {
 				declaration := tc.first
 				if name == "two" {
 					declaration = tc.second
 				}
-				path := fixture(t, root, name, "", declaration)
-				if declaration.Runtime != nil {
-					testkit.WriteFile(t, filepath.Join(filepath.Dir(path), "runtime.sh"), []byte("#!/bin/sh\n"), 0o700)
+				declaration.SchemaVersion = 1
+				data, err := json.Marshal(declaration)
+				if err != nil {
+					t.Fatal(err)
 				}
+				decoded, err := Decode(name, data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				metadata = append(metadata, decoded)
 			}
-			if _, err := Load(root); err == nil {
+			if err := ValidateMetadata(metadata, nil); err == nil {
 				t.Fatal("accepted cross-profile collision")
 			}
+
 		})
 	}
 }
@@ -360,6 +372,23 @@ func TestServicesScopedCheckAndApplyLeaveNeighborsUntouched(t *testing.T) {
 		if err := RunServices(context.Background(), root, arguments, env, io.Discard, io.Discard); err == nil {
 			t.Fatalf("accepted %v", arguments)
 		}
+	}
+}
+
+func TestServiceCheckPreservesOwnerAndNativeDisposition(t *testing.T) {
+	root := testkit.TempDir(t)
+	env := map[string]string{"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1"}
+	for _, code := range []int{1, 17} {
+		fixture(t, root, "sample", fmt.Sprintf("#!/bin/bash\necho private-canary >&2\nexit %d\n", code), Definition{})
+		var output bytes.Buffer
+		err := RunServices(context.Background(), root, []string{"--check"}, env, &output, &output)
+		want := fmt.Sprintf("profile service check owner=sample native-exit=%d", code)
+		if err == nil || err.Error() != want || output.Len() != 0 || ServiceCheckExit(err) != code {
+			t.Fatalf("check disposition lost: err=%v output=%q", err, output.String())
+		}
+	}
+	if err := RunServices(context.Background(), root, []string{"--check"}, nil, io.Discard, io.Discard); err == nil || ServiceCheckExit(err) != 2 {
+		t.Fatalf("dispatcher failure classified as drift: %v", err)
 	}
 }
 

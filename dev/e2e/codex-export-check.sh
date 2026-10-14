@@ -11,17 +11,17 @@ for name in CodexOne CodexTwo; do
   printf '%s\n' "$name" > "$CODEX_SOURCES/$name/project.txt"
 done
 # A synthetic target records the L1 workspace without installing a shipped profile.
-[ ! -e "$ROOT/config/profiles/codex-fixture" ] && [ ! -L "$ROOT/config/profiles/codex-fixture" ] \
+[ ! -e "$FIXTURE_CONFIG_ROOT/profiles/codex-fixture" ] && [ ! -L "$FIXTURE_CONFIG_ROOT/profiles/codex-fixture" ] \
   || fail 'synthetic Codex profile already exists'
-install -d -m 0755 "$ROOT/config/profiles/codex-fixture"
-printf 'PROFILE_NAME=codex-fixture\n' > "$ROOT/config/profiles/codex-fixture/profile.conf"
-chmod 0644 "$ROOT/config/profiles/codex-fixture/profile.conf"
+install -d -m 0755 "$FIXTURE_CONFIG_ROOT/profiles/codex-fixture"
+printf 'PROFILE_NAME=codex-fixture\n' > "$FIXTURE_CONFIG_ROOT/profiles/codex-fixture/profile.conf"
+chmod 0644 "$FIXTURE_CONFIG_ROOT/profiles/codex-fixture/profile.conf"
 peer bash -s -- "$STATE" "$RUN_ID" <<'EOS'
 set -euo pipefail
 state="$1" run="$2"
 [ "$(cat "$state/.marker")" = "subyard-preview-acceptance-v1:$run:2" ]
-root="$(cat "$state/source-root")"
-case "$root" in /var/tmp/subyard-worktree.*/src) ;; *) exit 2 ;; esac
+root="$(dirname "$(dirname "$(readlink -f "$state/bin/yard")")")"
+case "$root" in "$state/runtime/"*) ;; *) exit 2 ;; esac
 [ ! -e "$root/config/profiles/codex-fixture" ] && [ ! -L "$root/config/profiles/codex-fixture" ]
 install -d -m 0755 "$root/config/profiles/codex-fixture"
 printf 'PROFILE_NAME=codex-fixture\n' > "$root/config/profiles/codex-fixture/profile.conf"

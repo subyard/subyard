@@ -91,6 +91,10 @@ uses the existing exact integration facts and shared bounded hook executor;
 integration packages own provisioning, retirement and route receipts. See the
 [shipped integration contract](reference/shipped-integration-contract.md).
 
+Semantic profile/catalog, scalar-layer and resource contracts accept metadata or readers before
+physical binding. See [functional declaration boundaries](reference/functional-boundaries.md)
+for consumer APIs, adapter responsibilities and regression coverage.
+
 ## Stable interfaces
 
 ### Commands
@@ -713,8 +717,11 @@ caller reports completed activation drift as a fresh migration-required plan; v0
 recovering presentation. Neither reuses completed authorization.
 
 The same harness runs the checksum-pinned v0.17.3 engine to create and interrupt an activation-only
-repair, reproduce its unrelated-template blocker, resume through the standalone candidate with
-the original assets, and complete a subsequent ordinary update. Its synthetic Incus backend changes
+repair and reproduce its unrelated-template blocker. A standalone candidate with the same registry
+resumes with the original assets. When the latest candidate advances the registry, the harness proves
+its refusal without mutation, resumes through the checksum-pinned v0.18.6 registry/catalog bridge,
+then separately authorizes the latest ordinary update and verifies the new publication epoch while
+preserving historical domains. Its synthetic Incus backend changes
 only observed running/stopped state; settings, ledger and original journal bindings must survive
 recovery. Privileged commands are rejected by fixture shims.
 
@@ -795,6 +802,11 @@ candidate with the same registry can resume that exact transaction using its eng
 original owner's verified runtime assets. It preserves the original authorization, observation
 scope, settings, ledger and stable runtime links; it does not replace the journal or migrate the
 unrelated yard. Other blocked transactions retain their existing recovery rules.
+
+If the latest candidate has a different registry or catalog, publish a verified compatible bridge
+first; v0.18.6 retains the exact v0.17.3 registry and catalog. Resume through that bridge's standalone
+launcher, then separately authorize the ordinary update to the latest release. The latest caller's
+refusal does not permit editing the original journal, catalog or unrelated yard settings.
 
 After the runtime installer publishes the verified candidate without activating it, use its exact
 launcher path to inspect and resume the installed release before retrying the ordinary update:

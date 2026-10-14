@@ -15,11 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -762,6 +764,230 @@ func TestTeardownRejectsUnknownInputAndPublishesMode(t *testing.T) {
 	}
 	if artifacts[1].Path != filepath.Join(root, "home", ".ssh", "subyard.config") || artifacts[2].Path != filepath.Join(root, "data", "space.cache") {
 		t.Fatalf("default-yard artifacts differ from physical cleanup paths: %#v", artifacts)
+	}
+}
+
+type recordedNativeIntegrationRuntime struct {
+	reconcileruntime.Runtime
+	unavailable *bool
+}
+
+func (runtime recordedNativeIntegrationRuntime) IntegrationPlan(ctx context.Context) (reconcileruntime.IntegrationPlan, error) {
+	plan, err := runtime.Runtime.IntegrationPlan(ctx)
+	*runtime.unavailable = err != nil
+	return plan, err
+}
+
+func TestCompletedTeardownUsesFreshConsentAndProtectedHistory(t *testing.T) {
+	for _, scenario := range []string{
+		"purge", "keep-data", "decline", "reset-config", "corrupt history", "unfinished history", "foreign history",
+		"unrelated target", "global current", "global drift", "unknown runtime", "temporary host storage", "persistent host storage",
+		"source after consent", "history after consent", "runtime after consent", "integration after consent",
+		"absent inventory", "stopped inventory", "paused inventory", "unknown inventory", "inventory after consent",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			var assets map[string]string
+			var powerEnvironment []string
+			if scenario == "global drift" || scenario == "global current" {
+				powerRoot := testkit.TempDir(t)
+				unit, reconciler := filepath.Join(powerRoot, "unit"), filepath.Join(powerRoot, "reconciler")
+				testkit.WriteFile(t, unit, []byte("installed power fixture\n"), 0o600)
+				assets = map[string]string{"config/host.env": "SUBYARD_POWER_UNIT_PATH=" + unit + "\nSUBYARD_POWER_RECONCILER_PATH=" + reconciler + "\n"}
+				powerEnvironment = []string{"SUBYARD_POWER_UNIT_PATH=" + unit, "SUBYARD_POWER_RECONCILER_PATH=" + reconciler}
+			}
+			program, _, home := completedSourceAuthoringFixture(t, false, assets)
+			options := program.options
+			// Exercise persisted source authority; the storage pair isolates a temporary host override.
+			options.Environment = append(environmentList(program.freshMigrationEnvironment(program.baseEnv, options.RepositoryRoot), nil), powerEnvironment...)
+			options.Arguments = []string{"teardown"}
+			if scenario == "keep-data" {
+				options.Arguments = append(options.Arguments, "--keep-data")
+			} else if scenario == "reset-config" {
+				options.Arguments = append(options.Arguments, "--reset-config")
+			}
+			hostSource := filepath.Join(home, "config.env")
+			var hostSettings []byte
+			if scenario == "temporary host storage" || scenario == "persistent host storage" {
+				storage := filepath.Join(testkit.TempDir(t), "incus-storage")
+				options.Environment = append(options.Environment, "STORAGE_PATH="+storage)
+				if scenario == "persistent host storage" {
+					hostSettings = []byte("STORAGE_PATH=" + storage + "\n")
+					testkit.WriteFile(t, hostSource, hostSettings, 0o600)
+				}
+			}
+			source := filepath.Join(home, "yards/default/config.env")
+			writeProfileTestFile(t, source, []byte("# retain owner settings\n"), 0o600)
+			before := mustReadConfigFixture(t, source)
+			loaded, err := program.loadSelectionRepair("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			incus := options.Incus.(*testkit.Incus)
+			incus.Reconcile.InstanceFound = true
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			platform.converged[ports.ReconcileStageProfileRuntimes] = false
+			if scenario == "global drift" {
+				platform.converged[ports.ReconcileStagePower] = false
+			} else if scenario == "unknown runtime" {
+				platform.observation = &ports.RuntimeObservation{State: "unknown"}
+			} else if scenario == "unrelated target" {
+				writeProfileTestFile(t, filepath.Join(home, "yards/neighbor/config.env"), []byte("SSH_PORT=2223\n"), 0o600)
+			}
+			integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{
+				Fingerprint: operationStateDigest("current integration fixture"), Scope: operationStateDigest("integration scope"),
+			}}
+			inventoryCase := strings.Contains(scenario, "inventory")
+			var inventoryContext domain.Context
+			var inventorySource string
+			var inventorySettings []byte
+			var nativeInventoryUnavailable bool
+			if inventoryCase {
+				inventorySource = filepath.Join(home, "yards/inventory/config.env")
+				writeProfileTestFile(t, inventorySource, []byte("SSH_PORT=2223\n"), 0o600)
+				inventorySettings = mustReadConfigFixture(t, inventorySource)
+				inventory, err := program.resolveReleaseTransitionContext("inventory", home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inventoryContext = inventory.Context
+				status := map[string]string{"stopped inventory": "Stopped", "paused inventory": "Paused", "unknown inventory": "unknown"}[scenario]
+				if status != "" {
+					incus.Instances[inventoryContext.IncusProject+"/"+inventoryContext.YardInstanceName] = ports.InstanceInfo{Status: status}
+				}
+				// Isolate integration drift on the selected target from the registered inventory target.
+				platform.converged[ports.ReconcileStageProfileRuntimes] = true
+				integrations.plan.Changed = true
+			}
+			owned := filepath.Join(loaded.Context.Paths.OperatorHome, ".ssh", "subyard.config")
+			writeProfileTestFile(t, owned, []byte("owned yard SSH snippet\n"), 0o600)
+			journalPath := filepath.Join(home, "release-transition/v2/journal.json")
+			if scenario == "corrupt history" {
+				testkit.WriteFile(t, journalPath, []byte("{invalid\n"), 0o600)
+			} else if scenario == "unfinished history" || scenario == "foreign history" {
+				journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, journalPath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "unfinished history" {
+					journal.Checkpoint = releasetransition.JournalReconciling
+				} else {
+					journal.ArtifactDigest = releasetransition.Fingerprint(operationStateDigest("foreign release artifact"))
+				}
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, journalPath, payload, 0o600)
+			}
+			history := operationStateDigest(activationRepairHistory(t, options.RepositoryRoot, home))
+			checkpointPath := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
+			checkpoint := mustReadConfigFixture(t, checkpointPath)
+			runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, Status: "ok"}, Apply: func(request domain.AdapterRequest) {
+				if request.Adapter != "teardown" {
+					t.Fatal("completed teardown dispatched another adapter")
+				}
+				incus.Reconcile.InstanceFound = false
+				delete(incus.Instances, loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName)
+				if err := os.Remove(owned); err != nil {
+					t.Fatal(err)
+				}
+			}}}}
+			prompt := &callbackPrompt{callback: func() {
+				if len(runner.Requests) != 0 || !bytes.Equal(before, mustReadConfigFixture(t, source)) {
+					t.Fatal("teardown changed state before consent")
+				}
+				switch scenario {
+				case "source after consent":
+					testkit.WriteFile(t, source, append(before, '#', '\n'), 0o600)
+					before = mustReadConfigFixture(t, source)
+				case "history after consent":
+					testkit.WriteFile(t, journalPath, append(mustReadConfigFixture(t, journalPath), '\n'), 0o600)
+					history = operationStateDigest(activationRepairHistory(t, options.RepositoryRoot, home))
+				case "runtime after consent":
+					platform.observation = &ports.RuntimeObservation{State: ports.RuntimeStateAbsent}
+				case "integration after consent":
+					integrations.plan.Fingerprint = operationStateDigest("replaced integration instance")
+				case "inventory after consent":
+					incus.Instances[inventoryContext.IncusProject+"/"+inventoryContext.YardInstanceName] = ports.InstanceInfo{Status: "Stopped"}
+				}
+			}}
+			decline := &testkit.Prompt{Answers: []bool{false}}
+			options.AdapterRunner, options.Prompt = runner, prompt
+			if scenario == "decline" {
+				options.Prompt = decline
+			}
+			options.InitPlatform, options.NetworkPolicy = platform, allowTestNetworkPolicy()
+			options.IntegrationRuntime = func(loaded config.Loaded) IntegrationRuntime {
+				if !inventoryCase || loaded.Context.YardName != "inventory" {
+					return integrations
+				}
+				instance, err := incus.Instance(context.Background(), loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+				if err != nil && !errors.Is(err, ports.ErrInstanceNotFound) {
+					t.Fatal(err)
+				}
+				// Use the actual native precondition, which refuses absent and stopped targets.
+				return recordedNativeIntegrationRuntime{Runtime: reconcileruntime.Runtime{
+					Yard: loaded.Context, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{
+						InstanceFound: err == nil, Instance: instance,
+					}},
+				}, unavailable: &nativeInventoryUnavailable}
+			}
+			var output bytes.Buffer
+			options.Stdout, options.Stderr = &output, &output
+			code := runAliasRepairFixture(t, options)
+			approved := scenario == "purge" || scenario == "keep-data" || scenario == "global current" || scenario == "persistent host storage" ||
+				scenario == "absent inventory" || scenario == "stopped inventory"
+			if (code == 0) != approved {
+				t.Fatalf("completed teardown: code=%d approved=%t native_inventory_plan_unavailable=%t output=%s", code, approved, nativeInventoryUnavailable, output.String())
+			}
+			prompts := len(prompt.requests) + len(decline.Requests)
+			wantPrompt := approved || scenario == "decline" || strings.Contains(scenario, "after consent")
+			if (prompts == 1) != wantPrompt || prompts > 1 || (len(runner.Requests) == 1) != approved {
+				t.Fatalf("fresh teardown authority: prompts=%d native=%d output=%s", prompts, len(runner.Requests), output.String())
+			}
+			if approved {
+				expectedDefault, keep := domain.ConfirmationDefaultNo, "0"
+				if scenario == "keep-data" {
+					expectedDefault, keep = domain.ConfirmationDefaultYes, "1"
+				}
+				if prompt.requests[0].Default != expectedDefault || runner.Requests[0].Context["SUBYARD_TEARDOWN_KEEP_DATA"] != keep {
+					t.Fatal("teardown changed ordinary consent or retained-data policy")
+				}
+			} else if _, err := os.Stat(owned); err != nil || !incus.Reconcile.InstanceFound {
+				t.Fatal("refused teardown removed owned state")
+			}
+			info, err := os.Stat(source)
+			if err != nil || info.Mode().Perm() != 0o600 || !bytes.Equal(before, mustReadConfigFixture(t, source)) ||
+				history != operationStateDigest(activationRepairHistory(t, options.RepositoryRoot, home)) ||
+				!bytes.Equal(checkpoint, mustReadConfigFixture(t, checkpointPath)) {
+				t.Fatal("teardown changed settings, protected release history or links")
+			}
+			if len(platform.applied) != 0 || platform.projectHooks != 0 || integrations.applied != 0 {
+				t.Fatal("teardown repaired activation instead of removing its approved target")
+			}
+			if scenario == "persistent host storage" {
+				info, err := os.Stat(hostSource)
+				if err != nil || info.Mode().Perm() != 0o600 || !bytes.Equal(hostSettings, mustReadConfigFixture(t, hostSource)) {
+					t.Fatal("teardown changed the persisted host storage source")
+				}
+			} else if scenario == "temporary host storage" {
+				if _, err := os.Stat(hostSource); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("refused teardown persisted temporary host storage")
+				}
+			}
+			if inventoryCase {
+				info, err := os.Stat(inventorySource)
+				if err != nil || info.Mode().Perm() != 0o600 || !bytes.Equal(inventorySettings, mustReadConfigFixture(t, inventorySource)) {
+					t.Fatal("teardown changed the unselected inventory declaration")
+				}
+				if scenario == "stopped inventory" && incus.Instances[inventoryContext.IncusProject+"/"+inventoryContext.YardInstanceName].Status != "Stopped" {
+					t.Fatal("teardown removed the unselected stopped target")
+				}
+			}
+		})
 	}
 }
 

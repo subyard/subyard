@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -18,6 +19,52 @@ type reconcileFixture struct {
 	failOnce  map[ports.ReconcileStageID]bool
 	verified  map[ports.ReconcileStageID]bool
 	applied   []ports.ReconcileStageID
+}
+
+type observedReconcileFixture struct {
+	*reconcileFixture
+	observation ports.ReconcileStageObservation
+}
+
+func (fixture observedReconcileFixture) ObserveStage(context.Context, ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
+	return fixture.observation, nil
+}
+
+func TestReconcilerRetainsDriftWithoutApplyingNewWork(t *testing.T) {
+	stage := ReconcileStage{ID: ports.ReconcileStageProfileServices, Label: "Services"}
+	base := &reconcileFixture{}
+	fixture := observedReconcileFixture{base, ports.ReconcileStageObservation{Owner: "sample", NativeExit: 1}}
+	reconciler := Reconciler{Stages: []ReconcileStage{stage}, Runner: fixture}
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil || plan.Pending() != 1 {
+		t.Fatalf("ordinary drift was not planable: %#v %v", plan, err)
+	}
+	before, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.observation.Owner = "another"
+	reconciler.Runner = fixture
+	refreshed, err := reconciler.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(refreshed)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("diagnostic-only owner changed plan identity: %s -> %s (%v)", before, after, err)
+	}
+	approved := ReconcilePlan{Steps: []ReconcileStep{{Stage: stage, Converged: true}}}
+	for _, owner := range []string{"sample", "private-canary/config"} {
+		fixture.observation.Owner = owner
+		reconciler.Runner = fixture
+		err := reconciler.Apply(context.Background(), approved)
+		if !errors.Is(err, domain.ErrPlanStale) || len(base.applied) != 0 || strings.Contains(err.Error(), "private-canary") {
+			t.Fatalf("fresh drift refusal unsafe: %v applied=%v", err, base.applied)
+		}
+		if owner == "sample" && !strings.Contains(err.Error(), "owner=sample native-exit=1") {
+			t.Fatalf("fresh refusal lost finite cause: %v", err)
+		}
+	}
 }
 
 func (fixture *reconcileFixture) CheckStage(_ context.Context, id ports.ReconcileStageID) (bool, error) {

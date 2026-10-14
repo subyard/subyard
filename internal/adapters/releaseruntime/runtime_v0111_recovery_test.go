@@ -104,7 +104,7 @@ func (v0111AbsentOwnerRegistration) Commit(
 	return nil
 }
 
-func TestV0111RecoveryUsesRealPublicTransitionAcrossProcesses(t *testing.T) {
+func TestSyntheticV0111ScopeRecoveryUsesPublicTransitionAcrossProcesses(t *testing.T) {
 	fixture, bindings := newV0111ProcessFixture(t)
 	fixture = seedV0111PostActivationScopeJournal(t, fixture, bindings)
 
@@ -279,20 +279,10 @@ func newV0111ProcessFixture(t *testing.T) (v0111ProcessFixture, v0111FixtureBind
 		sourceTx:    "tx-source-v0111",
 		candidateTx: "tx-recovery-v0112",
 	}
-	fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
-	var retainedRegistry releasetransition.RegistryV2
-	if err := json.Unmarshal(fixture.registry, &retainedRegistry); err != nil {
-		t.Fatal(err)
-	}
-	retainedRegistry.CurrentEpochs["settings"] = 2
-	retainedRegistry.CurrentEpochs["power-metadata"] = 1
-	retainedRegistry.Migrations = retainedRegistry.Migrations[:2]
-	retainedPayload, err := json.Marshal(retainedRegistry)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fixture.registry = retainedPayload
+	// The registry is verbatim from published v0.11.1 b4f203baa0cd81c383fe4a8426b96d855611542e.
+	// This process fixture runs the current compiled catalog; the owning core
+	// recovery tests separately exercise the exact historical catalog.
+	fixture.registry = mustReadFile(t, filepath.Join("testdata", "v0.11.1-release-transition.json"))
 	if err := os.MkdirAll(filepath.Join(fixture.runtimeRoot, "releases", string(fixture.previous)), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -396,13 +386,25 @@ func seedV0111PostActivationScopeJournal(
 	if err != nil {
 		t.Fatalf("parse source journal: %v", err)
 	}
+	registry, _, err := releasetransition.ParseRegistryV2(fixture.registry, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := make(map[string]bool)
+	for _, migration := range registry.Migrations {
+		pending[migration.ID+".ledger"] = true
+	}
 	if journal.Transaction != fixture.sourceTx ||
-		journal.Checkpoint != releasetransition.JournalReconciling || len(journal.Steps) != 2 ||
+		journal.Checkpoint != releasetransition.JournalReconciling || len(journal.Steps) != len(pending) ||
 		journal.ArtifactDigest != bindings.sourceArtifact ||
 		journal.RegistryDigest != bindings.registry || journal.CatalogDigest != bindings.catalog {
 		t.Fatalf("seeded source journal = %#v", journal)
 	}
 	for _, step := range journal.Steps {
+		if !pending[step.ID] {
+			t.Fatalf("source journal lost the fixture's intended migration steps: %#v", step)
+		}
+		delete(pending, step.ID)
 		if step.Checkpoint != releasetransition.StepVerified || step.Evidence == nil ||
 			step.Evidence.Checkpoint != releasetransition.EvidenceVerified {
 			t.Fatalf("seeded source step = %#v", step)

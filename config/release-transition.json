@@ -21,6 +21,13 @@
       "kind": "test-vms-settings-v1-to-v2"
     },
     {
+      "id": "introduce-owner-publication-state-v1",
+      "domain": "power-metadata",
+      "fromEpoch": 1,
+      "toEpoch": 2,
+      "kind": "owner-publication-state-v1"
+    },
+    {
       "id": "canonicalize-test-yard-owner-v2",
       "domain": "owner-registration",
       "fromEpoch": 1,
@@ -29,13 +36,6 @@
       "dependsOn": [
         "canonicalize-test-vms-settings-v2"
       ]
-    },
-    {
-      "id": "introduce-owner-publication-state-v1",
-      "domain": "power-metadata",
-      "fromEpoch": 1,
-      "toEpoch": 2,
-      "kind": "owner-publication-state-v1"
     },
     {
       "id": "localize-ssh-port-settings-v3",

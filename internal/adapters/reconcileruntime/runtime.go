@@ -172,6 +172,14 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 	return probeConverged(err)
 }
 
+func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
+	if stage == ports.ReconcileStageProfileServices {
+		return runtime.observeProfileServices(ctx)
+	}
+	converged, err := runtime.CheckStage(ctx, stage)
+	return ports.ReconcileStageObservation{Converged: converged}, err
+}
+
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
 	switch stage {
 	case ports.ReconcileStageProject:
@@ -201,7 +209,13 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		}
 		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
-		return runtime.runScript(ctx, runtime.Stderr, "install-power-reconciler.sh", "--yes")
+		operator, err := runtime.operatorIdentity()
+		if err != nil {
+			return err
+		}
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr,
+			map[string]string{"SUBYARD_USER": operator.Username},
+			"install-power-reconciler.sh", "--yes")
 	case ports.ReconcileStageFinalize:
 		return runtime.finalizePowerState(ctx)
 	case ports.ReconcileStageTestVMs:
@@ -1733,7 +1747,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, errors.New("Incus executor is required")
 	}
 	// Integration ownership probes require the generic Docker substrate first.
-	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "command -v docker >/dev/null && timeout 10 docker info >/dev/null"}); err != nil || !ok {
+	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1"}); err != nil || !ok {
 		return false, err
 	}
 	definitions, err := runtime.integrationDefinitions()
@@ -2154,15 +2168,43 @@ func (runtime Runtime) runPathEnvironment(
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
+	observation, err := runtime.observeProfileServices(ctx)
+	return observation.Converged, err
+}
+
+func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.ReconcileStageObservation, error) {
 	environment := map[string]string{}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
-		return false, err
+		return ports.ReconcileStageObservation{}, err
 	}
 	if state.InstanceFound && strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
 		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
-	return probeConverged(runtime.runScriptEnvironment(ctx, nil, environment, "profile-services.sh", "--check"))
+	output := &profileRuntimeBoundedBuffer{limit: 256}
+	err = runtime.runScriptEnvironment(ctx, output, environment, "profile-services.sh", "--check")
+	return profileServiceObservation(output.String(), output.exceeded, err)
+}
+
+func profileServiceObservation(output string, exceeded bool, err error) (ports.ReconcileStageObservation, error) {
+	if err == nil {
+		return ports.ReconcileStageObservation{Converged: true}, nil
+	}
+	observation := ports.ReconcileStageObservation{}
+	var exit *exec.ExitError
+	fields := strings.Fields(output)
+	if !exceeded && errors.As(err, &exit) && len(fields) == 5 && strings.Join(fields[:3], " ") == "profile service check" {
+		owner := strings.TrimPrefix(fields[3], "owner=")
+		code, parseErr := strconv.Atoi(strings.TrimPrefix(fields[4], "native-exit="))
+		if fields[3] == "owner="+owner && fields[4] == "native-exit="+strconv.Itoa(code) && domain.SafeName(owner) && parseErr == nil && code == exit.ExitCode() && code > 0 && code <= 255 {
+			observation.Owner, observation.NativeExit = owner, code
+			if code == 1 {
+				return observation, nil
+			}
+			return observation, fmt.Errorf("profile service check failed (owner=%s native-exit=%d)", owner, code)
+		}
+	}
+	return observation, errors.New("profile service check unavailable")
 }
 
 // Scoped profile operations never enter the general init reconciler.

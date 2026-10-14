@@ -122,6 +122,7 @@ type CLI struct {
 	resourceWire                 string
 	profileInitRepair            *configApplyRepairPermit
 	integrationCleanupRepair     *configApplyRepairPermit
+	teardownRepair               *configApplyRepairPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -133,6 +134,7 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
+	operation.teardownRepair = nil
 	return &operation
 }
 
@@ -570,8 +572,24 @@ func (cli *CLI) Run(ctx context.Context) int {
 				outcome = nil
 			}
 		}
+		if outcome != nil && core && definition.Handler == "@teardown" {
+			permit, err := cli.prepareTeardownRepair(ctx, yard, commandArguments, *outcome)
+			if err != nil {
+				cli.errorf("teardown release admission: %v", err)
+				return 1
+			}
+			cli.teardownRepair = permit
+			if permit != nil {
+				outcome = nil
+			}
+		}
 		if outcome != nil {
 			if core {
+				if definition.Handler == "@config" {
+					if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, commandArguments, yes, *outcome); handled {
+						return code
+					}
+				}
 				if handled, code := cli.runActivationSelectionRepair(ctx, yard, definition.Handler, commandArguments, yes, *outcome); handled {
 					return code
 				}

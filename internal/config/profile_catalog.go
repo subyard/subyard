@@ -24,6 +24,49 @@ func LoadCatalog(root string) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
+	profiles := make([]profile.Metadata, len(definitions))
+	for i, definition := range definitions {
+		profiles[i], err = definition.Metadata()
+		if err != nil {
+			return Catalog{}, err
+		}
+	}
+	agents := make([]profile.IntegrationMetadata, len(integrations))
+	for i, definition := range integrations {
+		agents[i], err = definition.Metadata()
+		if err != nil {
+			return Catalog{}, err
+		}
+	}
+	result, err := BuildCatalog(profiles, agents)
+	if err != nil {
+		return Catalog{}, err
+	}
+	result.declarations, result.integrations = definitions, integrations
+	return result, nil
+}
+
+// BuildCatalog evaluates declarations without opening packages or resolving hooks.
+func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetadata) (Catalog, error) {
+	if err := profile.ValidateMetadata(profiles, agents); err != nil {
+		return Catalog{}, err
+	}
+	definitions := make([]profile.Definition, 0, len(profiles))
+	integrations := make([]profile.IntegrationDefinition, 0, len(agents))
+	for _, metadata := range profiles {
+		data, err := metadata.Data()
+		if err != nil {
+			return Catalog{}, err
+		}
+		definitions = append(definitions, profile.Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard})
+	}
+	for _, metadata := range agents {
+		data, err := metadata.Data()
+		if err != nil {
+			return Catalog{}, err
+		}
+		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Cleanup: data.Cleanup, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native})
+	}
 	result := Catalog{profiles: make(map[string]SettingDefinition), declarations: definitions, integrations: integrations}
 	type settingsOwner struct {
 		Name     string

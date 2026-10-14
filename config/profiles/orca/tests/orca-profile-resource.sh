@@ -507,6 +507,9 @@ if [ "${1:-}" = --prepare-parser-fixture ]; then
   printf '3735928559\n' > "$TMP/invocation"
   SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" restart > "$2/restart.json"
   printf 'tcp:127.0.0.1:17678\ntcp:127.0.0.1:6768\n' > "$ORCA_TEST_ROUTE"
+  incus config device show "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" > "$2/down-device.yaml"
+  incus config get "$YARD_INSTANCE_NAME" user.subyard.resource.orca-server \
+    --project "$INCUS_PROJECT" > "$2/down-receipt"
   SUBYARD_RESOURCE_MODE=prepare "$ROOT/config/profiles/orca/resources/orca/handler.sh" down > "$2/down.json"
   SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=restart SUBYARD_OPERATION_ID=orca-parser-fixture \
     SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$2/restart.json")" \

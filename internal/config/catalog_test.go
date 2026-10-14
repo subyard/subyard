@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -51,9 +52,11 @@ func TestPublicSettingsExampleCoversStaticCatalog(t *testing.T) {
 }
 
 func TestOperationCatalogProfileSettingsAreIsolatedAndTyped(t *testing.T) {
-	root := t.TempDir()
-	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"default":"2345","syncable":true,"host_listener":true}]}`)
-	catalog, err := LoadCatalog(root)
+	metadata, err := profile.Decode("fixture", []byte(`{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"default":"2345","syncable":true,"host_listener":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := BuildCatalog([]profile.Metadata{metadata}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,9 +73,11 @@ func TestOperationCatalogProfileSettingsAreIsolatedAndTyped(t *testing.T) {
 }
 
 func TestOperationCatalogRejectsCoreSettingCollision(t *testing.T) {
-	root := t.TempDir()
-	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"SSH_PORT","type":"port","scopes":["command"],"application":"next-command","minimum":1,"maximum":65535}]}`)
-	if _, err := LoadCatalog(root); err == nil {
+	metadata, err := profile.Decode("fixture", []byte(`{"schema_version":1,"settings":[{"name":"SSH_PORT","type":"port","scopes":["command"],"application":"next-command","minimum":1,"maximum":65535}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildCatalog([]profile.Metadata{metadata}, nil); err == nil {
 		t.Fatal("profile setting collision with core catalog accepted")
 	}
 }
@@ -106,11 +111,7 @@ func TestPublicEnvironmentProfilesExampleIsCopyable(t *testing.T) {
 		t.Fatal("public settings example is missing ENVIRONMENT_PROFILES")
 	}
 
-	path := filepath.Join(t.TempDir(), "config.env")
-	if err := os.WriteFile(path, []byte(assignment+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	values, err := ReadAssignments(path)
+	values, err := EvaluateAssignments(strings.NewReader(assignment+"\n"), examplePath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

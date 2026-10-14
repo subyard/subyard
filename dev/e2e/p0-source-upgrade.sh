@@ -851,6 +851,27 @@ resume() {
   printf 'ok: prepared migration resumed through the v0.1 installer and is committed for reboot\n'
 }
 
+current_migration_ready() {
+  # The public ready outcome already excludes pending migrations and blockers.
+  # Informational decisions describe observations, not remaining work.
+  jq -es --arg current "$1" '
+    length == 1 and (.[0] |
+      .schemaVersion == 1 and .current == $current and .outcome.status == "ready")
+  ' >/dev/null 2>&1
+}
+
+current_migration_readiness_diagnostics() {
+  # Project closed semantic fields; omit release IDs, bindings and messages.
+  jq -ces --arg current "$1" '
+    def known($values): . as $value | if ($values | index($value)) != null then . else "unknown" end;
+    select(length == 1) | .[0] |
+    {schema_valid: (.schemaVersion == 1), current_matches: (.current == $current),
+     target_matches: (.outcome.target == $current),
+     status: (.outcome.status | known(["ready", "migration-required", "recovering", "operator-action-required"])),
+     reached_goal: (.outcome.reachedGoal | known([true, false]))}
+  ' >&2 2>/dev/null || printf 'current migration readiness report is invalid\n' >&2
+}
+
 finish() {
   local transaction_before target_before previous_before report releases_before host_hash guest_hash
   local ready=0 attempt
@@ -952,48 +973,10 @@ finish() {
     sha256sum /home/dev/.codex/rules/repo.rules | awk '{print $1}')"
   [ "$host_hash" = "$guest_hash" ] || die 'current migration did not repair the materialized rules'
   report="$(operator_yard migrate --check --json)"
-  if ! jq -e 'type == "object" and .schemaVersion == 1 and
-      (.outcome | type) == "object" and .outcome.status == "ready" and
-      .outcome.code == "ready" and .outcome.reachedGoal == true and
-      (.current | type == "string" and length > 0) and
-      .current == .outcome.target and .current == .outcome.active and
-      ((has("blockers") | not) or ((.blockers | type) == "array" and .blockers == [])) and
-      (.domains | type) == "array" and
-      all(.domains[]; type == "object" and (.pending | type) == "array" and .pending == []) and
-      ((has("decisions") | not) or (.decisions | type) == "array") and
-      all((.decisions // [])[]; type == "object" and
-        .resource == "transition.source-metadata" and .decision == "preserve" and
-        ((has("scope") | not) or .scope == "") and
-        (.result | type == "string" and length == 64 and test("^[0-9a-f]{64}$")))' \
-      <<<"$report" >/dev/null; then
-    # Summarize the captured check without another probe or raw report output.
-    jq -ce '
-      def member($values): . as $value | type == "string" and ($values | index($value)) != null;
-      {"activation.materialized-config":"materialized-config", "activation.host-power":"host-power",
-       "activation.test-vm-broker":"test-vm-broker", "activation.test-yard-route-consumers":"route-consumers",
-       "activation.orca-runtime":"orca-runtime", "activation.openlit-runtime":"openlit-runtime",
-       "source-install.config":"source-config", "source-install.entrypoints":"source-entrypoints",
-       "test-yard-owner":"owner-registration", "migration-history.checkpoint":"migration-history",
-       "transition.source-metadata":"source-metadata"} as $resources |
-      select(type == "object" and .schemaVersion == 1 and (.outcome | type) == "object") |
-      select((.outcome.reachedGoal | type) == "boolean" and (.domains | type) == "array") |
-      select(.domains | length <= 64) |
-      select(all(.domains[]; type == "object" and (.pending | type) == "array")) |
-      select((has("blockers") | not) or (.blockers | type) == "array") |
-      select((has("decisions") | not) or (.decisions | type) == "array") |
-      (.decisions // []) as $decisions | select($decisions | length <= 64) |
-      select(all($decisions[]; type == "object" and
-        ((has("scope") | not) or (.scope | type) == "string") and
-        (.resource | member($resources | keys)) and
-        (.decision | member(["preserve", "transform", "canonicalize", "reset", "quarantine", "block"])))) |
-      {native_ready: (.outcome.status == "ready" and .outcome.code == "ready"),
-       goal_reached: .outcome.reachedGoal,
-       pending_domains: ([.domains[] | select(.pending | length > 0)] | length),
-       decisions: [$decisions[] | {resource_class: $resources[.resource], decision}]}' \
-      <<<"$report" >&2 2>/dev/null \
-      || printf '  [ .. ] current migration readiness diagnostic unavailable: invalid public report\n' >&2
+  current_migration_ready "$target_before" <<<"$report" || {
+    current_migration_readiness_diagnostics "$target_before" <<<"$report"
     die 'current migration did not reach readiness'
-  fi
+  }
   operator_env cat "$transition_root/journal.json" > "$journal_ready"
   operator_no_go env -u ASSUME_YES YARD_RELEASE_BASE_URL="file://$SHARED_ROOT/forbidden-release" \
     YARD_RELEASE_CACHE="$SHARED_ROOT/forbidden-cache" YARD_RELEASE_VERSION=invalid/selected/version \

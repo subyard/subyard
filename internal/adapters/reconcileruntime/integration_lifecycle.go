@@ -34,6 +34,10 @@ func (runtime Runtime) integrationDefinitions() ([]profile.IntegrationDefinition
 	return profile.LoadIntegrations(runtime.RepositoryRoot)
 }
 func (runtime Runtime) integrationPackageBinding(definition profile.IntegrationDefinition) (string, error) {
+	return runtime.integrationPackageBindingWithSourceReader(definition, runtime.SourceReader)
+}
+
+func (runtime Runtime) integrationPackageBindingWithSourceReader(definition profile.IntegrationDefinition, reader func(config.MaterializedAsset) ([]byte, error)) (string, error) {
 	source, err := definition.SourceBinding()
 	if err != nil {
 		return "", err
@@ -50,13 +54,12 @@ func (runtime Runtime) integrationPackageBinding(definition profile.IntegrationD
 		if path == "" {
 			continue
 		}
-		asset := config.MaterializedAsset{Source: path}
 		var data []byte
 		var err error
-		if runtime.SourceReader != nil {
-			data, err = runtime.SourceReader(asset)
+		if reader == nil {
+			data, err = (config.MaterializedAsset{Source: path}).ReadSource()
 		} else {
-			data, err = asset.ReadSource()
+			data, err = reader(config.MaterializedAsset{Source: path})
 		}
 		if err != nil {
 			return "", err
@@ -77,6 +80,10 @@ func (runtime Runtime) integrationSourceBindingPhase(phase string) (string, erro
 	return binding, err
 }
 func (runtime Runtime) integrationSourceBindingsPhase(phase string) (string, map[string]string, error) {
+	return runtime.integrationSourceBindingsWithSourceReader(phase, runtime.SourceReader)
+}
+
+func (runtime Runtime) integrationSourceBindingsWithSourceReader(phase string, reader func(config.MaterializedAsset) ([]byte, error)) (string, map[string]string, error) {
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return "", nil, err
@@ -87,7 +94,7 @@ func (runtime Runtime) integrationSourceBindingsPhase(phase string) (string, map
 	}
 	sources := map[string]string{}
 	for _, definition := range definitions {
-		binding, err := runtime.integrationPackageBinding(definition)
+		binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 		if err != nil {
 			return "", nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 		}
@@ -97,7 +104,10 @@ func (runtime Runtime) integrationSourceBindingsPhase(phase string) (string, map
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), sources, nil
 }
 func (runtime Runtime) integrationLifecycleEnvironment(definition profile.IntegrationDefinition) ([]string, error) {
-	binding, err := runtime.integrationPackageBinding(definition)
+	return runtime.integrationLifecycleEnvironmentWithSourceReader(definition, runtime.SourceReader)
+}
+func (runtime Runtime) integrationLifecycleEnvironmentWithSourceReader(definition profile.IntegrationDefinition, reader func(config.MaterializedAsset) ([]byte, error)) ([]string, error) {
+	binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +148,10 @@ func (runtime Runtime) observeIntegrationLifecycle(ctx context.Context, definiti
 	return runtime.observeIntegrationLifecyclePhase(ctx, definition, "inspect")
 }
 func (runtime Runtime) observeIntegrationLifecyclePhase(ctx context.Context, definition profile.IntegrationDefinition, phase string) (ports.RuntimeObservation, error) {
-	environment, err := runtime.integrationLifecycleEnvironment(definition)
+	return runtime.observeIntegrationLifecycleWithSourceReader(ctx, definition, phase, runtime.SourceReader)
+}
+func (runtime Runtime) observeIntegrationLifecycleWithSourceReader(ctx context.Context, definition profile.IntegrationDefinition, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (ports.RuntimeObservation, error) {
+	environment, err := runtime.integrationLifecycleEnvironmentWithSourceReader(definition, reader)
 	if err != nil {
 		return ports.RuntimeObservation{}, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
 	}

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import runpy
 import selectors
+import shlex
 import signal
 import socket
 import subprocess
@@ -29,6 +30,91 @@ LAUNCH = (
     "settings['URL'] = 'http://%s:%d/' % settings['ADDRESS']; "
     "sys.exit(helper['main']())"
 )
+
+
+class PreviewPresetCleanupTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="subyard-preview-preset-", dir="/tmp")
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name)
+        self.state.chmod(0o755)
+        self.runtime = self.state / "runtime/releases/fixture"
+        self.presets = self.runtime / "config/yards/profiles"
+        self.presets.mkdir(parents=True)
+        (self.runtime / "bin").mkdir()
+        (self.runtime / "bin/yard").write_text("#!/bin/sh\n")
+        (self.state / "bin").mkdir()
+        (self.state / "bin/yard").symlink_to(self.runtime / "bin/yard")
+        self.marker = "subyard-preview-acceptance-v1:1234abcd:2"
+        (self.state / ".marker").write_text(self.marker + "\n")
+        (self.state / ".marker").chmod(0o644)
+        self.config = self.state / "config/yards/named/config.env"
+        self.config.parent.mkdir(parents=True)
+        self.before = "# " + self.marker + "\nSSH_PORT=2222\n"
+        self.config.write_text(self.before + "YARD_TEMPLATE=canonical-no-projects\n")
+        self.config.chmod(0o600)
+        (self.state / "project-role-config.backup").write_text(self.before)
+        (self.state / "project-role-config.backup").chmod(0o600)
+        self.preset = self.presets / "canonical-no-projects.env"
+        self.neighbor = self.presets / "ordinary.env"
+        self.neighbor.write_text("ALLOWS_PROJECTS=true\n")
+        self.neighbor.chmod(0o644)
+        source = (HELPER.parents[2] / "dev/e2e/preview-lifecycle.sh").read_text()
+        self.cleanup = source[source.index("cleanup_canonical_preset() {"):source.index('\nif [ "$PHASE" = owner-cleanup ]')]
+        create = source.split("<<'PRESET_RECEIPT'\n", 1)[1].split("\nPRESET_RECEIPT", 1)[0]
+        subprocess.run([sys.executable, "-c", create, str(self.state), str(self.runtime), str(self.preset)], check=True)
+
+    def cleanup_fixture(self):
+        assignments = {"STATE": self.state, "MARKER": self.marker, "NAME": "named", "RUN_ID": "1234abcd", "VM": "2", "KIND": "container", "HOME": self.state, "SUBYARD_CONFIG_HOME": self.state / "config"}
+        program = "\n".join(key + "=" + shlex.quote(str(value)) for key, value in assignments.items()) + "\n"
+        program += '''stop_sessions() { :; }
+incus() { printf true; }
+yard() {
+  # Model only the owning admission prerequisite, not the core inventory parser.
+  [ ! -e "$STATE/runtime/releases/fixture/config/yards/profiles/canonical-no-projects.env" ] || return 1
+  printf 'teardown reached after sealed fixture restoration\\n'
+}
+sudo() { [ "$1:$2" = -n:find ]; }
+'''
+        result = subprocess.run(["bash", "-c", program + self.cleanup + "\ncleanup_state\n"], capture_output=True, timeout=10)
+        self.assertEqual(self.config.read_text(), self.before)
+        self.assertEqual(self.neighbor.read_text(), "ALLOWS_PROJECTS=true\n")
+        return result
+
+    def test_restores_role_then_removes_only_owned_runtime_preset(self):
+        result = self.cleanup_fixture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.preset.exists())
+        self.assertFalse((self.state / "canonical-preset.json").exists())
+        self.assertIn(b"teardown reached after sealed fixture restoration", (self.state / "cleanup-named.log").read_bytes())
+
+    def test_changed_preset_identity_or_content_is_retained(self):
+        for drift in ("content", "ownership", "symlink", "parent"):
+            with self.subTest(drift=drift):
+                # A fresh real filesystem fixture per distinct refusal.
+                self.setUp()
+                receipt = self.state / "canonical-preset.json"
+                if drift == "content":
+                    self.preset.write_text("ALLOWS_PROJECTS=true\n")
+                elif drift == "ownership":
+                    record = json.loads(receipt.read_text())
+                    record["preset"][2] += 1
+                    receipt.write_text(json.dumps(record))
+                elif drift == "symlink":
+                    self.preset.unlink()
+                    self.preset.symlink_to(self.neighbor)
+                else:
+                    self.presets.rename(self.presets.with_name("original-profiles"))
+                    self.presets.mkdir()
+                    self.preset.write_text("ALLOWS_PROJECTS=false\n")
+                    self.preset.chmod(0o644)
+                    self.neighbor.write_text("ALLOWS_PROJECTS=true\n")
+                before = (self.preset.lstat(), self.preset.read_bytes())
+                result = self.cleanup_fixture()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(receipt.exists())
+                self.assertEqual(self.preset.lstat().st_ino, before[0].st_ino)
+                self.assertEqual(self.preset.read_bytes(), before[1])
 
 
 class PreviewTest(unittest.TestCase):

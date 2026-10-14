@@ -47,7 +47,7 @@ func (runtime *Runtime) setV0173StandaloneRetry(ctx context.Context, root string
 	if !isV0173ActivationOnlyBlocker(protected) {
 		return
 	}
-	retry := "publish a verified standalone release newer than v0.17.3, then run its bin/yard migrate --check and bin/yard migrate before retrying yard update"
+	retry := "publish a verified standalone release newer than v0.17.3 with the exact original migration registry and catalog, then run its bin/yard migrate --check and bin/yard migrate before retrying yard update"
 	if candidate, available := runtime.verifiedStandaloneCandidateRoot(ctx, root); available {
 		defer candidate.Close()
 		version, err := semver.Parse(candidate.version)

@@ -304,6 +304,7 @@ func TestPreviewRouteDefersOnlyMissingInstanceOrMissingVMPin(t *testing.T) {
 }
 
 func TestDeferredPreviewPreservesInstalledHostWithoutOwnerInterface(t *testing.T) {
+	previewLoopbackFixture(t)
 	host := "100.101.102.103"
 	device := previewroute.Device(host, "32222")
 	saved, _ := json.Marshal(ownerpublication.Receipt{Version: 1, Ownership: "v1:" + host + ":32222", Device: device})
@@ -313,8 +314,101 @@ func TestDeferredPreviewPreservesInstalledHostWithoutOwnerInterface(t *testing.T
 	if runtime.previewHost(context.Background()) != host || !runtime.previewRouteConverged(context.Background(), instance) {
 		t.Fatal("deferred endpoint was replaced by fallback")
 	}
+	// Desired-port drift needs explicit repair while the saved interface is
+	// absent; selecting loopback would instead cancel the exact saved receipt.
+	runtime.Environment = []string{"WEB_PREVIEW_HOST_PORT=33333"}
+	if runtime.previewHost(context.Background()) != host || runtime.previewRouteConverged(context.Background(), instance) ||
+		instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName] != string(saved) {
+		t.Fatal("desired-port drift discarded or converged the saved endpoint")
+	}
 	delete(instance.LocalConfig, previewroute.Key)
 	if runtime.previewRouteConvergedForHost(host, instance) {
 		t.Fatal("orphaned endpoint accepted")
+	}
+}
+
+func TestAttachedPreviewReconcilesCurrentPreferredHost(t *testing.T) {
+	for _, mode := range []string{"private route", "loopback fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			preferred := "127.0.0.1"
+			if mode == "private route" {
+				preferred = previewPrivateHostFixture(t)
+			} else {
+				previewLoopbackFixture(t)
+			}
+			old := "100.101.102.103"
+			device := previewroute.Device(old, "32222")
+			instance := ports.InstanceInfo{LocalConfig: map[string]string{previewroute.Key: "v1:" + old + ":32222"}, Devices: map[string]map[string]string{previewroute.DeviceName: device}, LocalDevices: map[string]map[string]string{previewroute.DeviceName: device}}
+			runtime := Runtime{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "yard", YardKind: domain.YardContainer}, Environment: []string{"WEB_PREVIEW_HOST_PORT=32222"}}
+			if host := runtime.previewHost(context.Background()); host != preferred {
+				t.Fatalf("attached endpoint retained %q, current route %q", host, preferred)
+			}
+			if runtime.previewRouteConverged(context.Background(), instance) {
+				t.Fatal("attached stale route reported convergence")
+			}
+			payload, err := runtime.previewEndpoint(context.Background())
+			if err != nil || string(payload) != string(previewroute.Metadata(preferred, "32222")) {
+				t.Fatalf("current endpoint: %s %v", payload, err)
+			}
+		})
+	}
+}
+
+func TestPendingDeferredPreviewPreservesExactOwnershipAcrossDesiredPortDrift(t *testing.T) {
+	previewLoopbackFixture(t)
+	host := "100.101.102.103"
+	marker := "v1:pending:" + host + ":32222"
+	device := previewroute.Device(host, "32222")
+	instance := ports.InstanceInfo{LocalConfig: map[string]string{previewroute.Key: marker},
+		Devices: map[string]map[string]string{previewroute.DeviceName: device}, LocalDevices: map[string]map[string]string{previewroute.DeviceName: device}}
+	config, devices, waiting, err := ownerpublication.Plan(instance, ownerpublication.CoreContracts(), nil)
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("pending publication deferral: %v %v", waiting, err)
+	}
+	instance.LocalConfig, instance.Devices, instance.LocalDevices = config, devices, devices
+	saved := config[ownerpublication.Prefix+previewroute.DeviceName]
+	if saved == "" {
+		t.Fatal("pending publication did not retain its receipt")
+	}
+	runtime := Runtime{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}},
+		Yard: domain.Context{IncusProject: "p", YardInstanceName: "yard", YardKind: domain.YardContainer}, Environment: []string{"WEB_PREVIEW_HOST_PORT=32222"}}
+	if runtime.previewHost(context.Background()) != host || runtime.previewRouteConverged(context.Background(), instance) {
+		t.Fatal("pending deferred endpoint was discarded or reported complete")
+	}
+	runtime.Environment = []string{"WEB_PREVIEW_HOST_PORT=33333"}
+	if runtime.previewHost(context.Background()) != host || runtime.previewRouteConverged(context.Background(), instance) ||
+		instance.LocalConfig[previewroute.Key] != marker || instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName] != saved {
+		t.Fatal("desired-port drift changed pending deferred ownership")
+	}
+}
+
+func TestInvalidDeferredPreviewDoesNotRetainInstalledHost(t *testing.T) {
+	previewLoopbackFixture(t)
+	for _, fault := range []string{"version", "ownership", "attached device", "device shape"} {
+		t.Run(fault, func(t *testing.T) {
+			host := "100.101.102.103"
+			marker := "v1:" + host + ":32222"
+			receipt := ownerpublication.Receipt{Version: 1, Ownership: marker, Device: previewroute.Device(host, "32222")}
+			instance := ports.InstanceInfo{LocalConfig: map[string]string{previewroute.Key: marker}, Devices: map[string]map[string]string{}, LocalDevices: map[string]map[string]string{}}
+			switch fault {
+			case "version":
+				receipt.Version = 2
+			case "ownership":
+				receipt.Ownership = "foreign"
+			case "attached device":
+				instance.Devices[previewroute.DeviceName] = receipt.Device
+			case "device shape":
+				receipt.Device["connect"] = "tcp:127.0.0.1:9999"
+			}
+			payload, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance.LocalConfig[ownerpublication.Prefix+previewroute.DeviceName] = string(payload)
+			runtime := Runtime{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "yard", YardKind: domain.YardContainer}, Environment: []string{"WEB_PREVIEW_HOST_PORT=32222"}}
+			if runtime.previewHost(context.Background()) != "127.0.0.1" || runtime.previewRouteConvergedForHost(host, instance) {
+				t.Fatal("invalid deferred receipt retained its endpoint")
+			}
+		})
 	}
 }

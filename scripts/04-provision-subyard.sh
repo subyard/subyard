@@ -166,14 +166,15 @@ chmod g+rwXs "${srv_skel[@]}"   # g+rwX + setgid (dirs) so new subdirs inherit t
 
 # Services live in the container's own systemd (does not touch host systemd).
 systemctl enable --now ssh docker
-docker_info_started=$EPOCHREALTIME
-if timeout 10 docker info >/dev/null 2>&1; then
+# Verify the inventory API used by native callers; provisioning consumes no info fields.
+docker_api_started=$EPOCHREALTIME
+if timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1; then
   :
 else
-  docker_info_exit=$?
-  docker_info_ended=$EPOCHREALTIME
+  docker_api_exit=$?
+  docker_api_ended=$EPOCHREALTIME
   # Keep diagnostic interpreter startup off the original readiness boundary.
-  if ! python3 - "$docker_info_exit" "$docker_info_started" "$docker_info_ended" >&2 2>/dev/null <<'PY'
+  if ! python3 - "$docker_api_exit" "$docker_api_started" "$docker_api_ended" >&2 2>/dev/null <<'PY'
 from decimal import Decimal
 import json
 import subprocess
@@ -194,13 +195,13 @@ def run(arguments, stdout=subprocess.DEVNULL):
 
 
 elapsed_ms = int((Decimal(sys.argv[3]) - Decimal(sys.argv[2])) * 1000)
-emit(probe="info", exit=int(sys.argv[1]), elapsed_ms=elapsed_ms,
-     clock="realtime", budget_ms=10000)
+emit(probe="container-enumeration", exit=int(sys.argv[1]), elapsed_ms=elapsed_ms,
+     clock="realtime", budget_ms=10000, kill_after_ms=1000)
 
 # Failure-only comparisons cannot replace the original readiness failure.
 for probe, arguments in (
+    ("info", ["info"]),
     ("server-version", ["version", "--format", "{{.Server.Version}}"]),
-    ("container-enumeration", ["container", "ls", "-a", "--format", "{{.Names}}"]),
 ):
     started = time.monotonic()
     result = run(["timeout", "--kill-after=1", "10", "docker", *arguments])

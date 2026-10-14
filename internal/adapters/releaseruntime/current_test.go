@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -190,6 +191,7 @@ func newCurrentProcessFixture(t *testing.T) v0111ProcessFixture {
 	t.Helper()
 	fixture, _ := newV0111ProcessFixture(t)
 	fixture.previous = fixture.candidate.release
+	fixture.registry = mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-transition.json"))
 	fixture.candidate = writeV0111ProcessRuntime(t, fixture, string(fixture.candidate.release), "0.11.2", fixture.candidateTx, fixture.registry)
 	if err := os.Remove(filepath.Join(fixture.runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
@@ -234,12 +236,13 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	if report.Current != string(fixture.candidate.release) || report.Outcome.Status != releasetransition.StatusMigrationRequired || len(report.Domains) == 0 {
 		t.Fatalf("check report = %s", stdout.String())
 	}
-	pending := 0
+	var pending []string
 	for _, domain := range report.Domains {
-		pending += len(domain.Pending)
+		pending = append(pending, domain.Pending...)
 	}
-	if pending != 2 {
-		t.Fatalf("pending migrations = %d: %s", pending, stdout.String())
+	slices.Sort(pending)
+	if !slices.Equal(pending, []string{"canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2", "introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"}) {
+		t.Fatalf("pending migrations = %v: %s", pending, stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(fixture.configHome, "release-transition")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("check mutated target: %v", err)

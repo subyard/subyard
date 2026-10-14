@@ -29,7 +29,13 @@ owned() {
 safe_file() {
   [ ! -L "$1" ] && { [ ! -e "$1" ] || { [ -f "$1" ] && [ "$(stat -c %u "$1")" = 0 ]; }; }
 }
-compose() { timeout 240 docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" "$@"; }
+compose() {
+  local bound=(timeout 240)
+  # Cold phases stay in the aggregate supervisor's group. GNU timeout's
+  # default separate group would let them escape caller cancellation.
+  [ "$mode" != apply ] || bound=(timeout --foreground 240)
+  "${bound[@]}" docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" "$@"
+}
 native() { python3 "$root/native.py" "$1" --home "$home" --state "$state/native.json" --uid "$uid" --gid "$gid" --agents "$2"; }
 cutover() { python3 "$root/trace_cutover.py" "$1" --home "$home" --state "$state" --uid "$uid" --agents "$agents"; }
 runtime() {
@@ -119,10 +125,15 @@ if [ "$selected" = 1 ]; then
   missing=0
   for image in "${images[@]}"; do docker image inspect "$image" >/dev/null 2>&1 || missing=1; done
   if [ "$missing" = 1 ]; then
-    pull_limit=240
-    [ "$mode" != refresh ] || pull_limit=20
+    # Cold apply is bounded by its guest-owned aggregate deadline. Refresh
+    # retains its short pull limit and original transport budget.
+    pull_command=(docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" pull --quiet)
+    if [ "$mode" = refresh ]; then
+      pull_limit=20
+      pull_command=(timeout "$pull_limit" "${pull_command[@]}")
+    fi
     stage image-pull
-    if timeout "$pull_limit" docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" pull --quiet > "$state/pull.log" 2>&1; then
+    if "${pull_command[@]}" > "$state/pull.log" 2>&1; then
       :
     else
       pull_status=$?

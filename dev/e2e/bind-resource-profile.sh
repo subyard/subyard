@@ -90,6 +90,8 @@ export MIN_DISK_GIB=1
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 
 YARD_BUILD_VERSION=0.7.2 "$ROOT/dev/build-engine.sh" --force
+# Init binds every shipped integration package, including deselected native assets.
+"$ROOT/dev/build-profiles.sh"
 port=$((35000 + ($$ % 15000)))
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 SSH_PORT=$port

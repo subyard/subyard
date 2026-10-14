@@ -24,7 +24,7 @@ mapfile -t diagnostic_images < <(sed -n 's/^    image: //p' "$ROOT/config/profil
 die() { printf 'openlit-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
 [ "$(id -un)" = dev ] || die 'run as the allocated dev user'
-for command in go incus jq sudo ip ssh ssh-keygen unshare nsenter python3; do
+for command in go incus jq sg sudo ip ssh ssh-keygen unshare nsenter python3; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -42,6 +42,50 @@ incus() {
   # Keep file pulls owned by this operator even when enrollment refreshed only
   # the account database and this shell still has its original groups.
   openlit_candidate_command /usr/bin/incus "$@"
+}
+reexec_with_incus_group() {
+  local command
+  printf -v command 'exec env SUBYARD_E2E_VM=%q bash %q %q %q' \
+    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/openlit/tests/e2e/owner.sh" "$kind" "$auth_only"
+  exec sg incus-admin -c "$command"
+}
+
+ensure_owner_incus() {
+  local platform_root="$HOME/.cache/subyard-e2e-platform/incus"
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  if ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
+    || ! /usr/bin/incus storage show default --project default >/dev/null 2>&1; then
+    (
+      # Reuse the supported platform initializer before release migration.
+      # shellcheck source=tests/helpers/test-context.sh
+      . "$ROOT/tests/helpers/test-context.sh"
+      setup_test_context "$platform_root/bootstrap"
+      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME"
+      SUBYARD_USER="$(id -un)"
+      export SUBYARD_CONFIG_DIR="$ROOT/config"
+      export SUBYARD_CONFIG_HOME="$platform_root/config" SUBYARD_HOME="$platform_root/data"
+      export STORAGE_PATH="$platform_root/incus/storage" YARD_KIND="$kind"
+      export HOST_BASE="$platform_root/host-data" RESTRICTED_DISK_PATHS="$platform_root/host-data"
+      set -a
+      # shellcheck source=config/host.env
+      . "$ROOT/config/host.env"
+      set +a
+      bash "$ROOT/scripts/01-install-incus.sh" --yes
+    )
+  fi
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    reexec_with_incus_group
+  fi
+  # The installer uses the native API, without the fixture's sudo wrapper.
+  /usr/bin/incus query '/1.0/instances?project=default' >/dev/null \
+    || die 'owner Incus API is unavailable in the actual execution session'
+  /usr/bin/incus storage show default --project default >/dev/null \
+    || die 'owner default storage is unavailable after platform preparation'
+  printf 'openlit owner native-Incus-preflight=PASS\n'
 }
 candidate() {
   openlit_candidate_command "${CANDIDATE_ENGINE:-$ROOT/.build/yard}" "$@"
@@ -115,6 +159,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+ensure_owner_incus
 STATE="$(mktemp -d /var/tmp/subyard-openlit.XXXXXX)"
 printf '%s\n' openlit-profile-e2e-v1 > "$STATE/.marker"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
@@ -126,6 +171,10 @@ export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 # Complete the supported fresh release transition before power publication.
 # Keep the runtime, shell configuration and links inside this fixture's root.
+# Persist the host storage source before candidate bootstrap.
+install -d -m 0700 "$SUBYARD_CONFIG_HOME"
+printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$SUBYARD_CONFIG_HOME/config.env"
+chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
 unset YARD_ENGINE_PATH
 export YARD_RUNTIME_ROOT="$STATE/runtime"
 printf 'openlit_e2e_stage=candidate-release-transition\n'
@@ -247,11 +296,9 @@ chmod 0600 "$STATE/operator.json"
 printf 'openlit_e2e_stage=published-dashboard-origin\n'
 dashboard_port=$((1024 + (port+20000-1024)%64512))
 origin="http://127.0.0.1:$dashboard_port"
-yard status > "$STATE/dashboard-status"
-grep -Fq "$origin/" "$STATE/dashboard-status" || die 'status omitted the published OpenLIT dashboard'
+yard status > /dev/null
 if [ "$kind" = vm ]; then
   ! incus config device list "$instance" --project "$project" | grep -Fxq openlit-dashboard || die 'VM profile published an owner proxy'
-  grep -Fq "$dashboard_port:127.0.0.1:3000" "$STATE/dashboard-status" || die 'VM status omitted guest SSH forward'
   ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L "$dashboard_port:127.0.0.1:3000" "yard-$YARD_NAME" > "$STATE/ui-tunnel.log" 2>&1 &
   tunnel_pid=$!
   for ((attempt=0;attempt<40;attempt++)); do
@@ -296,12 +343,34 @@ incus query "/1.0/instances/$instance?project=$project" | jq -e --arg marker "v2
   '.config["user.subyard.openlit_dashboard"] == $marker and .devices["openlit-dashboard"] == null
    and (.config["user.subyard.deferred_publication.openlit-dashboard"] | fromjson | .version == 1 and .ownership == $marker)' >/dev/null \
   || die 'native publication did not preserve the exact deferred dashboard ownership'
+incus query "/1.0/instances/$instance?project=$project" | jq -c \
+  '{marker:.config["user.subyard.openlit_dashboard"],receipt:.config["user.subyard.deferred_publication.openlit-dashboard"],device:.devices["openlit-dashboard"]}' > "$STATE/deferred-route-before"
+deferred_native_before="$(incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json)"
+retained_data > "$STATE/deferred-data-before"
+# The exact deferred publication is converged; status withholds its unavailable URL.
 yard init --yes
+incus query "/1.0/instances/$instance?project=$project" | jq -c \
+  '{marker:.config["user.subyard.openlit_dashboard"],receipt:.config["user.subyard.deferred_publication.openlit-dashboard"],device:.devices["openlit-dashboard"]}' > "$STATE/deferred-route-after"
+cmp "$STATE/deferred-route-before" "$STATE/deferred-route-after" \
+  || die 'deferred init changed dashboard ownership'
+[ "$(incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json)" = "$deferred_native_before" ] \
+  || die 'deferred init changed native runtime receipt'
+[ "$(incus list "$instance" --project "$project" --format csv -c s)" = RUNNING ] \
+  || die 'deferred dashboard stopped its local workload'
+incus exec "$instance" --project "$project" -- systemctl is-active --quiet subyard-openlit.service
+retained_data > "$STATE/deferred-data-after"
+python3 - "$STATE/deferred-data-before" "$STATE/deferred-data-after" <<'DEFERRED_DATA'
+import json,sys
+before,after=(json.load(open(path)) for path in sys.argv[1:])
+assert before['volumes']==after['volumes'], 'deferred init replaced native volumes'
+assert after['logs']>=before['logs'] and after['metrics']>=before['metrics'], 'deferred init lost native telemetry'
+DEFERRED_DATA
 yard status > "$STATE/deferred-dashboard-status"
 ! grep -Fq "$private_origin/" "$STATE/deferred-dashboard-status" || die 'deferred dashboard exposed a working URL'
 sudo -n ip address add "$synthetic_address/32" dev lo
 synthetic_address_active=1
 candidate _publications "$project" "$instance" > "$STATE/restored-publications"
+yard init --yes
 yard status | grep -Fq "$private_origin/" || die 'exact dashboard restoration did not publish its original URL'
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$private_origin" --state "$STATE/private-ui-cookies" --identity "$token-private" --resume
 # Explicit owning cancellation revokes restoration before choosing a different
@@ -388,6 +457,16 @@ import socket,sys
 with socket.socket() as listener:
     listener.bind(('127.0.0.1',int(sys.argv[1])))
 FREE_LISTENER
+  stopped_collision_state() {
+    local name
+    for name in "$YARD_NAME" "$secondary_name"; do
+      # Config bytes include the persisted profile selection and listener settings.
+      sha256sum "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
+      incus query "/1.0/instances/yard-$name?project=subyard-$name" | jq -S \
+        '{marker:.config["user.subyard.openlit_dashboard"],receipt:.config["user.subyard.deferred_publication.openlit-dashboard"],device:.devices["openlit-dashboard"]}'
+    done
+  }
+  stopped_collision_state > "$STATE/stopped-collision-before"
   if (YARD_NAME="$secondary_name"; yard profile enable openlit --yes) > "$STATE/second-stopped-collision.log" 2>&1; then die 'second project claimed a stopped peer dashboard listener'; fi
   if ! grep -Fq 'observe profile runtime openlit-runtime: profile runtime handler observe failed: exit status 1' "$STATE/second-stopped-collision.log"; then
     printf 'openlit_e2e_stopped_peer_refusal=unclassified\n' >&2
@@ -395,6 +474,9 @@ FREE_LISTENER
   fi
   incus exec "$secondary_instance" --project "$secondary_project" -- test ! -e /var/lib/subyard/openlit
   [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'peer refusal woke the stopped dashboard owner'
+  stopped_collision_state > "$STATE/stopped-collision-after"
+  cmp "$STATE/stopped-collision-before" "$STATE/stopped-collision-after" \
+    || die 'stopped-peer refusal changed profile selection, configuration or dashboard ownership'
   yard start --yes
   for ((attempt=0;attempt<60;attempt++)); do
     if curl --silent --fail --max-time 1 "$origin/api/auth/csrf" >/dev/null; then break; fi

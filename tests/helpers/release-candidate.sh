@@ -37,3 +37,39 @@ PY
   [ -x "$runtime/bin/yard" ] && [ -x "$runtime/bin/yard-engine" ] || { printf 'release candidate yard executable is missing\n' >&2; return 2; }
   printf '%s\n' "$runtime/bin/yard-engine"
 }
+
+# Bootstrap a fresh fixture through the public installer before any yard effects.
+# The caller supplies its isolated SUBYARD_CONFIG_HOME and SUBYARD_HOME.
+release_candidate_install() {
+  local root="$1" state="$2" release version runtime_file arch candidate_rc launcher
+  if release_candidate_prepare "$root" >/dev/null; then
+    release="$root/.subyard-acceptance/release"
+    read -r version runtime_file < <(jq -er '[.version, .runtime_file] |
+      select(all(.[]; type == "string")) | @tsv' "$root/.subyard-acceptance/candidate.json") \
+      || { printf 'release candidate bootstrap identity is invalid\n' >&2; return 2; }
+    case "$version" in ''|*[!A-Za-z0-9._+-]*)
+      printf 'release candidate bootstrap version is invalid\n' >&2; return 2 ;;
+    esac
+    case "$(uname -s)/$(uname -m)" in
+      Linux/x86_64) arch=amd64 ;;
+      Linux/aarch64|Linux/arm64) arch=arm64 ;;
+      *) printf 'release candidate bootstrap platform is unsupported\n' >&2; return 2 ;;
+    esac
+    [ "$runtime_file" = "subyard-$version-linux-$arch.tar.gz" ] \
+      || { printf 'release candidate archive differs from the bootstrap selection\n' >&2; return 2; }
+  else
+    candidate_rc=$?
+    [ "$candidate_rc" = 1 ] || return "$candidate_rc"
+    release="$state/release"
+    version=0.1.0-candidate.e2e
+    "$root/dev/package-engine.sh" --version "$version" --output-dir "$release" >&2 || return
+  fi
+  env YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$state/releases" \
+    YARD_RUNTIME_ROOT="$state/runtime" YARD_BIN_DIR="$state/bin" \
+    YARD_SHELL_RC="$state/bashrc" YARD_LOGIN_RC="$state/profile" \
+    bash "$release/subyard-install.sh" --version "$version" --yes >&2 || return
+  launcher="$state/bin/yard"
+  env YARD_RUNTIME_ROOT="$state/runtime" "$launcher" migrate --check --json \
+    | jq -e '.outcome.status == "ready"' >/dev/null || return
+  printf '%s\n' "$launcher"
+}

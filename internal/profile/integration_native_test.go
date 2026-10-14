@@ -73,12 +73,7 @@ func TestIntegrationNativeValidation(t *testing.T) {
 		`{"schema_version":1,"native":[{"package":"cmd/tool","path":"../tool"}]}`,
 		`{"schema_version":1,"native":[{"package":"cmd/tool","path":"bin/tool"},{"package":"cmd/other","path":"bin/tool"}]}`,
 	} {
-		root := testkit.TempDir(t)
-		if err := os.MkdirAll(filepath.Join(root, "config", "agents", "sample"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, filepath.Join(root, "config", "agents", "sample", "integration.json"), []byte(declaration), 0644)
-		if _, err := LoadIntegrations(root); err == nil {
+		if _, err := DecodeIntegration("sample", []byte(declaration)); err == nil {
 			t.Fatal("invalid native declaration accepted")
 		}
 	}
