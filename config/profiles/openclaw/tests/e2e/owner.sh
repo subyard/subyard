@@ -12,7 +12,7 @@ MARKER=openclaw-profile-e2e-v1
 die() { printf 'openclaw-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
 [ "$(id -un)" = dev ] || die 'run as the allocated dev user'
-for command in go incus jq sudo; do
+for command in go incus jq sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -71,21 +71,46 @@ export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
-install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/overrides/host"
 printf '%s\n' "$(printf '%s' openclaw-e2e-synthetic-denylist-token | sha256sum | awk '{print $1}')" \
   > "$SUBYARD_CONFIG_HOME/overrides/host/prod-fingerprints"
 chmod 0600 "$SUBYARD_CONFIG_HOME/overrides/host/prod-fingerprints"
 
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ] || [ -L "$ROOT/.subyard-acceptance/candidate.json" ]; then
-  # shellcheck source=tests/helpers/release-candidate.sh
-  . "$ROOT/tests/helpers/release-candidate.sh"
   YARD_BIN="$(release_candidate_prepare "$ROOT")" \
     || die 'packaged release candidate is invalid or unavailable'
 else
   "$ROOT/dev/build-engine.sh" --force
   YARD_BIN="$ROOT/.build/yard"
 fi
+
+# Activation needs native owner access before any uninitialized yard is registered.
+# Reuse the product reconciler, then commit the protected publication reader epoch
+# through the supported installer; running a source engine does not establish it.
+printf 'openclaw_e2e_stage=release-preflight\n'
+(
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_context "$STATE/incus-foundation"
+  export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+  export SUBYARD_DISPATCHER_PATH="$YARD_BIN"
+  export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
+  set -a
+  # shellcheck source=config/host.env
+  . "$ROOT/config/host.env"
+  set +a
+  bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
+)
+timeout 10 /usr/bin/incus query /1.0 >/dev/null
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
+YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+"$YARD_BIN" _publication-contracts >/dev/null
+printf 'openclaw candidate release-preflight=PASS\n'
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 
 port=$((35000 + ($$ % 15000)))
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
@@ -245,6 +270,23 @@ docker exec subyard-staging-canonical sh -eu -c '
   fi
 ' sh "$1"
 VERIFY_GATEWAY_STOP
+assert_no_staging_lease
+# Reconcile an old installation without replacing the flock inode.
+incus exec "$instance" --project "$project" -- sh -eu -c '
+  dir=/srv/staging/_lease
+  printf "500\n" > "$dir/bot.epoch"
+  chown 0:0 "$dir/bot.lock" "$dir/bot.epoch"
+  chmod 0644 "$dir/bot.lock" "$dir/bot.epoch"
+'
+lease_inode="$(incus exec "$instance" --project "$project" -- stat -c '%d:%i' /srv/staging/_lease/bot.lock)"
+yard staging up --yes > "$STATE/staging-up-existing.out"
+[ "$(incus exec "$instance" --project "$project" -- stat -c '%d:%i' /srv/staging/_lease/bot.lock)" = "$lease_inode" ] \
+  || die 'staging up replaced the retained lease lock inode'
+# Exercise the delivered guest entrypoint and its sibling payload as the yard user.
+incus exec "$instance" --project "$project" -- su - dev -c 'sy-stage reserve --zone canonical' > "$STATE/staging-guest-reserve.out"
+incus exec "$instance" --project "$project" -- jq -e \
+  '.holder == "canonical" and .kind == "ephemeral" and .epoch == 501' /srv/staging/_lease/bot.json >/dev/null
+incus exec "$instance" --project "$project" -- su - dev -c 'sy-stage release --zone canonical' > "$STATE/staging-guest-release.out"
 assert_no_staging_lease
 if yard qa-pool up --yes > "$STATE/qa-up.out" 2>&1; then
   die 'QA resource accepted bring-up without a broker source and generated secrets'

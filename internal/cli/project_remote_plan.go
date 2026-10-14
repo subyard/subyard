@@ -244,11 +244,7 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 	}{"sync", true, &source, 1}, &exact); err != nil {
 		return err
 	}
-	digest, err := hex.DecodeString(exact.Digest)
-	if err != nil || len(digest) != 32 || exact.Schema != 1 || exact.StepSchema != 1 || len(exact.Plan.Steps) == 0 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != "sync" || exact.Plan.Target != domain.TargetLocalOwner || exact.Plan.Effect != domain.CommandMutate || exact.ExpiresAt.IsZero() || exact.Plan.Confirmed && exact.Plan.Confirmation != domain.ConfirmationNever {
-		return errors.New("owner returned invalid project copy plan")
-	}
-	if err := domain.ValidateOperationSteps(exact.Plan.Steps); err != nil {
+	if err := session.validatePlan(exact, cli.ensureOperationID(), "sync"); err != nil {
 		return err
 	}
 	prepared.Plan, prepared.ownerPlan, prepared.executeNoOp = exact.Plan, true, true
@@ -263,17 +259,11 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 		if err := project.checkPreparedSource(ctx, cli); err != nil {
 			return domain.AdapterResult{}, err
 		}
-		var response struct {
-			Plan   domain.OperationPlan `json:"plan"`
-			Result domain.AdapterResult `json:"result"`
-		}
-		if err := session.call(ctx, "operation.execute", exact.Plan.OperationID, struct {
-			Confirmed bool   `json:"confirmed"`
-			Digest    string `json:"digest"`
-		}{true, exact.Digest}, &response); err != nil {
+		response, err := session.execute(ctx, exact)
+		if err != nil {
 			return domain.AdapterResult{}, err
 		}
-		if response.Plan.OperationID != exact.Plan.OperationID || response.Result.OperationID != exact.Plan.OperationID || response.Result.Status != "ok" {
+		if response.Result.Status != "ok" {
 			return domain.AdapterResult{}, errors.New("owner project admission response mismatch")
 		}
 		encoded, err := json.Marshal(response.Result.Output["project"])

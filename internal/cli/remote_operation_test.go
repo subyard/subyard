@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -378,4 +379,87 @@ while True:
 `, 0600)
 	writeCLIFile(t, filepath.Join(folder, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"\nexec python3 '"+filepath.Join(folder, "owner.py")+"' \"$@\"\n", 0700)
 	return filepath.Join(folder, "owner-calls")
+}
+
+func TestOwnerRPCPlanEnvelope(t *testing.T) {
+	valid := exactOperationPlan{Schema: 1, StepSchema: 1, Digest: strings.Repeat("a", 64), ExpiresAt: time.Unix(1, 0), Plan: domain.OperationPlan{OperationID: "envelope", Command: "sync", Target: domain.TargetLocalOwner, Effect: domain.CommandMutate, Confirmation: domain.ConfirmationNever, Steps: []domain.OperationStep{{ID: "copy", Target: "owner", Observed: "missing", Desired: "copied", Decision: domain.StepApply, Verify: "content"}}}}
+	for _, tc := range []struct {
+		name   string
+		change func(*exactOperationPlan)
+	}{
+		{"schema", func(p *exactOperationPlan) { p.Schema = 2 }},
+		{"step-schema", func(p *exactOperationPlan) { p.StepSchema = 0 }},
+		{"missing-steps", func(p *exactOperationPlan) { p.Plan.Steps = nil }},
+		{"operation-id", func(p *exactOperationPlan) { p.Plan.OperationID = "other" }},
+		{"command", func(p *exactOperationPlan) { p.Plan.Command = "remove" }},
+		{"target", func(p *exactOperationPlan) { p.Plan.Target = "other" }},
+		{"effect", func(p *exactOperationPlan) { p.Plan.Effect = "other" }},
+		{"digest-encoding", func(p *exactOperationPlan) { p.Digest = strings.Repeat("z", 64) }},
+		{"digest-length", func(p *exactOperationPlan) { p.Digest = "ab" }},
+		{"expiry-missing", func(p *exactOperationPlan) { p.ExpiresAt = time.Time{} }},
+		{"preconfirmed-prompt", func(p *exactOperationPlan) {
+			p.Plan.Confirmed = true
+			p.Plan.Confirmation = domain.ConfirmationPromptDefaultYes
+		}},
+		{"malformed-step", func(p *exactOperationPlan) {
+			p.Plan.Steps = domain.CloneOperationSteps(p.Plan.Steps)
+			p.Plan.Steps[0].Verify = ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := valid
+			tc.change(&p)
+			if err := (&ownerRPCSession{}).validatePlan(p, "envelope", "sync"); err == nil {
+				t.Fatal("malformed plan accepted")
+			}
+		})
+	}
+	// A controller clock must not reject an envelope issued by a skewed owner.
+	valid.Plan.Confirmed = true
+	if err := (&ownerRPCSession{}).validatePlan(valid, "envelope", "sync"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOwnerRPCExecutionEnvelope(t *testing.T) {
+	for _, kind := range []string{"ok", "failed", "plan-identity", "result-identity"} {
+		t.Run(kind, func(t *testing.T) {
+			exact := exactOperationPlan{Digest: strings.Repeat("a", 64), Plan: domain.OperationPlan{OperationID: "execute-envelope"}}
+			response := ownerOperationResponse{Plan: exact.Plan, Result: domain.AdapterResult{OperationID: exact.Plan.OperationID, Status: "ok"}}
+			switch kind {
+			case "failed":
+				response.Result.Status = "failed"
+			case "plan-identity":
+				response.Plan.OperationID = "other"
+			case "result-identity":
+				response.Result.OperationID = "other"
+			}
+			var input, output bytes.Buffer
+			if err := rpc.NewCodec(nil, &input).Write(rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "operation.execute", OperationID: exact.Plan.OperationID, Result: response}); err != nil {
+				t.Fatal(err)
+			}
+			session := ownerRPCSession{codec: rpc.NewCodec(&input, &output), close: func() error { return nil }}
+			got, err := session.execute(context.Background(), exact)
+			if strings.HasSuffix(kind, "identity") {
+				if err == nil {
+					t.Fatal("mismatched identity accepted")
+				}
+				return
+			}
+			if err != nil || got.Result.Status != response.Result.Status {
+				t.Fatalf("execute: %#v, %v", got, err)
+			}
+			request, err := rpc.NewCodec(&output, nil).ReadRequest()
+			if err != nil || request.Method != "operation.execute" || request.OperationID != exact.Plan.OperationID {
+				t.Fatalf("request: %#v, %v", request, err)
+			}
+			var params struct {
+				Confirmed bool
+				Digest    string
+			}
+			if err := json.Unmarshal(request.Params, &params); err != nil || !params.Confirmed || params.Digest != exact.Digest {
+				t.Fatalf("execution binding: %#v, %v", params, err)
+			}
+		})
+	}
 }

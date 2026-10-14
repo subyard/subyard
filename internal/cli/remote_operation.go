@@ -189,6 +189,36 @@ func (session *ownerRPCSession) requireOperationSteps() error {
 	return nil
 }
 
+// validatePlan checks only the shared owner envelope; command-specific scope and
+// status remain with the caller. Expiry is enforced by the issuing owner's clock.
+func (session *ownerRPCSession) validatePlan(exact exactOperationPlan, operationID, command string) error {
+	digest, err := hex.DecodeString(exact.Digest)
+	if err != nil || len(digest) != sha256.Size || exact.Schema != 1 || exact.StepSchema != 1 || len(exact.Plan.Steps) == 0 || exact.Plan.OperationID != operationID || exact.Plan.Command != command || exact.Plan.Target != domain.TargetLocalOwner || exact.Plan.Effect != domain.CommandMutate || exact.ExpiresAt.IsZero() || exact.Plan.Confirmed && exact.Plan.Confirmation != domain.ConfirmationNever {
+		return errors.New("owner returned an invalid exact operation plan")
+	}
+	return domain.ValidateOperationSteps(exact.Plan.Steps)
+}
+
+type ownerOperationResponse struct {
+	Plan   domain.OperationPlan `json:"plan"`
+	Result domain.AdapterResult `json:"result"`
+}
+
+func (session *ownerRPCSession) execute(ctx context.Context, exact exactOperationPlan) (ownerOperationResponse, error) {
+	var response ownerOperationResponse
+	err := session.call(ctx, "operation.execute", exact.Plan.OperationID, struct {
+		Confirmed bool   `json:"confirmed"`
+		Digest    string `json:"digest"`
+	}{true, exact.Digest}, &response)
+	if err != nil {
+		return ownerOperationResponse{}, err
+	}
+	if response.Plan.OperationID != exact.Plan.OperationID || response.Result.OperationID != exact.Plan.OperationID {
+		return ownerOperationResponse{}, errors.New("owner execution response identity mismatch")
+	}
+	return response, nil
+}
+
 func (session *ownerRPCSession) integrationStatus(ctx context.Context, yard domain.Context, operationID, id string) (integrationStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -266,14 +296,7 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	if err = session.call(planContext, "operation.plan", cli.ensureOperationID(), params, &exact); err != nil {
 		return err
 	}
-	digest, decodeErr := hex.DecodeString(exact.Digest)
-	// Native preparation pre-confirms actions whose concrete policy is never,
-	// including converged no-ops. Prompting actions still require this controller.
-	preconfirmedPrompt := exact.Plan.Confirmed && exact.Plan.Confirmation != domain.ConfirmationNever
-	if exact.Schema != 1 || exact.StepSchema != 1 || len(exact.Plan.Steps) == 0 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != prepared.Definition.Name || exact.Plan.Effect != domain.CommandMutate || exact.Plan.Target != domain.TargetLocalOwner || preconfirmedPrompt || decodeErr != nil || len(digest) != sha256.Size || exact.ExpiresAt.IsZero() {
-		return errors.New("owner returned an invalid exact operation plan")
-	}
-	if err := domain.ValidateOperationSteps(exact.Plan.Steps); err != nil {
+	if err := session.validatePlan(exact, cli.ensureOperationID(), prepared.Definition.Name); err != nil {
 		return err
 	}
 	if request.check {
@@ -296,20 +319,9 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		}
 	}
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
-		// The owner validates expiry against the same clock that issued the plan.
-		var response struct {
-			Plan   domain.OperationPlan `json:"plan"`
-			Result domain.AdapterResult `json:"result"`
-		}
-		err := session.call(ctx, "operation.execute", exact.Plan.OperationID, struct {
-			Confirmed bool   `json:"confirmed"`
-			Digest    string `json:"digest"`
-		}{true, exact.Digest}, &response)
+		response, err := session.execute(ctx, exact)
 		if err != nil {
 			return domain.AdapterResult{}, err
-		}
-		if response.Plan.OperationID != exact.Plan.OperationID || response.Result.OperationID != exact.Plan.OperationID {
-			return domain.AdapterResult{}, errors.New("owner execution response identity mismatch")
 		}
 		if response.Result.Status == "ok" && prepared.Project != nil {
 			if err := cli.invalidateOwnerInventory(prepared.Loaded); err != nil {

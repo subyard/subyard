@@ -29,6 +29,8 @@ case "${1:-}" in
   exec)
     [ -e "$state_root/up" ] || exit 1
     case " $* " in
+      *' id -u '*) printf '1000\n' ;;
+      *' id -g '*) printf '1001\n' ;;
       *' sh -s -- /srv/staging/_lease bot canonical '*)
         script="$(cat)"
         case "$script" in

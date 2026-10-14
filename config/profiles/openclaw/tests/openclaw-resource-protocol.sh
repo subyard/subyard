@@ -147,7 +147,7 @@ case "${command[0]:-}" in
     esac
     ;;
   install) touch "$state_root/secret-staged" ;;
-  id) [ "${command[1]:-}" = -g ] && printf '1001\n' ;;
+  id) case "${command[1]:-}" in -u) printf '1000\n' ;; -g) printf '1001\n' ;; esac ;;
   test)
     case "${command[1]:-} ${command[2]:-}" in
       '-r /srv/source/convex.json') exit 0 ;;
@@ -370,15 +370,27 @@ SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-u
   || fail 'staging up did not copy the validated production fingerprints'
 printf '%s\n' "$other_fp" | cmp -s - "$TMP/staged-prod-fingerprints" \
   || fail 'staging up did not copy the normalized validated fingerprint snapshot'
-printf '# refresh existing runner\n%s\n' "${third_fp^^}" >"$prod_fingerprints"
-SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-up-refresh \
-  "$STAGING" up >"$TMP/up-refresh.out"
-printf '%s\n' "$third_fp" | cmp -s - "$TMP/staged-prod-fingerprints" \
-  || fail 'repeated staging up did not refresh the normalized fingerprint snapshot'
 for cache in pnpm pip npm; do
   grep -Fq -- "-- install -d -o 1000 -g 1001 /srv/cache/$cache" "$TMP/incus.log" \
     || fail "staging did not preserve the primary group of the $cache cache"
 done
+printf '# refresh existing runner\n%s\n' "${third_fp^^}" >"$prod_fingerprints"
+# An existing runner still prepares apply work, reaching lease repair after consent.
+: >"$TMP/incus.log"
+SUBYARD_RESOURCE_MODE=prepare "$STAGING" up >"$TMP/up-refresh-plan.json"
+jq -e '.changed == true and all(.steps[]; .decision == "apply")' "$TMP/up-refresh-plan.json" >/dev/null
+if grep -Eq -- ' setup |-- install |-- docker (start|run) ' "$TMP/incus.log"; then
+  fail 'repeated staging up prepare changed native state'
+fi
+SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-up-refresh \
+  SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$TMP/up-refresh-plan.json")" \
+  SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$TMP/up-refresh-plan.json")" \
+  "$STAGING" up >"$TMP/up-refresh.out"
+grep -Fq -- '-- sh -s -- /srv/staging/_lease bot canonical setup 1000 1001' "$TMP/incus.log" \
+  || fail 'prepared repeated up skipped the lease ownership repair'
+printf '%s\n' "$third_fp" | cmp -s - "$TMP/staged-prod-fingerprints" \
+  || fail 'repeated staging up did not refresh the normalized fingerprint snapshot'
+
 
 # Exercise sy-stage itself, including its embedded guard, against marker-owned paths.
 sy_root="$TMP/sy-stage"
@@ -388,6 +400,7 @@ mkdir -p "$sy_root/bin" "$sy_root/staging/diag/vasily/openclaw" \
 sed -e "s|^LEASE_DIR=\"/srv/staging/_lease\"$|LEASE_DIR=\"$sy_root/lease\"|" \
     -e "s|^STAGING_ROOT=\"/srv/staging\"$|STAGING_ROOT=\"$sy_root/staging\"|" \
     "$SY_STAGE" >"$sy_script"
+cp "$(dirname "$SY_STAGE")/staging-lease.sh" "$sy_root/staging-lease.sh"
 chmod 0755 "$sy_script"
 cp "$TMP/staging/vasily/openclaw/openclaw.json" \
   "$sy_root/staging/diag/vasily/openclaw/openclaw.json"

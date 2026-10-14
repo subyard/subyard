@@ -27,6 +27,7 @@
 # run is `ephemeral` and PREEMPTS a `canonical` holder (fence-by-lifecycle: stop it first).
 set -euo pipefail
 
+LEASE_PAYLOAD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/staging-lease.sh"
 LEASE_DIR="/srv/staging/_lease"
 STAGING_ROOT="/srv/staging"
 
@@ -122,39 +123,11 @@ load_prod_fingerprints() { # <file>
 }
 
 # --- bot-identity lease (flock+file; FIFO/TTL/epoch; single host) — same primitive as the host CLI
-lease_acquire() {  # kind [mode] -> "OK <epoch>" | "PREEMPT <holder>" | "BUSY <holder> <kind> <secs>"
-  local kind="$1" mode="${2:-normal}"
-  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" "$kind" "$LEASE_TTL" "$mode" <<'LEASE'
-set -eu
-dir="$1"; key="$2"; me="$3"; kind="$4"; ttl="$5"; mode="$6"
-install -d -m 0755 "$dir"
-lock="$dir/$key.lock"; st="$dir/$key.json"
-exec 9>"$lock"; flock 9
-now=$(date +%s)
-holder=""; hk=""; epoch=0; exp=0
-if [ -r "$st" ]; then
-  holder=$(jq -r '.holder // ""' "$st"); hk=$(jq -r '.kind // ""' "$st")
-  epoch=$(jq -r '.epoch // 0' "$st");    exp=$(jq -r '.expires // 0' "$st")
-fi
-if [ "$mode" != force ] && [ -n "$holder" ] && [ "$holder" != "$me" ] && [ "$now" -lt "$exp" ]; then
-  if [ "$kind" = ephemeral ] && [ "$hk" = canonical ]; then echo "PREEMPT $holder"; exit 0; fi
-  echo "BUSY $holder $hk $((exp-now))"; exit 0
-fi
-epoch=$((epoch+1))
-printf '{"holder":"%s","kind":"%s","epoch":%d,"expires":%d}\n' "$me" "$kind" "$epoch" "$((now+ttl))" >"$st"
-echo "OK $epoch"
-LEASE
+lease_acquire() {
+  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" acquire "$1" "$LEASE_TTL" "${2:-normal}" < "$LEASE_PAYLOAD"
 }
 lease_release() {
-  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" <<'LEASE'
-set -eu
-dir="$1"; key="$2"; me="$3"
-st="$dir/$key.json"; lock="$dir/$key.lock"
-[ -r "$st" ] || exit 0
-exec 9>"$lock"; flock 9
-[ "$(jq -r '.holder // ""' "$st")" = "$me" ] || exit 0
-rm -f "$st"
-LEASE
+  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" release "${lease_expected_epoch:-}" < "$LEASE_PAYLOAD"
 }
 lease_show() { [ -r "$LEASE_DIR/$BOT_LEASE_KEY.json" ] && cat "$LEASE_DIR/$BOT_LEASE_KEY.json" || echo "{}"; }
 
@@ -163,14 +136,14 @@ reserve_lease() {
   local la holder
   la="$(lease_acquire ephemeral normal)"
   case "$la" in
-    OK\ *)      ok "lease acquired (epoch ${la#OK })"; return 0 ;;
+    OK\ *)      lease_expected_epoch="${la#OK }"; ok "lease acquired (epoch ${la#OK })"; return 0 ;;
     PREEMPT\ *) holder="${la#PREEMPT }"
                 info "preempting canonical holder '$holder' (fence-by-lifecycle: stopping its gateway)"
                 docker exec "subyard-staging-$holder" sh -c '
                   p="$(cat "$1" 2>/dev/null)"; [ -n "$p" ] && kill "$p" 2>/dev/null || true; rm -f "$1"
                 ' _ "$STAGING_ROOT/$holder/run/gateway.pid" 2>/dev/null || true
                 la="$(lease_acquire ephemeral force)"
-                case "$la" in OK\ *) ok "lease acquired after preempt (epoch ${la#OK })"; return 0 ;; esac
+                case "$la" in OK\ *) lease_expected_epoch="${la#OK }"; ok "lease acquired after preempt (epoch ${la#OK })"; return 0 ;; esac
                 die "could not acquire lease after preempt: $la" ;;
     BUSY\ *)    die "bot lease held: ${la#BUSY } — another ephemeral run is polling; wait or 'sy-stage stop' it" ;;
     *)          die "could not acquire bot lease: $la" ;;
@@ -232,23 +205,8 @@ GUARD
   sleep 1
   gateway_running || { lease_release || true; die "gateway exited immediately — sy-stage logs --zone $zone"; }
   # heartbeat sidecar — renews the lease while the gateway pid lives, then releases (inside the box)
-  docker exec -d "$CNAME" sh -c '
-    lease="$1/$2.json"; lock="$1/$2.lock"; me="$3"; ttl="$4"; gwpid="$5"; hbpid="$6"
-    echo $$ >"$hbpid"
-    step=$((ttl/3)); [ "$step" -gt 0 ] || step=5
-    while [ -f "$gwpid" ] && kill -0 "$(cat "$gwpid" 2>/dev/null)" 2>/dev/null; do
-      ( exec 9>"$lock"; flock 9
-        [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] || exit 0
-        now=$(date +%s); t="$lease.t.$$"
-        jq --argjson e "$((now+ttl))" ".expires=\$e" "$lease" >"$t" && mv "$t" "$lease"
-      ) 2>/dev/null || true
-      sleep "$step"
-    done
-    ( exec 9>"$lock"; flock 9
-      [ -r "$lease" ] && [ "$(jq -r ".holder//\"\"" "$lease")" = "$me" ] && rm -f "$lease"
-    ) 2>/dev/null || true
-    rm -f "$hbpid"
-  ' _ "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" "$LEASE_TTL" "$GW_PID" "$HB_PID"
+  docker exec -d "$CNAME" sh -c "$(cat "$LEASE_PAYLOAD")" _ \
+      "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" heartbeat "$LEASE_TTL" "$GW_PID" "$HB_PID" "${lease_expected_epoch:?}"
   ok "gateway running for zone '$zone' (pid $(docker exec "$CNAME" cat "$GW_PID" 2>/dev/null)) — follow: sy-stage logs --zone $zone -f"
 }
 

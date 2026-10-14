@@ -5,6 +5,7 @@
     {"path": "config/profiles/openclaw/resources/qa-bot-broker/handler.sh", "kind": "profile", "owner": "config/profiles/openclaw/resources/qa-bot-broker.res", "reference": "HANDLER=resources/qa-bot-broker/handler.sh"},
     {"path": "config/profiles/openclaw/resources/staging-gateway/handler.sh", "kind": "profile", "owner": "config/profiles/openclaw/resources/staging-gateway.res", "reference": "HANDLER=resources/staging-gateway/handler.sh"},
     {"path": "config/profiles/openclaw/resources/staging-gateway/sy-stage.sh", "kind": "embedded", "owner": "config/profiles/openclaw/resources/staging-gateway/handler.sh", "reference": "sy-stage.sh"},
+    {"path": "config/profiles/openclaw/resources/staging-gateway/staging-lease.sh", "kind": "embedded", "owner": "config/profiles/openclaw/resources/staging-gateway/handler.sh", "reference": "staging-lease.sh"},
     {"path": "config/profiles/openclaw/resources/exact-plan.sh", "kind": "embedded", "owner": "config/profiles/openclaw/resources/qa-bot-broker/handler.sh", "reference": "exact-plan.sh"}
   ]
 }

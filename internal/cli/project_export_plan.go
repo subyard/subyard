@@ -367,11 +367,11 @@ func (prepared *preparedCommand) prepareRemoteProjectExport(ctx context.Context)
 	}{"export", true, 1, descriptor}, &exact); err != nil {
 		return err
 	}
-	if !validExportDigest(exact.Digest) || exact.Schema != 1 || exact.StepSchema != 1 || len(exact.Plan.Steps) != 3 || exact.Plan.OperationID != cli.ensureOperationID() || exact.Plan.Command != "export" || exact.Plan.Target != domain.TargetLocalOwner || exact.Plan.Effect != domain.CommandMutate || exact.Plan.Confirmation != domain.ConfirmationNever || exact.ExpiresAt.IsZero() {
-		return errors.New("owner returned an invalid exact export plan")
-	}
-	if err := domain.ValidateOperationSteps(exact.Plan.Steps); err != nil {
+	if err := session.validatePlan(exact, cli.ensureOperationID(), "export"); err != nil {
 		return err
+	}
+	if !validExportDigest(exact.Digest) || len(exact.Plan.Steps) != 3 || exact.Plan.Confirmation != domain.ConfirmationNever {
+		return errors.New("owner returned an invalid exact export plan")
 	}
 	if exact.Plan.Steps[2].Target != "controller:"+descriptor.Destination {
 		return errors.New("owner export destination scope mismatch")
@@ -385,17 +385,11 @@ func (prepared *preparedCommand) prepareRemoteProjectExport(ctx context.Context)
 		if err := project.controllerExport.store.Check(); err != nil {
 			return domain.AdapterResult{}, err
 		}
-		var response struct {
-			Plan   domain.OperationPlan `json:"plan"`
-			Result domain.AdapterResult `json:"result"`
-		}
-		if err := session.call(ctx, "operation.execute", exact.Plan.OperationID, struct {
-			Confirmed bool   `json:"confirmed"`
-			Digest    string `json:"digest"`
-		}{true, exact.Digest}, &response); err != nil {
+		response, err := session.execute(ctx, exact)
+		if err != nil {
 			return domain.AdapterResult{}, err
 		}
-		if response.Plan.OperationID != exact.Plan.OperationID || response.Result.OperationID != exact.Plan.OperationID || response.Result.Status != "ok" {
+		if response.Result.Status != "ok" {
 			return domain.AdapterResult{}, errors.New("owner export authorization response mismatch")
 		}
 		identity, _ := response.Result.Output["temporaryIdentity"].(string)
