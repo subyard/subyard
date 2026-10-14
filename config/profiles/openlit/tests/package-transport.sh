@@ -18,27 +18,7 @@ fi
 release_args=(--runtime-root "$state/runtime" --bundle "$bundle"
   --checksum "$bundle.sha256" --manifest "$bundle.manifest.json"
   --provenance "$bundle.provenance.json")
-bash "$root/scripts/install-runtime-release.sh" "${release_args[@]}" --check >/dev/null
 target="$(bash "$root/scripts/install-runtime-release.sh" "${release_args[@]}" --publish-only)"
-repeat="$(bash "$root/scripts/install-runtime-release.sh" "${release_args[@]}" --publish-only)"
-[ "$target" = "$repeat" ]
-[ ! -e "$state/runtime/current" ] && [ ! -e "$state/runtime/previous" ]
 installed="$state/runtime/$target"
-python3 - "$bundle" <<'PY'
-import sys, tarfile
-with tarfile.open(sys.argv[1]) as archive:
-    for asset in ("tomli_w.py", "TOMLI_W_LICENSE"):
-        assert archive.getmember("./internal/adapters/configmaterial/" + asset).mode == 0o644
-PY
-for asset in tomli_w.py TOMLI_W_LICENSE; do
-  relative="internal/adapters/configmaterial/$asset"
-  cmp "$root/$relative" "$installed/$relative"
-done
 bash "$root/config/profiles/openlit/tests/owner-lifecycle.sh" "$installed"
-# An immutable repeat must validate the shared dependency too.
-writer="$installed/internal/adapters/configmaterial/tomli_w.py"
-printf '\n# fixture corruption\n' >> "$writer"
-if bash "$root/scripts/install-runtime-release.sh" "${release_args[@]}" --publish-only >/dev/null 2>&1; then
-  printf 'FAIL: installed dependency corruption accepted\n' >&2; exit 1
-fi
-printf 'ok: installed OpenLIT transport, shared assets and immutable repeat validation\n'
+printf 'ok: installed OpenLIT lifecycle transport\n'

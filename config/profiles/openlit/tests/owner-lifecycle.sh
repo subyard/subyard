@@ -3,6 +3,7 @@
 set -euo pipefail
 export TMPDIR=/tmp
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source_root="$root"
 [ "$#" -le 1 ] || { printf 'usage: owner-lifecycle.sh [installed-runtime]\n' >&2; exit 2; }
 if [ "$#" = 1 ]; then root="$(cd "$1" && pwd)"; fi
 state="$(mktemp -d /tmp/subyard-openlit-owner.XXXXXX)"
@@ -98,14 +99,14 @@ fi
 # Released-updater observations use this profile's exact transport, with no guest execution.
 # Retain the owning guest double for the independent elevated-pause scenario.
 cp "$state/bin/incus" "$state/incus-owner-fixture"
-python3 - "$root" "$state" <<'PY'
+python3 - "$root" "$state" "$source_root" <<'PY'
 import json, os, pathlib, runpy, subprocess, sys
 
-root, state = map(pathlib.Path, sys.argv[1:])
+root, state, source_root = map(pathlib.Path, sys.argv[1:])
 control, rejected = state/'control.json', state/'rejected'
 control.write_text(json.dumps({'instances': [{'info': {'status': 'Running'}}]}))
 control.chmod(0o600)
-harness = runpy.run_path(str(root/'dev/verify-release-upgrades.py'))
+harness = runpy.run_path(str(source_root/'dev/verify-release-upgrades.py'))
 harness['write_observation_incus'](state/'bin', control, rejected)
 profile = root/'config/profiles/openlit'
 environment = dict(os.environ, INCUS_PROJECT='subyard', YARD_INSTANCE_NAME='yard',
@@ -125,7 +126,7 @@ result = subprocess.run(['bash', str(profile/'runtime.sh'), 'apply', 'fixture-op
 assert result.returncode != 0 and not result.stdout
 assert b'dashboard/runtime conflict or failed verification' in result.stderr
 assert control.read_bytes() == before and not rejected.exists()
-commands = runpy.run_path(str(profile/'tests/release-observation.py'))['read_only_commands'](profile)
+commands = runpy.run_path(str(source_root/'config/profiles/openlit/tests/release-observation.py'))['read_only_commands'](profile)
 command = commands[0][0]
 changed_script = command.copy(); changed_script[9] += '\n'
 apply = command.copy(); apply[11] = 'refresh'; apply += ['a'*64, 'b'*64]

@@ -40,6 +40,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 	var recipeCompleted, stoppedAfterRecipe, restartedAfterRecipe, agentAfterRestart, cloudAfterRestart, toolsAfterRestart, sanitized bool
 	var validationFault string
 	var metadataAttached bool
+	var builderMetadata string
 	var owner, buildKey string
 	var builds, publications, deletions int
 	images := map[string]incusImage{}
@@ -120,7 +121,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			if metadataAttached {
 				devices[cloudInitDevice] = map[string]string{"type": "disk", "source": "cloud-init:config"}
 			}
-			return encode(map[string]any{"type": "virtual-machine", "config": map[string]string{"user.subyard.managed": managedMarker}, "devices": devices, "expanded_devices": devices})
+			return encode(map[string]any{"type": "virtual-machine", "status": "Stopped", "stateful": false, "config": map[string]string{"user.subyard.managed": managedMarker, "user.subyard.base_owner": owner, "user.subyard.base_key": buildKey, "volatile.uuid": "00000000-0000-0000-0000-000000000001"}, "devices": devices, "expanded_devices": devices})
 		case "config device add e2e-base-1 " + cloudInitDevice + " disk source=cloud-init:config --project " + project:
 			metadataAttached = true
 			return nil, nil, nil
@@ -156,10 +157,16 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			}
 			builds++
 			metadataAttached = false
+			builderMetadata = `{ "architecture":"x86_64", "creation_date":1, "properties":{}, "templates":{ "/var/lib/cloud/seed/nocloud-net/meta-data":{"template":"meta.tpl", "when":["create"]}}}`
 			recipeCompleted, stoppedAfterRecipe, restartedAfterRecipe, agentAfterRestart, cloudAfterRestart, toolsAfterRestart, sanitized = false, false, false, false, false, false, false
 			vmExists, buildKey = true, properties()["user.subyard.base_key"]
+		case strings.HasPrefix(command, "query /1.0/instances/e2e-base-1/metadata?"):
+			if len(args) > 2 {
+				builderMetadata = args[5]
+			}
+			return []byte(builderMetadata), nil, nil
 		case strings.HasPrefix(command, "publish e2e-base-1 "):
-			if !recipeCompleted || !restartedAfterRecipe || !agentAfterRestart || !cloudAfterRestart || !toolsAfterRestart || !sanitized || builderRunning {
+			if !recipeCompleted || !restartedAfterRecipe || !agentAfterRestart || !cloudAfterRestart || !toolsAfterRestart || !sanitized || builderRunning || strings.Contains(builderMetadata, "nocloud-net") {
 				return nil, nil, errors.New("base published without post-upgrade boot validation")
 			}
 			publications++
@@ -208,7 +215,7 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 					return nil, nil, errors.New("synthetic missing tool")
 				}
 			}
-			if strings.Contains(command, "cloud-init clean --logs --machine-id") {
+			if strings.Contains(command, "cloud-init clean --logs --machine-id --seed") {
 				if !restartedAfterRecipe || !cloudAfterRestart || !toolsAfterRestart || !strings.Contains(command, "systemctl stop incus.service incus.socket") {
 					return nil, nil, errors.New("base sanitized before validation or retained Incus state")
 				}

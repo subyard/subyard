@@ -527,8 +527,9 @@ Fault staging has an exact fixture marker and canonical nonsymlink files; backup
 current configuration content, mode and ownership are checked before restoration.
 Cleanup restores the fault before restarting recovery or retiring the owner. A guard
 refusal retains the owner and reports cleanup failure; shared cleanup cannot bypass it.
-The fixture removes its owned runtime reaper mask, but refuses to restart the timer
-against configuration that could not be safely restored.
+The fixture verifies an owned runtime drop-in that refuses explicit reaper starts
+while its timer is stopped. It restores that drop-in before native recovery, and
+refuses to restart the timer against configuration that could not be safely restored.
 
 The 40 GiB virtual disk does not guarantee 35 GiB of usable free space after filesystem,
 base-image and owner provisioning costs. The nested directory pool shares that physical
@@ -538,10 +539,12 @@ through guarded helpers. It also cleans the verified owner container's downloade
 archives and removes only package staging created by this run after installed-worker
 verification. Installed runtimes, release caches, recipes, images and pins remain intact.
 Once owner installation is complete, it also removes reproducible downloaded APT
-indexes only inside the verified disposable owner. Nonblocking native POSIX APT/dpkg
+indexes inside the verified disposable owner and allocated VM. The privileged VM
+actor verifies its original schema-2 lease and exact fixture marker before deletion;
+both actors require native APT's canonical lists directory. Nonblocking POSIX APT/dpkg
 locks exclude concurrent package activity; complete ownership and nonsymlink checks
 precede deletion. Package databases, sources, directories and lock inodes are retained.
-Existing before/after categories report owner APT index bytes; reclaiming them still
+Existing before/after categories report APT index bytes in both scopes; reclaiming them still
 requires a fresh physical-capacity admission result.
 Fixed numeric categories cover caches and staging in both the allocated guest and its
 owner container; missing measurements are explicit. The owner provisioner copies the

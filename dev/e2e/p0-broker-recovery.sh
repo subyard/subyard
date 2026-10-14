@@ -17,7 +17,8 @@ RECLAIM_FIXTURE=/var/tmp/subyard-p0-release-reclaim
 RECLAIM_FIXTURE_BYTES=$((512 * 1024 * 1024))
 FAULT_ROOT=/run/subyard-p0-incus-fault
 FAULT_INSTALLED=0
-REAPER_MASKED=0
+REAPER_PAUSED=0
+REAPER_PAUSE_MARKER="subyard-p0-$$"
 REAPER_TIMER_STOPPED=0
 # The 100-minute default contains the 90-minute provisioning lease plus a
 # 10-minute cleanup/reaper margin. The 120-minute override ceiling remains bounded.
@@ -45,7 +46,7 @@ restore_targeted_incus_failure() {
       cp --preserve=mode,ownership,timestamps -- "$backup" "$config"
     fi
     find "$root" -depth -delete
-  ' _ "$FAULT_ROOT"
+  ' _ "$FAULT_ROOT" || return 1
   FAULT_INSTALLED=0
 }
 
@@ -126,20 +127,22 @@ start_slot_pair() {
 }
 
 cleanup() {
-  local rc=$?
+  local rc=$? reaper_restore_allowed=1
   trap - EXIT INT TERM
   set +e
   if [ -n "$NEIGHBOR_CONFIG" ] && [ -n "$RECLAIM_MARKER" ]; then
     remove_reclaim_fixture "$NEIGHBOR_CONFIG" >/dev/null 2>&1 || rc=3
   fi
-  restore_targeted_incus_failure >/dev/null 2>&1
-  if [ "$REAPER_MASKED" = 1 ]; then
-    outer_root systemctl unmask --runtime \
-      subyard-test-vms-lease-reaper.service >/dev/null 2>&1
+  restore_targeted_incus_failure >/dev/null 2>&1 || { rc=3; reaper_restore_allowed=0; }
+  if [ "$REAPER_PAUSED" = 1 ] && [ "$reaper_restore_allowed" = 1 ]; then
+    reaper_pause outer_root restore "$REAPER_PAUSE_MARKER" >/dev/null 2>&1 \
+      || { rc=3; reaper_restore_allowed=0; }
+  fi
+  if [ "$REAPER_PAUSED" = 1 ] && [ "$reaper_restore_allowed" = 1 ]; then
     outer_root systemctl start --no-block \
       subyard-test-vms-lease-reaper.service >/dev/null 2>&1
   fi
-  if [ "$REAPER_TIMER_STOPPED" = 1 ]; then
+  if [ "$REAPER_TIMER_STOPPED" = 1 ] && [ "$reaper_restore_allowed" = 1 ]; then
     outer_root systemctl start \
       subyard-test-vms-lease-reaper.timer >/dev/null 2>&1
   fi
@@ -183,6 +186,62 @@ wait_for_ready() {
   done
   tail -n 240 "$STATE_PARENT/$client.log" >&2
   return 1
+}
+
+# A runtime mask loses to a local /etc unit. Refuse the reaper's explicit start
+# instead; its timer is stopped separately while the incident is captured.
+reaper_pause() {
+  case "$1" in outer_root|outer_exec) ;; *) return 1 ;; esac
+  "$1" python3 - "$2" "$3" <<'PYREAPERPAUSE'
+import os,pathlib,re,stat,subprocess,sys
+action,marker=sys.argv[1:]
+if action not in ('install','verify','restore') or not re.fullmatch(r'subyard-p0-[0-9]+',marker):
+    raise RuntimeError('invalid reaper pause request')
+unit='subyard-test-vms-lease-reaper.service'
+parent=pathlib.Path('/run/systemd/system')
+directory=parent/(unit+'.d')
+path=directory/'subyard-e2e-pause.conf'
+body=('# '+marker+'\n[Unit]\nRefuseManualStart=yes\n').encode()
+def owned(path,mode,kind):
+    info=path.lstat()
+    if path.resolve()!=path or not kind(info.st_mode) or info.st_uid!=os.geteuid() or info.st_gid!=os.getegid() or stat.S_IMODE(info.st_mode)!=mode:
+        raise RuntimeError('unsafe reaper pause path')
+    return info
+def systemctl(*args):
+    return subprocess.check_output(['systemctl',*args],text=True,timeout=30 if args[0]=='stop' else 10).strip()
+def property(name):
+    return systemctl('show',unit,'--property='+name,'--value')
+for ancestor in (parent,parent.parent,parent.parent.parent):
+    info=ancestor.lstat()
+    if ancestor.resolve()!=ancestor or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode & 0o022:
+        raise RuntimeError('unsafe reaper pause parent')
+if action=='install':
+    if directory.exists() or directory.is_symlink() or property('RefuseManualStart')!='no':
+        raise RuntimeError('foreign reaper pause')
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:
+        os.fchmod(stream.fileno(),0o600)
+        stream.write(body)
+        stream.flush()
+        os.fsync(stream.fileno())
+    systemctl('daemon-reload')
+    systemctl('stop',unit)
+owned(directory,0o755,stat.S_ISDIR)
+info=owned(path,0o600,stat.S_ISREG)
+if info.st_nlink!=1 or info.st_size!=len(body) or path.read_bytes()!=body or list(directory.iterdir())!=[path]:
+    raise RuntimeError('foreign reaper pause content')
+if action=='restore':
+    path.unlink()
+    directory.rmdir()
+    systemctl('daemon-reload')
+    expected='no'
+else:
+    expected='yes'
+if property('RefuseManualStart')!=expected or property('ActiveState')!='inactive':
+    raise RuntimeError('reaper pause was not effective')
+PYREAPERPAUSE
 }
 
 start_holder_child() {
@@ -619,15 +678,14 @@ IFS=$'\t' read -r NEIGHBOR_SLOT NEIGHBOR_CONFIG NEIGHBOR_PROJECT \
   || die 'nested broker holders did not use one canonical candidate project'
 reclaim_held_pair_capacity "$NEIGHBOR_CONFIG" neighbor
 
-# Mask only the recovery worker while the quarantine evidence is inspected.
-# Masking Incus itself would stop the broker through Requires=incus.service and
+# Pause only the recovery worker while the quarantine evidence is inspected.
+# Stopping Incus itself would stop the broker through Requires=incus.service and
 # run its drain-all ExecStop, changing the held neighbor before the targeted
 # release can exercise its failure boundary.
 outer_root systemctl stop subyard-test-vms-lease-reaper.timer
 REAPER_TIMER_STOPPED=1
-outer_root systemctl mask --runtime --now \
-  subyard-test-vms-lease-reaper.service >/dev/null
-REAPER_MASKED=1
+REAPER_PAUSED=1
+reaper_pause outer_root install "$REAPER_PAUSE_MARKER"
 install_targeted_incus_failure
 : > "$STATE_PARENT/victim.release"
 victim_release_rc=0
@@ -684,9 +742,8 @@ kill -0 "$NEIGHBOR_PID" >/dev/null 2>&1 \
 # Start recovery only after release maintenance has finished. Running the
 # worker concurrently with broker replacement can turn one deterministic
 # incident into a failed attempt followed by a second incident.
-outer_root systemctl unmask --runtime \
-  subyard-test-vms-lease-reaper.service >/dev/null
-REAPER_MASKED=0
+reaper_pause outer_root restore "$REAPER_PAUSE_MARKER"
+REAPER_PAUSED=0
 outer_root systemctl start subyard-test-vms-lease-reaper.timer
 REAPER_TIMER_STOPPED=0
 outer_root systemctl start --no-block subyard-test-vms-lease-reaper.service

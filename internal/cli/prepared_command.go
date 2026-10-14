@@ -68,7 +68,7 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 				"up": {Path: path, Direct: true}, "status": {Path: path, Direct: true, Capture: true},
 				"down": {Path: path, Direct: true}, "revoke": {Path: path, Direct: true},
 				"recover": {Path: path, Direct: true},
-				"refresh": {Path: path, Direct: true}, "retire-legacy": {Path: path, Direct: true},
+				"refresh": {Path: path, Direct: true, Timeout: 75 * time.Minute}, "retire-legacy": {Path: path, Direct: true},
 			}}
 		}
 	case "@teardown":

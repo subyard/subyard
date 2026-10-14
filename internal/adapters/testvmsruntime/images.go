@@ -23,7 +23,7 @@ const baseMaxAge = 7 * 24 * time.Hour
 
 var imageFingerprint = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-const baseValidationRevision = "post-upgrade-boot-v1"
+const baseValidationRevision = "cidata-seed-clean-v2"
 
 var errBaseMismatch = errors.New("image ownership or immutable recipe mismatch")
 
@@ -457,6 +457,9 @@ ssh_pwauth: false
 	if _, err := builder.incus(ctx, args...); err != nil {
 		return result, err
 	}
+	if err := builder.prepareBuilderCloudInit(ctx, registry); err != nil {
+		return result, err
+	}
 	if err := builder.startVM(ctx, vm); err != nil {
 		return result, err
 	}
@@ -536,7 +539,7 @@ if [ -d /var/lib/incus ]; then
   [ -z "$(find /var/lib/incus/containers /var/lib/incus/virtual-machines -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)" ] || exit 1
   find /var/lib/incus -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 fi
-cloud-init clean --logs --machine-id
+cloud-init clean --logs --machine-id --seed
 rm -f /etc/ssh/ssh_host_* /var/lib/dbus/machine-id
 find /root /home/dev -maxdepth 2 -type d -name .ssh -exec rm -rf -- {} +
 rm -rf /opt/subyard-base-recipe
@@ -666,9 +669,6 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 	build := registry.Build
 	if build == nil {
 		return nil
-	}
-	if build.Project != rt.Config.Project+"-builder" || !imageFingerprint.MatchString(build.Key) {
-		return errors.New("unrecognized builder staging")
 	}
 	builder, err := rt.builderRuntime(build)
 	if err != nil {

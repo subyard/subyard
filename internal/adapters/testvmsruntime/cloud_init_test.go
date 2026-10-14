@@ -221,62 +221,115 @@ func TestStartVMDoesNotMutateRunningInstance(t *testing.T) {
 }
 
 func TestBuildBaseRejectsDisabledCloudInitBeforeAPT(t *testing.T) {
-	cfg := fixtureConfig(t)
-	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	spec, err := cfg.EnvironmentSpec(EnvironmentPair)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attached, started, statusChecked := false, false, false
-	runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
-		command := strings.Join(args, " ")
-		if strings.Contains(command, "apt-get") || strings.Contains(command, "base.sh") || args[0] == "publish" {
-			t.Fatalf("disabled cloud-init advanced preparation: %s", command)
-		}
-		switch {
-		case args[0] == "image":
-			return []byte(`[{"fingerprint":"` + strings.Repeat("a", 64) + `","type":"virtual-machine","architecture":"` + imageArchitecture() + `","aliases":[{"name":"debian/13/cloud"}]}]`), nil, nil
-		case strings.HasPrefix(command, "query /1.0/storage-pools/"):
-			return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
-		case strings.HasPrefix(command, "project get ") && strings.HasSuffix(command, "user.subyard.managed"):
-			return []byte(managedMarker), nil, nil
-		case args[0] == "info":
-			return nil, nil, errors.New("absent")
-		case strings.HasPrefix(command, "profile device list "):
-			return []byte("root\neth0"), nil, nil
-		case strings.Contains(command, " -c s"):
-			return []byte("STOPPED"), nil, nil
-		case args[0] == "query":
-			devices := `{}`
-			if attached {
-				devices = `{"subyard-cloud-init":{"type":"disk","source":"cloud-init:config"}}`
+	for _, failure := range []string{"disabled cloud-init", "metadata update", "metadata readback", "builder replacement", "foreign builder", "unsupported seed"} {
+		t.Run(failure, func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+				t.Fatal(err)
 			}
-			return []byte(`{"type":"virtual-machine","config":{"user.subyard.managed":"` + managedMarker + `"},"devices":` + devices + `,"expanded_devices":` + devices + `}`), nil, nil
-		case strings.HasPrefix(command, "config device add "):
-			attached = true
-		case args[0] == "start":
-			if !attached {
-				t.Fatal("builder started before metadata")
+			spec, err := cfg.EnvironmentSpec(EnvironmentPair)
+			if err != nil {
+				t.Fatal(err)
 			}
-			started = true
-		case strings.Contains(command, "cloud-init status"):
-			statusChecked = true
-			return []byte(`{"status":"disabled","boot_status_code":"disabled-by-generator","errors":[],"recoverable_errors":{}}`), nil, nil
-		}
-		return nil, nil, nil
-	}}
-	rt := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard, Now: time.Now,
-		memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 64 << 30}, nil },
-		diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
-		cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
-	}
-	rt.prepareDefaults()
-	registry := &ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("b", 32)}
-	_, err = rt.buildBase(context.Background(), LeaseStore{Path: cfg.leaseState(), SlotCount: 2}, LeaseGrant{Environment: &spec}, registry, strings.Repeat("c", 64))
-	if err == nil || !started || !statusChecked {
-		t.Fatalf("error=%v started=%v statusChecked=%v", err, started, statusChecked)
+			attached, started, statusChecked, updated := false, false, false, false
+			var buildKey string
+			metadata := `{"architecture":"x86_64","creation_date":1,"expiry_date":0,"properties":{"unrelated":"preserved"},"templates":{"/etc/hostname":{"when":["start"],"template":"hostname.tpl"},"/var/lib/cloud/seed/nocloud-net/meta-data":{"when":["create"],"template":"meta.tpl"},"/var/lib/cloud/seed/nocloud-net/user-data":{"when":["create"],"template":"user.tpl"},"/var/lib/cloud/seed/nocloud-net/vendor-data":{"when":["create"],"template":"vendor.tpl"},"/var/lib/cloud/seed/nocloud-net/network-config":{"when":["create"],"template":"network.tpl"}}}`
+			if failure == "unsupported seed" {
+				metadata = strings.ReplaceAll(metadata, "nocloud-net/network-config", "unknown/meta-data")
+			}
+			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				command := strings.Join(args, " ")
+				if strings.Contains(command, "apt-get") || strings.Contains(command, "base.sh") || args[0] == "publish" {
+					t.Fatalf("disabled cloud-init advanced preparation: %s", command)
+				}
+				switch {
+				case args[0] == "image":
+					return []byte(`[{"fingerprint":"` + strings.Repeat("a", 64) + `","type":"virtual-machine","architecture":"` + imageArchitecture() + `","aliases":[{"name":"debian/13/cloud"}]}]`), nil, nil
+				case strings.HasPrefix(command, "query /1.0/storage-pools/"):
+					return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
+				case strings.HasPrefix(command, "project get ") && strings.HasSuffix(command, "user.subyard.managed"):
+					return []byte(managedMarker), nil, nil
+				case args[0] == "info":
+					return nil, nil, errors.New("absent")
+				case strings.HasPrefix(command, "profile device list "):
+					return []byte("root\neth0"), nil, nil
+				case strings.Contains(command, " -c s"):
+					return []byte("STOPPED"), nil, nil
+				case args[0] == "query" && strings.Contains(args[1], "/metadata?"):
+					if len(args) == 2 {
+						return []byte(metadata), nil, nil
+					}
+					if !attached || started || args[2] != "-X" || args[3] != "PUT" || args[4] != "-d" {
+						t.Fatal("metadata update occurred outside stopped CIDATA preparation")
+					}
+					if failure == "metadata update" {
+						return nil, nil, &CommandError{ExitCode: 7, Message: "private metadata"}
+					}
+					var got struct {
+						Properties map[string]string
+						Templates  map[string]any
+					}
+					if json.Unmarshal([]byte(args[5]), &got) != nil || got.Properties["unrelated"] != "preserved" || len(got.Templates) != 1 || got.Templates["/etc/hostname"] == nil {
+						t.Fatal("metadata lost unrelated fields or retained duplicate seed templates")
+					}
+					updated = true
+					if failure != "metadata readback" {
+						metadata = args[5]
+					}
+					return nil, nil, nil
+				case args[0] == "init":
+					for _, arg := range args {
+						if value, ok := strings.CutPrefix(arg, "user.subyard.base_key="); ok {
+							buildKey = value
+						}
+					}
+				case args[0] == "query":
+					devices := `{}`
+					if attached {
+						devices = `{"subyard-cloud-init":{"type":"disk","source":"cloud-init:config"}}`
+					}
+					uuid, owner := "00000000-0000-0000-0000-000000000001", strings.Repeat("b", 32)
+					if updated && failure == "builder replacement" {
+						uuid = "00000000-0000-0000-0000-000000000002"
+					}
+					if failure == "foreign builder" {
+						owner = "foreign"
+					}
+					return []byte(`{"type":"virtual-machine","status":"Stopped","stateful":false,"config":{"user.subyard.managed":"` + managedMarker + `","user.subyard.base_owner":"` + owner + `","user.subyard.base_key":"` + buildKey + `","volatile.uuid":"` + uuid + `"},"devices":` + devices + `,"expanded_devices":` + devices + `}`), nil, nil
+				case strings.HasPrefix(command, "config device add "):
+					attached = true
+				case args[0] == "start":
+					if !attached || !updated {
+						t.Fatal("builder started before metadata")
+					}
+					started = true
+				case strings.Contains(command, "cloud-init status"):
+					statusChecked = true
+					return []byte(`{"status":"disabled","boot_status_code":"disabled-by-generator","errors":[],"recoverable_errors":{}}`), nil, nil
+				}
+				return nil, nil, nil
+			}}
+			rt := &Runtime{Config: cfg, Runner: runner, Stdout: io.Discard, Stderr: io.Discard, Now: time.Now,
+				memoryProbe:    func() (MemoryCapacity, error) { return MemoryCapacity{Available: 64 << 30}, nil },
+				diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil },
+				cacheProbe:     func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil },
+			}
+			rt.prepareDefaults()
+			registry := &ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("b", 32)}
+			_, err = rt.buildBase(context.Background(), LeaseStore{Path: cfg.leaseState(), SlotCount: 2}, LeaseGrant{Environment: &spec}, registry, strings.Repeat("c", 64))
+			if err == nil || started != (failure == "disabled cloud-init") || statusChecked != started {
+				t.Fatalf("error=%v started=%v statusChecked=%v", err, started, statusChecked)
+			}
+			if strings.Contains(err.Error(), "private") {
+				t.Fatal("metadata error disclosed native output")
+			}
+			if failure == "metadata update" {
+				var native *CommandError
+				if !errors.As(err, &native) || native.ExitCode != 7 {
+					t.Fatal("metadata failure lost native exit")
+				}
+			}
+		})
 	}
 }
 

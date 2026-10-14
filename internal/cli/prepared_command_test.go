@@ -110,6 +110,17 @@ func TestPreparedCommandResolverContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if test.name == "test-vms" {
+				for name, action := range behavior.shellActions(root)["test-vms"] {
+					want := time.Duration(0) // Other actions retain the runner's default.
+					if name == "refresh" {
+						want = 75 * time.Minute
+					}
+					if action.Timeout != want {
+						t.Fatalf("%s timeout=%s, want %s", name, action.Timeout, want)
+					}
+				}
+			}
 			if (behavior.prepare != nil) != test.prepared {
 				t.Fatalf("prepared=%v, want %v (reason=%q)", behavior.prepare != nil, test.prepared, behavior.nonRPCReason)
 			}

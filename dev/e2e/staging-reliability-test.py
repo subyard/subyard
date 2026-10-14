@@ -7,6 +7,9 @@ import re
 import shlex
 import subprocess
 import tempfile
+import os
+import sys
+from unittest import mock
 
 fixture = pathlib.Path(__file__).with_name('staging-reliability.sh').read_text()
 source = fixture.split("<<'PYTHON'", 1)[1].split('\n', 1)[1].split('\nPYTHON', 1)[0]
@@ -37,24 +40,79 @@ with tempfile.TemporaryDirectory(prefix='subyard-boot-observer-', dir='/tmp') as
     assert rows[0]['reason'] == 'guest-reset' and rows[0]['guest'] is True
     assert 'secret' not in json.dumps(evidence) and 'private' not in json.dumps(evidence)
 
+p0_fixture = pathlib.Path(__file__).with_name('p0-broker-recovery.sh').read_text()
+pause_source = p0_fixture.split("<<'PYREAPERPAUSE'\n",1)[1].split('\nPYREAPERPAUSE',1)[0]
+with tempfile.TemporaryDirectory(prefix='subyard-reaper-pause-', dir='/tmp') as directory:
+    root=pathlib.Path(directory)/'run/systemd/system'; root.mkdir(parents=True)
+    dropin=root/'subyard-test-vms-lease-reaper.service.d/subyard-e2e-pause.conf'
+    effective={'RefuseManualStart':'no','ActiveState':'inactive'}
+    def systemctl(argv,**kwargs):
+        if argv[1]=='daemon-reload': effective['RefuseManualStart']='yes' if dropin.exists() else 'no'
+        if argv[1]=='show': return effective[argv[3].split('=',1)[1]]+'\n'
+        return ''
+    def pause(action,marker='subyard-p0-123'):
+        with mock.patch.object(sys,'argv',['pause',action,marker]), mock.patch.object(subprocess,'check_output',systemctl):
+            exec(pause_source.replace("'/run/systemd/system'",repr(str(root))),{})
+    def refused(action):
+        try: pause(action)
+        except RuntimeError: return
+        raise AssertionError('unsafe pause accepted')
+    pause('install'); pause('verify')
+    assert dropin.stat().st_mode & 0o777 == 0o600 and dropin.parent.stat().st_mode & 0o777 == 0o755
+    original=dropin.read_bytes()
+    refused('install')
+    for drift in ['mode','marker','link','extra','effective','active']:
+        if drift=='mode': dropin.chmod(0o644)
+        elif drift=='marker': dropin.write_bytes(original.replace(b'123',b'456'))
+        elif drift=='link': os.link(dropin,root/'other')
+        elif drift=='extra': (dropin.parent/'foreign').write_bytes(b'foreign')
+        elif drift=='effective': effective['RefuseManualStart']='no'
+        else: effective['ActiveState']='active'
+        refused('verify')
+        if drift in ['mode','marker','link','extra']:
+            refused('restore'); assert dropin.exists()
+        dropin.chmod(0o600); dropin.write_bytes(original)
+        if drift=='link': (root/'other').unlink()
+        if drift=='extra': (dropin.parent/'foreign').unlink()
+        effective.update(RefuseManualStart='yes',ActiveState='inactive')
+    pause('restore'); assert not dropin.parent.exists() and effective['RefuseManualStart']=='no'
+    dropin.parent.symlink_to(root,target_is_directory=True); refused('install'); dropin.parent.unlink()
+    root.chmod(0o777); refused('install'); root.chmod(0o755)
+print('shared reaper pause preserves owned drop-in and verifies effective/inactive state before recovery')
+
 cleanup = re.search(r'^cleanup\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
-for failed in ['unmask', 'start', 'evidence']:
+for failed in ['pause', 'start', 'evidence']:
     script = '''set +e
-HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_MASKED=1; REAPER_TIMER_STOPPED=1
+HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1
 stop_sampler() { :; }
-retire_minimal_owner() { :; }
+retire_minimal_owner() { echo retired; }
 restore_inventory_fault() { :; }
 collect_evidence() { [ "$FAILED" != evidence ]; }
+reaper_pause() { [ "$FAILED" != pause ]; }
 outer_exec() { case "$*" in *"$FAILED"*) return 42;; *) return 0;; esac; }
-owner_cleanup() { exit "$?"; }
+owner_cleanup() { local rc=$?; echo shared; exit "$rc"; }
 ''' + f'FAILED={failed}\n' + cleanup + '\ntrue\ncleanup\n'
     result = subprocess.run(['bash', '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
     assert result.returncode == 3, (failed, result.returncode, result.stdout, result.stderr)
+    if failed == 'pause': assert 'retired' not in result.stdout and 'shared' not in result.stdout, result
 print('staging observer projection and cleanup checks passed')
+
+p0_cleanup = re.search(r'^cleanup\(\) \{\n.*?^\}',p0_fixture,re.MULTILINE|re.DOTALL)[0]
+for failed in ['fault','pause']:
+    script = '''set +e
+NEIGHBOR_CONFIG=''; RECLAIM_MARKER=''; STATE_PARENT=''
+VICTIM_PID=''; NEIGHBOR_PID=''; REUSE_PID=''
+REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1; REAPER_PAUSE_MARKER=subyard-p0-123
+restore_targeted_incus_failure() { [ "$FAILED" != fault ]; }
+reaper_pause() { echo pause_restore; [ "$FAILED" != pause ]; }
+outer_root() { echo unexpected_start; }
+''' + f'FAILED={failed}\n' + p0_cleanup + '\ntrue\ncleanup\n'
+    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+    assert result.returncode==3 and 'unexpected_start' not in result.stdout, result
 
 # A failed diagnostic/export must not replace the original bootstrap failure.
 script = '''set +e
-HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_MASKED=0; REAPER_TIMER_STOPPED=0
+HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=0; REAPER_TIMER_STOPPED=0
 stop_sampler() { :; }
 retire_minimal_owner() { :; }
 restore_inventory_fault() { :; }
@@ -88,6 +146,141 @@ sudo() {{ echo unsafe_sink; }}
     assert result.returncode == 1 and not result.stdout, result
 
 print('bootstrap exit and uninstalled-worker guard checks passed')
+
+# The native sink acknowledges pending spool entries after durable host capture.
+# Exercise the actual collector with an empty spool and a persisted builder ID.
+# Mock native root filesystem ownership/Incus only; retain real paths and modes.
+builder_receipt = re.search(r'^builder_incident_receipt\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
+builder_capture = re.search(r'^collect_builder_incident\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
+with tempfile.TemporaryDirectory(prefix='subyard-acked-builder-', dir='/tmp') as directory:
+    root = pathlib.Path(directory)
+    state = root/'native-state'
+    state.mkdir(mode=0o700)
+    config = root/'native-config'
+    config.write_text('E2E_VM_STATE_DIR=/var/lib/subyard/test-vms\nE2E_BROKER_SOURCE=test-yard\n')
+    config.chmod(0o644)
+    incident_id = '00000000000000000001-'+'a'*16
+    receipt = {'incident_id': incident_id, 'owner': 'b'*32, 'build_key': 'c'*64}
+    registry = {'schema_version': 1, 'owner': receipt['owner'], 'build': {
+        'key': receipt['build_key'], 'environment': 'subyard-pair', 'project': 'subyard-e2e-vms-builder',
+        'memory_bytes': 2684354560, 'disk_peak_bytes': 32212254720,
+        'incident_id': incident_id, 'incident_slot': {'slot_id': 'slot-000', 'resource_generation': 0, 'lease_epoch': 0},
+        # Persisted readinessFailure has exported Go field names, unlike diagnostics.
+        'readiness_failure': {'Label': 'waiting for e2e-base-1 Incus agent',
+            'Project': 'subyard-e2e-vms-builder', 'VM': 'e2e-base-1', 'Phase': 'incus-agent',
+            'Budget': 300000000000, 'StartedAt': '2026-01-01T00:00:00Z',
+            'ObservedAt': '2026-01-01T00:05:00Z', 'LastProbe': 'error_kind=command_error exit_code=255'}}}
+    registry_path = state/'images.json'
+    registry_path.write_text(json.dumps(registry))
+    registry_path.chmod(0o600)
+    host_root = root/'logs/test-vms-broker-incidents'
+    host_root.mkdir(parents=True, mode=0o750)
+    (host_root/'host').mkdir(mode=0o750)
+    host_root.chmod(0o750)
+    (host_root/'host').chmod(0o750)
+    incident = {'schema_version': 1, 'incident_id': incident_id, 'source': 'test-yard',
+        'slot_id': 'slot-000', 'created_at': '2026-10-12T00:00:00Z', 'diagnostics': {
+            'resource': json.dumps({'resource_kind': 'base_builder', 'project': 'subyard-e2e-vms-builder',
+                'vm': 'e2e-base-1', 'build_key': receipt['build_key']})}}
+    memory = {'outer_host_evidence': 'collected by physical-owner host sink',
+        'available_bytes': 123, 'limit_available': False}
+    host = {'observed_at': '2026-10-12T00:00:01Z',
+        'timing': 'after incident, at host spool collection; kernel window is the preceding 15 minutes',
+        'host_memory': memory, 'allocation_memory': memory}
+    incident_path = host_root/(incident_id+'.json')
+    host_path = host_root/'host'/(incident_id+'.json')
+    for path, payload in ((incident_path, incident), (host_path, host)):
+        path.write_text(json.dumps(payload))
+        path.chmod(0o640)
+    shim = root/'native-python.py'
+    shim.write_text('''import pathlib,os,stat,sys
+native=pathlib.PosixPath
+directory=native(sys.argv.pop(1))
+paths={'/var/lib/subyard/test-vms':directory/'native-state','/etc/subyard/test-vms.env':directory/'native-config'}
+pathlib.Path=lambda *args: paths.get(str(native(*args)),native(*args))
+original=native.lstat
+def lstat(path):
+    info=list(original(path))
+    if path.is_relative_to(directory): info[4]=0
+    foreign=directory/'foreign-owner'
+    if foreign.exists() and str(path)==foreign.read_text(): info[4]=1001
+    return os.stat_result(info)
+native.lstat=lstat
+sys.argv=sys.argv[1:]
+exec(compile(sys.stdin.read(),'native-evidence-leaf','exec'))
+''')
+    native_python = shim.read_text()
+    def run_capture(spool=None, project_marker='test-vms-v1', preflight=False):
+        spool = {'schema_version': 1} if spool is None else spool
+        script = f'''set -euo pipefail
+STATE_PARENT={str(root)!r}; SUBYARD_HOME={str(root)!r}; BROKER_INSTALLED=1
+stop_sampler() {{ :; }}
+verify_broker_installation() {{ :; }}
+sudo() {{ [ "$*" = '-n systemctl start subyard-test-vms-host-sink.service' ]; }}
+python3() {{ command python3 {str(shim)!r} {str(root)!r} "$@"; }}
+outer_exec() {{
+  case "$*" in
+    '/usr/local/libexec/subyard/test-vms-inner _test-vms-worker spool-export') printf '%s\\n' {shlex.quote(json.dumps(spool))};;
+    'incus project get subyard-e2e-vms-builder user.subyard.managed') printf '%s\\n' {project_marker!r};;
+    'incus project get subyard-e2e-vms-builder user.subyard.base_owner') echo {'b'*32};;
+    'python3 -') python3 -;;
+    *) return 42;;
+  esac
+}}
+''' + builder_receipt + '\n' + builder_capture + '\n' + collect + ('\nbuilder_incident_receipt\n' if preflight else '\ncollect_evidence\n')
+        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
+    # Supported provisioning creates a private root, not a worker-key marker.
+    # Both an absent image registry and a persisted empty registry are native.
+    registry_path.unlink()
+    for payload in (None, {'schema_version': 1, 'owner': receipt['owner'], 'bases': []}):
+        if payload is not None:
+            registry_path.write_text(json.dumps(payload)); registry_path.chmod(0o600)
+        result = run_capture(preflight=True)
+        assert result.returncode == 0 and json.loads(result.stdout) == {}, (result.returncode, result.stdout, result.stderr)
+    registry_path.write_text(json.dumps(registry)); registry_path.chmod(0o600)
+    result = run_capture(preflight=True)
+    assert result.returncode == 0 and json.loads(result.stdout) == receipt, result
+    for failure in ({'project': 'subyard-e2e-vms-builder', 'vm': 'e2e-base-1'},
+        {'Project': 'foreign', 'VM': 'e2e-base-1'}, {'Project': 'subyard-e2e-vms-builder', 'VM': 'foreign'},
+        {'Project': 'subyard-e2e-vms-builder'}, 'malformed'):
+        registry_path.write_text(json.dumps({**registry, 'build': {**registry['build'], 'readiness_failure': failure}}))
+        result = run_capture(preflight=True)
+        assert result.returncode == 1 and not result.stdout, (failure,result)
+    registry_path.write_text(json.dumps(registry))
+    for spool in ({'schema_version': 1}, {'schema_version': 1, 'incidents': [incident]}):
+        result = run_capture(spool)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        lines = result.stdout.splitlines()
+        assert json.loads(next(line.split('=', 1)[1] for line in lines if line.startswith('STAGING_SPOOL='))) == spool
+        assert [json.loads(line.split('=', 1)[1]) for line in lines if line.startswith('STAGING_BUILDER_INCIDENT=')] == [incident]
+        assert [json.loads(line.split('=', 1)[1]) for line in lines if line.startswith('STAGING_HOST_OBSERVATION=')] == [host]
+    assert run_capture(project_marker='foreign').returncode == 1
+    for path, bad, original in ((config, 'E2E_VM_STATE_DIR=/foreign\nE2E_BROKER_SOURCE=test-yard\n', config.read_text()),
+        (registry_path, json.dumps({**registry, 'build': {**registry['build'], 'incident_id': '../foreign'}}), registry_path.read_text()),
+        (incident_path, json.dumps({**incident, 'source': 'foreign'}), incident_path.read_text()),
+        (host_path, json.dumps({**host, 'observed_at': '2026-10-11T00:00:00Z'}), host_path.read_text())):
+        path.write_text(bad)
+        result = run_capture()
+        assert result.returncode == 1 and 'STAGING_BUILDER_INCIDENT=' not in result.stdout, result
+        path.write_text(original)
+    host_path.chmod(0o600)
+    assert run_capture().returncode == 1
+    host_path.chmod(0o640)
+    for path in (registry_path, host_path):
+        saved = path.with_suffix('.saved')
+        path.rename(saved)
+        path.symlink_to(saved)
+        assert run_capture().returncode == 1
+        path.unlink()
+        saved.rename(path)
+        (root/'foreign-owner').write_text(str(path))
+        assert run_capture().returncode == 1
+        (root/'foreign-owner').unlink()
+    saved = host_path.with_suffix('.saved')
+    host_path.rename(saved)
+    assert run_capture().returncode == 1
+    saved.rename(host_path)
+print('marker-free native preflight, acknowledged builder capture and provenance refusal checks passed')
 
 verify_worker = re.search(r'^verify_broker_installation\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-bootstrap-worker-', dir='/tmp') as directory:
@@ -148,6 +341,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-disposable-sizes-', dir='/tmp')
     result = subprocess.run(['python3', '-c', measure, 'before_reclaim', 'outer_vm', *paths], capture_output=True, text=True, timeout=5)
     row = json.loads(result.stdout.split('STAGING_DISPOSABLE_CAPACITY=', 1)[1])
     assert row['default_go_build_bytes'] > 0 and row['marked_go_build_bytes'] == 0 and row['go_modules_bytes'] is None, row
+    assert 'apt_lists_bytes' not in row, 'allocated VM lists require the privileged probe'
     assert directory not in result.stdout, 'private paths escaped category projection'
 
 reclaim = re.search(r'^reclaim_release_staging\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
@@ -209,8 +403,13 @@ print('numeric disk footprint privacy, missing, symlink and timeout checks passe
 prepare_owner = 'prepare_minimal_owner() {' + fixture.split('prepare_minimal_owner() {', 1)[1].split('\n\nprepare_owner_go_cache', 1)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-minimal-owner-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for failed, expected in [('prerequisites', 42), ('backend', 7), ('', 0)]:
+    for failed, expected in [('prerequisites', 42), ('backend', 7), ('evidence-baseline', 2), ('audit', 2), ('', 0)]:
         checkout = root/(failed or 'passed'); (checkout/'.build').mkdir(parents=True)
+        (checkout/'native-state').mkdir(mode=0o700)
+        native_config = checkout/'native-config'
+        native_config.write_text('E2E_VM_STATE_DIR='+('/foreign' if failed == 'evidence-baseline' else '/var/lib/subyard/test-vms')+'\nE2E_BROKER_SOURCE=test-yard\n')
+        native_config.chmod(0o644)
+        native_shim = checkout/'native-python.py'; native_shim.write_text(native_python)
         log = checkout/'calls'
         script = f'''set -euo pipefail
 ROOT={str(checkout)!r}; SUBYARD_HOME=/installed; PROJECT=subyard-test-yard; INSTANCE=yard-test-yard
@@ -219,7 +418,7 @@ diagnostic_cpu=4; MINIMAL_OWNER=0; BROKER_INSTALLED=0; LOG={str(log)!r}; FAILED=
 die() {{ exit 2; }}
 go() {{
   printf 'compile\\n' >> "$LOG"
-  printf '#!/bin/sh\\nprintf "backend\\n" >> "$LOG"\\n[ "$FAILED" != backend ] || exit 7\\n' > "$ROOT/.build/p0-staging-owner/owner"
+  printf '#!/bin/sh\\n[ "$5" = "$1" ] || exit 42\\nprintf "backend\\n" >> "$LOG"\\n[ "$FAILED" != backend ] || exit 7\\n' > "$ROOT/.build/p0-staging-owner/owner"
   chmod 0700 "$ROOT/.build/p0-staging-owner/owner"
 }}
 owner_adapter() {{ printf '%s\\n' "$1" >> "$LOG"; }}
@@ -227,23 +426,64 @@ incus() {{
   case "$1" in
     project) printf '%s\\n' "$MARKER";;
     list) :;;
-    init) printf 'init\\n' >> "$LOG";;
+    init)
+      [[ " $* " = *" -c user.subyard.initialized=false "* ]] || return 42
+      printf 'init\\n' >> "$LOG";;
     exec) printf 'cloud-init\\n' >> "$LOG";;
     *) return 42;;
   esac
 }}
 timeout() {{ shift 3; "$@"; }}
-outer_exec() {{ printf 'prerequisites\\n' >> "$LOG"; [ "$FAILED" != prerequisites ] || return 42; }}
+outer_exec() {{
+  if [ "$*" = 'python3 -' ]; then
+    printf 'evidence-baseline\\n' >> "$LOG"
+    command python3 {str(native_shim)!r} {str(checkout)!r} -
+  else
+    printf 'prerequisites\\n' >> "$LOG"; [ "$FAILED" != prerequisites ] || return 42
+  fi
+}}
 verify_broker_installation() {{ printf 'verify\\n' >> "$LOG"; }}
+prepare_owner_audit() {{ printf 'audit\\n' >> "$LOG"; [ "$FAILED" != audit ]; }}
 export LOG FAILED
-''' + prepare_owner + '\nprepare_minimal_owner\n'
+''' + builder_receipt + '\n' + prepare_owner + '\nprepare_minimal_owner\nprintf "cold\\n" >> "$LOG"\n'
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
         assert result.returncode == expected, result
         calls = log.read_text().splitlines()
         assert calls[:6] == ['compile','02-create-project.sh','init','03-create-subyard.sh','cloud-init','prerequisites'], calls
-        assert calls[6:] == ({'prerequisites': [], 'backend': ['backend','verify'], '': ['backend','verify','install-test-vms-host-sink.sh']}[failed]), calls
+        assert calls[6:] == ({'prerequisites': [], 'backend': ['backend','verify'], 'evidence-baseline': ['backend','verify','evidence-baseline'], 'audit': ['backend','verify','evidence-baseline','audit'], '': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold']}[failed]), calls
         assert (checkout/'.build/p0-staging-owner').exists() == bool(failed), calls
 print('minimal owner prerequisites precede product backend and host sink')
+
+audit_prepare = re.search(r'^prepare_owner_audit\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
+with tempfile.TemporaryDirectory(prefix='subyard-owner-audit-', dir='/tmp') as directory:
+    root = pathlib.Path(directory)
+    foreign = root/'foreign'; foreign.mkdir(); keep = foreign/'keep'; keep.write_bytes(b'foreign evidence')
+    for failed in ['', 'command', 'absent', 'mode', 'symlink', 'file-symlink', 'home-symlink']:
+        home = root/(failed or 'success'); home.mkdir(); home.chmod(0o700)
+        logs = home/'logs'
+        if failed == 'symlink':
+            logs.symlink_to(foreign)
+        elif failed != 'absent':
+            logs.mkdir(); logs.chmod(0o700)
+            for name in ['yard.log', '.yard.lock']:
+                path = logs/name; path.write_bytes(b''); path.chmod(0o600)
+            if failed == 'mode': logs.chmod(0o770)
+            if failed == 'file-symlink':
+                (logs/'yard.log').unlink(); (logs/'yard.log').symlink_to(keep)
+        if failed == 'home-symlink':
+            alias = root/'home-alias'; alias.symlink_to(home); home = alias
+        calls = root/((failed or 'success')+'.calls')
+        script = f'''set -euo pipefail
+SUBYARD_HOME={str(home)!r}; CALLS={str(calls)!r}; FAILED={failed!r}
+timeout() {{ printf '%s\\n' "$*" >> "$CALLS"; [ "$FAILED" != command ]; }}
+''' + audit_prepare + '\nprepare_owner_audit\n'
+        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
+        assert result.returncode == (0 if not failed else 1), (failed, result)
+        assert calls.exists() == (failed not in ['symlink', 'file-symlink', 'home-symlink']), failed
+        if calls.exists():
+            assert 'env SUBYARD_NO_AUDIT=' in calls.read_text() and calls.read_text().rstrip().endswith('/bin/yard help')
+    assert keep.read_bytes() == b'foreign evidence' and foreign.stat().st_uid == keep.stat().st_uid
+print('owner audit setup requires normal installed CLI success and exact user-owned private paths before the sink')
 
 retire = re.search(r'^retire_minimal_owner\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
 for owned, installed, drained, expected, reclaims in [(0,1,1,1,0),(1,1,0,1,0),(1,1,1,0,1),(1,0,1,0,1)]:
@@ -273,7 +513,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-owner-cleanup-', dir='/tmp') as
             yard = case/'bin/yard'; yard.parent.mkdir()
             yard.write_text('#!/bin/sh\nprintf "teardown\\n" >> "$LOG"\n'); yard.chmod(0o700)
             script = f'''set -euo pipefail
-HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_MASKED=0; REAPER_TIMER_STOPPED=0
+HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=0; REAPER_TIMER_STOPPED=0
 MINIMAL_OWNER=1; BROKER_INSTALLED=1; PROJECT=subyard-test-yard; MARKER=owned; TOKEN=123
 OWNER_YARD_DIR={str(case/'yards')!r}; OWNER_ROOT={str(case/'absent-owner')!r}
 SUBYARD_HOME={str(case/'absent-data')!r}; OWNER_BASELINE_CAPTURED=0
@@ -333,47 +573,113 @@ PROJECT=subyard-test-yard; INSTANCE=yard-test-yard; YARD=test-yard; OWNER_BASE_I
 print('minimal owner adapters receive the complete product context contract')
 
 apt_indexes = fixture.split("<<'PYAPTINDEX'\n", 1)[1].split('\nPYAPTINDEX', 1)[0]
+# Use the producer's real public exports; its broker selector is distinct from
+# the workspace attribution stored in the lease's yard field.
+worker = pathlib.Path('dev/agent-e2e.sh').read_text()
+write_guest = re.search(r'^write_guest_command\(\) \{\n.*?^\}', worker, re.MULTILINE | re.DOTALL)[0]
+generated = subprocess.run(['bash','--noprofile','--norc','-c', '''set -euo pipefail
+E2E_YARD=broker-selector; LEASE_YARD=workspace-attribution
+LEASE_PROJECT=sample-project; LEASE_RUN=sample-run; LEASE_SLOT=slot-001; LEASE_PURPOSE=staging-reliability
+LEASE_GENERATION=1; ENVIRONMENT_TYPE=android-test; VM_COUNT=1; GRANT_CPU_PER_VM=4
+GRANT_MEMORY_PER_VM=8GiB; GRANT_DISK_PER_VM=40GiB; BASE_FINGERPRINT=sample-base
+''' + write_guest + '\nwrite_guest_command 1 /tmp/fixture true\n'], capture_output=True, text=True, timeout=5)
+assert generated.returncode == 0, generated
+guest_exports = '\n'.join(line for line in generated.stdout.splitlines() if line.startswith('export SUBYARD_E2E_'))
+exported = subprocess.run(['bash','--noprofile','--norc','-c', guest_exports + '''
+printf '%s\\n' "$SUBYARD_E2E_PROJECT" "$SUBYARD_E2E_RUN_ID" "$SUBYARD_E2E_SLOT" "$SUBYARD_E2E_PURPOSE"
+test "$SUBYARD_E2E_YARD" = broker-selector
+'''], env={'PATH':'/usr/bin:/bin'}, capture_output=True, text=True, timeout=5)
+assert exported.returncode == 0, exported
+actor_context = exported.stdout.splitlines(); assert len(actor_context) == 4
 with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for failed in ['', 'symlink', 'busy', 'linked']:
-        case = root/(failed or 'success'); lists = case/'var/lib/apt/lists'; lists.mkdir(parents=True)
+    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid')]:
+        case = root/(scope+'-'+(failed or 'success')); lists = case/'var/lib/apt/lists'; lists.mkdir(parents=True)
         locks = [case/name for name in ['var/lib/dpkg/lock-frontend','var/lib/dpkg/lock','var/lib/apt/lists/lock']]
         for lock in locks: lock.parent.mkdir(parents=True, exist_ok=True); lock.touch()
         inodes = [lock.stat().st_ino for lock in locks]
         index = lists/'repository_Packages'; index.write_text('reproducible index')
+        partial=lists/'partial';partial.mkdir(mode=0o700);(partial/'index').write_text('private APT index bytes')
         foreign = case/'keep'; foreign.write_text('foreign bytes')
         if failed == 'symlink': (lists/'late-link').symlink_to(foreign)
-        if failed == 'linked':
-            import os
-            os.link(foreign, lists/'late-link')
-        # Fixed path literals are redirected only into this test-owned namespace.
-        payload = apt_indexes.replace('/var/lib/',str(case/'var/lib')+'/')
-        payload = payload.replace("root=pathlib.Path", "pwd.getpwnam=lambda name: type('APTUser',(),{'pw_uid':os.geteuid()})()\nroot=pathlib.Path",1)
+        if failed == 'linked': os.link(foreign, lists/'late-link')
+        if failed == 'linked-lock': os.link(locks[0],case/'linked-lock')
+        if failed == 'special': os.mkfifo(lists/'late-fifo')
+        state=case/'state';state.mkdir(mode=0o711);state.chmod(0o711)
+        marker=state/'.subyard-p0-marker';marker.write_text(('foreign' if failed=='marker' else 'fixture')+'\n');marker.chmod(0o600)
+        lease=case/'lease';lease.write_text(json.dumps({'schema_version':1 if failed=='lease' else 2,'yard':'workspace-attribution',
+            **dict(zip(('project','run','slot','purpose'),actor_context))}));lease.chmod(0o444)
+        if failed=='marker-mode':marker.chmod(0o644)
+        if failed=='lease-link':os.link(lease,case/'lease-copy')
+        if failed=='lease-symlink':lease.rename(case/'lease-original');lease.symlink_to(case/'lease-original')
+        # Real paths/locks/deletion; only native root ownership and apt-config are leaves.
+        setup=f"""import os,pathlib,pwd,subprocess
+actual_lstat=pathlib.PosixPath.lstat;actual_fstat=os.fstat
+caller_uid=os.getuid()
+def owner(item,marker=False,apt=False):
+ values=list(item);values[4]=42 if apt else caller_uid if marker else 0;return os.stat_result(values)
+pathlib.PosixPath.lstat=lambda path:owner(actual_lstat(path),path.is_relative_to(pathlib.Path({str(state)!r})),path.is_relative_to(pathlib.Path({str(partial)!r})))
+os.fstat=lambda fd:owner(actual_fstat(fd))
+os.geteuid=lambda:0
+pwd.getpwnam=lambda name:type('APTUser',(),{{'pw_uid':42}})()
+actual_output=subprocess.check_output
+def command(args,**kwargs):
+ if args[0]=='apt-config':return b"LISTS='/foreign/lists/'\\n" if {failed!r}=='config' else ('LISTS='+{str(lists)!r}+'/').encode()
+ if {failed!r}=='du-timeout':raise subprocess.TimeoutExpired(args,2,output=b'private APT index bytes')
+ return b'private APT index bytes' if {failed!r}=='du-invalid' else actual_output(args,**kwargs)
+subprocess.check_output=command
+"""
+        payload=apt_indexes.replace('/var/lib/',str(case/'var/lib')+'/').replace('/run/subyard-e2e-lease.json',str(lease))
         held = None
         if failed == 'busy':
             import fcntl
             held = locks[0].open('r+'); fcntl.lockf(held, fcntl.LOCK_EX|fcntl.LOCK_NB)
-        result = subprocess.run(['python3', '-c', payload], capture_output=True, text=True, timeout=5)
+        context = ['foreign-'+key if failed == key else value
+            for key,value in zip(('project','run','slot','purpose'),actor_context)]
+        result = subprocess.run(['python3', '-c', setup+payload,scope,str(state),'fixture',str(os.getuid()),
+            *context], capture_output=True, text=True, timeout=5)
         if held: held.close()
-        assert (result.returncode != 0) == bool(failed), result
-        assert index.exists() == bool(failed) and foreign.read_text() == 'foreign bytes', result
+        refused=bool(failed) and not failed.startswith('du-')
+        assert (result.returncode != 0) == refused, (scope,failed,result)
+        assert index.exists() == refused and (partial/'index').exists() == refused and foreign.read_text() == 'foreign bytes', result
+        rows=[json.loads(line.split('=',1)[1]) for line in result.stdout.splitlines()]
+        assert len(rows)==(0 if refused else 2) and 'private APT index bytes' not in result.stdout+result.stderr,result
+        if rows:
+            assert [row['phase'] for row in rows]==['before_reclaim','after_reclaim'] and all(row['scope']==scope and set(row)=={'phase','scope','apt_lists_bytes'} for row in rows),rows
+            assert all(row['apt_lists_bytes'] is None for row in rows) if failed else rows[0]['apt_lists_bytes']>rows[1]['apt_lists_bytes']>=0,rows
         assert [lock.stat().st_ino for lock in locks] == inodes, 'APT lock inode changed'
     reclaim_apt = re.search(r'^reclaim_owner_apt_indexes\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
     for owned, installed in [(0,1),(1,0)]:
         script = f'''set -euo pipefail
 MINIMAL_OWNER={owned}
 verify_broker_installation() {{ return {0 if installed else 1}; }}
+p0_capacity_assert_root_marker() {{ :; }}
 outer_exec() {{ echo unsafe_deletion; }}
-''' + reclaim_apt + '\nreclaim_owner_apt_indexes\n'
+''' + reclaim_apt + '\nreclaim_owner_apt_indexes owner_container\n'
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
         assert result.returncode == 1 and not result.stdout, result
+    context_start=fixture.index('readonly -a OUTER_E2E_CONTEXT=')
+    outer_context=fixture[context_start:fixture.index('\nTOKEN=',context_start)]
+    script='set -euo pipefail\n'+guest_exports+'\n'+outer_context+"""
+SUBYARD_E2E_YARD=nested-yard; MINIMAL_OWNER=1; P0_CAPACITY_STATE_ROOT=/tmp/fixture; MARKER=fixture
+p0_capacity_assert_root_marker() { :; }
+verify_broker_installation() { :; }
+outer_exec() { printf 'owner:%s\\n' "$*"; cat >/dev/null; }
+sudo() { printf 'l1:%s\\n' "$*"; cat >/dev/null; }
+"""+reclaim_apt+'\nreclaim_owner_apt_indexes owner_container\nreclaim_owner_apt_indexes outer_vm\n'
+    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+    assert result.returncode==0 and len(result.stdout.splitlines())==2,result
+    assert all(' '.join(actor_context) in line and 'broker-selector' not in line and 'nested-yard' not in line
+        for line in result.stdout.splitlines()),result
 print('APT indexes require native locks, canonical ownership and complete preflight; lock inodes survive')
 
 fault_payload = fixture.split("<<'PYINVENTORYFAULT'\n", 1)[1].split('\nPYINVENTORYFAULT', 1)[0]
-with tempfile.TemporaryDirectory(prefix='subyard-inventory-fault-', dir='/tmp') as directory:
+with tempfile.TemporaryDirectory(prefix='subyard-inventory-fault-', dir='/tmp') as directory, \
+        tempfile.TemporaryDirectory(prefix='subyard-inventory-fault-', dir='/dev/shm') as fault_directory:
     root = pathlib.Path(directory)
     config = root/'etc/subyard/test-vms.env'; config.parent.mkdir(parents=True)
-    fault_root = root/'run/subyard-staging-incus-fault'; fault_root.parent.mkdir()
+    fault_root = pathlib.Path(fault_directory)/'subyard-staging-incus-fault'
+    assert root.stat().st_dev != fault_root.parent.stat().st_dev
     native = root/'real-incus'; native.write_text('#!/bin/sh\nprintf "native:%s\\n" "$*"\n'); native.chmod(0o700)
     payload = fault_payload.replace('/run/subyard-staging-incus-fault',str(fault_root)).replace('/etc/subyard/test-vms.env',str(config))
     def fault(action, marker='subyard-p0-123'):
@@ -382,13 +688,17 @@ with tempfile.TemporaryDirectory(prefix='subyard-inventory-fault-', dir='/tmp') 
     config.write_bytes(original); config.chmod(0o640)
     assert fault('install').returncode == 0
     wrapper = fault_root/'incus'
-    delegated = subprocess.run([str(wrapper),'version'],capture_output=True,text=True,timeout=5)
+    delegated = subprocess.run(['sh',str(wrapper),'version'],capture_output=True,text=True,timeout=5)
     assert delegated.returncode == 0 and delegated.stdout == 'native:version\n'
-    command = [str(wrapper),'project','list','--format','csv','-c','n']
+    command = ['sh',str(wrapper),'project','list','--format','csv','-c','n']
     failed = subprocess.run(command,capture_output=True,text=True,timeout=5)
     assert failed.returncode == 1 and 'p0 targeted inventory fault' in failed.stderr
     assert subprocess.run(command,capture_output=True,text=True,timeout=5).returncode == 0
     assert fault('consumed').returncode == 0
+    candidate = config.with_name('.'+config.name+'.subyard-p0-123.candidate')
+    candidate.write_bytes(b'foreign staging'); candidate.chmod(0o600)
+    assert fault('restore').returncode != 0 and candidate.read_bytes() == b'foreign staging'
+    candidate.unlink()
     for drift in ['marker','backup','config','mode','symlink']:
         path = {'marker':fault_root/'.marker','backup':fault_root/'backup','config':config,'mode':config,'symlink':fault_root/'backup'}[drift]
         before = path.read_bytes(); mode = path.stat().st_mode & 0o777
@@ -408,10 +718,11 @@ restore_fault = re.search(r'^restore_inventory_fault\(\) \{\n.*?^\}', fixture, r
 for failed in [0,1]:
     for original_rc in [0,7]:
         script = f'''set -euo pipefail
-HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_MASKED=1; REAPER_TIMER_STOPPED=1; FAULT_INSTALLED=1
+HOLDER_PID=''; SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1; FAULT_INSTALLED=1
 stop_sampler() {{ :; }}
 inventory_fault_config() {{ echo restore; return {failed}; }}
 collect_evidence() {{ echo capture; }}
+reaper_pause() {{ echo pause_restore; }}
 outer_exec() {{ echo "$*"; }}
 retire_minimal_owner() {{ echo retire; }}
 owner_cleanup() {{ local rc=$?; echo shared; exit "$rc"; }}
@@ -422,14 +733,14 @@ owner_cleanup() {{ local rc=$?; echo shared; exit "$rc"; }}
         calls = result.stdout.splitlines()
         assert calls[:2] == ['restore','capture'], calls
         assert ('retire' in calls) == ('shared' in calls) == (not failed), calls
-        assert any('unmask' in call for call in calls), calls
+        assert ('pause_restore' in calls) == (not failed), calls
         assert any(' start ' in ' '+call+' ' for call in calls) == (not failed), calls
 print('exit cleanup restores fault before capture/reaper/retirement and preserves failure on restoration refusal')
 
 with tempfile.TemporaryDirectory(prefix='subyard-recovery-holder-cleanup-', dir='/tmp') as directory:
     script = f'''set -euo pipefail
 STATE_PARENT={directory!r}; HOLDER_CLIENT=recovery; HOLDER_PID=42
-SECOND_BOOT_ACTIVE=0; REAPER_MASKED=0; REAPER_TIMER_STOPPED=0; FAULT_INSTALLED=0
+SECOND_BOOT_ACTIVE=0; REAPER_PAUSED=0; REAPER_TIMER_STOPPED=0; FAULT_INSTALLED=0
 stop_sampler() {{ :; }}
 stop_holder_child() {{ test "$1" = 42 && test -f "$STATE_PARENT/recovery.release" && test ! -e "$STATE_PARENT/holder.release"; }}
 collect_evidence() {{ :; }}
@@ -446,8 +757,18 @@ with tempfile.TemporaryDirectory(prefix='subyard-recovery-phase-', dir='/tmp') a
     identifier = '00000000000000000001-abcdef0123456789'
     events = [{'kind':kind,'incident_id':identifier,'event_id':f'{index:020d}-abcdef0123456789','resource_generation':generation,'lease_epoch':9,'recovery_attempt':1}
               for index,(kind,generation) in enumerate([('slot.quarantined',4),('recovery.start',4),('recovery.available',5)],1)]
-    for failed in ['', 'setup', 'release', 'consumed', 'quarantine', 'fence', 'incident', 'host', 'replay', 'restore', 'available', 'instances', 'volumes', 'events']:
+    for failed in ['', 'pause', 'setup', 'release', 'consumed', 'quarantine', 'fence', 'incident', 'host', 'replay', 'restore', 'available', 'instances', 'volumes', 'events']:
         case = root/(failed or 'success'); case.mkdir(); log = case/'calls'
+        runner = str(pathlib.Path(__file__).resolve().parents[1]/'agent-e2e.sh') if not failed else 'true'
+        key_environment = dict(os.environ)
+        for name in ['SUBYARD_E2E_IDENTITY', 'SUBYARD_E2E_YARD_STATE_DIR']:
+            key_environment.pop(name, None)
+        if not failed:
+            prepared = subprocess.run([runner, '--yard', 'test-yard', '--prepare'],
+                env=dict(key_environment, SUBYARD_E2E_STATE_DIR=str(case/'holder')),
+                capture_output=True, text=True, timeout=5)
+            assert prepared.returncode == 0, prepared
+            first_key = (case/'holder/id_ed25519').read_bytes()
         slot = {'state':'held','purpose':'staging-inventory-failure','project':'subyard-test-yard','resource_generation':4,'lease_epoch':9}
         quarantined = dict(slot,state='quarantined',incident_id=identifier,last_failure_event_id=identifier)
         if failed == 'quarantine': quarantined['resource_generation'] = 5
@@ -468,12 +789,14 @@ with tempfile.TemporaryDirectory(prefix='subyard-recovery-phase-', dir='/tmp') a
         event_body = '\n'.join(json.dumps(event) for event in (events if failed != 'events' else events[:-1]))
         script = f'''set -euo pipefail
 STATE_PARENT={str(case)!r}; SUBYARD_HOME={str(case)!r}; YARD=test-yard; base={'a'*64!r}
-REAPER_MASKED=1; REAPER_TIMER_STOPPED=1; FAULT_INSTALLED=0; FAULT_ROOT=/run/subyard-staging-incus-fault
+RUNNER={runner!r}
+REAPER_PAUSED=1; MARKER=subyard-p0-123; REAPER_TIMER_STOPPED=1; FAULT_INSTALLED=0; FAULT_ROOT=/run/subyard-staging-incus-fault
 LOG={str(log)!r}; FAILED={failed!r}
 die() {{ echo "$*" >&2; exit 2; }}
 verify_broker_installation() {{ :; }}
+reaper_pause() {{ echo pause_$2 >> "$LOG"; [ "$FAILED" != pause ]; }}
 stop_sampler() {{ echo observer_stopped >> "$LOG"; }}
-start_holder_child() {{ printf 'slot-001\tconfig\tproject\trun\tpurpose\t4\t%s\n' "$base" > "$STATE_PARENT/recovery.ready"; HOLDER_STARTED_PID=42; }}
+start_holder_child() {{ [ -n "$FAILED" ] || [ -s "$STATE_PARENT/recovery/id_ed25519.pub" ]; printf 'slot-001\tconfig\tproject\trun\tpurpose\t4\t%s\n' "$base" > "$STATE_PARENT/recovery.ready"; HOLDER_STARTED_PID=42; }}
 recovery_monotonic_seconds() {{ echo 100; }}
 status() {{ printf '%s\n' {held_body!r}; }}
 wait_state() {{ if [ "$1" = quarantined ]; then printf '%s\n' {quarantine_body!r}; else printf '%s\n' {available_body!r}; fi; }}
@@ -500,15 +823,22 @@ outer_exec() {{
 }}
 runtime_yard() {{ printf '%s\n' {shlex.quote(event_body)}; }}
 ''' + restore_fault + '\n' + owned_vm + '\n' + recovery_phase + '\nverify_singleton_recovery\n'
-        result = subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+        result = subprocess.run(['bash','-c',script],env=key_environment,capture_output=True,text=True,timeout=5)
         assert result.returncode == (2 if failed else 0), (failed,result)
         calls = log.read_text().splitlines()
         if not failed:
+            assert (case/'holder/id_ed25519').read_bytes() == first_key
+            assert (case/'recovery/id_ed25519').read_bytes() != first_key
+            for key, mode in [('id_ed25519', 0o600), ('id_ed25519.pub', 0o644)]:
+                assert (case/'recovery'/key).stat().st_mode & 0o777 == mode
+            verified = subprocess.run(['ssh-keygen', '-lf', str(case/'recovery/id_ed25519.pub')],
+                capture_output=True, text=True, timeout=5)
+            assert verified.returncode == 0 and '(ED25519)' in verified.stdout, verified
             receipt = json.loads(result.stdout.split('STAGING_RECOVERY=',1)[1])
             assert receipt.pop('original_release_exit_code') == 1 and all(value is True for value in receipt.values()), receipt
             assert calls.index('release') < calls.index('consumed') < calls.index('capture') < calls.index('restore') < calls.index('systemctl'), calls
         else:
             assert 'STAGING_RECOVERY=' not in result.stdout, (failed,result.stdout)
-            if failed in ['setup','release','consumed','quarantine','fence','incident','host','replay','restore']:
+            if failed in ['pause','setup','release','consumed','quarantine','fence','incident','host','replay','restore']:
                 assert 'systemctl' not in calls, (failed,calls)
 print('actual singleton recovery phase requires original failure, capture, immutable replay, restoration, fencing and native availability proofs')

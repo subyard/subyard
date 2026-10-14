@@ -9,7 +9,16 @@ cd "$ROOT"
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ "${SUBYARD_E2E_TYPE:-}" = android-test ] \
   && sudo -n test -f /run/subyard-e2e-lease.json \
   || { echo 'staging-reliability: requires allocated Android VM1' >&2; exit 2; }
-TOKEN="${1:-$(date +%s)$$}"
+readonly -a OUTER_E2E_CONTEXT=("${SUBYARD_E2E_PROJECT:-}" \
+  "${SUBYARD_E2E_RUN_ID:-}" "${SUBYARD_E2E_SLOT:-}" "${SUBYARD_E2E_PURPOSE:-}")
+TOKEN=''
+for argument in "$@"; do
+  case "$argument" in
+    --*) echo 'staging-reliability: unknown option' >&2; exit 2 ;;
+    *) [ -z "$TOKEN" ] || { echo 'staging-reliability: unexpected argument' >&2; exit 2; }; TOKEN="$argument" ;;
+  esac
+done
+TOKEN="${TOKEN:-$(date +%s)$$}"
 # Reuse the existing marker-owned owner bootstrap without its broad dispatcher.
 # shellcheck disable=SC1090
 . <(sed '/^  case "$MODE" in/,$d; /^ROOT=/d' "$ROOT/dev/e2e/p0-guest.sh") staging-reliability "$TOKEN"
@@ -22,10 +31,7 @@ HOLDER_PID=''
 HOLDER_STARTED_PID=''
 SAMPLER_PID=''
 SECOND_BOOT_ACTIVE=0
-# This fixture owns console capture after native lifecycles have been reaped.
-# shellcheck disable=SC2034
-OWNER_DIAGNOSTIC_CONSOLE_CAPTURED=1
-REAPER_MASKED=0
+REAPER_PAUSED=0
 REAPER_TIMER_STOPPED=0
 BROKER_INSTALLED=0
 RELEASE_STAGED=0
@@ -38,7 +44,7 @@ HOLDER_STOP_GRACE_SECONDS=30
 # shellcheck disable=SC2034
 HOLDER_KILL_GRACE_SECONDS=10
 # shellcheck disable=SC1090
-. <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p' \
+. <(sed -n '/^hold_lease() (/,/^)/p; /^start_holder_child() {/,/^}/p; /^stop_holder_child() {/,/^}/p; /^recovery_monotonic_seconds() {/,/^}/p; /^reaper_pause() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-broker-recovery.sh" | sed '/^  acquire_lease /i\
   VM_COUNT_REQUESTED=1\n  resolve_vm_count')
 
@@ -61,6 +67,90 @@ stop_sampler() {
   printf 'STAGING_OBSERVER_EXIT={"exit_code":%d}\n' "$rc"
   [ "$rc" = 0 ] || [ "$rc" = 143 ]
 }
+builder_incident_receipt() {
+  outer_exec python3 - <<'PYBUILDERRECEIPT'
+import json,pathlib,re,stat
+def read_owned(path,mode):
+    if path.resolve()!=path: raise RuntimeError('noncanonical builder evidence path')
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=mode:
+        raise RuntimeError('unsafe builder evidence file')
+    if info.st_size>2*1024*1024: raise RuntimeError('builder evidence exceeds bound')
+    return path.read_text()
+def receipt(root,config):
+    lines=read_owned(config,0o644).splitlines()
+    for expected in ('E2E_VM_STATE_DIR=/var/lib/subyard/test-vms','E2E_BROKER_SOURCE=test-yard'):
+        key=expected.split('=',1)[0]+'='
+        if [line for line in lines if line.startswith(key)]!=[expected]:
+            raise RuntimeError('unexpected builder evidence configuration')
+    info=root.lstat()
+    if root.resolve()!=root or not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o700:
+        raise RuntimeError('unsafe builder evidence root')
+    path=root/'images.json'
+    if not path.exists() and not path.is_symlink(): return {}
+    registry=json.loads(read_owned(path,0o600))
+    if registry.get('schema_version')!=1 or not re.fullmatch('[0-9a-f]{32}',registry.get('owner','')):
+        raise RuntimeError('invalid builder evidence registry')
+    build=registry.get('build')
+    if build is None: return {}
+    failure=build.get('readiness_failure')
+    if failure is None: return {}
+    if (build.get('project')!='subyard-e2e-vms-builder' or failure.get('Project')!=build['project']
+        or failure.get('VM')!='e2e-base-1' or not re.fullmatch('[0-9a-f]{64}',build.get('key',''))
+        or not re.fullmatch('[0-9]{20}-[0-9a-f]{16}',build.get('incident_id',''))
+        or build.get('incident_slot',{}).get('slot_id')!='slot-000'):
+        raise RuntimeError('failed builder lacks a matching durable incident receipt')
+    return {'incident_id':build['incident_id'],'owner':registry['owner'],'build_key':build['key']}
+print(json.dumps(receipt(pathlib.Path('/var/lib/subyard/test-vms'),pathlib.Path('/etc/subyard/test-vms.env'))))
+PYBUILDERRECEIPT
+}
+collect_builder_incident() {
+  local receipt="$1" id owner
+  [ "$receipt" != '{}' ] || return 0
+  id="$(jq -er '.incident_id' <<<"$receipt")" || return 1
+  owner="$(jq -er '.owner' <<<"$receipt")" || return 1
+  [ "$(outer_exec incus project get subyard-e2e-vms-builder user.subyard.managed)" = test-vms-v1 ] \
+    && [ "$(outer_exec incus project get subyard-e2e-vms-builder user.subyard.base_owner)" = "$owner" ] || return 1
+  python3 - "$SUBYARD_HOME" "$receipt" <<'PYBUILDERCAPTURE'
+import datetime,json,pathlib,re,stat,sys
+def capture(home,receipt):
+    incident_id=receipt['incident_id']
+    if not re.fullmatch('[0-9]{20}-[0-9a-f]{16}',incident_id): raise RuntimeError('invalid builder incident ID')
+    root=home/'logs/test-vms-broker-incidents'
+    def read(path):
+        if path.resolve()!=path: raise RuntimeError('noncanonical host capture path')
+        for directory in (root,root/'host'):
+            info=directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o750:
+                raise RuntimeError('unsafe host capture root')
+        info=path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o640 or info.st_size>2*1024*1024:
+            raise RuntimeError('unsafe host capture file')
+        return json.loads(path.read_text())
+    incident=read(root/(incident_id+'.json'))
+    host=read(root/'host'/(incident_id+'.json'))
+    resource=json.loads(incident.get('diagnostics',{}).get('resource','{}'))
+    if (incident.get('schema_version')!=1 or incident.get('incident_id')!=incident_id
+        or incident.get('source')!='test-yard' or incident.get('slot_id')!='slot-000'
+        or resource!={'resource_kind':'base_builder','project':'subyard-e2e-vms-builder','vm':'e2e-base-1','build_key':receipt['build_key']}):
+        raise RuntimeError('foreign builder incident')
+    parse=lambda value: datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+    if parse(host['observed_at'])<parse(incident['created_at']): raise RuntimeError('host capture predates incident')
+    if host.get('timing')!='after incident, at host spool collection; kernel window is the preceding 15 minutes':
+        raise RuntimeError('unexpected host capture provenance')
+    for key in ('host_memory','allocation_memory'):
+        memory=host.get(key)
+        if memory is not None:
+            if (memory.get('outer_host_evidence')!='collected by physical-owner host sink'
+                or type(memory.get('available_bytes')) is not int or memory['available_bytes']<0
+                or type(memory.get('limit_available')) is not bool):
+                raise RuntimeError('invalid physical host memory evidence')
+    return incident,host
+incident,host=capture(pathlib.Path(sys.argv[1]),json.loads(sys.argv[2]))
+print('STAGING_BUILDER_INCIDENT='+json.dumps(incident,separators=(',',':')))
+print('STAGING_HOST_OBSERVATION='+json.dumps(host,separators=(',',':')))
+PYBUILDERCAPTURE
+}
 collect_evidence() {
   [ -n "$STATE_PARENT" ] && [ -d "$STATE_PARENT" ] || return 0
   stop_sampler || return 1
@@ -73,10 +163,15 @@ collect_evidence() {
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker spool-export > "$STATE_PARENT/spool.json" || return 1
   printf 'STAGING_SPOOL='
   jq -c . "$STATE_PARENT/spool.json" || return 1
+  local builder_receipt
+  builder_receipt="$(builder_incident_receipt)" || return 1
   sudo -n systemctl start subyard-test-vms-host-sink.service || return 1
+  # Native Ack removes pending spool entries, not the builder's durable receipt.
+  collect_builder_incident "$builder_receipt" || return 1
   local id host
   while IFS= read -r id; do
     [[ "$id" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || return 1
+    [ "$id" != "$(jq -r '.incident_id // ""' <<<"$builder_receipt")" ] || continue
     host="$SUBYARD_HOME/logs/test-vms-broker-incidents/host/$id.json"
     [ -f "$host" ] && [ ! -L "$host" ] || return 1
     printf 'STAGING_HOST_OBSERVATION='
@@ -110,8 +205,8 @@ cleanup() {
   stop_sampler || cleanup_rc=3
   restore_inventory_fault || { cleanup_rc=3; owner_cleanup_allowed=0; }
   collect_evidence || cleanup_rc=3
-  if [ "$REAPER_MASKED" = 1 ]; then
-    outer_exec systemctl unmask --runtime subyard-test-vms-lease-reaper.service || cleanup_rc=3
+  if [ "$REAPER_PAUSED" = 1 ] && [ "$owner_cleanup_allowed" = 1 ]; then
+    reaper_pause outer_exec restore "$MARKER" || { cleanup_rc=3; owner_cleanup_allowed=0; }
   fi
   if [ "$REAPER_TIMER_STOPPED" = 1 ]; then
     if [ "$owner_cleanup_allowed" = 1 ]; then
@@ -242,22 +337,53 @@ reclaim_release_staging() {
 }
 
 reclaim_owner_apt_indexes() {
-  [ "$MINIMAL_OWNER" = 1 ] && verify_broker_installation || return 1
+  [ "$MINIMAL_OWNER" = 1 ] && p0_capacity_assert_root_marker && verify_broker_installation || return 1
+  local scope="$1" executor
+  case "$scope" in
+    owner_container) executor=(outer_exec) ;;
+    outer_vm) executor=(sudo -n timeout --signal=TERM --kill-after=5 30) ;;
+    *) return 1 ;;
+  esac
   # Installation is complete. These downloaded indexes are reproduced by
   # apt-get update; keep sources, package databases and all native lock inodes.
-  outer_exec python3 - <<'PYAPTINDEX'
-import fcntl,os,pathlib,pwd,stat
+  "${executor[@]}" python3 - "$scope" "$P0_CAPACITY_STATE_ROOT" "$MARKER" "$(id -u)" \
+    "${OUTER_E2E_CONTEXT[@]}" <<'PYAPTINDEX'
+import fcntl,json,os,pathlib,pwd,shlex,stat,subprocess,sys
+scope,state,marker,uid,project,run,slot,purpose=sys.argv[1:]
 root=pathlib.Path('/var/lib/apt/lists')
 locks=['/var/lib/dpkg/lock-frontend','/var/lib/dpkg/lock','/var/lib/apt/lists/lock']
 def canonical(path):
     if path.resolve()!=path or not path.exists(): raise RuntimeError('unsafe APT metadata path')
-canonical(root)
-if not root.is_dir() or root.stat().st_uid!=os.geteuid(): raise RuntimeError('foreign APT metadata owner')
+    return path.lstat()
+def private_file(path,owner,mode):
+    item=canonical(path)
+    if not stat.S_ISREG(item.st_mode) or item.st_uid!=owner or stat.S_IMODE(item.st_mode)!=mode or item.st_nlink!=1 or item.st_size>4096:
+        raise RuntimeError('unsafe APT actor identity file')
+    return path.read_text()
+if scope=='outer_vm':
+    if os.geteuid()!=0: raise RuntimeError('APT actor is not privileged L1')
+    lease=json.loads(private_file(pathlib.Path('/run/subyard-e2e-lease.json'),0,0o444))
+    if (type(lease.get('schema_version')) is not int or lease['schema_version']!=2
+        or any(lease.get(key)!=value or not value for key,value in
+            (('project',project),('run',run),('slot',slot),('purpose',purpose)))
+        or purpose!='staging-reliability'): raise RuntimeError('foreign APT actor lease')
+    state=pathlib.Path(state);uid=int(uid);item=canonical(state)
+    if uid<=0 or not stat.S_ISDIR(item.st_mode) or item.st_uid!=uid or stat.S_IMODE(item.st_mode)!=0o711:
+        raise RuntimeError('unsafe APT actor fixture root')
+    if private_file(state/'.subyard-p0-marker',uid,0o600)!=marker+'\n': raise RuntimeError('foreign APT actor fixture marker')
+elif scope!='owner_container': raise RuntimeError('invalid APT actor scope')
+body=subprocess.check_output(['apt-config','shell','LISTS','Dir::State::lists/d'],stderr=subprocess.DEVNULL,timeout=2)
+rows=shlex.split(body.decode()) if len(body)<=4096 else []
+if len(rows)!=1 or rows[0] not in ('LISTS='+str(root),'LISTS='+str(root)+'/'):
+    raise RuntimeError('foreign APT lists configuration')
+info=canonical(root)
+if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid(): raise RuntimeError('foreign APT metadata owner')
 held=[]
 for name in locks:
-    path=pathlib.Path(name); canonical(path)
+    path=pathlib.Path(name); before=canonical(path)
     fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
-    if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_uid!=os.geteuid():
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or (info.st_dev,info.st_ino)!=(before.st_dev,before.st_ino):
         raise RuntimeError('unsafe APT lock')
     fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
     held.append(fd)
@@ -272,8 +398,17 @@ for parent,dirs,files in os.walk(root,followlinks=False):
         if stat.S_ISREG(info.st_mode):
             if info.st_nlink!=1: raise RuntimeError('linked APT metadata entry')
             if path!=root/'lock': indexes.append(path)
+def measure(phase):
+    value=None
+    try:
+        fields=subprocess.check_output(['du','-sx','-B1','--',str(root)],stderr=subprocess.DEVNULL,timeout=2).split()
+        if fields and fields[0].isdigit() and len(fields[0])<=18: value=int(fields[0])
+    except (OSError,subprocess.SubprocessError): pass
+    print('STAGING_DISPOSABLE_CAPACITY='+json.dumps({'phase':phase,'scope':scope,'apt_lists_bytes':value}))
 # Preflight the entire tree before deleting anything. Native APT locks stay held.
+measure('before_reclaim')
 for path in indexes: path.unlink()
+measure('after_reclaim')
 PYAPTINDEX
 }
 
@@ -297,6 +432,17 @@ def fingerprint(path):
     regular(path); s=path.stat()
     return {'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'mode':stat.S_IMODE(s.st_mode),'uid':s.st_uid,'gid':s.st_gid}
 regular(config)
+parent=config.parent.lstat()
+if parent.st_uid!=os.geteuid() or stat.S_IMODE(parent.st_mode)&0o022:
+    raise RuntimeError('unsafe configuration directory')
+def replace_config(body,original):
+    # Atomic replacement must stage on the configuration filesystem, not /run.
+    target=config.with_name('.'+config.name+'.'+marker+'.candidate')
+    fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:
+        os.fchmod(stream.fileno(),original['mode']); os.fchown(stream.fileno(),original['uid'],original['gid'])
+        stream.write(body); stream.flush(); os.fsync(stream.fileno())
+    os.replace(target,config)
 backup=root/'backup'; metadata=root/'metadata'; wrapper=root/'incus'; trigger=root/'trigger'
 if action=='install':
     if root.exists() or root.is_symlink() or root.parent.resolve()!=root.parent:
@@ -325,8 +471,7 @@ exec '''+real+''' "$@"
 '''); wrapper.chmod(0o700)
     trigger.write_text(marker+'\n'); trigger.chmod(0o600)
     if fingerprint(config)!=original or fingerprint(backup)!=original: raise RuntimeError('configuration changed during fault setup')
-    target=root/'candidate'; target.write_bytes(candidate); target.chmod(original['mode']); os.chown(target,original['uid'],original['gid'])
-    os.replace(target,config)
+    replace_config(candidate,original)
 else:
     if root.resolve()!=root or not root.is_dir() or root.stat().st_uid!=os.geteuid(): raise RuntimeError('unsafe fault staging')
     regular(root/'.marker')
@@ -342,8 +487,7 @@ else:
         if fingerprint(backup)!=original or any(current[k]!=original[k] for k in ('mode','uid','gid')):
             raise RuntimeError('fault backup or configuration mode/owner changed')
         if current['sha256'] not in {original['sha256'],saved['candidate_sha256']}: raise RuntimeError('foreign configuration change')
-        target=root/'candidate'; target.write_bytes(backup.read_bytes()); target.chmod(original['mode']); os.chown(target,original['uid'],original['gid'])
-        os.replace(target,config)
+        replace_config(backup.read_bytes(),original)
         if fingerprint(config)!=original: raise RuntimeError('configuration restoration failed')
         for path in root.iterdir(): path.unlink()
         root.rmdir()
@@ -360,10 +504,12 @@ restore_inventory_fault() {
 verify_singleton_recovery() {
   local held quarantined available uuid lease_project incident_id incident host captured incident_hash host_hash logs release_rc=0 until
   verify_broker_installation || die 'owner changed before recovery acceptance'
-  [ "$REAPER_MASKED" = 1 ] && [ "$REAPER_TIMER_STOPPED" = 1 ] \
+  [ "$REAPER_PAUSED" = 1 ] && [ "$REAPER_TIMER_STOPPED" = 1 ] \
     || die 'recovery capture requires the fixture-owned reaper pause'
+  reaper_pause outer_exec verify "$MARKER" || die 'reaper pause changed before recovery acceptance'
   stop_sampler
   HOLDER_CLIENT=recovery
+  SUBYARD_E2E_STATE_DIR="$STATE_PARENT/$HOLDER_CLIENT" "$RUNNER" --yard "$YARD" --prepare >/dev/null
   start_holder_child hold_lease "$HOLDER_CLIENT" staging-inventory-failure slot-001 \
     >"$STATE_PARENT/$HOLDER_CLIENT.log" 2>&1
   HOLDER_PID="$HOLDER_STARTED_PID"
@@ -440,8 +586,8 @@ PYCAPTURETIME
   [ "$(sha256sum "$incident")" = "$incident_hash" ] && [ "$(sha256sum "$host")" = "$host_hash" ] \
     || die 'sink replay changed immutable captured evidence'
   restore_inventory_fault || die 'inventory configuration restoration refused'
-  outer_exec systemctl unmask --runtime subyard-test-vms-lease-reaper.service
-  REAPER_MASKED=0
+  reaper_pause outer_exec restore "$MARKER"
+  REAPER_PAUSED=0
   outer_exec systemctl start subyard-test-vms-lease-reaper.timer
   REAPER_TIMER_STOPPED=0
   outer_exec systemctl start --no-block subyard-test-vms-lease-reaper.service
@@ -508,6 +654,30 @@ PYFOOTPRINT
   outer_exec python3 - owner_container <<<"$measure"
 }
 
+prepare_owner_audit() {
+  local logs="$SUBYARD_HOME/logs" path
+  [ -d "$SUBYARD_HOME" ] && [ ! -L "$SUBYARD_HOME" ] && [ -O "$SUBYARD_HOME" ] \
+    && [ "$(realpath -m -- "$SUBYARD_HOME")" = "$SUBYARD_HOME" ] || return 1
+  if [ -e "$logs" ] || [ -L "$logs" ]; then
+    [ -d "$logs" ] && [ ! -L "$logs" ] && [ -O "$logs" ] || return 1
+  fi
+  for path in "$logs/yard.log" "$logs/.yard.lock"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
+    fi
+  done
+  # Normal init audits as the operator before enabling the root host sink.
+  # Use the installed CLI writer; the sink preserves an existing user log root.
+  timeout --signal=TERM --kill-after=10 30 env SUBYARD_NO_AUDIT= \
+    "$SUBYARD_HOME/runtime/current/bin/yard" help >/dev/null || return 1
+  [ -d "$logs" ] && [ ! -L "$logs" ] && [ -O "$logs" ] \
+    && [ "$(stat -c '%u:%a' "$logs")" = "$(id -u):700" ] || return 1
+  for path in "$logs/yard.log" "$logs/.yard.lock"; do
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] \
+      && [ "$(stat -c '%u:%a' "$path")" = "$(id -u):600" ] || return 1
+  done
+}
+
 owner_adapter() {
   env ASSUME_YES=1 SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
     SUBYARD_USER="$(id -un)" SUBYARD_OPERATOR_HOME="$HOME" \
@@ -527,7 +697,7 @@ owner_adapter() {
 }
 
 prepare_minimal_owner() {
-  local bootstrap="$ROOT/.build/p0-staging-owner" userdata bootstrap_rc=0
+  local bootstrap="$ROOT/.build/p0-staging-owner" userdata bootstrap_rc=0 recipes="$SUBYARD_HOME/runtime/current"
   [ ! -L "$ROOT/.build" ] || die 'owner driver parent is a symlink'
   [ ! -e "$bootstrap" ] && [ ! -L "$bootstrap" ] || die 'owner driver staging already exists'
   install -d -m 0700 "$bootstrap"
@@ -545,8 +715,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 5 {
-		panic("owner driver requires runtime, data home, CPU and fixture marker")
+	if len(os.Args) != 6 {
+		panic("owner driver requires runtime, data home, CPU, fixture marker and recipes")
 	}
 	root, home, cpu, marker := os.Args[1], os.Args[2], os.Args[3], os.Args[4]
 	runner := testvmsruntime.ProcessRunner{}
@@ -561,7 +731,7 @@ func main() {
 		}
 	}
 	backend := testvmsruntime.Backend{
-		RepositoryRoot: root, DataHome: home, Dispatcher: root + "/bin/yard-engine",
+		RepositoryRoot: os.Args[5], DataHome: home, Dispatcher: root + "/bin/yard-engine",
 		Project: "subyard-test-yard", Instance: "yard-test-yard", YardName: "test-yard", DesiredPower: "running", Output: os.Stderr,
 		Environment: map[string]string{"NESTED_E2E_VMS": "1", "DEV_USER": "dev", "E2E_VM_IMAGE": "images:debian/13/cloud",
 			"E2E_VM_CPU": cpu, "E2E_VM_MEMORY": "2GiB", "E2E_VM_DISK": "10GiB", "E2E_VM_SLOT_COUNT": "1", "E2E_VM_BOOT_TIMEOUT": "300"},
@@ -597,7 +767,8 @@ CLOUDOWNER
 )"
   incus init "$OWNER_BASE_IMAGE" "$INSTANCE" --project "$PROJECT" \
     -c boot.autostart=false -c user.subyard.managed=true -c user.subyard.name="$YARD" \
-    -c user.subyard.bridge=incusbr0 -c user.subyard.desired_power=running -c cloud-init.user-data="$userdata" >/dev/null
+    -c user.subyard.bridge=incusbr0 -c user.subyard.desired_power=running \
+    -c user.subyard.initialized=false -c cloud-init.user-data="$userdata" >/dev/null
   owner_adapter 03-create-subyard.sh
   timeout --signal=TERM --kill-after=10 300 incus exec "$INSTANCE" --project "$PROJECT" -- cloud-init status --wait --long
   outer_exec sh -eu -c '
@@ -607,13 +778,16 @@ CLOUDOWNER
     sshd -t
     systemctl is-active --quiet ssh.service
   '
-  "$bootstrap/owner" "$SUBYARD_HOME/runtime/current" "$SUBYARD_HOME" "$diagnostic_cpu" "$MARKER" || bootstrap_rc=$?
+  "$bootstrap/owner" "$SUBYARD_HOME/runtime/current" "$SUBYARD_HOME" "$diagnostic_cpu" "$MARKER" "$recipes" || bootstrap_rc=$?
   if [ "$bootstrap_rc" != 0 ]; then
     if verify_broker_installation; then BROKER_INSTALLED=1; fi
     return "$bootstrap_rc"
   fi
   verify_broker_installation || die 'minimal owner broker differs from installed candidate'
   BROKER_INSTALLED=1
+  # Provisioning owns this private root; a legacy worker-key marker is optional.
+  builder_incident_receipt >/dev/null || die 'native builder evidence baseline is unsafe'
+  prepare_owner_audit || die 'normal owner audit context is unavailable'
   owner_adapter install-test-vms-host-sink.sh
   # Run-created driver staging is unused after native installation/readiness.
   [ ! -L "$ROOT/.build" ] && [ ! -L "$bootstrap" ] \
@@ -675,7 +849,8 @@ p0_capacity_reclaim_go_module_cache
 p0_capacity_remove_build_cache
 verify_broker_installation || die 'owner changed before disposable cache cleanup'
 outer_exec apt-get clean
-reclaim_owner_apt_indexes || die 'owner APT index cleanup refused'
+reclaim_owner_apt_indexes owner_container || die 'owner APT index cleanup refused'
+reclaim_owner_apt_indexes outer_vm || die 'allocated VM APT index cleanup refused'
 reclaim_release_staging || die 'release staging ownership not verified'
 sample_disposable_capacity after_reclaim
 sample_disk_footprint
@@ -689,8 +864,8 @@ jq -e '(.resources.bases // []) | length == 0'  <<<"$before" >/dev/null || die '
 # Keep actual failures intact until durable capture; restore only owned services.
 outer_exec systemctl stop subyard-test-vms-lease-reaper.timer
 REAPER_TIMER_STOPPED=1
-outer_exec systemctl mask --runtime --now subyard-test-vms-lease-reaper.service >/dev/null
-REAPER_MASKED=1
+REAPER_PAUSED=1
+reaper_pause outer_exec install "$MARKER"
 printf 'STAGING_NATIVE_VERSIONS_BEGIN\n'
 outer_exec sh -eu -c 'incus version; qemu-system-x86_64 --version | head -n 1; dpkg-query -W -f="\${Package} \${Version}\\n" incus incus-agent qemu-system-x86 ovmf 2>/dev/null || true'
 printf 'STAGING_NATIVE_VERSIONS_END\n'
@@ -844,13 +1019,15 @@ except (OSError,ValueError,subprocess.SubprocessError):
 PYTHON
 SAMPLER_PID=$!
 printf '  [ .. ] cold post-upgrade base validation\n'
-timeout --signal=TERM --kill-after=30 4500 "$SUBYARD_HOME/runtime/current/bin/yard" -Y test-yard test-vms refresh subyard-pair --yes
+refresh_rc=0
+timeout --signal=TERM --kill-after=30 4500 "$SUBYARD_HOME/runtime/current/bin/yard" -Y test-yard test-vms refresh subyard-pair --yes || refresh_rc=$?
+[ "$refresh_rc" = 0 ] || exit "$refresh_rc"
 base="$(status | jq -er '.resources.bases[] | select(.type=="subyard-pair") | .fingerprint')"
 [[ "$base" =~ ^[a-f0-9]{64}$ ]] || die 'validated base fingerprint missing'
 outer_exec incus query "/1.0/images/$base?project=default" | jq -ec '
- .properties["user.subyard.base_validation"] == "post-upgrade-boot-v1" and .type == "virtual-machine"
+ .properties["user.subyard.base_validation"] == "cidata-seed-clean-v2" and .type == "virtual-machine"
 ' >/dev/null || die 'base lacks fresh-boot validation metadata'
-printf 'STAGING_BASE={"fingerprint":"%s","validation":"post-upgrade-boot-v1"}\n' "$base"
+printf 'STAGING_BASE={"fingerprint":"%s","validation":"cidata-seed-clean-v2"}\n' "$base"
 
 start_holder_child hold_lease holder staging-reboot slot-001 >"$STATE_PARENT/holder.log" 2>&1
 HOLDER_PID="$HOLDER_STARTED_PID"
@@ -882,7 +1059,7 @@ timeout --signal=TERM --kill-after=10 300 bash -c '
 ' _ "$HOLDER_CONFIG"
 timeout --signal=TERM --kill-after=10 310 incus exec "$INSTANCE" --project "$PROJECT" --   incus exec e2e-vm-1 --project subyard-e2e-vms-slot-1 -- timeout --kill-after=10 300 cloud-init status --wait --long >/dev/null
 boot_after="$(timeout --signal=TERM --kill-after=10 15 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id </dev/null)"
-[ -n "$boot_before" ] && [ -n "$boot_after" ] && [ "$boot_before" != "$boot_after" ] || die 'singleton did not boot again' 
+[ -n "$boot_before" ] && [ -n "$boot_after" ] && [ "$boot_before" != "$boot_after" ] || die 'singleton did not boot again'
 printf 'STAGING_SECOND_BOOT_IDENTITY_BEGIN\n'
 timeout --signal=TERM --kill-after=10 30 ssh -F "$HOLDER_CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- \
   'uname -r; systemctl show incus-agent.service -p ActiveState -p ActiveEnterTimestampMonotonic; journalctl -b -u incus-agent.service --no-pager -n 80' </dev/null

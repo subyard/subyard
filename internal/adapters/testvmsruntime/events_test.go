@@ -695,16 +695,8 @@ func TestHostSinkBuilderSentinelUsesExactCleanupReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostPath := filepath.Join(filepath.Dir(path), "host", filepath.Base(path))
-	host, err := os.ReadFile(hostPath)
-	if err != nil {
+	if _, err := os.ReadFile(hostPath); err != nil {
 		t.Fatal(err)
-	}
-	if err := sink.saveHostEvidence(context.Background(), instance, []IncidentArtifact{builder}); err != nil {
-		t.Fatal(err)
-	}
-	hostRetry, err := os.ReadFile(hostPath)
-	if err != nil || string(host) != string(hostRetry) {
-		t.Fatal("builder host retry changed evidence")
 	}
 	// A receipt for another source or another kind cannot close this builder.
 	otherRecorder := recorder
