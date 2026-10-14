@@ -1,0 +1,10 @@
+# Managed by Subyard git-fetch profile.
+[Unit]
+Description=Fetch managed yard repositories every five minutes
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+AccuracySec=1s
+Unit=subyard-git-fetch.service
+[Install]
+WantedBy=timers.target

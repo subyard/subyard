@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Exercise the actual profile transport with a bounded fake Incus guest boundary.
+set -euo pipefail
+export TMPDIR=/tmp
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+state="$(mktemp -d /tmp/subyard-git-fetch-owner.XXXXXX)"
+trap 'rm -rf -- "$state"' EXIT
+mkdir "$state/bin"
+cat > "$state/bin/incus" <<'PY'
+#!/usr/bin/env python3
+import json,os,sys,tarfile
+from pathlib import Path
+args=sys.argv[1:]
+if os.environ.get('GIT_FETCH_FIXTURE_FAIL')==args[0]: sys.exit(1)
+if args[0]=='list': print(os.environ.get('GIT_FETCH_FIXTURE_STATE','RUNNING')); sys.exit()
+assert args[0]=='exec'
+with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
+    names=sorted(member.name for member in archive)
+assert names==['fetch.py','guest.py','subyard-git-fetch.service.in','subyard-git-fetch.timer']
+arguments=args[args.index('subyard')+1:]
+Path(os.environ['GIT_FETCH_FIXTURE_CALLS']).write_text(json.dumps(arguments))
+if arguments[0]=='check' and os.environ.get('GIT_FETCH_FIXTURE_DRIFT')=='1': print('git-fetch-drift')
+if arguments[0]=='pause': print('paused')
+if arguments[0] in ('observe','refresh'): print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
+PY
+chmod 755 "$state/bin/incus"
+export PATH="$state/bin:$PATH" GIT_FETCH_FIXTURE_CALLS="$state/calls"
+export SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1
+export SUBYARD_OPERATOR_HOME="$state" SUBYARD_CONFIG_DIR="$root/config" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
+export STORAGE_PATH="$state/storage" HOST_BASE="$state/host" RESTRICTED_DISK_PATHS="$state/host"
+export ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME=yard-fixture INCUS_PROJECT=subyard-fixture INCUS_BRIDGE=fixture SSH_HOST=127.0.0.1
+export DEV_USER=dev DEV_UID=1000 DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
+export SUBYARD_PROFILE_SELECTED=1 ENVIRONMENT_PROFILES=git-fetch
+bash "$root/config/profiles/git-fetch/owner.sh" --yes
+python3 - "$state/calls" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))==['apply','1','dev','0']
+PY
+bash "$root/config/profiles/git-fetch/owner.sh" --remove
+python3 - "$state/calls" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))==['apply','0','dev','0']
+PY
+[ "$(bash "$root/config/profiles/git-fetch/owner.sh" --pause)" = paused ]
+GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/owner.sh" --check
+expect_exit() {
+  local expected=$1 rc=0
+  shift
+  "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = "$expected" ] || { printf 'unexpected lifecycle exit %s (expected %s)\n' "$rc" "$expected" >&2; exit 1; }
+}
+expect_exit 1 env GIT_FETCH_FIXTURE_DRIFT=1 bash "$root/config/profiles/git-fetch/owner.sh" --check
+expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=list bash "$root/config/profiles/git-fetch/owner.sh" --check
+expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=exec bash "$root/config/profiles/git-fetch/owner.sh" --check
+expect_exit 2 env GIT_FETCH_FIXTURE_STATE=ERROR bash "$root/config/profiles/git-fetch/owner.sh" --check
+if SUBYARD_ENGINE_CONTEXT=0 bash "$root/config/profiles/git-fetch/owner.sh" --yes >/dev/null 2>&1; then
+  echo 'FAIL: unprepared owner invocation accepted' >&2; exit 1
+fi
+printf 'ok: git-fetch owner transport, selection, pause and stopped runtime\n'

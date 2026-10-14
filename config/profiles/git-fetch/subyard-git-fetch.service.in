@@ -1,0 +1,18 @@
+# Managed by Subyard git-fetch profile.
+[Unit]
+Description=Fetch managed yard repositories sequentially
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+Environment=HOME=@HOME@
+Environment=SSH_AUTH_SOCK=@HOME@/.ssh/subyard-agent.sock
+ExecStart=/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B /var/lib/subyard/git-fetch/fetch.py
+TimeoutStartSec=infinity
+TimeoutStopSec=5s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
