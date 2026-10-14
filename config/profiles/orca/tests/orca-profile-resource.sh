@@ -764,8 +764,15 @@ grep -Fxq 'Environment=SUBYARD_ORCA_CODEX_CONFIG=1' "$ORCA_TEST_CAPTURE/subyard-
 dash -n "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
   || fail 'Codex shell integration is not valid for ordinary POSIX login shells'
 env -u SUBYARD_ORCA_CODEX_CONFIG bash --noprofile --norc -c \
-  '. "$1"; ! declare -F codex' _ "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
+  'previous_path="$PATH"; . "$1"; ! declare -F codex && [ "$PATH" = "$previous_path" ]' \
+  _ "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
   || fail 'Codex shell integration changed a non-Orca shell'
+SUBYARD_ORCA_CODEX_CONFIG=1 bash --noprofile --norc -c \
+  '. "$1"; [ "${PATH%%:*}" = /usr/local/libexec/subyard/orca-codex ]' \
+  _ "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
+  || fail 'Orca login environment did not select its native chat launcher'
+[ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex")" = 755 ] \
+  || fail 'Orca native chat launcher is not executable'
 touch "$TMP/codex-defaults-drift"
 ORCA_ADVERTISE_HOST=owner.example-tailnet.ts.net ORCA_HOST_PORT=17678 SUBYARD_RESOURCE_MODE=prepare \
   "$ROOT/config/profiles/orca/resources/orca/handler.sh" up >"$TMP/codex-plan.json"

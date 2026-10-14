@@ -26,23 +26,15 @@ for name in codex-policy-one codex-policy-two; do
 done
 yard orca sync --yes >/dev/null
 
-stage 'checking native requirements drift and public yard-init repair'
-home_config_before="$(guest_root sha256sum /home/dev/.codex/config.toml | cut -d' ' -f1)" \
-  || die 'Codex user configuration is unavailable before requirements repair'
-guest_root /usr/local/bin/codex-policy-check >/dev/null \
-  || die 'native Codex requirements did not pass their managed check'
-guest_root sh -c 'printf "\n# e2e requirements drift\n" >> /etc/codex/requirements.toml'
-if guest_root /usr/local/bin/codex-policy-check >/dev/null 2>&1; then
-  die 'native Codex requirements drift passed its managed check'
-fi
-yard init --yes >/dev/null
-guest_root /usr/local/bin/codex-policy-check >/dev/null \
-  || die 'public yard init did not repair native Codex requirements drift'
-[ "$(guest_root sha256sum /home/dev/.codex/config.toml | cut -d' ' -f1)" = "$home_config_before" ] \
-  || die 'native requirements repair changed the Codex user configuration'
+incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
+stage 'running stock Orca native Codex chat start and resume'
+chat_helper="$ROOT/config/profiles/orca/tests/e2e/codex-chat.py"
+incus --project "$PROJECT" file push "$chat_helper" "$INSTANCE/tmp/subyard-codex-chat.py" --mode 0644
+guest_root runuser -u dev -- env HOME=/home/dev \
+  python3 -B /tmp/subyard-codex-chat.py "$guest_helper" "$workspace_two" \
+  || die 'stock Orca native Codex chat permissions failed'
 
 stage 'running Codex permission and Orca terminal coverage as the developer'
-incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
 for surface in appserver terminal; do
   helper_args=()
   [ "$surface" != terminal ] || helper_args+=(--terminal)
@@ -118,4 +110,22 @@ done
 codex_terminal_close
 guest_root rm -f -- "$guest_helper"
 
-printf 'ok: native Codex requirements repaired by yard init, user config preserved, and two workspaces passed direct and Orca policy coverage\n'
+stage 'checking native requirements drift denial and authorized release repair'
+home_config_before="$(guest_root sha256sum /home/dev/.codex/config.toml | cut -d' ' -f1)" \
+  || die 'Codex user configuration is unavailable before requirements repair'
+guest_root /usr/local/bin/codex-policy-check >/dev/null \
+  || die 'native Codex requirements did not pass their managed check'
+guest_root sh -c 'printf "\n# e2e requirements drift\n" >> /etc/codex/requirements.toml'
+if guest_root /usr/local/bin/codex-policy-check >/dev/null 2>&1; then
+  die 'native Codex requirements drift passed its managed check'
+fi
+focused_release_ready requirements-drift || die 'native requirements release repair failed'
+guest_root /usr/local/bin/codex-policy-check >/dev/null \
+  || die 'authorized release repair did not restore native Codex requirements'
+yard init --yes >/dev/null
+guest_root /usr/local/bin/codex-policy-check >/dev/null \
+  || die 'native Codex requirements did not remain ready after public yard init'
+[ "$(guest_root sha256sum /home/dev/.codex/config.toml | cut -d' ' -f1)" = "$home_config_before" ] \
+  || die 'native requirements repair changed the Codex user configuration'
+
+printf 'ok: native Codex drift denied and repaired through release migration, init verified policy, user config preserved, and two workspaces passed direct and Orca coverage\n'

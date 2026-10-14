@@ -746,8 +746,11 @@ dev/agent-e2e.sh --slot "$slot" --purpose codex-permissions --vm 1 -- \
 ```
 
 This focused mode installs the native Codex CLI and stock Orca in a disposable yard.
-It verifies managed policy reconciliation through `yard init` and exercises runtime approval
-with synthetic model responses and disposable Git repositories. It uses no real agent credentials
+It verifies managed policy drift refusal, authorized release repair and subsequent
+`yard init` readiness, and exercises runtime approval
+with synthetic model responses and disposable Git repositories. Stock Orca native chat
+starts and resumes a real Codex thread and writes outside the workspace to verify the
+yard sandbox default. It uses no real agent credentials
 or external model APIs. These checks do not replace interactive VS Code/Desktop acceptance or
 establish a security boundary against alternative Git commands.
 

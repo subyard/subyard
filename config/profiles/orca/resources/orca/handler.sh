@@ -30,6 +30,7 @@ ORCA_INGRESS=/usr/local/libexec/subyard/orca-ingress
 ORCA_SYNC=/usr/local/libexec/subyard/projects-changed.d/orca
 ORCA_REGISTRATION=/usr/local/libexec/subyard/orca-registration
 ORCA_CODEX_PROFILE=/etc/profile.d/subyard-orca-codex.sh
+ORCA_CODEX_BIN=/usr/local/libexec/subyard/orca-codex/codex
 ORCA_CONTRACT_DIGEST=/usr/local/libexec/subyard/orca-contract.sha256
 ORCA_REGISTRATION_DIGEST=/usr/local/libexec/subyard/orca-registration.sha256
 ORCA_REGISTRATION_LOCK=/usr/local/libexec/subyard/orca-registration.lock
@@ -537,6 +538,7 @@ stage_runtime_contract() {
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
   local codex_profile="$ORCA_TMP_DIR/orca-codex-profile"
+  local codex_bin="$ORCA_TMP_DIR/orca-codex-bin"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
   local source contract_version
   local -a helpers=()
@@ -548,6 +550,7 @@ stage_runtime_contract() {
   local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
   local guest_capture="$ORCA_GUEST_TMP_DIR/orca-capture-ready"
   local guest_codex_profile="$ORCA_GUEST_TMP_DIR/orca-codex-profile"
+  local guest_codex_bin="$ORCA_GUEST_TMP_DIR/orca-codex-bin"
   local guest_unit="$ORCA_GUEST_TMP_DIR/$ORCA_UNIT"
   cat >"$ingress" <<'INGRESS'
 #!/usr/bin/env bash
@@ -598,9 +601,14 @@ CAPTURE
   # its supported --no-daemon policy and managed-account hook preparation.
   cat >"$codex_profile" <<CODEX_PROFILE
 if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
+  export PATH=${ORCA_CODEX_BIN%/*}:\$PATH
   codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
 fi
 CODEX_PROFILE
+  cat >"$codex_bin" <<CODEX_BIN
+#!/bin/sh
+exec /usr/bin/python3 -B $ORCA_REGISTRATION/codex_appserver.py /usr/local/bin/codex "\$@"
+CODEX_BIN
   render_registration_hook >"$sync"
   cat >"$unit" <<UNIT
 [Unit]
@@ -640,12 +648,15 @@ UNIT
     "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$codex_profile" "$YARD_INSTANCE_NAME$guest_codex_profile" \
     "${PROJ[@]}" --mode 0644 >/dev/null
+  incus file push "$codex_bin" "$YARD_INSTANCE_NAME$guest_codex_bin" \
+    "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   stage_registration_contract
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
     ! yexec cmp -s "$guest_codex_profile" "$ORCA_CODEX_PROFILE" ||
+    ! yexec cmp -s "$guest_codex_bin" "$ORCA_CODEX_BIN" ||
     ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
     ! ingress_active; then
     ORCA_RUNTIME_CHANGED=1
@@ -654,9 +665,11 @@ UNIT
   yexec install -m 0755 "$guest_ingress" "$ORCA_INGRESS"
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
   yexec install -m 0644 "$guest_codex_profile" "$ORCA_CODEX_PROFILE"
+  yexec install -d -m 0755 "${ORCA_CODEX_BIN%/*}"
+  yexec install -m 0755 "$guest_codex_bin" "$ORCA_CODEX_BIN"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
   yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 digest="$(sha256sum "$@" | sha256sum | awk '{print $1}')"
@@ -808,7 +821,7 @@ runtime_contract_ready() {
   mapfile -t helpers < <(registration_files)
   contract_version="$(registration_contract_version)" || return 1
   if ! yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
-    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
+    "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'
 set -euo pipefail
 marker="$1"; version="$2"; shift 2
 [ -r "$marker" ]

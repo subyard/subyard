@@ -393,8 +393,32 @@ EOF_SECONDARY_HANDLER
     "$mode" "$UPGRADE_FROM" "$rolled_back_version" "$target_version" "$legacy_helper" "$target_helper"
 }
 
+focused_release_ready() {
+  local phase="$1" report="$STATE/focused-migrate-$1.json" status=0 state
+  stage "assessing focused release activation: $phase"
+  yard migrate --check --json >"$report" || status=$?
+  state="$(jq -er '.outcome.status' "$report")" || return 1
+  case "$state" in
+    ready) [ "$status" = 0 ] || return 1 ;;
+    migration-required)
+      jq -e '.outcome.code == "transition-required"' "$report" >/dev/null || return 1
+      stage "authorizing newly assessed focused activation repair: $phase"
+      yard migrate --yes || return 1
+      yard migrate --check --json >"$report" || return 1
+      ;;
+    *)
+      jq -r '.outcome | "focused activation blocked: \(.status) / \(.code); next: \(.retry)"' "$report" >&2
+      return 1
+      ;;
+  esac
+  jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$report" >/dev/null \
+    || return 1
+  stage "focused native release activation ready: $phase"
+}
+
 cleanup() {
-  local rc=$? cleanup_failed=0
+  local rc=$? cleanup_failed=0 original_rc
+  original_rc="$rc"
   trap - EXIT INT TERM
   set +e
   [ "$FIXTURE_READY" = 1 ] || exit "$rc"
@@ -421,11 +445,21 @@ cleanup() {
     stage 'resume with SUBYARD_E2E_ORCA_RESUME set to that exact path; successful runs clean up normally'
     exit "$rc"
   fi
+  if [ "$CODEX_PERMISSIONS" = 1 ] && incus info "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
+    if ! focused_release_ready cleanup; then
+      stage "focused activation repair failed during cleanup (original fixture exit $original_rc)"
+      rc=3; cleanup_failed=1
+    fi
+  fi
   if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/secondary/config.env" ]; then
     yard -Y secondary teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
   fi
   if [ -f "${SUBYARD_CONFIG_HOME:-}/yards/default/config.env" ]; then
-    yard teardown --yes >/dev/null 2>&1 || { rc=3; cleanup_failed=1; }
+    if ! yard teardown --yes >"$STATE/teardown.out" 2>"$STATE/teardown.err"; then
+      stage "default-yard teardown failed (original fixture exit $original_rc)"
+      tail -n 8 "$STATE/teardown.err" >&2
+      rc=3; cleanup_failed=1
+    fi
   fi
   if ! incus list --all-projects --format=json | jq -e --arg project "$PROJECT" \
     'all(.[]; .project != $project and .project != ($project + "-secondary"))' >/dev/null; then
@@ -924,7 +958,7 @@ GOMODCACHE="$(go env GOMODCACHE)"
 GOCACHE="$(go env GOCACHE)"
 export GOMODCACHE GOCACHE
 if [ -z "$RESUME_STATE" ]; then
-  install -d -m 0700 "$STATE/home" "$STATE/config/yards/default" "$STATE/data" "$STATE/host"
+  install -d -m 0700 "$STATE/home" "$STATE/config" "$STATE/data" "$STATE/host"
 fi
 export HOME="$STATE/home"
 export SUBYARD_OPERATOR_HOME="$HOME"
@@ -934,6 +968,45 @@ export STORAGE_PATH="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus/incus/stor
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
+if [ "$CODEX_PERMISSIONS" = 1 ]; then
+  # Immutable VM bases carry packages but reset the daemon and operator socket
+  # access. Activation needs the native API before it can observe an absent yard.
+  stage 'reconciling the native Incus foundation before candidate installation'
+  (
+    # shellcheck source=tests/helpers/test-context.sh
+    . "$ROOT/tests/helpers/test-context.sh"
+    setup_test_context "$STATE/incus-foundation"
+    export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME="$ORIGINAL_HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+    export SUBYARD_DISPATCHER_PATH="$YARD_BIN"
+    set -a
+    # shellcheck source=config/host.env
+    . "$ROOT/config/host.env"
+    set +a
+    export STORAGE_PATH="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus/incus/storage"
+    bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
+  )
+  timeout 10 /usr/bin/incus query /1.0 >/dev/null
+  timeout 10 /usr/bin/incus storage show default --project default >/dev/null
+  timeout 10 /usr/bin/incus network show incusbr0 --project default >/dev/null
+  yard config status >/dev/null
+  stage 'focused native operator API and absent-yard config readiness passed'
+  # Install before registering an uninitialized yard: activation can inspect only
+  # existing selected yards. This also commits the publication reader boundary
+  # before init installs its publication-capable power unit.
+  stage 'installing the focused candidate before registering its disposable yard'
+  # shellcheck source=config/profiles/orca/tests/e2e/orca-release-prepare.sh
+  . "$ROOT/config/profiles/orca/tests/e2e/orca-release-prepare.sh"
+  orca_prepare_bootstrap_release
+  YARD_RELEASE_BASE_URL="file://$STATE/release" YARD_RELEASE_VERSION="$release_version" \
+    YARD_BIN_DIR="$HOME/.local/bin" SHELL=/bin/bash \
+    "$STATE/release/subyard-install.sh" --yes >/dev/null
+  YARD_BIN="$HOME/.local/bin/yard"
+  [ "$(yard --version)" = "yard $release_version" ] || die 'focused candidate release is not active'
+  jq -e '.domains["power-metadata"].epoch == 2' \
+    "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null \
+    || die 'focused candidate release did not commit the publication reader boundary'
+  stage 'focused native installer and publication reader prerequisite passed'
+fi
 coding_integrations=''
 yard_profiles=subyard-dev
 [ "$SSH_AGENT" = 0 ] || yard_profiles=orca
@@ -947,6 +1020,7 @@ if [ "$EXISTING_YARD" = 1 ]; then
   yard_profiles='subyard-dev orca'
 fi
 if [ -z "$RESUME_STATE" ]; then
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/default"
   SSH_PORT="$(free_port)"
   cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
 SSH_PORT=$SSH_PORT
@@ -1010,11 +1084,14 @@ if [ "$SSH_AGENT" = 1 ]; then
 fi
 
 if [ "$CODEX_PERMISSIONS" = 1 ]; then
-  install_stock_orca_client
   stage 'initializing the candidate and stock Orca for focused Codex permissions acceptance'
   yard init --yes
+  stage 'focused configured native yard init prerequisite passed'
+  install_stock_orca_client
   prepare_cached_orca_guest
+  focused_release_ready after-cache || die 'focused activation did not become ready after cached Orca installation'
   yard orca up --yes
+  focused_release_ready after-up || die 'focused activation did not become ready after Orca startup'
   stock_orca_probe
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
   assert_orca_readiness

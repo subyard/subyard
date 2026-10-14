@@ -245,6 +245,20 @@ events attached to the correct tab and prevents closing one tab from disconnecti
 others. It uses more memory, and those sessions do not appear in Codex's shared
 `codex agents` overview.
 
+Orca's built-in Codex chat also follows the yard configuration. A scoped launcher
+reads Codex's effective configuration for the chat's directory before starting or
+resuming its thread, including the account-specific `CODEX_HOME`. This replaces
+Orca's fixed Manual/YOLO thread permissions with the configured sandbox, approval
+policy and reviewer. Stricter configured sandboxes remain effective; later turns
+inherit the thread's permissions. Native managed requirements still enforce user
+approval and command rules. If the effective permissions cannot be read, the chat
+fails instead of guessing a permission mode.
+
+After updating this integration, run `yard orca up` and start or reopen the chat.
+The launcher belongs to the Orca server's login environment; SSH/VS Code launches
+and the installed Codex executable keep their existing behavior. An explicit Orca
+Command override bypasses this launcher and remains subject to native requirements.
+
 The **Run each Codex terminal on its own server** setting belongs to the Orca host
 that runs the terminal. Changing a paired Desktop's local toggle does not change
 the yard server's preference. New terminals follow the server setting; setting
