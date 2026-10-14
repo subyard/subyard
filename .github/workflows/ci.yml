@@ -31,8 +31,8 @@ jobs:
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 ./cmd/... ./internal/...
-      - name: Native AI Observer producer contract
-        run: bash config/agents/aiobserver/tests/run.sh
+      - name: Native OpenLIT profile Go checks
+        run: bash tests/helpers/profile-go.sh openlit
 
   verify:
     # Ubuntu 24.04 carries systemd 255, whose real parser guards the oldest

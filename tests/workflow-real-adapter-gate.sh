@@ -70,6 +70,11 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
     && grep -Fxq '          .build/yard --version' <<<"$native_engine_job" \
     && grep -Fxq '        run: go test -count=1 ./cmd/... ./internal/...' <<<"$native_engine_job" \
     || fail "$(basename "$workflow") must build, run and test the native ARM64 engine"
+  mapfile -t native_runners < <(sed -nE 's/^[[:space:]]+run: bash ([^[:space:]]+).*/\1/p' <<<"$native_engine_job")
+  for runner in "${native_runners[@]}"; do
+    [ -f "$ROOT/$runner" ] \
+      || fail "$(basename "$workflow") references a missing native ARM64 runner: $runner"
+  done
   grep -Fq 'make verify' "$workflow" \
     || fail "$(basename "$workflow") must verify core and shipped profiles"
   grep -Fq 'run: make cli-docs-check' "$workflow" \

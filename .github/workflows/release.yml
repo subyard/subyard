@@ -57,8 +57,8 @@ jobs:
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 ./cmd/... ./internal/...
-      - name: Native AI Observer producer contract
-        run: bash config/agents/aiobserver/tests/run.sh
+      - name: Native OpenLIT profile Go checks
+        run: bash tests/helpers/profile-go.sh openlit
 
   paseo-headless:
     name: paseo-headless-${{ matrix.arch }}
