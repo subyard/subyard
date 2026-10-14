@@ -77,7 +77,7 @@ subyard_download_https_atomic() {
 
     retryable=0
     if [ "$curl_status" -eq 0 ]; then
-      # A successful but empty response is an incomplete key payload.
+      # A successful but empty response is an incomplete download.
       retryable=1
     elif _subyard_download_retryable "$curl_status" "$http_status"; then
       retryable=1
@@ -86,7 +86,7 @@ subyard_download_https_atomic() {
       break
     fi
 
-    printf 'Subyard: signing-key download failed (attempt %s/%s); retrying in %ss\n' \
+    printf 'Subyard: HTTPS download failed (attempt %s/%s); retrying in %ss\n' \
       "$attempt" "$attempts" "$delay" >&2
     elapsed=$((SECONDS - started))
     remaining=$((total_timeout - elapsed))
@@ -98,6 +98,6 @@ subyard_download_https_atomic() {
   done
 
   rm -f -- "$temporary"
-  printf 'Subyard: signing-key download failed after %s attempt(s)\n' "$attempt" >&2
+  printf 'Subyard: HTTPS download failed after %s attempt(s)\n' "$attempt" >&2
   return 1
 }

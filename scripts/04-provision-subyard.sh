@@ -66,7 +66,10 @@ fi
 # --- 1. provision inside the yard --------------------------------------------
 # Quoted heredoc: nothing expands on the host; vars arrive via --env.
 info "provisioning inside $YARD_INSTANCE_NAME (packages, Docker, user, /srv, services)"
-incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s <<'EOS'
+{
+  # Transport the existing download policy as code, without persistent guest files.
+  declare -f _subyard_download_retryable subyard_download_https_atomic
+  cat <<'EOS'
 export DEBIAN_FRONTEND=noninteractive
 # The yard bridge is IPv4-only (ipv6.address=none), so steer apt to IPv4 — mirrors that
 # resolve to AAAA records would otherwise be tried over an unreachable IPv6 path first.
@@ -121,8 +124,15 @@ else
 fi
 
 # Docker Engine + Compose plugin (official convenience script; Debian/Ubuntu aware).
+docker_install() (
+  installer="$(mktemp /tmp/subyard-docker-install.XXXXXX)"
+  trap 'rm -f -- "$installer"' EXIT
+  chmod 0600 "$installer"
+  subyard_download_https_atomic https://get.docker.com "$installer" 0600 root root
+  sh "$installer"
+)
 if ! command -v docker >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sh
+  docker_install
 else
   docker_forwarding_converge "$docker_config_changed"
 fi
@@ -246,6 +256,7 @@ PY
   exit 1
 fi
 EOS
+} | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s
 ok "in-yard provisioning complete"
 
 # The helper owns no service or persistent preview state.

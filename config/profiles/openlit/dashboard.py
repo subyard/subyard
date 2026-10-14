@@ -23,8 +23,9 @@ DEVICE = 'openlit-dashboard'
 DEFERRED = 'user.subyard.deferred_publication.'+DEVICE
 GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-openlit.XXXXXX)"; trap \'rm -rf -- "$stage"\' EXIT; tar -xf - -C "$stage"; bash "$stage/guest.sh" "$@"'
 COLD_GUEST_SCRIPT = 'stage=$1; shift; tar -xf - -C "$stage"; bash "$stage/guest.sh" "$@"'
-# Cold apply shares one deadline across archive delivery and every guest phase.
-GUEST_TIMEOUTS = {'apply':900, 'refresh':110, 'observe':30, 'pause':120, 'resume':120}
+# Cold apply shares one deadline across archive delivery, first pinned delivery
+# (900 seconds), the remaining guest phases and host publication.
+GUEST_TIMEOUTS = {'apply':1560, 'refresh':110, 'observe':30, 'pause':120, 'resume':120}
 COLD_CANCEL_SECONDS = 25
 COLD_KILL_SECONDS = 5
 COLD_DEADLINE = None
@@ -73,7 +74,7 @@ def supervise_cold(script, argv):
         os.chmod(stage, 0o700)
         reader.register(0, selectors.EVENT_READ)
         header = b''
-        header_deadline = time.monotonic()+900
+        header_deadline = time.monotonic()+1560
         while not header.endswith(b'\n') and len(header) < 80:
             if cancelled or time.monotonic() >= header_deadline: sys.exit(124)
             if not reader.select(min(0.1, max(0, header_deadline-time.monotonic()))): continue
@@ -82,7 +83,7 @@ def supervise_cold(script, argv):
             header += part
         budget, grace, size = header.decode('ascii').split()
         budget, grace, size = float(budget), float(grace), int(size)
-        if not (0 < budget <= 900 and 0 < grace <= 5 and 0 <= size <= 16*1024*1024):
+        if not (0 < budget <= 1560 and 0 < grace <= 5 and 0 <= size <= 16*1024*1024):
             sys.exit(124)
         deadline = time.monotonic()+budget
         while size:

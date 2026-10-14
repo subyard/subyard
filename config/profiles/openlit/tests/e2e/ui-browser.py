@@ -176,16 +176,55 @@ def screenshot(cdp, output, name):
 
 OBSERVE = r'''(() => {
  const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+ const rendered=e=>visible(e)&&getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).opacity!=='0';
+ const params=new URLSearchParams(location.search);
+ const tab=['logs','metrics','traces'].includes(params.get('tab'))?params.get('tab'):'UNKNOWN';
  const rows=[...document.querySelectorAll('section .grid.gap-2 > button.w-full.text-left.border')].filter(visible);
- const service=(row,name)=>[...row.querySelectorAll('span')].some(e=>e.innerText.trim().toLowerCase()===name);
+ const kinds=new Map([['codex_cli_rs','CODEX'],['claude-code','CLAUDE'],['unknown service','UNKNOWN_SERVICE'],['all services','ALL_SERVICES'],['','EMPTY']]);
+ const kind=text=>kinds.get(text.trim().toLowerCase())||'OTHER';
+ // Structural service fields from pinned OpenLIT 2.1.0 SignalRecords.
+ // Hidden labels and adjacent metadata cannot establish a rendered service.
+ const selectors={logs:'div.grid.min-w-0.grow > span.max-w-36.truncate',metrics:'div.mt-1.flex.flex-wrap > span.rounded:not(.font-medium)',traces:'div.mt-1.flex.flex-wrap.gap-x-3 > span:not(.font-mono)'};
+ const service=(row,name)=>[...row.querySelectorAll(selectors[tab]||'nonexistent-service-field')].some(e=>rendered(e)&&e.innerText.trim().toLowerCase()===name);
+ const fields=rows.flatMap(row=>[...row.querySelectorAll(selectors[tab]||'nonexistent-service-field')]);
+ const categories={CODEX:0,CLAUDE:0,UNKNOWN_SERVICE:0,ALL_SERVICES:0,EMPTY:0,OTHER:0};
+ const visibleCategories={...categories};
+ for(const field of fields){const k=kind(field.textContent||'');categories[k]++;if(rendered(field))visibleCategories[k]++;}
  const alerts=[...document.querySelectorAll('[role="alert"], [data-sonner-toast][data-type="error"]')].filter(visible).map(e=>e.innerText.toLowerCase());
  const errors=[];
  if(alerts.some(t=>/sql|clickhouse|unknown identifier|syntax error|db::exception|code: \d+/.test(t))) errors.push('sql-query');
  else if(alerts.some(t=>/unauthori|forbidden|credential/.test(t))) errors.push('authentication');
  else if(alerts.length) errors.push('rendered-alert');
  const labels=[...document.querySelectorAll('button')].filter(visible).map(e=>e.innerText.trim());
- return {path:location.pathname,tab:new URLSearchParams(location.search).get('tab'),title:document.title.includes('OpenLIT')?'OpenLIT':'rendered',rows:rows.length,codexRows:rows.filter(e=>service(e,'codex_cli_rs')).length,claudeRows:rows.filter(e=>service(e,'claude-code')).length,errors,tabs:['Logs','Metrics','Traces'].every(t=>labels.includes(t))};
+ const activeRange=[...document.querySelectorAll('[role="tab"][aria-selected="true"], [role="tab"][data-state="active"]')].filter(rendered).some(e=>['7d','7days'].includes(e.innerText.trim().toLowerCase().replace(/\s/g,'')));
+ return {path:location.pathname==='/telemetry'?'/telemetry':'OTHER',tab,title:document.title.includes('OpenLIT')?'OpenLIT':'rendered',rows:rows.length,codexRows:rows.filter(e=>service(e,'codex_cli_rs')).length,claudeRows:rows.filter(e=>service(e,'claude-code')).length,errors,tabs:['Logs','Metrics','Traces'].every(t=>labels.includes(t)),rowElements:{buttons:rows.length,visible:rows.filter(rendered).length,serviceFields:fields.length,visibleServiceFields:fields.filter(rendered).length,categories,visibleCategories},range:{url:params.get('tr')==='7D'?'7D':'OTHER',selected7D:activeRange},clearControlPresent:labels.includes('Clear Filters')};
 })()'''
+
+DATABASE = r'''(async()=>{
+ try {
+  const r=await fetch('/api/db-config',{credentials:'same-origin'});
+  const values=await r.json();
+  if(!r.ok||!Array.isArray(values))return 'UNKNOWN';
+  const current=values.filter(v=>v&&v.isCurrent===true);
+  return current.length===1?(current[0].database==='default'?'CURRENT_DEFAULT':'CURRENT_OTHER'):'UNKNOWN';
+ }catch{return 'UNKNOWN';}
+})()'''
+
+CLEAR_FILTERS = r'''(()=>{
+ const b=[...document.querySelectorAll('button')].find(b=>b.innerText.trim()==='Clear Filters');
+ if(!b)return 'NOT_PRESENT';
+ if(b.disabled)return 'DISABLED';
+ b.click();return 'CLICKED';
+})()'''
+
+def record_page(summary, observation, tab):
+    """Retain the safe observation before any assertion can refuse the page."""
+    summary['pages'].append(observation)
+    print('openlit_browser_observation='+json.dumps(observation, sort_keys=True), flush=True)
+    if observation.get('errors'):
+        raise Failure(observation['errors'][0])
+    if not observation.get('tabs') or observation.get('tab') != tab or not observation.get('rows') or not observation.get('codexRows'):
+        raise Failure('native-service-rows-missing-'+tab)
 
 
 def main():
@@ -196,7 +235,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=120)
     args = parser.parse_args()
     process = cdp = None
-    summary = {'pages': [], 'authenticated': False}
+    summary = {'pages': [], 'authenticated': False, 'normalLogin': {'anonymousForm': False, 'submitted': False, 'sessionVerified': False}, 'database': 'UNKNOWN'}
+    output_ready = False
     try:
         if not 15 <= args.timeout <= 120:
             raise Failure('invalid-timeout')
@@ -216,6 +256,7 @@ def main():
             args.output.mkdir(mode=0o700)
             os.chmod(args.output, 0o700)
         protected(args.output, True)
+        output_ready = True
         binary = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
         if not binary:
             raise Failure('chromium-missing')
@@ -235,23 +276,27 @@ def main():
                     cdp.call('Emulation.setDeviceMetricsOverride', {'width': 1600, 'height': 1000, 'deviceScaleFactor': 1, 'mobile': False})
                     cdp.call('Page.navigate', {'url': origin+'/dashboard'})
                     wait(cdp, 'location.pathname==="/login"&&!!document.querySelector("form input[name=email]")&&!!document.querySelector("form input[name=password]")', min(deadline, time.monotonic()+25), 'anonymous-login-redirect')
+                    summary['normalLogin']['anonymousForm'] = True
                     screenshot(cdp, args.output, 'anonymous-login')
                     # Native input setter + events update React, then click the actual
                     # submit control. No auth endpoint is called by the driver.
                     expression = '''(creds=>{const f=document.querySelector('form:has(input[name="password"])');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;for(const name of ['email','password']){const e=f.querySelector('[name="'+name+'"]');set.call(e,creds[name]);e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}f.querySelector('[type="submit"]').click();return true;})(CREDENTIALS)'''.replace('CREDENTIALS', json.dumps(credentials))
                     cdp.evaluate(expression)
+                    summary['normalLogin']['submitted'] = True
                     del expression
                     wait(cdp, 'location.pathname!=="/login"&&location.pathname!=="/register"&&location.pathname!=="/onboarding"&&document.readyState==="complete"', min(deadline, time.monotonic()+30), 'rendered-login')
                     active = cdp.evaluate('(async()=>{const r=await fetch("/api/auth/session",{credentials:"same-origin"});const v=await r.json();return r.ok&&!!v.user&&v.user.email===EMAIL;})()'.replace('EMAIL', json.dumps(credentials['email'])))
                     if not active:
                         raise Failure('active-session')
                     summary['authenticated'] = True
+                    summary['normalLogin']['sessionVerified'] = True
+                    summary['database'] = cdp.evaluate(DATABASE)
                     del credentials
                     for tab in ('logs', 'metrics', 'traces'):
                         cdp.call('Page.navigate', {'url': origin+'/telemetry?tab='+tab+'&tr=7D'})
                         tab_deadline = min(deadline, time.monotonic()+30)
                         wait(cdp, 'location.pathname==="/telemetry"&&document.readyState==="complete"&&[...document.querySelectorAll("button")].some(b=>b.innerText.trim()==="'+tab.title()+'")', tab_deadline, 'telemetry-navigation')
-                        cdp.evaluate('(()=>{const b=[...document.querySelectorAll("button")].find(b=>b.innerText.trim()==="Clear Filters"&&!b.disabled);if(b)b.click();return true;})()')
+                        clear_action = cdp.evaluate(CLEAR_FILTERS)
                         observation = None
                         ready_since = None
                         while time.monotonic() < tab_deadline:
@@ -266,12 +311,12 @@ def main():
                                 ready_since = None
                             time.sleep(0.3)
                         observation = observation or {}
-                        observation['screenshot'] = screenshot(cdp, args.output, tab)
-                        summary['pages'].append(observation)
-                        if observation.get('errors'):
-                            raise Failure(observation['errors'][0])
-                        if not observation.get('tabs') or observation.get('tab') != tab or not observation.get('rows') or not observation.get('codexRows'):
-                            raise Failure('native-service-rows-missing-'+tab)
+                        screenshot(cdp, args.output, tab)
+                        observation['screenshot'] = tab+'.png'
+                        observation['clearFilters'] = {'action': clear_action, 'controlPresentAfter': observation.get('clearControlPresent')}
+                        observation['normalLogin'] = summary['normalLogin']
+                        observation['database'] = summary['database']
+                        record_page(summary, observation, tab)
                     write_private(args.output/'summary.json', (json.dumps(summary, sort_keys=True)+'\n').encode())
                     print(json.dumps(summary, sort_keys=True))
                 finally:
@@ -287,6 +332,12 @@ def main():
     except Exception as error:
         # Never print browser protocol, page text, URLs, API bodies or credentials.
         summary['error_category'] = str(error) if isinstance(error, Failure) else 'browser-driver'
+        if output_ready:
+            try:
+                protected(args.output, True)
+                write_private(args.output/'failure.json', (json.dumps(summary, sort_keys=True)+'\n').encode())
+            except (OSError, Failure):
+                summary['failureArtifact'] = 'REFUSED'
         print(json.dumps(summary, sort_keys=True), file=sys.stderr)
         return 1
     return 0

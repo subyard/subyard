@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-create-limits.XXXXXX)"
 cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -143,6 +143,7 @@ for YARD_KIND in container vm; do
   reset_state RUNNING 1 2GiB
   run_create
   assert_limits 2 4GiB
+  ! grep -Eq '^(image list |init )' "$MOCK_INCUS_LOG" || fail "$YARD_KIND looked up an image for an existing instance"
   [ "$(grep -c '^stop ' "$MOCK_INCUS_LOG")" = 1 ] || fail "$YARD_KIND did not stop once before applying limits"
   [ "$(grep -c '^start ' "$MOCK_INCUS_LOG")" = 1 ] || fail "$YARD_KIND did not restore running power"
 

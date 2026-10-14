@@ -177,9 +177,20 @@ func (view preparedActivationSnapshotFixture) ReadPreparedInput(path string) (co
 }
 
 func TestPreparedMaterializedActivationMatchesNativeImportedAssetsAndNewYard(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		t.Run(map[bool]string{false: "injected-platform", true: "native-platform"}[native], func(t *testing.T) {
+			checkPreparedMaterializedActivation(t, native)
+		})
+	}
+}
+
+func checkPreparedMaterializedActivation(t *testing.T, native bool) {
+	t.Helper()
 	fixture := newSourceScopeFixture(t)
 	testkit.WriteFile(t, filepath.Join(fixture.root, "config", "projects-changed.sh"), []byte("#!/bin/sh\n"), 0755)
-	fixture.program.options.InitPlatform = nil
+	if native {
+		fixture.program.options.InitPlatform = nil
+	}
 	fixture.program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	fixture.program.options.Executor = nil
 	reconciler := fixture.reconciler(false).materializedConfigActivationReconciler
@@ -187,6 +198,22 @@ func TestPreparedMaterializedActivationMatchesNativeImportedAssetsAndNewYard(t *
 	before, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Characterized from the native adapter before the shared Desired policy.
+	const legacyNativeDesired = releasetransition.Fingerprint("82339782016ccd3cb2fceb9b1b619928fd1ac0b2d3290f6fb35b56be2cd334ea")
+	if before.Desired != legacyNativeDesired {
+		t.Fatalf("native desired fingerprint compatibility changed: %s", before.Desired)
+	}
+	platform := fixture.program.options.InitPlatform
+	if native {
+		fixture.program.options.InitPlatform = newInitPlatformFixture()
+	} else {
+		fixture.program.options.InitPlatform = nil
+	}
+	otherPlatform, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+	fixture.program.options.InitPlatform = platform
+	if err != nil || otherPlatform.Desired != before.Desired {
+		t.Fatalf("platform injection changed native desired fingerprint: injected=%s native=%s err=%v", otherPlatform.Desired, before.Desired, err)
 	}
 	hostAsset := filepath.Join(fixture.configHome, "overrides", "host", "agents", "claude", "settings.json")
 	newAsset := filepath.Join(fixture.configHome, "yards", "test-yard", "overrides", "agents", "claude", "settings.json")
@@ -252,5 +279,53 @@ func TestPreparedMaterializedActivationMatchesNativeImportedAssetsAndNewYard(t *
 	stableAfter, err := profile.desired(releases)
 	if err != nil || stableAfter != stableBefore {
 		t.Fatal("static profile Desired changed", err)
+	}
+}
+
+func TestPreparedActivationOmitsDisabledIntegrationScope(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		t.Run(map[bool]string{false: "injected-platform", true: "native-platform"}[native], func(t *testing.T) {
+			fixture := newSourceScopeFixture(t)
+			if native {
+				fixture.program.options.InitPlatform = nil
+			}
+			fixture.program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+			fixture.program.options.Executor = nil
+			profile := filepath.Join(fixture.root, "config/yards/profiles/restricted.env")
+			if err := os.MkdirAll(filepath.Dir(profile), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, profile, []byte("ALLOWS_CODING_TOOLS=false\n"), 0o600)
+			for _, name := range []string{"default", "named"} {
+				path := filepath.Join(fixture.configHome, "yards", name, "config.env")
+				before, err := os.ReadFile(path)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path, append(before, []byte("YARD_TEMPLATE=restricted\n")...), 0o600)
+				loaded, err := fixture.program.resolveReleaseTransitionContext(name, fixture.configHome)
+				if err != nil || loaded.Integrations.AllowsCodingTools {
+					t.Fatalf("restricted fixture did not disable coding tools: %s %v", name, err)
+				}
+			}
+			// A disabled owner must not read or require the native integration hook.
+			if err := os.Remove(filepath.Join(fixture.root, "config/projects-changed.sh")); err != nil {
+				t.Fatal(err)
+			}
+			reconciler := fixture.reconciler(false).materializedConfigActivationReconciler
+			releases := releasetransition.ReleasePair{From: "release-b", Target: "release-b"}
+			fresh, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			view := preparedActivationSnapshotFixture{home: fixture.configHome, names: []string{"named"}}
+			prepared, err := reconciler.PrepareSourceActivation(context.Background(), releases, releasetransition.ReleaseLinks{}, releasetransition.V2SourceActivationView{Settings: view})
+			if err != nil || prepared.Desired != fresh.Desired || len(fixture.boundary.applied) != 0 {
+				t.Fatalf("disabled scope changed desired identity or performed writes: prepared=%s fresh=%s err=%v", prepared.Desired, fresh.Desired, err)
+			}
+		})
 	}
 }

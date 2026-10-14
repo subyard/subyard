@@ -90,7 +90,7 @@ def dependency(compose, images):
         env['OPENLIT_DB_PASSWORD'] = 'synthetic-preflight'
         started = time.monotonic()
         with (directory/'pull.log').open('wb') as output:
-            result = subprocess.run(['timeout', '--signal=TERM', '--kill-after=30', '240',
+            result = subprocess.run(['timeout', '--signal=TERM', '--kill-after=30', '900',
                 'docker', 'compose', '--ansi', 'never', '--progress', 'plain', '-f', str(directory/'compose.yaml'), 'pull'],
                 stdout=output, stderr=subprocess.STDOUT, env=env)
         native_exit = result.returncode

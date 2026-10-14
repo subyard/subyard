@@ -33,6 +33,87 @@ YARD_LABEL="${YARD_NAME:-default}"
 desired_power="${SUBYARD_POWER_DESIRED:-}"
 
 PROJ=(--project "$INCUS_PROJECT")
+# Only a complete successful catalog can establish absence. Transport failures
+# must not change the selected distribution, and instance creation is never retried.
+yard_instance_create() (
+  local reference="$YARD_IMAGE" image_type=container metadata attempt rc availability selected_image
+  local remote=()
+  if [[ "$reference" = *:* ]]; then
+    remote=("${reference%%:*}:")
+    reference=${reference#*:}
+  fi
+  [ -n "$reference" ] || exit 2
+  [ "$YARD_KIND" != vm ] || image_type=virtual-machine
+  metadata=$(mktemp -d /tmp/subyard-image-metadata.XXXXXX) || exit 1
+  trap 'rm -rf -- "$metadata"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  chmod 0700 "$metadata" || exit 1
+  install -m 0600 /dev/null "$metadata/catalog" || exit 1
+  install -m 0600 /dev/null "$metadata/error" || exit 1
+  install -m 0600 /dev/null "$metadata/parse-error" || exit 1
+  for attempt in 1 2 3; do
+    if timeout --signal=TERM --kill-after=1 30 incus image list "${remote[@]}" "${PROJ[@]}" --format=json \
+      > "$metadata/catalog" 2> "$metadata/error"; then
+      break
+    else
+      rc=$?
+    fi
+    # Cancellation and unknown errors are terminal. Retry only bounded read-only
+    # metadata requests, with at most 95 seconds across attempts and backoff.
+    if [ "$attempt" -lt 3 ] \
+      && { [ "$rc" = 124 ] || { [ "$rc" = 1 ] && LC_ALL=C grep -qiE \
+        'lookup .*: (no such host|temporary failure in name resolution|server misbehaving)|context deadline exceeded|i/o timeout|TLS handshake timeout|connection (reset by peer|refused)|network is unreachable' "$metadata/error"; }; }; then
+      sleep 1 || exit "$?"
+    else
+      printf 'image metadata unavailable (incus image list exit %s)\n' "$rc" >&2
+      exit "$rc"
+    fi
+  done
+  # Incus emits api.Image arrays. Nil aliases and legacy empty container types
+  # are valid. Read the catalog from its private file, never through argv.
+  availability=$(jq -ser --arg reference "$reference" --arg kind "$image_type" '
+    if length == 1 and (.[0] | type == "array") then .[0]
+      else error("invalid image catalog") end
+    | if all(.[];
+        type == "object" and (.fingerprint | type == "string")
+        and (.fingerprint | test("^[a-f0-9]{64}$"))
+        and (.type == "" or .type == "container" or .type == "virtual-machine")
+        and has("aliases") and (.aliases == null or (.aliases | type == "array"))
+        and all((.aliases // [])[]; type == "object" and (.name | type == "string")))
+      then . else error("invalid image catalog") end
+    | def kind: if .type == "" then "container" else .type end;
+      if any(.[]; kind == $kind and any((.aliases // [])[]; .name == $reference)) then "present"
+      else map(select(.fingerprint | startswith($reference)))
+        | if length == 0 then "absent"
+          elif length == 1 then (if .[0] | kind == $kind then "present" else "absent" end)
+          else error("ambiguous image fingerprint") end
+      end
+  ' "$metadata/catalog" 2> "$metadata/parse-error") || {
+    rc=$?
+    printf 'image metadata invalid (catalog parse exit %s)\n' "$rc" >&2
+    exit "$rc"
+  }
+  selected_image=$YARD_IMAGE
+  if [ "$availability" = absent ]; then
+    selected_image=$YARD_IMAGE_FALLBACK
+    warn "preferred image is absent from its catalog; trying fallback $YARD_IMAGE_FALLBACK"
+  fi
+  info "creating $YARD_INSTANCE_NAME from $selected_image"
+  # Keep progress on stdout, but private CLI stderr inside this scoped capture.
+  if incus init "$selected_image" "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" 2> "$metadata/error"; then
+    ok "created $YARD_INSTANCE_NAME"
+  else
+    rc=$?
+    if incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
+      warn "instance '$YARD_INSTANCE_NAME' was created with an initialization warning (incus init exit $rc)"
+    else
+      printf 'instance creation failed (incus init exit %s)\n' "$rc" >&2
+      exit "$rc"
+    fi
+  fi
+)
 # Consume the complete list: grep -q can SIGPIPE Incus under pipefail.
 device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -Fx -- "$1" >/dev/null; }
 device_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
@@ -206,22 +287,12 @@ else
     -c "$POWER_KEY_DESIRED=$desired_power"
     -c "$POWER_KEY_INITIALIZED=false"
   )
-  info "creating $YARD_INSTANCE_NAME from $YARD_IMAGE"
-  if err="$(incus init "$YARD_IMAGE" "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" 2>&1)"; then
-    ok "created $YARD_INSTANCE_NAME"
-  elif incus info "$YARD_INSTANCE_NAME" "${PROJ[@]}" >/dev/null 2>&1; then
-    warn "instance '$YARD_INSTANCE_NAME' was created with an initialization warning:"
-    printf '%s\n' "$err" >&2
-  elif printf '%s' "$err" | grep -qiE 'image|not found|no such|remote'; then
-    # Only the base image looks missing — try the fallback. Other failures (e.g. a
-    # missing root device) would just repeat, so surface them instead of retrying.
-    warn "create from $YARD_IMAGE failed (image unavailable); trying fallback $YARD_IMAGE_FALLBACK"
-    incus init "$YARD_IMAGE_FALLBACK" "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${LAUNCH_FLAGS[@]}" \
-      || die "instance creation failed (check image remotes and YARD_KIND)"
-    ok "created $YARD_INSTANCE_NAME (fallback image)"
+  if yard_instance_create; then
+    :
   else
-    printf '%s\n' "$err" >&2
-    die "instance creation failed"
+    rc=$?
+    printf 'image lookup or instance creation failed (exit %s)\n' "$rc" >&2
+    exit "$rc"
   fi
 fi
 vm_storage_check_device_boundary true \

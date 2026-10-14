@@ -240,7 +240,7 @@ if [ "$auth_only" = dependency-only ]; then
   for image in "${diagnostic_images[@]}"; do
     incus exec "$instance" --project "$project" -- docker image inspect --format '{{.Id}}' "$image"
   done
-  printf 'ok: all pinned OpenLIT image blobs delivered within native240s\n'
+  printf 'ok: all pinned OpenLIT image blobs delivered within native900s\n'
   exit 0
 fi
 printf 'openlit_e2e_stage=absent-native-clis\n'

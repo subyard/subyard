@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-docker-forwarding.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 export TEST_LOG="$TMP/log"
@@ -176,4 +176,77 @@ assert probes['info']['exit'] == 0 and probes['server-version']['exit'] == 0
 assert (root / 'log').read_text().splitlines().count('docker container ls -a --format {{.Names}}') == 1
 PY
 
-printf 'ok: Docker forwarding and service readiness convergence\n'
+# Execute the real installer branch with the shared atomic download policy.
+installer="$TMP/docker-installer.sh"
+sed -n '/^# Docker Engine /,/^# Groups /{ /^# Groups /d; p; }' \
+  "$ROOT/scripts/04-provision-subyard.sh" > "$installer"
+cat > "$TMP/bin/curl" <<'PY'
+#!/usr/bin/python3
+import os,pathlib,stat,sys
+args=sys.argv[1:];base=pathlib.Path(os.environ['TEST_LOG']).parent
+counter=base/'fetch-count';attempt=int(counter.read_text())+1 if counter.exists() else 1
+counter.write_text(str(attempt))
+output=pathlib.Path(args[args.index('--output')+1]) if '--output' in args else None
+if output:
+    assert stat.S_IMODE(output.stat().st_mode)==0o600
+    with (base/'fetch-paths').open('a') as log:log.write(str(output)+'\n')
+scenario=os.environ['TEST_DOWNLOAD']
+code=6 if scenario=='dns' or (scenario=='dns-recovery' and attempt==1) else 18 if scenario=='partial' or (scenario=='partial-recovery' and attempt==1) else 0
+body='printf "complete\\n" >> "$TEST_INSTALLED"\nexit "${TEST_INSTALL_EXIT:-0}"\n'
+if code==18:body='printf "partial\\n" >> "$TEST_INSTALLED"\n'
+if code!=6:
+    if output:output.write_text(body)
+    else:sys.stdout.write(body)
+if '--write-out' in args:sys.stdout.write('000' if code==6 else '200')
+sys.exit(code)
+PY
+cat > "$TMP/bin/sh" <<'SH'
+#!/bin/sh
+if [ "$#" -gt 0 ]; then
+  [ "$(stat -c %a "$1")" = 600 ] || exit 99
+  printf '%s\n' "$1" >> "$TEST_LOG.installer-paths"
+fi
+exec /bin/sh "$@"
+SH
+cat > "$TMP/bin/chown" <<'SH'
+#!/bin/sh
+[ "$1" = root:root ] || exit 99
+SH
+cat > "$TMP/bin/sleep" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod 0755 "$TMP/bin/curl" "$TMP/bin/sh" "$TMP/bin/chown" "$TMP/bin/sleep"
+command() {
+  if [ "$#" = 2 ] && [ "$1" = -v ] && [ "$2" = docker ]; then
+    [ "$TEST_DOWNLOAD" = installed ]; return
+  fi
+  builtin command "$@"
+}
+export -f command docker_forwarding_converge
+export TEST_INSTALLED="$TMP/installer-executed"
+for TEST_DOWNLOAD in dns-recovery partial-recovery dns partial installer-failure installed; do
+  export TEST_DOWNLOAD TEST_INSTALL_EXIT=0
+  [ "$TEST_DOWNLOAD" != installer-failure ] || export TEST_INSTALL_EXIT=42
+  rm -f "$TMP/fetch-count" "$TMP/fetch-paths" "$TEST_INSTALLED" "$TEST_LOG.installer-paths"
+  status=0
+  bash -euo pipefail -c '. "$1"; docker_config_changed=0; . "$2"' \
+    subyard "$ROOT/scripts/lib/download.sh" "$installer" > "$TMP/stdout" 2> "$TMP/stderr" || status=$?
+  case "$TEST_DOWNLOAD" in
+    dns-recovery|partial-recovery) [ "$status" = 0 ] && [ "$(cat "$TMP/fetch-count")" = 2 ] ;;
+    dns|partial) [ "$status" = 1 ] && [ "$(cat "$TMP/fetch-count")" = 4 ] ;;
+    installer-failure) [ "$status" = 42 ] && [ "$(cat "$TMP/fetch-count")" = 1 ] ;;
+    installed) [ "$status" = 0 ] && [ ! -e "$TMP/fetch-count" ] ;;
+  esac || { printf 'FAIL: Docker installer download outcome %s exit=%s\n' "$TEST_DOWNLOAD" "$status" >&2; exit 1; }
+  case "$TEST_DOWNLOAD" in
+    dns-recovery|partial-recovery|installer-failure)
+      [ "$(cat "$TEST_INSTALLED")" = complete ]
+      [ "$(wc -l < "$TEST_LOG.installer-paths")" = 1 ] ;;
+    *) [ ! -e "$TEST_INSTALLED" ] && [ ! -e "$TEST_LOG.installer-paths" ] ;;
+  esac
+  for paths in "$TMP/fetch-paths" "$TEST_LOG.installer-paths"; do
+    [ ! -e "$paths" ] || while IFS= read -r path; do [ ! -e "$path" ]; done < "$paths"
+  done
+done
+
+printf 'ok: Docker forwarding, service readiness and atomic installer download\n'

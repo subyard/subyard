@@ -133,6 +133,17 @@ func (draft *sourceActivationDraft) load(name string) (config.Loaded, error) {
 	}
 	return config.Load(config.LoadOptions{Catalog: &draft.cli.catalog, RepositoryRoot: draft.cli.options.RepositoryRoot, OperatorHome: home, YardName: name, Environment: environment, ProspectiveFiles: draft.inputs, FileOverrides: draft.overrides})
 }
+
+// Desired integration identity belongs to the loaded declarations, independently
+// of the platform that supplies native observation and reconciliation.
+func (cli *CLI) materializedIntegrationScope(loaded config.Loaded, reader func(config.MaterializedAsset) ([]byte, error)) (string, []string, error) {
+	if !loaded.Integrations.AllowsCodingTools {
+		return "", nil, nil
+	}
+	runtime := reconcileruntime.Runtime{RepositoryRoot: cli.options.RepositoryRoot, Environment: environmentList(loaded.Environment, nil), Yard: loaded.Context, Integrations: loaded.Catalog.Integrations(), SourceReader: reader}
+	return runtime.IntegrationScope()
+}
+
 func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivation(ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
 	if err := reconciler.resolveScope(releases); err != nil {
 		return releasetransition.V2SourceActivationPlan{}, err
@@ -172,14 +183,11 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 		if err != nil {
 			return releasetransition.V2SourceActivationPlan{}, err
 		}
-		scope := ""
+		scope, _, err := reconciler.operation().materializedIntegrationScope(loaded, draft.readAsset)
+		if err != nil {
+			return releasetransition.V2SourceActivationPlan{}, err
+		}
 		if loaded.Integrations.AllowsCodingTools {
-			runtime := reconcileruntime.Runtime{RepositoryRoot: reconciler.cli.options.RepositoryRoot, Environment: environmentList(loaded.Environment, nil), Yard: loaded.Context, Integrations: loaded.Catalog.Integrations()}
-			scope, _, err = runtime.IntegrationScopeWithSourceReader(draft.readAsset)
-			if err != nil {
-				return releasetransition.V2SourceActivationPlan{}, err
-			}
-
 			incus, _ := reconciler.cli.statusPorts()
 			instance, inspectErr := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 			absent := errors.Is(inspectErr, ports.ErrInstanceNotFound) || errors.Is(inspectErr, os.ErrNotExist)

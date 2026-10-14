@@ -153,7 +153,7 @@ class FailureFactsTest(unittest.TestCase):
         output = io.StringIO()
         directories = []
         def native(argv, **options):
-            self.assertEqual(argv[:7], ['timeout', '--signal=TERM', '--kill-after=30', '240', 'docker', 'compose', '--ansi'])
+            self.assertEqual(argv[:7], ['timeout', '--signal=TERM', '--kill-after=30', '900', 'docker', 'compose', '--ansi'])
             self.assertIn('plain', argv)
             self.assertNotIn('--quiet', argv)
             log = Path(options['stdout'].name)

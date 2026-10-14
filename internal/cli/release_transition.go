@@ -909,19 +909,21 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{assessErr, target.Name, "materialized config", "config status", "inspect", reconciler.configHome}
 		}
 		consequences = append(consequences, target.Loaded.IntegrationSelectionExplanation(), target.Loaded.EnvironmentProfileSelectionExplanation())
-		integrationScope := ""
-		var managedPaths []string
+		var reader func(config.MaterializedAsset) ([]byte, error)
+		if files != nil {
+			reader = files.ReadAsset
+		}
+		integrationScope, managedPaths, err := operation.materializedIntegrationScope(target.Loaded, reader)
+		if err != nil {
+			return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}
+		}
 		platform := operation.initPlatform(target.Loaded, nil)
 		if runtime, ok := platform.(reconcileruntime.Runtime); ok && files != nil {
 			runtime.SourceReader = files.ReadAsset
 			platform = runtime
 		}
 		integration := reconcileruntime.IntegrationPlan{}
-		if runtime, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
-			integrationScope, managedPaths, err = runtime.IntegrationScope()
-			if err != nil {
-				return releasetransition.V2ActivationObservation{}, materializedConfigActivationError{err, target.Name, "integration scope", "integration status", "inspect", reconciler.configHome}
-			}
+		if _, ok := platform.(reconcileruntime.Runtime); ok && target.Loaded.Integrations.AllowsCodingTools {
 			if assessment.State == "drift" || assessment.State == "converged" {
 				platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 				if err != nil {

@@ -25,8 +25,10 @@ application instrumentation or session-file parser is installed.
 
 The yard must have core Docker Engine and Compose provisioning, internet access for the first
 bounded image download, and enough memory for the service environment. The stack caps ClickHouse
-and OpenLIT at 2 GiB each and the dedicated Collector at 256 MiB. Image pulls have a four-minute
-limit; initial Compose startup has a separate three-minute limit. Failed setup can be retried.
+and OpenLIT at 2 GiB each and the dedicated Collector at 256 MiB. First image delivery has a
+15-minute limit for the large pinned layers; initial Compose startup has a separate three-minute
+limit. Failed setup can be retried. Existing cached images skip downloads, and runtime refresh
+keeps its short repair budget.
 The profile uses public multi-architecture image manifests pinned by SHA-256: OpenLIT 2.1.0, ClickHouse 24.4.1,
 and Collector Contrib 0.162.0. See the [shipped stack](../config/profiles/openlit/compose.yaml).
 
@@ -190,7 +192,7 @@ bash config/profiles/openlit/tests/e2e/acceptance.sh --slot N --dependency-only
 ```
 
 It provisions a disposable yard and requires actual cold delivery of all three pinned images
-within the normal four-minute pull budget, then releases the allocation. HTTP registry metadata
+within the normal 15-minute pull budget, then releases the allocation. HTTP registry metadata
 alone does not prove blob delivery; this diagnostic does not satisfy the full acceptance lanes.
 
 To compare registry transport on an owner and its standard nested container within the same

@@ -81,6 +81,10 @@ func newSourceScopeFixture(t *testing.T) *sourceScopeFixture {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	// Prospective activation binds the shipped project hook before consent.
+	// Retain that native source dependency in the common migration fixture.
+	testkit.WriteFile(t, filepath.Join(root, "config", "projects-changed.sh"),
+		mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "projects-changed.sh")), 0o644)
 	// Fresh migration operations load shipped defaults instead of inherited
 	// native-fixture settings; keep the synthetic paths in that supported layer.
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)

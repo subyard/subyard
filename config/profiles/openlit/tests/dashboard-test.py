@@ -252,15 +252,14 @@ class DashboardTest(unittest.TestCase):
             mode=args[args.index('subyard')+1]
             calls.append((mode,options['timeout']))
             if mode=='apply':
-                # A scaled actual child crosses the old transport's pull frontier
-                # while remaining inside the cold apply's existing inner budgets.
-                subprocess.run([sys.executable,'-c','import time; time.sleep(2.5)'],check=True,timeout=options['timeout']/100)
+                # A scaled real download outlives the former cold transport.
+                subprocess.run([sys.executable,'-c','import time; time.sleep(1)'],check=True,timeout=options['timeout']/1000)
             return b''
         with patch.object(dashboard,'run',side_effect=transport),patch.object(dashboard,'cold_run',side_effect=transport):
             for mode in ('apply','observe','pause','resume','refresh'):
                 self.assertEqual(ORIGINAL_GUEST(mode,True,'dev','claude codex',''), '')
                 self.assertEqual(dashboard.PHASE,'guest-'+mode)
-        self.assertEqual(calls,[('apply',900),('observe',30),('pause',120),('resume',120),('refresh',110)])
+        self.assertEqual(calls,[('apply',1560),('observe',30),('pause',120),('resume',120),('refresh',110)])
 
     def test_guest_failure_projects_only_allowlisted_progress(self):
         captured=io.StringIO()
@@ -290,7 +289,7 @@ class ColdTransportTest(unittest.TestCase):
         # is a real exec transport: stdin and cancellation cross a native pipe.
         source=(PROFILE/'guest.sh').read_text()
         pull=source[source.index('  if [ "$missing" = 1 ]; then'):source.index('\npublish_asset()')]
-        pull=pull.rsplit('\nfi',1)[0].replace('pull_limit=240','pull_limit=0.24').replace('pull_limit=20','pull_limit=0.02')
+        pull=pull.rsplit('\nfi',1)[0].replace('pull_limit=900','pull_limit=0.9').replace('pull_limit=20','pull_limit=0.02')
         write(self.profile/'guest.sh', '#!/bin/bash\nset -euo pipefail\nmode=$1\nmissing=1\nroot='+str(self.profile)+'\nstate='+str(self.root)+'\nstage(){ :; }\ndie(){ exit 1; }\n'+pull+'\ntouch '+str(self.published)+'\n')
         write(self.bin/'docker','#!/bin/bash\nsleep 0.3\n',0o700)
         self.patchers=[patch.object(dashboard,'ROOT',self.profile),

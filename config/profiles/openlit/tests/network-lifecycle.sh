@@ -11,6 +11,13 @@ trap 'rm -rf -- "$tmp"' EXIT
 root="$tmp/source"
 install -d -m 0700 "$root/config/profiles/openlit/tests/e2e" "$tmp/bin" "$tmp/state"
 cp "$ROOT/config/profiles/openlit/tests/e2e/"{owner.sh,network-only.sh,network-facts.py} "$root/config/profiles/openlit/tests/e2e/"
+# The native platform preflight also uses the absolute CLI path. Bind that
+# physical dependency in this copied fixture; never inspect the test host.
+python3 - "$root/config/profiles/openlit/tests/e2e/owner.sh" "$tmp/bin/incus" <<'PY'
+import pathlib,sys
+path=pathlib.Path(sys.argv[1])
+path.write_text(path.read_text().replace('/usr/bin/incus',sys.argv[2]))
+PY
 printf 'services: {}\n' > "$root/config/profiles/openlit/compose.yaml"
 export OPENLIT_NETWORK_FIXTURE_ROOT="$tmp"
 cat > "$root/config/profiles/openlit/tests/e2e/candidate.sh" <<'SH'
@@ -21,7 +28,13 @@ openlit_candidate_command() {
 SH
 cat > "$tmp/bin/id" <<'SH'
 #!/bin/sh
-if [ "${1-}" = -un ]; then printf 'dev\n'; else exec /usr/bin/id "$@"; fi
+case "${1-}" in
+  -un) printf 'dev\n' ;;
+  -nG)
+    { [ "$#" = 1 ] || { [ "$#" = 2 ] && [ "$2" = dev ]; }; } || exit 99
+    printf 'dev incus-admin\n' ;;
+  *) exec /usr/bin/id "$@" ;;
+esac
 SH
 cat > "$tmp/bin/mktemp" <<'SH'
 #!/bin/sh
@@ -51,6 +64,10 @@ cat > "$tmp/bin/incus" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$OPENLIT_NETWORK_FIXTURE_ROOT/incus-calls"
 case "$1" in
+  query)
+    test "$*" = 'query /1.0/instances?project=default' || exit 99
+    printf '{}\n' ;;
+  storage) test "$*" = 'storage show default --project default' ;;
   list) printf 'STOPPED\n' ;;
   config) test "$2" = get; printf 'stopped\n' ;;
   exec)
@@ -97,6 +114,8 @@ for location in ('owner','guest'):
 calls=yards.read_text().splitlines()
 assert len(calls)==3 and calls[0].endswith('init --yes') and calls[1].endswith('start --yes') and calls[2].endswith('teardown --yes')
 calls=incus.read_text()
+assert calls.splitlines().count('query /1.0/instances?project=default')==2
+assert calls.splitlines().count('storage show default --project default')==2
 assert 'python3 - probe --location guest --registry-ip 44.1.2.3' in calls
 assert 'docker' not in calls and 'bash' not in calls
 PY

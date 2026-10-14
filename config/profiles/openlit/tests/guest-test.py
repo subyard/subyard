@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the guest preconditions with absent native CLIs and an unavailable Compose plugin."""
+"""Exercise guest prerequisites, scoped disable, and bounded cold image delivery."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,7 +12,7 @@ PROFILE = Path(__file__).resolve().parents[1]
 
 
 class GuestTest(unittest.TestCase):
-    def test_disable_removes_only_owned_services_and_retains_attached_network(self):
+    def test_lifecycle_scopes_disable_and_bounds_cold_image_delivery(self):
         with tempfile.TemporaryDirectory(prefix='subyard-openlit-disable-', dir='/tmp') as temporary:
             root = Path(temporary)
             source, state, commands = root/'source', root/'state', root/'bin'
@@ -30,15 +30,25 @@ class GuestTest(unittest.TestCase):
             calls = root/'calls'
             driver = commands/'driver'
             driver.write_text('''#!/usr/bin/python3
-import json,os,pathlib,subprocess,sys
+import json,os,pathlib,subprocess,sys,time
 name=pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
 base=pathlib.Path(__file__).resolve().parents[1]
 if name in ('docker','systemctl'):
     with (base/'calls').open('a') as out: out.write(json.dumps([name,*args])+'\\n')
     if name=='docker':
-        if 'down' in args or 'pull' in args or ('up' in args and not (base/'enable').exists()): sys.exit(99)
+        if 'down' in args or ('up' in args and not (base/'enable').exists()): sys.exit(99)
+        if 'pull' in args:
+            if not (base/'cold').exists(): sys.exit(99)
+            time.sleep(2 if (base/'slow').exists() else 0.35)
+        if args[:2]==['image','inspect'] and (base/'cold').exists(): sys.exit(1)
         if args[-2:]==['config','--images']: print('fixture/clickhouse\\nfixture/openlit\\nfixture/collector')
+elif name=='timeout':
+    # Exercise the actual timeout process at millisecond scale for image pulls.
+    if 'pull' in args:
+        limit=next(i for i,arg in enumerate(args) if not arg.startswith('-'))
+        args[limit]=str(float(args[limit])/1000)
+    os.execv('/usr/bin/timeout',['timeout',*args])
 elif name=='id': print(0)
 elif name=='getent': print('dev:x:0:0::'+str(base/'home')+':/bin/bash')
 elif name=='stat':
@@ -58,9 +68,9 @@ elif name=='python3':
 else: sys.exit(99)
 ''')
             driver.chmod(0o755)
-            for name in ('docker', 'systemctl', 'id', 'getent', 'stat', 'install', 'python3'):
+            for name in ('docker', 'systemctl', 'id', 'getent', 'stat', 'install', 'python3', 'timeout'):
                 (commands/name).symlink_to(driver)
-            for name in ('dirname', 'cut', 'head', 'cat', 'cmp', 'mktemp', 'mv', 'chmod', 'timeout'):
+            for name in ('dirname', 'cut', 'head', 'cat', 'cmp', 'mktemp', 'mv', 'chmod'):
                 (commands/name).symlink_to(Path('/usr/bin')/name)
             code = (source/'guest.sh').read_text()
             for original, replacement in (
@@ -94,6 +104,29 @@ else: sys.exit(99)
                 self.assertIn(['python3', 'trace_cutover.py', 'fence'], rows)
                 self.assertEqual(['python3', 'runtime.py', 'publish'] in rows, status == 0)
                 self.assertEqual(['systemctl', 'enable', '--now', 'subyard-openlit-trace-cutover.timer'] in rows, status == 0)
+
+            # A real cold pull may outlive four minutes, but refresh remains short.
+            (root/'fence-exit').write_text('0')
+            (root/'cold').touch()
+            for mode, slow, expected in (('apply', False, 0), ('apply', True, 1), ('refresh', False, 1)):
+                calls.write_text('')
+                if slow: (root/'slow').touch()
+                else: (root/'slow').unlink(missing_ok=True)
+                installed = (state/'compose.yaml').read_bytes()
+                with (source/'compose.yaml').open('a') as stream: stream.write('# next cold recipe\n')
+                arguments = [mode, '1', 'dev', 'codex']
+                if mode == 'refresh': arguments += ['a'*64, 'b'*64]
+                result = subprocess.run(['/bin/bash', str(source/'guest.sh'), *arguments],
+                                        env={'PATH': str(commands)}, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                rows = [json.loads(line) for line in calls.read_text().splitlines()]
+                if expected:
+                    self.assertIn('pinned image pull exit=124', result.stderr)
+                    self.assertEqual((state/'compose.yaml').read_bytes(), installed)
+                    self.assertNotIn(['python3', 'runtime.py', 'publish'], rows)
+                else:
+                    self.assertEqual((state/'compose.yaml').read_bytes(), (source/'compose.yaml').read_bytes())
+                    self.assertIn(['python3', 'runtime.py', 'publish'], rows)
 
     def test_missing_selected_agents_reach_real_runtime_prerequisite_without_mutation(self):
         with tempfile.TemporaryDirectory(prefix='subyard-openlit-guest-', dir='/tmp') as temporary:
