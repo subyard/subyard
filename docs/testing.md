@@ -203,7 +203,8 @@ limits and any necessary reproduction steps. Do not commit task logs, receipts o
 Permanent log storage or copies outside the task cache are not required.
 
 Then stop task-owned temporary helpers and remove only explicitly identified, completed task-owned
-cache directories. Confirm that their runners and leases have finished and that no registered live
+cache directories without asking for permission again. Confirm that their runners and leases have
+finished and that no registered live
 worktree or running application uses those paths. Preserve active sibling runs and shared build
 outputs; never clear the whole `.build` as a handoff step. Keep original records until their review
 and concise findings are complete. Cache cleanup does not require another VM acceptance run.
