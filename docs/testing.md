@@ -65,7 +65,8 @@ for roles and model settings. Preserve required coverage and candidate identity.
   developer with `followup_task` for diagnosis or the next phase after native terminal evidence,
   or a material event requiring an owned decision. This handoff is not readiness. Process control,
   lease heartbeats and cleanup remain runner-owned.
-- Prefer supported completion events; necessary timed waits may still invoke the model.
+- Prefer completion events. For capacity shortages, use long adaptive waits and retry guarded
+  acquisition when availability may reasonably have changed.
   Send routine/material progress to one responsible canonical recipient named in the assignment
   (normally the coordinator while the developer phase has ended). Preserve operator updates.
   Do not send duplicate progress to both roles or acknowledge/follow up merely to say still running.
