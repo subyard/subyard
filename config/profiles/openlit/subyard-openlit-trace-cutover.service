@@ -1,0 +1,10 @@
+# Managed by Subyard OpenLIT profile.
+[Unit]
+Description=Retire proven temporary OpenLIT trace receiver when sessions drain
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/subyard/openlit/trace_cutover.py finish --state /var/lib/subyard/openlit
+TimeoutStartSec=60
+UMask=0077

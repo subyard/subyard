@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -18,18 +19,23 @@ def run(*args, **options):
     return subprocess.run(args, check=True, **options)
 
 
+def dashboard_instruction(status):
+    line = next(line for line in status.splitlines() if re.search(r'openlit\s+dashboard\s+up', line))
+    match = re.search(r'\(open (http://127\.0\.0\.1:[0-9]+/telemetry\?tab=logs) after: (.*)\)$', line)
+    if not match:
+        raise RuntimeError('remote status omitted the exact native dashboard tunnel instruction')
+    url, command = match.groups()
+    parsed = urllib.parse.urlsplit(url)
+    return parsed.scheme+'://'+parsed.netloc+'/', shlex.split(command)
+
+
 def client(root, engine, identity):
     root = Path(root)
     environment = dict(os.environ, SUBYARD_CONFIG_HOME=str(root/'client-config'),
                        SUBYARD_HOME=str(root/'client-data'), PATH=str(root/'bin')+':'+os.environ['PATH'])
     status = subprocess.check_output([engine, '-Y', 'remote', 'status'], env=environment, timeout=60, text=True)
     (root/'client-status').write_text(status)
-    line = next(line for line in status.splitlines() if re.search(r'openlit\s+dashboard\s+up', line))
-    match = re.search(r'\(open (http://127\.0\.0\.1:[0-9]+/) after: (.*)\)$', line)
-    if not match:
-        raise RuntimeError('remote status omitted the exact dashboard tunnel instruction')
-    origin, command = match.groups()
-    arguments = shlex.split(command)
+    origin, arguments = dashboard_instruction(status)
     if arguments[:2] not in (['ssh', '-N'], ['ssh', '-T']):
         raise RuntimeError('unexpected remote dashboard transport')
     tunnel = subprocess.Popen(arguments, env=environment, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

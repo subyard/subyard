@@ -1,0 +1,11 @@
+# Managed by Subyard OpenLIT profile.
+[Unit]
+Description=Retry pending OpenLIT trace receiver retirement
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+Unit=subyard-openlit-trace-cutover.service
+
+[Install]
+WantedBy=timers.target

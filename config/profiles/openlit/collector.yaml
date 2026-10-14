@@ -1,11 +1,18 @@
 receivers:
-  otlp:
+  otlp/grpc:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+  otlp/http:
+    protocols:
       http:
         endpoint: 0.0.0.0:4318
 processors:
+  resource/trace_cutover:
+    attributes:
+      - key: subyard.openlit.trace_cutover
+        value: ${env:OPENLIT_TRACE_CUTOVER_ID}
+        action: insert
   memory_limiter:
     check_interval: 1s
     limit_mib: 192
@@ -30,11 +37,19 @@ extensions:
 service:
   extensions: [health_check]
   pipelines:
+    traces/http:
+      receivers: [otlp/http]
+      processors: [memory_limiter, resource/trace_cutover, batch]
+      exporters: [otlphttp/openlit]
+    traces/grpc:
+      receivers: [otlp/grpc]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/openlit]
     logs:
-      receivers: [otlp]
+      receivers: [otlp/grpc, otlp/http]
       processors: [memory_limiter, batch]
       exporters: [otlphttp/openlit]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp/grpc, otlp/http]
       processors: [memory_limiter, batch]
       exporters: [otlphttp/openlit]

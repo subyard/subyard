@@ -20,8 +20,8 @@ GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-openlit.XXXXXX)"; trap \'rm -rf 
 # Cold apply retains the existing guest budgets: Compose config240 + pull240 +
 # startup240 + unit90 + guard/publication60 + lock5 + transport25 =900 seconds.
 GUEST_TIMEOUTS = {'apply':900, 'refresh':110, 'observe':30, 'pause':120, 'resume':120}
-FILES = ('guest.sh', 'native.py', 'runtime.py', 'compose.yaml', 'collector.yaml',
-         'openlit-collector.yaml', 'subyard-openlit.service')
+FILES = ('guest.sh', 'native.py', 'runtime.py', 'trace_cutover.py', 'account.py', 'compose.yaml', 'collector.yaml',
+         'openlit-collector.yaml', 'subyard-openlit.service', 'subyard-openlit-trace-cutover.service', 'subyard-openlit-trace-cutover.timer')
 
 
 def run(*args, input=None, timeout=240):
@@ -31,10 +31,14 @@ def run(*args, input=None, timeout=240):
         # Guest command output may be private; project only static stage markers.
         stderr = error.stderr or b''
         if isinstance(stderr, bytes): stderr = stderr.decode(errors='replace')
-        stages = re.findall(r'^openlit: guest stage=(guard|image-inventory|image-pull|assets|native-disable|compose-start|unit-start|native-enable|publication)$', stderr, re.MULTILINE)
+        stages = re.findall(r'^openlit: guest stage=(guard|image-inventory|image-pull|assets|native-disable|compose-start|account-bootstrap|unit-start|native-enable|publication)$', stderr, re.MULTILINE)
         if stages: print('openlit: guest progress='+stages[-1], file=sys.stderr)
         pulls = re.findall(r'^openlit: pinned image pull exit=([1-9][0-9]{0,2})$', stderr, re.MULTILINE)
         if pulls: print('openlit: guest image-pull exit='+pulls[-1], file=sys.stderr)
+        # Only fixed public diagnostics cross the guest boundary; never relay raw stderr.
+        for tool in ('Docker Engine', 'Docker Compose'):
+            diagnostic = 'openlit: '+tool+' is missing; run yard init to reconcile core provisioning, then retry OpenLIT enable'
+            if diagnostic in stderr.splitlines(): print(diagnostic, file=sys.stderr)
         raise
 
 
@@ -204,7 +208,9 @@ def main():
     if mode == 'observe':
         print(json.dumps(observation)); return
     if mode == 'check':
-        if observation['state'] not in ('current', 'absent') or (selected and actual.get('deferred')):
+        # An exact deferred publication is converged service state. The owning
+        # receipt remains intact; status separately withholds the unavailable URL.
+        if observation['state'] not in ('current', 'absent'):
             raise ValueError('dashboard or native runtime requires reconciliation')
         return
     if mode == 'refresh' and bindings != [observation['actual'], observation['desired']]:

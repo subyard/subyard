@@ -7,6 +7,7 @@ import (
 	"errors"
 	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -717,6 +718,107 @@ func TestPreviewProxyAcceptsOnlyExactContainerAndVMRoutes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPreviewSecurityKeepsActiveOwnedAddressWhenDiscoveryChanges(t *testing.T) {
+	active, err := activeIPv4Addresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := ""
+	for address := range active {
+		parsed, err := netip.ParseAddr(address)
+		if err == nil && parsed.IsPrivate() && previewroute.Address(address) {
+			host = address
+			break
+		}
+	}
+	if host == "" {
+		t.Skip("native active private interface unavailable; synthetic address guards run separately")
+	}
+	bin := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(bin, "tailscale"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+	ip := filepath.Join(bin, "ip")
+	testkit.WriteFile(t, ip, []byte("#!/bin/sh\nprintf '[{\"prefsrc\":\""+host+"\"}]\\n'\n"), 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	runtime := testRuntime(t)
+	runtime.Yard.YardKind = domain.YardContainer
+	runtime.Environment["WEB_PREVIEW_HOST_PORT"] = "32222"
+	device := previewroute.Device(host, "32222")
+	local := maps.Clone(device)
+	config := map[string]string{previewroute.Key: "v1:" + host + ":32222"}
+	if previewroute.Host(context.Background()) != host {
+		t.Fatal("initial discovery did not select the native active address")
+	}
+	if err := runtime.checkPreviewProxy(context.Background(), device, local, config, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Discovery now falls back, while the real UP interface and exact owned
+	// listener stay unchanged. Security must validate that listener, not reselect.
+	testkit.WriteFile(t, ip, []byte("#!/bin/sh\nprintf '[]\\n'\n"), 0o755)
+	if previewroute.Host(context.Background()) != "127.0.0.1" {
+		t.Fatal("fixture did not change preferred discovery")
+	}
+	if err := runtime.checkPreviewProxy(context.Background(), device, local, config, nil); err != nil {
+		t.Fatalf("active owned address rejected after discovery change: %v", err)
+	}
+	if !maps.Equal(device, local) || config[previewroute.Key] != "v1:"+host+":32222" {
+		t.Fatal("security changed exact owned listener or receipt")
+	}
+}
+
+func TestSelectPreviewOwnerAddressRequiresExactPermittedActiveBinding(t *testing.T) {
+	// Availability contains multiple valid addresses and inadmissible addresses.
+	// The durable requested endpoint decides identity; availability alone cannot
+	// authorize public, wildcard, loopback, link-local or noncanonical bindings.
+	active := map[string]struct{}{
+		"10.20.30.40": {}, "100.101.102.103": {}, "100.101.102.104": {},
+		"203.0.113.1": {}, "169.254.1.2": {}, "0.0.0.0": {}, "127.0.0.1": {},
+		"::1": {}, "10.020.30.40": {},
+	}
+	for _, host := range []string{"10.20.30.40", "100.101.102.103", "100.101.102.104"} {
+		t.Run(host, func(t *testing.T) {
+			actual, err := selectPreviewOwnerAddress(host, active)
+			if err != nil || actual != host {
+				t.Fatalf("exact active binding: address=%q err=%v", actual, err)
+			}
+		})
+	}
+	for _, host := range []string{"10.20.30.41", "100.101.102.105", "203.0.113.1", "169.254.1.2", "0.0.0.0", "127.0.0.1", "::1", "10.020.30.40"} {
+		t.Run(host, func(t *testing.T) {
+			if _, err := selectPreviewOwnerAddress(host, active); err == nil {
+				t.Fatal("inactive or impermissible requested binding accepted")
+			}
+		})
+	}
+	if _, err := selectPreviewOwnerAddress("10.20.30.40", nil); err == nil {
+		t.Fatal("unavailable address inventory accepted")
+	}
+}
+
+func TestDefaultPreviewSecurityRejectsInactiveOwnedAddress(t *testing.T) {
+	active, err := activeIPv4Addresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := ""
+	for _, candidate := range []string{"10.254.255.254", "192.168.254.254", "100.127.255.254"} {
+		if _, present := active[candidate]; !present {
+			host = candidate
+			break
+		}
+	}
+	if host == "" {
+		t.Fatal("fixture cannot select an inactive address")
+	}
+	runtime := testRuntime(t)
+	runtime.Yard.YardKind = domain.YardContainer
+	runtime.Environment["WEB_PREVIEW_HOST_PORT"] = "32222"
+	device := previewroute.Device(host, "32222")
+	config := map[string]string{previewroute.Key: "v1:" + host + ":32222"}
+	if err := runtime.checkPreviewProxy(context.Background(), device, maps.Clone(device), config, nil); err == nil {
+		t.Fatal("default security resolver accepted an inactive exposed preview")
 	}
 }
 

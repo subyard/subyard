@@ -58,7 +58,7 @@ class DashboardTest(unittest.TestCase):
         self.snapshot['devices']={}
         return device
 
-    def test_deferred_route_keeps_original_origin_and_withholds_readiness(self):
+    def test_deferred_route_keeps_original_origin_and_converges_without_publication(self):
         self.defer()
         value,_,actual,desired,origin=dashboard.observe(True,'dev','claude codex')
         self.assertEqual(value['state'],'current')
@@ -66,7 +66,21 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(actual,desired)
         self.assertEqual(origin,'http://100.64.1.2:22222')
         with patch.object(sys,'argv',['dashboard.py','check','1','dev','claude codex']):
+            dashboard.main()
+        self.assertNotIn(dashboard.DEVICE,self.snapshot['devices'])
+        self.assertEqual(self.effects,[])
+
+    def test_deferred_route_does_not_hide_native_drift_or_recipe_change(self):
+        self.defer()
+        original=json.dumps(self.snapshot,sort_keys=True)
+        self.native={'state':'stale','actual':'c'*64,'desired':'a'*64}
+        with patch.object(sys,'argv',['dashboard.py','check','1','dev','claude codex']):
             with self.assertRaises(ValueError): dashboard.main()
+        self.native={'state':'current','actual':'a'*64,'desired':'a'*64}
+        self.environment['OPENLIT_HOST_PORT']='22223'
+        with patch.object(sys,'argv',['dashboard.py','check','1','dev','claude codex']):
+            with self.assertRaisesRegex(ValueError,'recipe changed'): dashboard.main()
+        self.assertEqual(json.dumps(self.snapshot,sort_keys=True),original)
         self.assertEqual(self.effects,[])
 
     def test_deferred_receipt_is_strict_and_bound_before_guest(self):
@@ -170,6 +184,8 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(after['state'],'stale')
         self.assertNotEqual(after['actual'],before['actual'])
         self.assertEqual(after['desired'],before['desired'])
+        with patch.object(sys,'argv',['dashboard.py','check','1','dev','claude codex']):
+            with self.assertRaises(ValueError): dashboard.main()
         with patch.object(sys,'argv',['dashboard.py','refresh','1','dev','claude codex',before['actual'],before['desired']]):
             with self.assertRaises(ValueError): dashboard.main()
         self.assertEqual(self.effects,[])

@@ -86,11 +86,17 @@ class RuntimeTest(unittest.TestCase):
                                  'Env': ['PRIVATE=synthetic-unexported'], 'User': '10001:10001' if name == 'collector' else ''},
                       'State': {'Status': 'running', **({} if name == 'collector' else {'Health': {'Status': 'healthy'}})}}
                      for i, name in enumerate(sorted(runtime.SERVICES), 1)]
+        next(row for row in self.rows if row['Config']['Labels']['com.docker.compose.service'] == 'openlit')['Mounts'] = [
+            {'Destination': '/app/client/data', 'Type': 'volume', 'Name': 'subyard-openlit_openlit-data'}]
         self.mounted = {name: (self.source/asset).read_bytes() for name, (asset, _) in runtime.MOUNTS.items()}
         self.service_active = True
         self.service_enabled = True
+        self.timer_active = True
+        self.timer_enabled = True
         self.probe_failure = False
         self.collector_unavailable = False
+        self.trace_status = b'405'
+        self.account_unready = False
         self.commands = []
         original = runtime.run
         self.addCleanup(setattr, runtime, 'run', original)
@@ -100,6 +106,7 @@ class RuntimeTest(unittest.TestCase):
         self.state.mkdir(mode=0o700, exist_ok=True)
         native.write(self.state/'marker', runtime.MARKER+'\n')
         native.write(self.state/'database.env', 'OPENLIT_DB_PASSWORD=synthetic-private\n')
+        native.write(self.state/'trace-cutover.env', 'OPENLIT_TRACE_CUTOVER_ID=none\n')
         self.publish_assets()
         native.reconcile(self.home, self.state/'native.json', ['claude', 'codex'], 'apply', os.getuid(), os.getgid(), tomli_w)
 
@@ -109,6 +116,9 @@ class RuntimeTest(unittest.TestCase):
         (self.state/'collector.yaml').chmod(0o644)
         native.write(self.unit, (self.source/'subyard-openlit.service').read_text())
         self.unit.chmod(0o644)
+        for name in ('subyard-openlit-trace-cutover.service', 'subyard-openlit-trace-cutover.timer'):
+            native.write(self.unit.with_name(name), (self.source/name).read_text())
+            self.unit.with_name(name).chmod(0o644)
 
     def recreate(self):
         for i, row in enumerate(self.rows, 7):
@@ -116,18 +126,24 @@ class RuntimeTest(unittest.TestCase):
             row['Image'] = self.expected_images[row['Config']['Labels']['com.docker.compose.service']]
         self.mounted = {name: (self.source/asset).read_bytes() for name, (asset, _) in runtime.MOUNTS.items()}
 
-    def probe(self, arguments):
+    def probe(self, arguments, timeout=2):
         self.commands.append(arguments)
         if self.probe_failure:
             raise ValueError('synthetic native probe failed')
         if arguments[0] == 'systemctl':
-            return ('ActiveState='+('active' if self.service_active else 'inactive')+'\nUnitFileState='+('enabled' if self.service_enabled else 'disabled')+'\n').encode()
+            timer = 'subyard-openlit-trace-cutover.timer' in arguments
+            active = self.timer_active if timer else self.service_active
+            enabled = self.timer_enabled if timer else self.service_enabled
+            return ('ActiveState='+('active' if active else 'inactive')+'\nUnitFileState='+('enabled' if enabled else 'disabled')+'\n').encode()
         if arguments[:2] == ['docker', 'ps']:
             return '\n'.join(row['Id'] for row in self.rows).encode()
         if arguments[:2] == ['docker', 'inspect']:
             return json.dumps(self.rows).encode()
         if arguments[:3] == ['docker', 'image', 'inspect']:
             return json.dumps([{'Id': self.expected_images[name]} for name in sorted(runtime.SERVICES)]).encode()
+        if arguments[:3] == ['docker', 'volume', 'inspect']:
+            return json.dumps([{'Name': 'subyard-openlit_openlit-data', 'Labels': {
+                'com.docker.compose.project': 'subyard-openlit', 'com.docker.compose.volume': 'openlit-data'}}]).encode()
         if arguments[:2] == ['docker', 'compose']:
             if arguments[-2:] == ['--format', 'json']:
                 # This private environment must never enter observation output or CAS projection.
@@ -149,7 +165,14 @@ class RuntimeTest(unittest.TestCase):
         if arguments[0] == 'curl':
             if arguments[-1] == 'http://127.0.0.1:13133/' and self.collector_unavailable:
                 raise ValueError('synthetic collector health unavailable')
+            if arguments[-1].startswith('http://127.0.0.1:4318/v1/'):
+                return self.trace_status if arguments[-1].endswith('/traces') else b'405'
             return b'OK'
+        if arguments[:2] == ['python3', str(self.source/'account.py')]:
+            self.assertEqual(timeout, 10)
+            if self.account_unready:
+                raise ValueError('synthetic account linkage drift')
+            return b'{"kind":"fresh","phase":"ready"}\n'
         raise AssertionError(arguments)
 
     def test_absent_is_read_only(self):
@@ -160,7 +183,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands, [])
 
-    def test_integrated_receiver_mount_and_healthcheck_require_both_signals(self):
+    def test_integrated_receiver_mount_and_healthcheck_require_all_signals(self):
         environment = dict(os.environ, OPENLIT_DB_PASSWORD='synthetic-private')
         rendered = subprocess.run(['docker', 'compose', '-f', str(PROFILE/'compose.yaml'),
                                    'config', '--format', 'json'], env=environment,
@@ -173,16 +196,44 @@ class RuntimeTest(unittest.TestCase):
         self.assertTrue(mount['read_only'])
         self.assertEqual(service['healthcheck']['test'][:3], ['CMD', 'node', '-e'])
         script = service['healthcheck']['test'][3]
-        for statuses, expected in [([200, 405, 405], 0), ([500, 405, 405], 1),
-                                   ([200, 404, 405], 1), ([200, 405, 404], 1),
-                                   ([200, 0, 405], 1)]:
+        for statuses, expected in [([200, 405, 405, 405], 0), ([500, 405, 405, 405], 1),
+                                   ([200, 404, 405, 405], 1), ([200, 405, 404, 405], 1),
+                                   ([200, 0, 405, 405], 1), ([200, 405, 405, 404], 1),
+                                   ([200, 405, 405, 0], 1)]:
             with self.subTest(statuses=statuses):
                 urls = ['http://localhost:3000', 'http://localhost:4318/v1/logs',
-                        'http://localhost:4318/v1/metrics']
+                        'http://localhost:4318/v1/metrics', 'http://localhost:4318/v1/traces']
                 responses = dict(zip(urls, statuses))
                 stub = 'const responses='+json.dumps(responses)+';global.fetch=url=>{const status=responses[url];return status?Promise.resolve({ok:status===200,status}):Promise.reject(new Error("unavailable"));};'
                 result = subprocess.run(['node', '-e', stub+script], capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_dedicated_trace_receiver_is_required_without_agent_or_event_probes(self):
+        self.install()
+        runtime.publish(*self.args)
+        receipt = (self.state/'receipt.json').read_bytes()
+        self.trace_status = b'404'
+        self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+        with self.assertRaises(ValueError):
+            runtime.publish(*self.args)
+        self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+        self.trace_status = b'405'
+        self.assertEqual(runtime.observe(*self.args)['state'], 'current')
+        self.assertFalse(any(command[0] in ('claude', 'codex') for command in self.commands))
+
+    def test_account_linkage_and_owned_volume_are_required_before_receipt_publication(self):
+        self.install()
+        runtime.publish(*self.args)
+        receipt = (self.state/'receipt.json').read_bytes()
+        self.account_unready = True
+        with self.assertRaises(ValueError):
+            runtime.publish(*self.args)
+        self.account_unready = False
+        row = next(row for row in self.rows if row['Config']['Labels']['com.docker.compose.service'] == 'openlit')
+        row['Mounts'][0]['Name'] = 'foreign-volume'
+        with self.assertRaises(ValueError):
+            runtime.publish(*self.args)
+        self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
 
     def test_receipt_is_required_and_published_only_after_actual_verification(self):
         self.install()
@@ -294,6 +345,68 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
         self.assertEqual(runtime.publish(*self.args)['state'], 'current')
 
+    def test_timer_drift_requires_repair_while_pending_migration_does_not(self):
+        self.install()
+        runtime.publish(*self.args)
+        ready = runtime.observe(*self.args)
+        native.write(self.state/'trace-cutover.json', '{"phase":"adopted","pending":"sessions-or-events"}\n')
+        self.assertEqual(runtime.observe(*self.args), ready)
+        self.timer_enabled = False
+        disabled = runtime.observe(*self.args)
+        self.assertEqual(disabled['state'], 'stale')
+        self.timer_enabled = True
+        self.timer_active = False
+        inactive = runtime.observe(*self.args)
+        self.assertEqual(inactive['state'], 'stale')
+        self.assertNotEqual(inactive['actual'], disabled['actual'])
+        with self.assertRaises(ValueError):
+            runtime.guard(self.args, disabled['actual'], disabled['desired'])
+        self.timer_active = True
+        self.assertEqual(runtime.observe(*self.args), ready)
+
+    def test_deselected_profile_requires_timer_disabled_and_inactive(self):
+        self.install()
+        native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
+        self.rows = []
+        self.service_active = self.service_enabled = False
+        disabled = (*self.args[:4], False, [], 'dev')
+        self.assertEqual(runtime.capture(*disabled)[0]['state'], 'stale')
+        self.timer_enabled = False
+        self.assertEqual(runtime.capture(*disabled)[0]['state'], 'stale')
+        self.timer_active = False
+        self.assertEqual(runtime.publish(*disabled)['state'], 'current')
+
+    def test_recovered_admission_requests_fresh_cas_repair_without_pending_failure(self):
+        self.install()
+        native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
+        native.write(self.home/'.codex/config.toml', tomli_w.dumps({'otel': {'trace_exporter': runtime.trace_cutover.TEMP}}))
+        trace = native.CODEX.pop('trace_exporter')
+        try:
+            native.reconcile(self.home, self.state/'native.json', ['claude', 'codex'], 'apply', os.getuid(), os.getgid(), tomli_w)
+        finally:
+            native.CODEX['trace_exporter'] = trace
+        intent = {'schema': 1, 'home': str(self.home), 'uid': os.getuid(), 'status': 'unavailable'}
+        runtime.trace_cutover.save_admission(self.state, intent)
+        runtime.publish(*self.args)
+        current = runtime.observe(*self.args)
+        self.assertEqual(current['state'], 'current')
+        runtime.trace_cutover.save_admission(self.state, {**intent, 'status': 'ready'})
+        repair = runtime.observe(*self.args)
+        self.assertEqual(repair['state'], 'stale')
+        self.assertEqual(repair['desired'], current['desired'])
+        self.assertNotEqual(repair['actual'], current['actual'])
+        runtime.guard(self.args, repair['actual'], repair['desired'])
+        facts = runtime.capture(*self.args)[1]
+        self.assertTrue(facts['trace_admission_ready'])
+        self.assertEqual(facts['service']['ActiveState'], 'active')
+        self.assertEqual(facts['timer']['ActiveState'], 'active')
+        runtime.trace_cutover.save_admission(self.state, {**intent, 'status': 'mismatch'})
+        self.assertEqual(runtime.observe(*self.args), current)
+        with self.assertRaises(ValueError):
+            runtime.guard(self.args, repair['actual'], repair['desired'])
+        runtime.trace_cutover.cancel_admission(self.state)
+        self.assertEqual(runtime.observe(*self.args), current)
+
     def test_receipt_interruption_retry_and_disabled_installed_recipe_update(self):
         self.install()
         writer = native.write
@@ -308,6 +421,7 @@ class RuntimeTest(unittest.TestCase):
         native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
         self.rows = []
         self.service_active = self.service_enabled = False
+        self.timer_active = self.timer_enabled = False
         disabled = (*self.args[:4], False, [], 'dev')
         self.assertEqual(runtime.observe(*disabled)['state'], 'stale')
         self.assertEqual(runtime.publish(*disabled)['state'], 'current')

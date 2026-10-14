@@ -109,6 +109,42 @@ class NativeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             native.template_check(self.codex, 'codex')
 
+    def test_new_trace_leaf_upgrades_old_recipe_and_restores_user_exporter(self):
+        previous = {'otlp-grpc': {'endpoint': 'https://trace-fixture.invalid:4317'}}
+        self.seed({}, {'otel': {'trace_exporter': previous, 'environment': 'test'}})
+        trace = native.CODEX.pop('trace_exporter')
+        try:
+            # A logs/metrics-only predecessor owns no trace leaf.
+            self.run_mode('codex')
+        finally:
+            native.CODEX['trace_exporter'] = trace
+        with self.assertRaises(ValueError):
+            self.run_mode('codex', 'check')
+        self.run_mode('codex', 'validate')
+        self.run_mode('codex')
+        self.run_mode('codex', 'check')
+        self.assertEqual(native.load(self.codex, 'codex')['otel']['trace_exporter'], trace)
+        self.run_mode('')
+        self.assertEqual(native.load(self.codex, 'codex'),
+                         {'otel': {'trace_exporter': previous, 'environment': 'test'}})
+
+    def test_selected_config_is_prepared_without_cli_and_unselected_config_is_absent(self):
+        self.run_mode('codex')
+        self.assertFalse(self.claude.exists())
+        self.assertEqual(native.load(self.codex, 'codex')['otel'], native.CODEX)
+        self.run_mode('codex', 'check')
+        self.run_mode('claude codex')
+        self.assertEqual(native.load(self.claude, 'claude')['env'], native.CLAUDE)
+        self.run_mode(mode='check')
+
+    def test_trace_template_overlap_is_refused_without_writes(self):
+        native.write(self.codex, '[otel]\ntrace_exporter = "none"\n')
+        before = self.codex.read_bytes()
+        with self.assertRaises(ValueError):
+            native.template_check(self.codex, 'codex')
+        self.assertEqual(self.codex.read_bytes(), before)
+        self.assertFalse(self.state.exists())
+
     def test_shared_trace_routing_is_preserved_while_log_metric_routes_change(self):
         shared = {'OTEL_TRACES_EXPORTER': 'otlp',
                   'OTEL_EXPORTER_OTLP_ENDPOINT': 'https://trace-fixture.invalid',

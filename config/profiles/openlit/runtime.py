@@ -12,16 +12,17 @@ import sys
 import tarfile
 
 import native
+import trace_cutover
 
-FILES = ('guest.sh', 'native.py', 'runtime.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml', 'openlit-collector.yaml')
+FILES = ('guest.sh', 'native.py', 'runtime.py', 'trace_cutover.py', 'account.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml', 'openlit-collector.yaml', 'subyard-openlit-trace-cutover.service', 'subyard-openlit-trace-cutover.timer')
 MOUNTS = {'collector': ('collector.yaml', '/etc/otelcol-contrib/config.yaml'),
           'openlit': ('openlit-collector.yaml', '/etc/otel/otel-collector-config.yaml')}
 SERVICES = {'clickhouse', 'openlit', 'collector'}
 MARKER = 'subyard-openlit-v1'
 
 
-def run(arguments):
-    result = subprocess.run(arguments, capture_output=True, timeout=2, check=False)
+def run(arguments, timeout=2):
+    result = subprocess.run(arguments, capture_output=True, timeout=timeout, check=False)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
         raise ValueError('native runtime probe failed')
     return result.stdout
@@ -78,25 +79,46 @@ def capture(state, source, unit, home, selected, agents, user):
         ready = ready and owned_file(path, mode) and path.read_bytes() == (source/name).read_bytes()
     facts['unit'] = metadata(unit)
     ready = ready and owned_file(unit, 0o644) and unit.read_bytes() == (source/'subyard-openlit.service').read_bytes()
+    facts['migration_units'] = {}
+    for name in ('subyard-openlit-trace-cutover.service', 'subyard-openlit-trace-cutover.timer'):
+        path = unit.with_name(name)
+        facts['migration_units'][name] = metadata(path)
+        ready = ready and owned_file(path, 0o644) and path.read_bytes() == (source/name).read_bytes()
     for name, path in [('claude', home/'.claude/settings.json'), ('codex', home/'.codex/config.toml')]:
         facts['native'][name] = metadata(path)
     facts['ownership'] = metadata(state/'native.json')
+    facts['account'] = {name: metadata(state/name) for name in ('account.json', 'operator.json')}
     # Bind private environment replacement through filesystem identity only,
     # without fingerprinting its password or the rendered Compose environment.
     facts['database_environment'] = metadata(state/'database.env')
+    facts['trace_environment'] = metadata(state/'trace-cutover.env')
+    if selected:
+        ready = ready and owned_file(state/'trace-cutover.env', 0o600)
+    # A recovered ownership proof requests normal fresh assessment/reconciliation.
+    # Unavailable/mismatched admission and retirement progress are not readiness.
+    facts['trace_admission_ready'] = trace_cutover.admission_ready(home, state, selected, agents)
+    if facts['trace_admission_ready']:
+        facts['trace_admission'] = metadata(state/'trace-admission.json')
+        ready = False
     try:
         # Parsing and comparing native values is local; no values enter the CAS projection.
         native.reconcile(home, state/'native.json', agents if selected else [], 'check', None, None, None)
     except (ValueError, OSError, KeyError, TypeError):
         ready = False
     try:
-        manager = run(['systemctl', 'show', 'subyard-openlit.service', '--property=ActiveState,UnitFileState']).decode()
-        statuses = dict(line.split('=', 1) for line in manager.splitlines() if '=' in line)
-        if statuses.get('ActiveState') not in ('active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading') or statuses.get('UnitFileState') not in ('enabled', 'disabled', 'static', 'masked', 'not-found', 'indirect', 'enabled-runtime'):
-            raise ValueError('unexpected service state')
-        facts['service'] = statuses
-        ready = ready and (statuses.get('ActiveState') == 'active' and statuses.get('UnitFileState') == 'enabled'
-                           if selected else statuses.get('ActiveState') != 'active' and statuses.get('UnitFileState') != 'enabled')
+        for name, key in (('subyard-openlit.service', 'service'), ('subyard-openlit-trace-cutover.timer', 'timer')):
+            manager = run(['systemctl', 'show', name, '--property=ActiveState,UnitFileState']).decode()
+            values = dict(line.split('=', 1) for line in manager.splitlines() if '=' in line)
+            statuses = {field: values.get(field) for field in ('ActiveState', 'UnitFileState')}
+            if statuses['ActiveState'] not in ('active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading') or statuses['UnitFileState'] not in ('enabled', 'disabled', 'static', 'masked', 'not-found', 'indirect', 'enabled-runtime'):
+                raise ValueError('unexpected service state')
+            facts[key] = statuses
+            if selected:
+                ready = ready and statuses['ActiveState'] == 'active' and statuses['UnitFileState'] == 'enabled'
+            elif key == 'timer':
+                ready = ready and statuses['ActiveState'] == 'inactive' and statuses['UnitFileState'] == 'disabled'
+            else:
+                ready = ready and statuses['ActiveState'] != 'active' and statuses['UnitFileState'] != 'enabled'
         ids = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=subyard-openlit']).decode().split()
         rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
         for row in rows:
@@ -114,6 +136,14 @@ def capture(state, source, unit, home, selected, agents, user):
             definitions = config['services']
             if set(definitions) != SERVICES:
                 raise ValueError('unexpected Compose service inventory')
+            volumes = json.loads(run(['docker', 'volume', 'inspect', 'subyard-openlit_openlit-data']))
+            if not isinstance(volumes, list) or len(volumes) != 1 or not isinstance(volumes[0], dict):
+                raise ValueError('unexpected account volume')
+            labels = volumes[0].get('Labels') or {}
+            facts['account_volume_owned'] = (volumes[0].get('Name') == 'subyard-openlit_openlit-data'
+                                            and labels.get('com.docker.compose.project') == 'subyard-openlit'
+                                            and labels.get('com.docker.compose.volume') == 'openlit-data')
+            ready = ready and facts['account_volume_owned']
             # Compose hashes can depend on the private database environment. Compare locally;
             # never put them, environment fields or raw inspect JSON in fingerprints/receipts.
             hashes = dict(line.split() for line in run(compose(state, source, 'config', '--hash', '*')).decode().splitlines())
@@ -127,6 +157,11 @@ def capture(state, source, unit, home, selected, agents, user):
                 ready = ready and matches and row['State']['Status'] == 'running'
                 if name != 'collector':
                     ready = ready and row['State'].get('Health', {}).get('Status') == 'healthy'
+                if name == 'openlit':
+                    mounts = [mount for mount in row.get('Mounts', []) if mount.get('Destination') == '/app/client/data']
+                    account_mount = len(mounts) == 1 and mounts[0].get('Type') == 'volume' and mounts[0].get('Name') == 'subyard-openlit_openlit-data'
+                    facts['account_mount_matches'] = account_mount
+                    ready = ready and account_mount
                 if name in MOUNTS:
                     # Docker reads the mounted inode inside the container, detecting an old bind
                     # after atomic host publication even when the host path has desired bytes.
@@ -141,6 +176,15 @@ def capture(state, source, unit, home, selected, agents, user):
                     ready = ready and mounted_matches
             for endpoint in ('http://127.0.0.1:13133/', 'http://127.0.0.1:3000/'):
                 run(['curl', '-fsS', '--max-time', '1', endpoint])
+            for signal in ('logs', 'metrics', 'traces'):
+                status = run(['curl', '-sS', '--max-time', '1', '-o', '/dev/null', '-w', '%{http_code}',
+                              'http://127.0.0.1:4318/v1/'+signal])
+                facts[signal+'_receiver_ready'] = status == b'405'
+                ready = ready and facts[signal+'_receiver_ready']
+            # One read-only account projection verifies the saved default DB links
+            # and private first-run password without creating a login session.
+            if ready:
+                run(['python3', str(source/'account.py'), 'check', '--state', str(state), '--source', str(source)], timeout=10)
         else:
             ready = ready and not rows
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired):

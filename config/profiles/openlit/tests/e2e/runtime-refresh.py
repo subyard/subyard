@@ -10,7 +10,7 @@ import tempfile
 
 STATE = Path('/var/lib/subyard/openlit')
 UNIT = Path('/etc/systemd/system/subyard-openlit.service')
-FILES = ('guest.sh', 'native.py', 'runtime.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml', 'openlit-collector.yaml')
+FILES = ('guest.sh', 'native.py', 'runtime.py', 'trace_cutover.py', 'account.py', 'tomli_w.py', 'compose.yaml', 'collector.yaml', 'openlit-collector.yaml', 'subyard-openlit-trace-cutover.service', 'subyard-openlit-trace-cutover.timer')
 
 
 def command(arguments, success=True):

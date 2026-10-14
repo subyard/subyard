@@ -4,6 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 state=/var/lib/subyard/openlit
 unit=/etc/systemd/system/subyard-openlit.service
+cutover_unit=/etc/systemd/system/subyard-openlit-trace-cutover.service
+cutover_timer=/etc/systemd/system/subyard-openlit-trace-cutover.timer
+lock_fd=
+if [ "${1-}" = --runtime-lock-fd ]; then lock_fd=${2:?expected inherited descriptor}; shift 2; fi
 mode=${1:?expected lifecycle mode}
 selected=${2:?expected selected bit}
 user=${3:?expected developer user}
@@ -27,15 +31,23 @@ safe_file() {
 }
 compose() { timeout 240 docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" "$@"; }
 native() { python3 "$root/native.py" "$1" --home "$home" --state "$state/native.json" --uid "$uid" --gid "$gid" --agents "$2"; }
+cutover() { python3 "$root/trace_cutover.py" "$1" --home "$home" --state "$state" --uid "$uid" --agents "$agents"; }
 runtime() {
   python3 "$root/runtime.py" "$1" --source "$root" --state "$state" --unit "$unit" --home "$home" \
     --user "$user" --selected "$selected" --agents "$agents" "${@:2}"
 }
+account() { python3 "$root/account.py" "$1" --state "$state" --source "$root" >/dev/null; }
 if [ -e "$state" ] || [ -L "$state" ]; then owned || die 'unmanaged runtime directory'; fi
 safe_file "$unit" || die 'unsafe service unit'
 if [ -e "$unit" ]; then
   [ "$(head -n 1 "$unit")" = '# Managed by Subyard OpenLIT profile.' ] || die 'unmanaged service unit'
 fi
+for timer_asset in "$cutover_unit" "$cutover_timer"; do
+  safe_file "$timer_asset" || die 'unsafe trace migration unit'
+  if [ -e "$timer_asset" ]; then
+    [ "$(head -n 1 "$timer_asset")" = '# Managed by Subyard OpenLIT profile.' ] || die 'unmanaged trace migration unit'
+  fi
+done
 if [ "$mode" = observe ]; then runtime observe; exit; fi
 if [ "$mode" = check ]; then
   if ! owned; then [ "$selected" = 0 ]; exit; fi
@@ -43,10 +55,10 @@ if [ "$mode" = check ]; then
   exit
 fi
 umask 0077
-safe_file /run/lock/subyard-openlit.lock || die 'unsafe runtime lock'
-exec 9>/run/lock/subyard-openlit.lock
-chmod 0600 /run/lock/subyard-openlit.lock
-flock -w 5 9 || die 'runtime is being reconciled'
+if [ -z "$lock_fd" ]; then
+  exec python3 "$root/trace_cutover.py" locked-guest "$root/guest.sh" "$@"
+fi
+python3 "$root/trace_cutover.py" verify-lock "$lock_fd" || die 'unsafe runtime lock'
 if [ "$mode" = refresh ] || [ "$#" = 6 ]; then
   [ "$#" = 6 ] || exit 2
   # Source recipe, native metadata and actual installed/container identities must still
@@ -72,10 +84,12 @@ fi
 [ "$selected" != 0 ] || owned || exit 0
 if [ "$selected" = 1 ]; then
   for agent in $agents; do
-    case "$agent" in claude|codex) command -v "$agent" >/dev/null || die 'selected native coding integration is not installed' ;; *) die 'unsupported native coding integration' ;; esac
+    # Selection owns configuration, not installation or execution of native agents.
+    case "$agent" in claude|codex) ;; *) die 'unsupported native coding integration' ;; esac
   done
 fi
-command -v docker >/dev/null && docker compose version >/dev/null || die 'core yard Docker Compose provisioning is required'
+command -v docker >/dev/null || die 'Docker Engine is missing; run yard init to reconcile core provisioning, then retry OpenLIT enable'
+docker compose version >/dev/null || die 'Docker Compose is missing; run yard init to reconcile core provisioning, then retry OpenLIT enable'
 if ! owned; then
   [ -z "$(docker ps -aq --filter label=com.docker.compose.project=subyard-openlit)" ] || die 'unmanaged Docker project'
   [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=subyard-openlit)" ] || die 'unmanaged Docker volumes'
@@ -83,7 +97,7 @@ if ! owned; then
   printf 'subyard-openlit-v1\n' > "$state/marker"
   chmod 0600 "$state/marker"
 fi
-for file in marker database.env guest.sh native.py runtime.py tomli_w.py compose.yaml collector.yaml openlit-collector.yaml native.json receipt.json pull.log; do
+for file in marker database.env guest.sh native.py runtime.py trace_cutover.py trace-cutover.env trace-cutover.json trace-cutover-backup.json trace-admission.json account.py account.json operator.json tomli_w.py compose.yaml collector.yaml openlit-collector.yaml native.json receipt.json pull.log; do
   safe_file "$state/$file" || die 'unsafe runtime file'
 done
 if [ ! -e "$state/database.env" ]; then
@@ -117,6 +131,8 @@ if [ "$selected" = 1 ]; then
     fi
   fi
 fi
+if [ "$selected" = 1 ]; then account prepare; fi
+if [ "$selected" = 1 ]; then cutover prepare; fi
 publish_asset() {
   local source="$1" destination="$2" permissions="$3" temporary
   if [ -f "$destination" ] && cmp -s "$source" "$destination" && [ "$(stat -c '%u:%g:%a' "$destination")" = "0:0:$permissions" ]; then return; fi
@@ -125,19 +141,26 @@ publish_asset() {
   mv -f -- "$temporary" "$destination"
 }
 stage assets
-for source in guest.sh native.py runtime.py tomli_w.py compose.yaml openlit-collector.yaml; do
+for source in guest.sh native.py runtime.py trace_cutover.py account.py tomli_w.py compose.yaml openlit-collector.yaml subyard-openlit-trace-cutover.service subyard-openlit-trace-cutover.timer; do
   publish_asset "$root/$source" "$state/$source" 600
 done
 # The pinned Collector runs as 10001:10001. Only this nonsecret mounted asset
 # is world-readable; its host parent and all credentials remain root-private.
 publish_asset "$root/collector.yaml" "$state/collector.yaml" 644
 publish_asset "$root/subyard-openlit.service" "$unit" 644
+publish_asset "$root/subyard-openlit-trace-cutover.service" "$cutover_unit" 644
+publish_asset "$root/subyard-openlit-trace-cutover.timer" "$cutover_timer" 644
 systemctl daemon-reload
 if [ "$selected" = 0 ]; then
   stage native-disable
+  cutover cancel
   native apply ''
   systemctl disable --now subyard-openlit.service >/dev/null
-  compose down --timeout 20 >/dev/null
+  systemctl disable --now subyard-openlit-trace-cutover.timer >/dev/null
+  # Retain the shared network for compatibility or foreign attached receivers.
+  # Remove only the three services defined by this protected owning recipe.
+  compose stop --timeout 20 clickhouse openlit collector >/dev/null
+  compose rm --force clickhouse openlit collector >/dev/null
 else
   wait_limit=180
   [ "$mode" != refresh ] || wait_limit=60
@@ -145,11 +168,16 @@ else
   # collector bind inode. Receipt publication is separate and occurs only after verification.
   stage compose-start
   compose up -d --force-recreate --pull never --wait --wait-timeout "$wait_limit" >/dev/null
+  stage account-bootstrap
+  account apply
   systemctl enable subyard-openlit.service >/dev/null
   stage unit-start
   systemctl start subyard-openlit.service
   stage native-enable
   native apply "$agents"
+  # Unavailable process metadata defers fencing; unsafe protected state fails.
+  cutover fence >/dev/null
+  systemctl enable --now subyard-openlit-trace-cutover.timer >/dev/null
 fi
 stage publication
 published="$(runtime publish)"

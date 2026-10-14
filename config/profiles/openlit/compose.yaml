@@ -45,7 +45,7 @@ services:
         condition: service_healthy
     healthcheck:
       # GET returns 405 only when the configured OTLP signal handler is listening.
-      test: [CMD, node, -e, "Promise.all([fetch('http://localhost:3000'),fetch('http://localhost:4318/v1/logs'),fetch('http://localhost:4318/v1/metrics')]).then(([ui,logs,metrics])=>process.exit(ui.ok&&logs.status===405&&metrics.status===405?0:1)).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "Promise.all([fetch('http://localhost:3000'),fetch('http://localhost:4318/v1/logs'),fetch('http://localhost:4318/v1/metrics'),fetch('http://localhost:4318/v1/traces')]).then(([ui,logs,metrics,traces])=>process.exit(ui.ok&&logs.status===405&&metrics.status===405&&traces.status===405?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -55,6 +55,9 @@ services:
   collector:
     image: otel/opentelemetry-collector-contrib:0.162.0@sha256:39923a8e431bd1f57be82411999d389fcfe40857492e4365456d97a4c1f74be6
     command: [--config=/etc/otelcol-contrib/config.yaml]
+    env_file:
+      - path: ./trace-cutover.env
+        required: false
     volumes:
       - ./collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:

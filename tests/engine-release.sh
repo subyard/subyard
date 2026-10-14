@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-engine-release.XXXXXX)"
 incus_pid=''
 cleanup() {
   if [ -n "$incus_pid" ]; then
@@ -47,6 +47,17 @@ export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"
 export SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit"
 
 fail() { printf 'engine release: %s\n' "$*" >&2; exit 1; }
+# The installer owns startup-file additions and launcher links, not the
+# permissions, ownership or existing files of their containing directories.
+directory_identity() {
+  stat -c '%a:%u:%g:%d:%i' "$1"
+  sha256sum "$1/.operator-sentinel"
+  stat -c '%a:%u:%g' "$1/.operator-sentinel"
+}
+directory_sentinel() {
+  printf 'existing operator directory content\n' > "$1/.operator-sentinel"
+  chmod 0600 "$1/.operator-sentinel"
+}
 yard_update() { YARD_ENGINE_PATH="$release_engine" "$ROOT/bin/yard" update --yes "$@"; }
 installed_update() {
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
@@ -278,6 +289,12 @@ standalone_home="$TMP/standalone-home"
 standalone_bin="$TMP/standalone-bin"
 standalone_no_go="$TMP/standalone-no-go"
 install -d "$standalone_home" "$standalone_bin" "$standalone_no_go"
+chmod 0700 "$standalone_home"
+chmod 0750 "$standalone_bin"
+directory_sentinel "$standalone_home"
+directory_sentinel "$standalone_bin"
+standalone_home_before="$(directory_identity "$standalone_home")"
+standalone_bin_before="$(directory_identity "$standalone_bin")"
 cat > "$standalone_no_go/go" <<EOF
 #!/bin/sh
 touch '$TMP/standalone-go-invoked'
@@ -323,6 +340,9 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   PATH="$standalone_no_go:$PATH" \
   "$release/subyard-install.sh" --yes >/dev/null
+[ "$(directory_identity "$standalone_home")" = "$standalone_home_before" ] \
+  && [ "$(directory_identity "$standalone_bin")" = "$standalone_bin_before" ] \
+  || fail 'bootstrap changed existing default shell parent or binary directory identity'
 [ "$($standalone_bin/yard --version)" = 'yard 1.0.0-test' ] \
   && [ -L "$standalone_bin/sy" ] && [ ! -e "$TMP/standalone-go-invoked" ] \
   || fail 'standalone installer did not publish a usable runtime without a checkout'
@@ -360,6 +380,9 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   "$release/subyard-install.sh" --yes >/dev/null
 [ "$(sha256sum "$standalone_ledger")" = "$standalone_ledger_before" ] \
   || fail 'bootstrap retry rewrote the committed reader history'
+[ "$(directory_identity "$standalone_home")" = "$standalone_home_before" ] \
+  && [ "$(directory_identity "$standalone_bin")" = "$standalone_bin_before" ] \
+  || fail 'bootstrap retry changed existing default shell parent or binary directory identity'
 # A rejected first transition keeps its installed owner, withholds entrypoints,
 # and remains recoverable through the existing-runtime supported transition.
 (
@@ -419,13 +442,21 @@ done
 # work independently of whether the installation process already had the bin directory on PATH.
 zsh_home="$TMP/zsh-home"
 zsh_startup="$zsh_home/.config/zsh"
-mkdir -p "$zsh_home"
+install -d -m 0711 "$zsh_home"
+install -d -m 0750 "$zsh_startup"
+directory_sentinel "$zsh_home"
+directory_sentinel "$zsh_startup"
+zsh_home_before="$(directory_identity "$zsh_home")"
+zsh_startup_before="$(directory_identity "$zsh_startup")"
 printf '%s\n' '# Existing operator login settings' > "$zsh_home/.bash_profile"
 HOME="$zsh_home" SUBYARD_HOME="$zsh_home/.subyard" \
   SUBYARD_CONFIG_HOME="$zsh_home/.config/subyard" YARD_BIN_DIR="$zsh_home/.local/bin" \
   SHELL=/bin/zsh ZDOTDIR="$zsh_startup" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   PATH="$zsh_home/.local/bin:$PATH" "$release/subyard-install.sh" --yes >/dev/null
+[ "$(directory_identity "$zsh_home")" = "$zsh_home_before" ] \
+  && [ "$(directory_identity "$zsh_startup")" = "$zsh_startup_before" ] \
+  || fail 'bootstrap changed existing ZDOTDIR or alternate shell parent identity'
 HOME="$zsh_home" ZDOTDIR="$zsh_startup" PATH=/usr/bin:/bin SHELL=/bin/zsh \
   zsh -lic 'command -v yard >/dev/null && (( $+functions[_yard] ))' >/dev/null 2>&1 \
   || fail 'standalone installer did not honor ZDOTDIR for login Zsh'
@@ -436,20 +467,75 @@ grep -Fxq '# Existing operator login settings' "$zsh_home/.bash_profile" \
   || fail 'standalone installer replaced existing login settings'
 
 override_home="$TMP/override-home"
-mkdir -p "$override_home"
+override_rc="$override_home/interactive/custom.rc"
+override_login="$override_home/login/custom.profile"
+install -d -m 0700 "$override_home" "$override_home/.local/bin" "$override_home/login"
+install -d -m 0711 "$override_home/interactive"
+directory_sentinel "$override_home/.local/bin"
+directory_sentinel "$override_home/login"
+directory_sentinel "$override_home/interactive"
+printf '# Existing operator interactive settings\n' > "$override_rc"
+printf '# Existing operator login settings\n' > "$override_login"
+chmod 0640 "$override_rc"
+chmod 0600 "$override_login"
+override_bin_before="$(directory_identity "$override_home/.local/bin")"
+override_login_before="$(directory_identity "$override_home/login")"
+override_rc_before="$(directory_identity "$override_home/interactive")"
+override_rc_mode_before="$(stat -c '%a:%u:%g' "$override_rc")"
+override_login_mode_before="$(stat -c '%a:%u:%g' "$override_login")"
+# shellcheck disable=SC2034 # repeat proves metadata and startup bytes remain fixed.
+for override_repeat in 1 2; do
 HOME="$override_home" SUBYARD_HOME="$override_home/.subyard" \
   SUBYARD_CONFIG_HOME="$override_home/.config/subyard" YARD_BIN_DIR="$override_home/.local/bin" \
   SHELL=/bin/zsh ZDOTDIR="$override_home" \
-  YARD_SHELL_RC="$override_home/custom.rc" YARD_LOGIN_RC="$override_home/custom.profile" \
+  YARD_SHELL_RC="$override_rc" YARD_LOGIN_RC="$override_login" \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
   "$release/subyard-install.sh" --yes >/dev/null
-[ -s "$override_home/custom.rc" ] && [ -s "$override_home/custom.profile" ] \
+  [ "$(directory_identity "$override_home/.local/bin")" = "$override_bin_before" ] \
+    && [ "$(directory_identity "$override_home/login")" = "$override_login_before" ] \
+    && [ "$(directory_identity "$override_home/interactive")" = "$override_rc_before" ] \
+    && [ "$(stat -c '%a:%u:%g' "$override_rc")" = "$override_rc_mode_before" ] \
+    && [ "$(stat -c '%a:%u:%g' "$override_login")" = "$override_login_mode_before" ] \
+    && grep -Fxq '# Existing operator interactive settings' "$override_rc" \
+    && grep -Fxq '# Existing operator login settings' "$override_login" \
+    || fail 'bootstrap changed existing explicit shell parents or binary directory identity'
+  if [ "$override_repeat" = 1 ]; then
+    override_startup_before="$(sha256sum "$override_rc" "$override_login")"
+  else
+    [ "$(sha256sum "$override_rc" "$override_login")" = "$override_startup_before" ] \
+      || fail 'bootstrap retry rewrote explicit startup bytes'
+  fi
+done
+[ -s "$override_rc" ] && [ -s "$override_login" ] \
   && [ ! -e "$override_home/.bashrc" ] && [ ! -e "$override_home/.zshrc" ] \
   && [ ! -e "$override_home/.profile" ] && [ ! -e "$override_home/.zprofile" ] \
   || fail 'explicit startup overrides unexpectedly changed default shell files'
 HOME="$override_home" ZDOTDIR="$override_home" SHELL=/bin/zsh \
-  zsh -fic 'source "$1"; (( $+functions[_yard] ))' zsh "$override_home/custom.rc" \
+  zsh -fic 'source "$1"; (( $+functions[_yard] ))' zsh "$override_rc" \
   >/dev/null 2>&1 || fail 'neutral startup override filename selected the wrong shell completion'
+
+# Missing startup parents are private even under a permissive umask; creating
+# them must leave their existing shared ancestor unchanged.
+absent_parent="$TMP/absent-shell-parents"
+install -d -m 0750 "$absent_parent"
+directory_sentinel "$absent_parent"
+absent_before="$(directory_identity "$absent_parent")"
+(
+  umask 0000
+  HOME="$override_home" SUBYARD_HOME="$override_home/.subyard" \
+    SUBYARD_CONFIG_HOME="$override_home/.config/subyard" YARD_BIN_DIR="$absent_parent/bin"
+  export HOME SUBYARD_HOME SUBYARD_CONFIG_HOME YARD_BIN_DIR
+  SHELL=/bin/bash YARD_SHELL_RC="$absent_parent/interactive/nested/bashrc" \
+    YARD_LOGIN_RC="$absent_parent/login/profile" \
+    YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
+    "$release/subyard-install.sh" --yes >/dev/null
+)
+[ "$(directory_identity "$absent_parent")" = "$absent_before" ] \
+  && [ "$(stat -c '%a' "$absent_parent/bin")" = 755 ] \
+  && [ "$(stat -c '%a' "$absent_parent/interactive")" = 700 ] \
+  && [ "$(stat -c '%a' "$absent_parent/interactive/nested")" = 700 ] \
+  && [ "$(stat -c '%a' "$absent_parent/login")" = 700 ] \
+  || fail 'bootstrap did not create absent shell parents and binary directory with exact modes'
 
 bad_release="$TMP/bad-standalone-release"
 cp -a "$release" "$bad_release"

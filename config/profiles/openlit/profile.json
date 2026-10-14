@@ -30,7 +30,7 @@
   ],
   "dashboard": {
     "scheme": "http",
-    "path": "/",
+    "path": "/telemetry?tab=logs",
     "port_setting": "OPENLIT_HOST_PORT",
     "guest_port": 3000,
     "container_route": {

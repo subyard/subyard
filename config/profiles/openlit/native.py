@@ -26,6 +26,7 @@ CLAUDE = {
 CODEX = {
     'exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/logs', 'protocol': 'binary'}},
     'metrics_exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/metrics', 'protocol': 'binary'}},
+    'trace_exporter': {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/traces', 'protocol': 'binary'}},
     'log_user_prompt': False,
 }
 
@@ -51,7 +52,7 @@ def load(path, agent, anchor=None):
     return result
 
 
-def write(path, content, uid=None, gid=None):
+def write(path, content, uid=None, gid=None, before_replace=None):
     safe(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.openlit-')
@@ -63,6 +64,8 @@ def write(path, content, uid=None, gid=None):
         os.chmod(tmp, 0o600)
         if uid is not None:
             os.chown(tmp, uid, gid)
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp, path)
         directory = os.open(path.parent, os.O_DIRECTORY)
         try:
@@ -128,6 +131,12 @@ def reconcile(home, state, agents, mode, uid, gid, writer):
             pending = copy.deepcopy(owned)
             for key, value in expected(agent).items():
                 old = owned.get(key)
+                if agent == 'codex' and key == 'trace_exporter' and state.name == 'native.json' and (state.parent/'marker').exists():
+                    import trace_cutover
+                    # Matching the endpoint is insufficient proof of temporary
+                    # ownership. Leave an unrecognized compatibility leaf alone.
+                    if trace_cutover.leave_unowned(state, old, group.get(key)):
+                        continue
                 if old is None:
                     old = {'present': key in group, 'value': group.get(key), 'managed': value}
                 current = {'present': key in group, 'value': group.get(key)}

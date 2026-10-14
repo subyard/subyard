@@ -309,13 +309,32 @@ func (runtime Runtime) checkPreviewProxy(ctx context.Context, device, localDevic
 	}
 	resolver := runtime.ResolveOwnerAddress
 	if resolver == nil {
-		resolver = func(ctx context.Context, _ string) (string, error) { return previewroute.Host(ctx), nil }
+		resolver = func(_ context.Context, host string) (string, error) {
+			active, err := activeIPv4Addresses()
+			if err != nil {
+				return "", err
+			}
+			return selectPreviewOwnerAddress(host, active)
+		}
 	}
 	address, err := resolver(ctx, host)
 	if err != nil || address != host {
 		return errors.New("static preview proxy is not bound to the active private owner address")
 	}
 	return nil
+}
+
+// Preview reconciliation retains the exact owned endpoint across discovery
+// changes. Security validates its permitted address and actual availability;
+// choosing a new preferred address would contradict that durable ownership.
+func selectPreviewOwnerAddress(host string, active map[string]struct{}) (string, error) {
+	if !previewroute.Address(host) {
+		return "", errors.New("preview owner address must be a canonical private IPv4")
+	}
+	if _, present := active[host]; !present {
+		return "", errors.New("preview owner address is not active")
+	}
+	return host, nil
 }
 
 func (runtime Runtime) integrationProxy(name string) *profile.IntegrationDefinition {

@@ -22,6 +22,7 @@ exporters:
     create_schema: true
     ttl: 730h
     logs_table_name: otel_logs
+    traces_table_name: otel_traces
     timeout: 5s
     retry_on_failure:
       enabled: true
@@ -30,6 +31,12 @@ exporters:
       max_elapsed_time: 300s
 service:
   pipelines:
+    # create_schema initializes the canonical trace tables at exporter startup,
+    # before any agent sends events, so empty UI queries are valid.
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

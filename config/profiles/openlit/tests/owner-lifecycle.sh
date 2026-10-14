@@ -42,7 +42,10 @@ if mode=='pause' and os.environ.get('OPENLIT_OWNER_FIXTURE_REAL_GUEST')=='1':
     (state/'marker').write_text('subyard-openlit-v1\n')
     unit=directory/'unit'; unit.write_text('# Managed by Subyard OpenLIT profile.\n')
     guest_code=guest_code.replace('state=/var/lib/subyard/openlit','state='+str(state)).replace('unit=/etc/systemd/system/subyard-openlit.service','unit='+str(unit)).replace('/run/lock/subyard-openlit.lock',str(directory/'lock'))
-    result=subprocess.run(['bash','-euo','pipefail','-s','--',mode,selected,user,agents],input=guest_code.encode())
+    guest_code=guest_code.replace('cutover_unit=/etc/systemd/system/subyard-openlit-trace-cutover.service','cutover_unit='+str(directory/'cutover-unit')).replace('cutover_timer=/etc/systemd/system/subyard-openlit-trace-cutover.timer','cutover_timer='+str(directory/'cutover-timer'))
+    (directory/'guest.sh').write_text(guest_code)
+    (directory/'trace_cutover.py').write_text('import os,sys\nif sys.argv[1] == "locked-guest": os.execv("/bin/bash", ["bash", sys.argv[2], "--runtime-lock-fd", "9", *sys.argv[3:]])\n')
+    result=subprocess.run(['bash',str(directory/'guest.sh'),mode,selected,user,agents])
     sys.exit(result.returncode)
 elif mode=='pause': print('paused')
 elif mode in ('observe','refresh'):
@@ -67,7 +70,7 @@ export SUBYARD_PROFILE_SELECTED=1
 : > "$state/calls"
 bash "$root/config/profiles/openlit/owner.sh" --yes
 [ ! -s "$state/calls" ]
-printf 'collector.yaml\ncompose.yaml\nguest.sh\nnative.py\nopenlit-collector.yaml\nruntime.py\nsubyard-openlit.service\ntomli_w.py\n' > "$state/expected"
+printf 'account.py\ncollector.yaml\ncompose.yaml\nguest.sh\nnative.py\nopenlit-collector.yaml\nruntime.py\nsubyard-openlit-trace-cutover.service\nsubyard-openlit-trace-cutover.timer\nsubyard-openlit.service\ntomli_w.py\ntrace_cutover.py\n' > "$state/expected"
 cmp "$state/expected" "$state/files"
 : > "$state/calls"
 bash "$root/config/profiles/openlit/owner.sh" --remove
@@ -84,7 +87,8 @@ fi
 printf 'ok: OpenLIT lifecycle transport, stopped preservation and template-conflict refusal\n'
 
 # Exercise the real elevation projection, owner controller and tar-delivered guest
-# pause script. Only systemctl/identity facts are fixture-owned platform doubles.
+# pause script. Root lock handoff and systemctl/identity are platform doubles;
+# trace-cutover-test.py owns real protected file/FD/flock boundaries.
 cat > "$state/bin/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in

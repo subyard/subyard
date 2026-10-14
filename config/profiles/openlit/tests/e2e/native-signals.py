@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real native exporters with local synthetic model providers, then query OpenLIT."""
 import http.server
+import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -9,6 +10,9 @@ import time
 
 HOME = Path('/home/dev')
 STATE = Path('/var/lib/subyard/openlit')
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--agents', choices=['codex', 'claude'], default='codex')
+agent = parser.parse_args().agents
 # Test customization after enable must survive ordinary refresh and disable.
 claude = json.loads((HOME / '.claude/settings.json').read_text())
 claude.setdefault('env', {})['OPENLIT_E2E_CUSTOM'] = 'preserved'
@@ -71,19 +75,19 @@ class Provider(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = 'http://127.0.0.1:'+str(server.server_port)
-env = {'HOME': str(HOME), 'PATH': '/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+env = {'HOME': str(HOME), 'PATH': str(HOME/'.local/bin')+':/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
        'ANTHROPIC_API_KEY': 'synthetic-local-fixture', 'ANTHROPIC_BASE_URL': base,
        'OTEL_METRIC_EXPORT_INTERVAL': '1000', 'OTEL_LOGS_EXPORT_INTERVAL': '1000',
        'DISABLE_AUTOUPDATER': '1'}
 commands = {
-    'claude': ['claude', '--print', '--model', 'fixture', '--dangerously-skip-permissions', 'Say fixture'],
-    'codex': ['codex', '-c', 'model_provider="fixture"', '-c', 'model="fixture"',
+    'claude': [str(HOME/'.local/bin/claude'), '--print', '--model', 'fixture', '--dangerously-skip-permissions', 'Say fixture'],
+    'codex': [str(HOME/'.local/bin/codex'), '-c', 'model_provider="fixture"', '-c', 'model="fixture"',
               '-c', 'model_providers.fixture.name="Local fixture"',
               '-c', 'model_providers.fixture.base_url="'+base+'/v1"',
               '-c', 'model_providers.fixture.wire_api="responses"',
               '-c', 'model_providers.fixture.requires_openai_auth=false',
               'exec', '--skip-git-repo-check', 'Say fixture']}
-for agent, command in commands.items():
+for agent, command in [(agent, commands[agent])]:
     version = subprocess.check_output(['runuser', '-u', 'dev', '--', command[0], '--version'], cwd='/tmp', env=env, timeout=15, text=True).strip()
     print('native_version='+version, flush=True)
     result = subprocess.run(['runuser', '-u', 'dev', '--', *command], cwd='/tmp', env=env,
@@ -107,12 +111,13 @@ found = {}
 while time.monotonic() < deadline:
     logs = query("SELECT DISTINCT ServiceName FROM otel_logs ORDER BY ServiceName FORMAT JSONEachRow")
     metrics = query("SELECT DISTINCT ServiceName FROM otel_metrics_sum UNION DISTINCT SELECT DISTINCT ServiceName FROM otel_metrics_histogram FORMAT JSONEachRow")
-    found = {'logs': logs, 'metrics': metrics}
-    if all(any(agent in signal.lower() for agent in (name,)) for name in ('claude', 'codex') for signal in (logs, metrics)):
+    traces = query("SELECT DISTINCT ServiceName FROM otel_traces WHERE TraceId != '' FORMAT JSONEachRow")
+    found = {'logs': logs, 'metrics': metrics, 'traces': traces}
+    if all(agent in signal.lower() for signal in (logs, metrics)) and (agent != 'codex' or 'codex' in traces.lower()):
         break
     time.sleep(2)
 else:
     print('native_ingestion_missing='+json.dumps(found), flush=True)
     raise SystemExit(1)
 print('native_openlit_tables='+json.dumps(found), flush=True)
-print('ok: genuine Claude Code and Codex native logs and metrics reached OpenLIT ClickHouse', flush=True)
+print('ok: genuine '+agent+' native telemetry reached OpenLIT ClickHouse', flush=True)

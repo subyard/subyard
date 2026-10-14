@@ -14,6 +14,23 @@ OFFLINE=0
 PUBLISH_ONLY=0
 ASSUME_YES="${ASSUME_YES:-0}"
 
+# Startup parents and the binary directory may be existing operator directories.
+# Unlike install -d, mkdir never resets their permissions or ownership. Create
+# only missing components, with private parents and an explicit final mode.
+ensure_directory() {
+  local directory="$1" mode="${2:-0700}" parent
+  [ -d "$directory" ] && return 0
+  if [ -e "$directory" ] || [ -L "$directory" ] || [ -z "$directory" ]; then
+    printf 'bootstrap-runtime: directory path is unavailable\n' >&2
+    return 2
+  fi
+  parent="$(dirname -- "$directory")"
+  [ "$parent" != "$directory" ] || return 2
+  ensure_directory "$parent" || return
+  # A concurrent creator also owns its directory metadata; never chmod it.
+  mkdir -m "$mode" -- "$directory" || [ -d "$directory" ]
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --channel needs stable\n' >&2; exit 2; }; CHANNEL="$2"; shift 2 ;;
@@ -340,7 +357,7 @@ else
 fi
 
 if [ -z "$SOURCE_INGRESS_ROOT" ]; then
-  install -d "$BIN_DIR"
+  ensure_directory "$BIN_DIR" 0755
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/yard"
   ln -sfn "$RUNTIME_ROOT/current/bin/yard" "$BIN_DIR/sy"
 fi
@@ -349,7 +366,7 @@ for index in "${!login_rcs[@]}"; do
   # Source ingress owns its primary startup files and their sealed recovery digests.
   if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$index" = 0 ]; then continue; fi
   login_rc="${login_rcs[index]}"
-  install -d "$(dirname "$login_rc")"
+  ensure_directory "$(dirname "$login_rc")"
   if [ -f "$login_rc" ] && grep -qF 'Subyard CLI login PATH' "$login_rc"; then
     :
   else
@@ -368,7 +385,7 @@ for index in "${!shell_rcs[@]}"; do
   if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$index" = 0 ]; then continue; fi
   shell_rc="${shell_rcs[index]}"
   completion="${shell_completions[index]}"
-  install -d "$(dirname "$shell_rc")"
+  ensure_directory "$(dirname "$shell_rc")"
   if [ -f "$shell_rc" ] && grep -qF "export PATH=\"$BIN_DIR:" "$shell_rc"; then
     :
   else

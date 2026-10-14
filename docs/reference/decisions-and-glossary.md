@@ -734,13 +734,14 @@ yard start. After VPN down, provision/init/start/reboot preserve disabled intent
 Selecting profile alone never publishes VPN; external exposure follows confirmation policy. See
 [Amnezia](../amnezia.md).
 
-The retired AI Observer installation readiness contract proved exact owned runtime/active service, separate from
-advisory health. Initial history scan can delay HTTP while sole watcher works; re-provision does
-not restart a valid starting service. Watcher commits file data/offset transactionally, skips
-unchanged committed files, may retry interrupted files; progress uses offset/message/checkpoint
-aggregates, not record_count/CPU/DB growth alone. Health is ready/starting/failed/unknown
-without activation-fingerprint change. Rollback is for proven startup/spec failure, not absent
-HTTP. Full first-import budget cannot be inferred from a quick later retry.
+OpenLIT is an optional, default-off environment profile that owns its telemetry stack, native
+exporter settings, UI publication and local account bootstrap. Service readiness is independent
+of installed agent CLIs and emitted events; an existing backend must read new exporter settings
+before sending native logs, metrics or traces. Signals retain their upstream attributes, so
+ingestion does not establish compatible SDK model/token/cost cards. Fresh private credentials
+preserve seeded database/tenant links; initialized accounts and data survive update and
+disable/re-enable. Retired AI Observer compatibility preserves history and never selects
+OpenLIT automatically. The owning contract and its limits are in [OpenLIT](../openlit.md).
 
 <a id="decision-47"></a>
 
