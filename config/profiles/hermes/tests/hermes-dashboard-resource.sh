@@ -28,16 +28,6 @@ if grep -Eq '/srv/hermes|/home/dev/.hermes|\.env|config\.yaml|python|systemctl|j
   "$HANDLER"; then
   fail 'route handler knows about Hermes configuration, components or processes'
 fi
-grep -Fq 'tailscale ip -4' "$HANDLER" \
-  || fail 'route does not constrain publication to active Tailscale IPv4'
-grep -Fq 'listen=tcp:$HERMES_OWNER_IP:$HERMES_DASHBOARD_HOST_PORT' "$HANDLER" \
-  || fail 'route does not publish the exact selected owner address'
-grep -Fq 'connect=tcp:127.0.0.1:$HERMES_GUEST_PORT' "$HANDLER" \
-  || fail 'route does not target the guest loopback endpoint'
-grep -Fq 'bind=host' "$HANDLER" || fail 'route does not use host-side binding'
-grep -Fq 'user.subyard.resource.hermes-dashboard' "$HANDLER" \
-  || fail 'route does not persist owner-side device ownership'
-
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"

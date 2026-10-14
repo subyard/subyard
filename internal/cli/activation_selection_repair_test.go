@@ -201,170 +201,143 @@ func TestActivationProfileSelectionRepairRejectsNamedDescriptorOnlyExpansion(t *
 }
 
 func TestActivationProfileSelectionRepairPreservesConsentAndHistory(t *testing.T) {
+	selection := activationSelectionRepairTest{
+		key: "ENVIRONMENT_PROFILES", selected: "fixture-selected fixture-neighbor", reduced: "fixture-selected",
+		assets: activationProfileRepairAssets(),
+	}
 	for _, kind := range []string{"reduce", "disable", "set"} {
 		t.Run(kind, func(t *testing.T) {
-			root, home, path, environment := activationSelectionRepairFixture(t, activationProfileRepairAssets())
-			before := []byte("# preserve unrelated records\nENVIRONMENT_PROFILES='fixture-selected fixture-neighbor'\nSSH_PORT=2398\n")
-			testkit.WriteFile(t, path, before, 0o640)
-			history := activationRepairHistory(t, root, home)
 			arguments := []string{"config", "reduce-selection", "ENVIRONMENT_PROFILES", "fixture-selected", "--scope", "host", "--local"}
-			target, mode := path, os.FileMode(0o640)
-			stages := []string{"preview", "decline", "apply"}
 			if kind != "reduce" {
-				target, mode = filepath.Join(home, "yards/default/config.env"), 0o600
-				stages = stages[1:]
 				arguments = []string{"profile", "disable", "fixture-neighbor"}
 				if kind == "set" {
 					arguments = []string{"config", "set", "ENVIRONMENT_PROFILES", "fixture-selected", "--scope", "yard"}
 				}
 			}
-			for _, stage := range stages {
-				var stdout, stderr bytes.Buffer
-				args := slices.Clone(arguments)
-				if stage == "preview" {
-					args = append(args, "--check")
-				}
-				prompt := &testkit.Prompt{Answers: []bool{stage == "apply"}}
-				code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: args, Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
-				if code != 0 && stage != "decline" || stage == "decline" && code != 1 {
-					t.Fatalf("%s code=%d %s %s", stage, code, stdout.String(), stderr.String())
-				}
-				if !reflect.DeepEqual(history, activationRepairHistory(t, root, home)) {
-					t.Fatal("profile source reduction changed journal, ledger, release links or their modes")
-				}
-				if stage != "apply" {
-					if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
-						t.Fatal("unconsented profile reduction changed host settings")
-					}
-					if target != path {
-						if _, err := os.Lstat(target); !os.IsNotExist(err) {
-							t.Fatal("unconsented typed profile reduction created yard settings")
-						}
-					}
-					continue
-				}
-				if len(prompt.Requests) != 1 || !strings.Contains(stdout.String(), "activation remains pending") {
-					t.Fatal("profile source consent or separate activation boundary missing")
-				}
-				want := "ENVIRONMENT_PROFILES='fixture-selected'\n"
-				if target == path {
-					want = "# preserve unrelated records\n" + want + "SSH_PORT=2398\n"
-				} else if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
-					t.Fatal("yard profile reduction changed inherited host settings")
-				}
-				info, err := os.Stat(target)
-				if err != nil || info.Mode().Perm() != mode || string(mustReadConfigFixture(t, target)) != want {
-					t.Fatal("profile reduction changed unrelated settings or exact source mode")
-				}
-			}
+			testActivationSelectionRepairConsent(t, selection, arguments, kind != "reduce")
 		})
 	}
 }
 
 func TestActivationProfileSelectionRepairRejectsExpansionOverridesAndConsentDrift(t *testing.T) {
-	for _, scenario := range []string{"expansion", "override", "drift", "source-drift"} {
+	testActivationSelectionRepairRejections(t, activationSelectionRepairTest{
+		key: "ENVIRONMENT_PROFILES", source: "ENVIRONMENT_PROFILES='fixture-selected fixture-neighbor'\nSSH_PORT=2398\n", reduced: "fixture-selected",
+		expanded: "fixture-legacy", override: "fixture-selected", mode: 0o640, sourceDrift: true,
+		assets: activationProfileRepairAssets(),
+	})
+}
+
+func TestActivationSelectionRepairPreservesHistoryAndRequiresSourceConsent(t *testing.T) {
+	testActivationSelectionRepairConsent(t, activationSelectionRepairTest{
+		key: "CODING_TOOL_INTEGRATIONS", selected: "codex claude", reduced: "codex",
+	}, []string{"config", "reduce-selection", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "host", "--local"}, false)
+}
+
+func TestActivationSelectionRepairRejectsExpansionOverridesAndConsentDrift(t *testing.T) {
+	testActivationSelectionRepairRejections(t, activationSelectionRepairTest{
+		key: "CODING_TOOL_INTEGRATIONS", source: "CODING_TOOL_INTEGRATIONS='codex'\n", expanded: "codex claude", override: "claude", mode: 0o600,
+	})
+}
+
+type activationSelectionRepairTest struct {
+	key, selected, source, reduced, expanded, override string
+	mode                                               os.FileMode
+	sourceDrift                                        bool
+	assets                                             map[string]string
+}
+
+func testActivationSelectionRepairConsent(t *testing.T, selection activationSelectionRepairTest, arguments []string, yard bool) {
+	t.Helper()
+	root, home, path, environment := activationSelectionRepairFixture(t, selection.assets)
+	before := []byte("# preserve unrelated records\n" + selection.key + "='" + selection.selected + "'\nSSH_PORT=2398\n")
+	testkit.WriteFile(t, path, before, 0o640)
+	history := activationRepairHistory(t, root, home)
+	target, mode := path, os.FileMode(0o640)
+	stages := []string{"preview", "decline", "apply"}
+	if yard {
+		target, mode = filepath.Join(home, "yards/default/config.env"), 0o600
+		stages = stages[1:]
+	}
+	for _, stage := range stages {
+		var stdout, stderr bytes.Buffer
+		args := slices.Clone(arguments)
+		if stage == "preview" {
+			args = append(args, "--check")
+		}
+		prompt := &testkit.Prompt{Answers: []bool{stage == "apply"}}
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: args, Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
+		if code != 0 && stage != "decline" || stage == "decline" && code != 1 {
+			t.Fatalf("%s code=%d %s %s", stage, code, stdout.String(), stderr.String())
+		}
+		if !reflect.DeepEqual(history, activationRepairHistory(t, root, home)) {
+			t.Fatal("source reduction changed journal, ledger, release links or their modes")
+		}
+		if stage != "apply" {
+			if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
+				t.Fatal("unconsented source reduction changed host settings")
+			}
+			if yard {
+				if _, err := os.Lstat(target); !os.IsNotExist(err) {
+					t.Fatal("unconsented typed reduction created yard settings")
+				}
+			}
+			continue
+		}
+		if len(prompt.Requests) != 1 || !strings.Contains(stdout.String(), "activation remains pending") {
+			t.Fatal("source consent or separate activation boundary missing")
+		}
+		want := selection.key + "='" + selection.reduced + "'\n"
+		if !yard {
+			want = "# preserve unrelated records\n" + want + "SSH_PORT=2398\n"
+		} else if !bytes.Equal(before, mustReadConfigFixture(t, path)) {
+			t.Fatal("yard reduction changed inherited host settings")
+		}
+		info, err := os.Stat(target)
+		if err != nil || info.Mode().Perm() != mode || string(mustReadConfigFixture(t, target)) != want {
+			t.Fatal("source reduction changed unrelated settings or exact source mode")
+		}
+	}
+}
+
+func testActivationSelectionRepairRejections(t *testing.T, selection activationSelectionRepairTest) {
+	t.Helper()
+	scenarios := []string{"expansion", "override", "drift"}
+	if selection.sourceDrift {
+		scenarios = append(scenarios, "source-drift")
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
-			root, home, path, environment := activationSelectionRepairFixture(t, activationProfileRepairAssets())
-			before := []byte("ENVIRONMENT_PROFILES='fixture-selected fixture-neighbor'\nSSH_PORT=2398\n")
-			testkit.WriteFile(t, path, before, 0o640)
+			root, home, path, environment := activationSelectionRepairFixture(t, selection.assets)
+			before := []byte(selection.source)
+			testkit.WriteFile(t, path, before, selection.mode)
 			history := activationRepairHistory(t, root, home)
-			value := "fixture-selected"
+			value := selection.reduced
 			if scenario == "expansion" {
-				value = "fixture-legacy"
+				value = selection.expanded
 			}
 			if scenario == "override" {
-				environment = append(environment, "ENVIRONMENT_PROFILES=fixture-selected")
+				environment = append(environment, selection.key+"="+selection.override)
 			}
 			prompt := &callbackPrompt{callback: func() {
 				if scenario == "source-drift" {
-					testkit.WriteFile(t, path, append(slices.Clone(before), []byte("# independent update\n")...), 0o640)
+					testkit.WriteFile(t, path, append(slices.Clone(before), []byte("# independent update\n")...), selection.mode)
 				} else {
 					testkit.WriteFile(t, filepath.Join(home, "release-transition/v2/.journal.json.pending"), []byte("{}\n"), 0o600)
 				}
 			}}
 			var stderr bytes.Buffer
 			code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
-				Arguments: []string{"config", "reduce-selection", "ENVIRONMENT_PROFILES", value, "--scope", "host", "--local"}, Prompt: prompt, Stdout: &bytes.Buffer{}, Stderr: &stderr})
+				Arguments: []string{"config", "reduce-selection", selection.key, value, "--scope", "host", "--local"}, Prompt: prompt, Stdout: &bytes.Buffer{}, Stderr: &stderr})
 			info, err := os.Stat(path)
 			want := before
 			if scenario == "source-drift" {
 				want = append(slices.Clone(before), []byte("# independent update\n")...)
 			}
-			if code == 0 || err != nil || info.Mode().Perm() != 0o640 || !bytes.Equal(want, mustReadConfigFixture(t, path)) || !reflect.DeepEqual(history, activationRepairHistory(t, root, home)) {
-				t.Fatalf("unsafe profile reduction accepted: code=%d %s", code, stderr.String())
+			if code == 0 || err != nil || info.Mode().Perm() != selection.mode || !bytes.Equal(want, mustReadConfigFixture(t, path)) || !reflect.DeepEqual(history, activationRepairHistory(t, root, home)) {
+				t.Fatalf("unsafe source reduction accepted: code=%d %s", code, stderr.String())
 			}
 			if (scenario == "drift" || scenario == "source-drift") && (len(prompt.requests) != 1 || !strings.Contains(stderr.String(), "stale")) {
-				t.Fatalf("profile source consent did not bind history: %s", stderr.String())
-			}
-		})
-	}
-}
-
-func TestActivationSelectionRepairPreservesHistoryAndRequiresSourceConsent(t *testing.T) {
-	root, configHome, path, environment := activationSelectionRepairFixture(t)
-	before := []byte("# preserve unrelated records\nCODING_TOOL_INTEGRATIONS='codex claude'\nSSH_PORT=2398\n")
-	testkit.WriteFile(t, path, before, 0o640)
-	journalPath := filepath.Join(configHome, "release-transition/v2/journal.json")
-	journal := mustReadConfigFixture(t, journalPath)
-	for _, stage := range []string{"preview", "decline", "apply"} {
-		var stdout, stderr bytes.Buffer
-		arguments := []string{"config", "reduce-selection", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "host", "--local"}
-		prompt := &testkit.Prompt{Answers: []bool{stage == "apply"}}
-		if stage == "preview" {
-			arguments = append(arguments, "--check")
-		}
-		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: arguments, Prompt: prompt, Stdout: &stdout, Stderr: &stderr})
-		if stage == "decline" {
-			if code != 1 {
-				t.Fatalf("decline code=%d %s", code, stderr.String())
-			}
-		} else if code != 0 {
-			t.Fatalf("%s code=%d %s %s", stage, code, stdout.String(), stderr.String())
-		}
-		if !bytes.Equal(journal, mustReadConfigFixture(t, journalPath)) {
-			t.Fatal("source repair rewrote interrupted history")
-		}
-		if stage != "apply" && !bytes.Equal(before, mustReadConfigFixture(t, path)) {
-			t.Fatal("unconsented source repair wrote desired settings")
-		}
-		if stage == "apply" {
-			if len(prompt.Requests) != 1 || !strings.Contains(stdout.String(), "activation remains pending") {
-				t.Fatal("source consent or separate activation recovery boundary missing")
-			}
-			if string(mustReadConfigFixture(t, path)) != "# preserve unrelated records\nCODING_TOOL_INTEGRATIONS='codex'\nSSH_PORT=2398\n" {
-				t.Fatal("source repair changed unrelated settings")
-			}
-			info, err := os.Stat(path)
-			if err != nil || info.Mode().Perm() != 0o640 {
-				t.Fatal("source mode changed")
-			}
-		}
-	}
-}
-
-func TestActivationSelectionRepairRejectsExpansionOverridesAndConsentDrift(t *testing.T) {
-	for _, scenario := range []string{"expansion", "override", "drift"} {
-		t.Run(scenario, func(t *testing.T) {
-			root, configHome, path, environment := activationSelectionRepairFixture(t)
-			before := []byte("CODING_TOOL_INTEGRATIONS='codex'\n")
-			testkit.WriteFile(t, path, before, 0o600)
-			value := ""
-			if scenario == "expansion" {
-				value = "codex claude"
-			}
-			if scenario == "override" {
-				environment = append(environment, "CODING_TOOL_INTEGRATIONS=claude")
-			}
-			prompt := &callbackPrompt{callback: func() {
-				testkit.WriteFile(t, filepath.Join(configHome, "release-transition/v2/.journal.json.pending"), []byte("{}\n"), 0o600)
-			}}
-			var stderr bytes.Buffer
-			code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"config", "reduce-selection", "CODING_TOOL_INTEGRATIONS", value, "--scope", "host", "--local"}, Prompt: prompt, Stdout: &bytes.Buffer{}, Stderr: &stderr})
-			if code == 0 || !bytes.Equal(before, mustReadConfigFixture(t, path)) {
-				t.Fatalf("unsafe repair accepted: %d %s", code, stderr.String())
-			}
-			if scenario == "drift" && (len(prompt.requests) != 1 || !strings.Contains(stderr.String(), "stale")) {
-				t.Fatalf("changed history not rebound: %s", stderr.String())
+				t.Fatalf("source consent did not bind history and settings: %s", stderr.String())
 			}
 		})
 	}

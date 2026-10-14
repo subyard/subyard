@@ -654,7 +654,7 @@ func uniqueStringsAllowEmpty(values []string) bool {
 func rejectPolicyDuplicateMembers(source []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
-	if err := scanPolicyJSONValue(decoder); err != nil {
+	if err := scanJSONValue(decoder); err != nil {
 		return fmt.Errorf("scan policy JSON: %w", err)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -664,44 +664,4 @@ func rejectPolicyDuplicateMembers(source []byte) error {
 		return fmt.Errorf("scan policy JSON: %w", err)
 	}
 	return nil
-}
-
-func scanPolicyJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		members := make(map[string]struct{})
-		for decoder.More() {
-			token, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			name, ok := token.(string)
-			if !ok {
-				return errors.New("object member name is not a string")
-			}
-			if _, exists := members[name]; exists {
-				return fmt.Errorf("duplicate object member %q", name)
-			}
-			members[name] = struct{}{}
-			if err := scanPolicyJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanPolicyJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-	}
-	_, err = decoder.Token()
-	return err
 }
