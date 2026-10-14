@@ -107,14 +107,29 @@ yard_one keys sync @two --now --yes >/dev/null
 mkdir -p "$TMP/fake-bin"
 cat > "$TMP/fake-bin/incus" <<'SH'
 #!/usr/bin/env bash
-case "${1:-}" in info) exit 0 ;; list) printf 'RUNNING\n' ;; exec) exit 1 ;; *) exit 1 ;; esac
+case "${1:-}" in
+  info) exit 0 ;;
+  list) printf 'RUNNING\n' ;;
+  exec)
+    case " $* " in
+      *' id -u '*|*' id -g '*) printf '1000\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
 SH
 chmod +x "$TMP/fake-bin/incus"
 export PATH="$TMP/fake-bin:$PATH"
+yard_one staging status exclusive >"$TMP/exclusive-status.out"
+grep -Fq "zone 'exclusive': (no runner)" "$TMP/exclusive-status.out" \
+  || fail 'old exclusive consumer stop precondition was not established'
 mv "$SUBYARD_KEYS_ROOT/two/shared.git" "$SUBYARD_KEYS_ROOT/two/shared.git.handoff-offline"
 if yard_one keys move "$exclusive_id" @two --yes >"$TMP/handoff-offline.out" 2>&1; then
   fail 'exclusive handoff reported success while its target was offline'
 fi
+grep -Fq 'handoff was published' "$TMP/handoff-offline.out" \
+  || fail 'offline handoff did not reach assignment publication'
 [ ! -e "$TMP/consumer-one/staging/exclusive.env" ] || fail 'published handoff kept the old exclusive consumer'
 [ ! -e "$TMP/consumer-two/staging/exclusive.env" ] || fail 'offline handoff materialized an unconfirmed target'
 mv "$SUBYARD_KEYS_ROOT/two/shared.git.handoff-offline" "$SUBYARD_KEYS_ROOT/two/shared.git"

@@ -23,7 +23,7 @@ python3 -B "$root/config/profiles/openlit/tests/guest-test.py"
 python3 -B "$root/config/profiles/openlit/tests/account-test.py"
 python3 -B "$root/config/profiles/openlit/tests/runtime-test.py"
 bash -n "$root/config/profiles/openlit/owner.sh" "$root/config/profiles/openlit/guest.sh" "$root/config/profiles/openlit/runtime.sh" "$root/config/profiles/openlit/tests/e2e/owner.sh"
-shellcheck -S warning "$root/config/profiles/openlit/owner.sh" "$root/config/profiles/openlit/guest.sh" "$root/config/profiles/openlit/runtime.sh" "$root/config/profiles/openlit/tests/"*.sh "$root/config/profiles/openlit/tests/e2e/"*.sh
+shellcheck -x -S warning "$root/config/profiles/openlit/owner.sh" "$root/config/profiles/openlit/guest.sh" "$root/config/profiles/openlit/runtime.sh" "$root/config/profiles/openlit/tests/"*.sh "$root/config/profiles/openlit/tests/e2e/"*.sh
 python3 - "$root/config/profiles/openlit" <<'PY'
 import ast, pathlib, sys
 for path in pathlib.Path(sys.argv[1]).rglob('*.py'):

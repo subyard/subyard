@@ -58,7 +58,7 @@ sys.stdout.buffer.write(b"\0".join(word.encode() for word in words)+b"\0")
     ACCESS_KIND=local SSH_HOST=yard-inner YARD_INSTANCE_NAME=yard-inner \
     "$(dirname "$0")/project-owner-fixture" "${owner_arguments[@]}"
 fi
-if [[ "$joined" == *'.subyard-meta.json'* ]] && [[ "$joined" == *"'tee'"* || "$joined" == *'cat >'* ]]; then
+if [[ "$joined" == *'.subyard-meta.json'* ]] && [[ "$joined" == *"'tee'"* || "$joined" == *'exec tee --'* || "$joined" == *'cat >'* ]]; then
   cat > "$REGISTRY_TEST_STATE/yard-meta.json"
   [[ "$joined" =~ /srv/workspaces/([A-Za-z0-9_-]+)/.subyard-meta.json ]] || exit 1
   cp "$REGISTRY_TEST_STATE/yard-meta.json" "$REGISTRY_TEST_STATE/guest/workspaces/${BASH_REMATCH[1]}/.subyard-meta.json"
@@ -256,7 +256,8 @@ clone_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$clone_id.json"
 [ ! -e "$clone_state" ] || fail 'native clone published obsolete controller project state'
 [ -s "$REGISTRY_TEST_STATE/owner-calls" ] || fail 'native clone did not converge owner state'
 jq -e '.projectId == $id and .mode == "git" and .target == "synthetic"' --arg id "$clone_id" \
-  "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null || fail 'clone metadata omitted its target'
+  "$REGISTRY_TEST_STATE/guest/workspaces/$clone_id/.subyard-meta.json" >/dev/null \
+  || fail 'clone metadata omitted its target'
 
 for admitted in RemoteDemo RemoteDemo-2 RemoteDemo-3 StaleDemo-3 ForeignClone;do
   assert_json "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects/$admitted.json" \
