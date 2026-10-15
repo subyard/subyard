@@ -72,9 +72,15 @@ for roles and model settings. Preserve required coverage and candidate identity.
 - One assigned polling owner reads active progress/logs; the developer and coordinator use
   its events and evidence instead of parallel polling. Interactive root-console work also has
   one owner. Process control, lease heartbeats and cleanup remain with the existing runner.
+  While an observer owns the run, other roles do independent work or use the supported agent
+  event wait within client limits. Do not add process/status/log polls or request updates merely
+  because a wait returned unchanged. Check ownership once when its agreed checkpoint expires.
 - Prefer completion events. For capacity shortages, use long adaptive waits and retry guarded
-  acquisition when availability may reasonably have changed. Necessary timed waits may still
-  invoke the model.
+  acquisition when availability may reasonably have changed. Record the next retry time or
+  resource-change trigger in the existing task. Before that time or trigger, an unchanged timed
+  wakeup does not justify another capacity probe or allocation attempt. Use supported waits within
+  client limits, without intermediate clock/status calls solely to recheck the wait.
+  Necessary timed waits may still invoke the model.
   Send routine/material progress to one responsible canonical recipient named in the assignment
   (normally the coordinator while the developer phase has ended). Preserve operator updates.
   Do not send duplicate progress to both roles or acknowledge/follow up merely to say still running.
@@ -240,6 +246,11 @@ before expanding reads. Fix the cause and run affected checks; batch independent
 freezing a new candidate when needed. Before an expensive retry, verify the changed prerequisite
 with its existing check and consult installed CLI help when invocation/compatibility is uncertain.
 Record the concrete rerun reason in the current task, using existing evidence pointers.
+
+Before cancelling an active check or repeating a passed one after a candidate change, identify
+its affected runtime, fixture or shared inputs and check supported evidence import/transfer.
+A new fingerprint alone is not a reason to cancel or repeat an unaffected check. If a required
+gate cannot reuse that evidence, record that specific binding/coverage limit as the rerun reason.
 
 Reassess a rebase or changed candidate by affected contracts. Reuse only supported, still-bound
 results under the [candidate import/transfer limits](#one-release-candidate); supporting diagnostics
