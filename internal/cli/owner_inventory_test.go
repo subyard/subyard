@@ -450,6 +450,53 @@ func TestCanonicalReadOnlyInvocationDoesNotRecoverOwnerRoute(t *testing.T) {
 	}
 }
 
+func TestRemoteYardStatusAllowsFullProfileChecksOnBothRoutes(t *testing.T) {
+	root := testkit.TempDir(t)
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var response bytes.Buffer
+	codec := rpc.NewCodec(bytes.NewReader(nil), &response)
+	for _, frame := range []rpc.Response{
+		{Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate", Result: map[string]any{"capabilities": []string{ownerinventory.ProfileDashboardStatusCapability}}},
+		{Version: rpc.ProtocolVersion, Type: "response", ID: "status", Result: domain.YardStatus{State: "RUNNING", Facts: domain.StatusFacts{Shared: []domain.SharedResourceStatus{{Profile: "sample", Name: "dashboard", State: "up", URL: "http://127.0.0.1:22222/"}}}}},
+	} {
+		if err := codec.Write(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLIFile(t, filepath.Join(root, "reply"), response.String(), 0o600)
+	writeCLIFile(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"sleep 9\nexec cat \"$SUBYARD_TEST_STATUS_REPLY\"\n", 0o700)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SUBYARD_TEST_STATUS_REPLY", filepath.Join(root, "reply"))
+	loaded := config.Loaded{Context: domain.Context{Paths: domain.RuntimePaths{DataHome: root}}}
+	if err := (ownerinventory.Connections{Root: filepath.Join(root, "owner-inventory")}).Write(ownerinventory.Connection{HostID: "remote-owner", Destination: "dev@remote.example"}); err != nil {
+		t.Fatal(err)
+	}
+	program := &CLI{}
+	for _, route := range []string{"selector", "registered-owner"} {
+		t.Run(route, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var status domain.YardStatus
+			var err error
+			if route == "selector" {
+				status, err = program.remoteYardStatus(ctx, domain.Context{OwnerEndpoint: "dev@remote.example", OwnerYardName: "demo"})
+			} else {
+				var destination string
+				status, destination, err = program.remoteOwnerYardStatus(ctx, loaded, "remote-owner", "demo")
+				if err == nil && destination != "dev@remote.example" {
+					t.Fatal("registered route changed")
+				}
+			}
+			if err != nil || status.State != "RUNNING" || len(status.Facts.Shared) != 1 || status.Facts.Shared[0].State != "up" {
+				t.Fatalf("full owner check did not survive transport: status=%+v err=%v", status, err)
+			}
+		})
+	}
+}
+
 func TestRPCOwnerInventoryPreservesLegacyProjectState(t *testing.T) {
 	root, environment, stateDirectory := nativeFixture(t)
 	store, err := state.NewFileStore(stateDirectory)

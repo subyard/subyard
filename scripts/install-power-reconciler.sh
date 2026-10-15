@@ -71,21 +71,24 @@ fi
 [ -n "$ENGINE_SOURCE" ] || die "SUBYARD_POWER_ENGINE_SOURCE is required"
 [ -f "$ENGINE_SOURCE" ] && [ -x "$ENGINE_SOURCE" ] \
   || die "power engine source must be an executable regular file: $ENGINE_SOURCE"
+# Carry the pinned candidate through the operator credential boundary using the
+# query's own descriptors; another process's /proc directory may be inaccessible.
+exec {publication_root_fd}<"$SCRIPT_DIR/.."
+exec {publication_engine_fd}<"$ENGINE_SOURCE"
+publication_engine="/proc/self/fd/$publication_engine_fd"
+[ -f "$publication_engine" ] && [ -x "$publication_engine" ] \
+  || die 'opened power engine must be an executable regular file'
 # Read the protected epoch as its approved operator before copying any runtime.
-# The operator may have a different primary group after runuser. Inherited
-# descriptors retain the approved source without crossing a parent's proc gate.
-exec {publication_root}< "$SCRIPT_DIR/.."
-exec {publication_engine}< "$ENGINE_SOURCE"
-publication_args=(env "SUBYARD_REPOSITORY_ROOT=/proc/self/fd/$publication_root" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
+publication_args=(env "SUBYARD_REPOSITORY_ROOT=/proc/self/fd/$publication_root_fd" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
 if [ "$(id -u)" = 0 ] && [ "${SUBYARD_USER:-root}" != root ]; then
   publication_args=(runuser -u "$SUBYARD_USER" -- "${publication_args[@]}")
 fi
-publication_contracts="$("${publication_args[@]}" "/proc/self/fd/$publication_engine" _publication-contracts)"
-exec {publication_engine}<&-
-exec {publication_root}<&-
+publication_contracts="$("${publication_args[@]}" "$publication_engine" _publication-contracts)"
+exec {publication_root_fd}<&-
 [[ "$publication_contracts" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || die 'invalid publication contract snapshot'
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$(dirname "$UNIT_PATH")"
-install -o root -g root -m 0755 "$ENGINE_SOURCE" "$RECONCILER_PATH"
+install -o root -g root -m 0755 "$publication_engine" "$RECONCILER_PATH"
+exec {publication_engine_fd}<&-
 # Upgrades can reach this helper without running the new host-network stage.
 # Managed starts and teardown must work before the next host reboot.
 "$RECONCILER_PATH" _network-lock ensure \

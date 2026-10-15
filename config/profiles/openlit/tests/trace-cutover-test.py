@@ -6,6 +6,7 @@ import io
 import importlib.util
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,32 @@ sys.path.insert(0, str(PROFILE.parents[2]/'internal/adapters/configmaterial'))
 import native
 import tomli_w
 import trace_cutover as cutover
+
+
+class TraceEvidenceTest(unittest.TestCase):
+    def test_known_services_require_fresh_marked_nonempty_traces(self):
+        token = 'a'*32
+        with contextlib.closing(sqlite3.connect(':memory:')) as db:
+            db.create_function('fromUnixTimestamp64Nano', 1, lambda ns: ns)
+            db.execute('CREATE TABLE otel_traces (ServiceName TEXT, TraceId TEXT, cutover TEXT, Timestamp INTEGER)')
+
+            def runner(args):
+                # Execute the real predicate, adapting only ClickHouse map syntax.
+                query = args[-1].replace("ResourceAttributes['"+cutover.ATTRIBUTE+"']", 'cutover')
+                return (str(db.execute(query).fetchone()[0])+'\n').encode()
+
+            cases = [(name, 'trace', token, 101, True)
+                     for name in ('codex_cli_rs', 'codex_exec', 'codex-app-server')]
+            cases += [('codex_exec-other', 'trace', token, 101, False),
+                      ('foreign', 'trace', token, 101, False),
+                      ('codex_exec', '', token, 101, False),
+                      ('codex_exec', 'trace', 'b'*32, 101, False),
+                      ('codex_exec', 'trace', token, 100, False)]
+            for name, trace, marker, timestamp, expected in cases:
+                with self.subTest(service=name, trace=trace, marker=marker, timestamp=timestamp):
+                    db.execute('DELETE FROM otel_traces')
+                    db.execute('INSERT INTO otel_traces VALUES (?, ?, ?, ?)', (name, trace, marker, timestamp))
+                    self.assertEqual(cutover.new_flow(Path('/unused'), {'token': token, 'cutover_ns': 100}, runner), expected)
 
 
 class CutoverTest(unittest.TestCase):
@@ -102,7 +129,6 @@ class CutoverTest(unittest.TestCase):
         if args[:2] == ['systemctl', 'is-active']:
             return b'active\n' if self.active else b'inactive\n'
         if args[:2] == ['docker', 'compose'] and 'exec' in args:
-            self.assertIn("ServiceName = 'codex_cli_rs'", args[-1])
             self.assertIn("ResourceAttributes['subyard.openlit.trace_cutover']", args[-1])
             self.assertIn('Timestamp > fromUnixTimestamp64Nano(', args[-1])
             return self.events

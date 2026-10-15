@@ -65,6 +65,7 @@ fi
   export TEST_SYSTEMCTL_LOG="$temporary/install/systemctl.log"
   export TEST_NETWORK_LOCK_FAIL=0
   export TEST_READER_BOUNDARY_FAIL=0
+  export SUBYARD_USER=root
 
   cat > "$SUBYARD_POWER_ENGINE_SOURCE" <<'EOF'
 #!/usr/bin/env bash
@@ -123,6 +124,36 @@ EOF
     fail 'install did not prepare the network lock before enabling boot reconciliation'
   fi
   [ -f "$TEST_NETWORK_LOCK" ] || fail 'install left the upgraded host without a network lock'
+
+  # Model the operator handoff without host credentials: the query must inherit
+  # its own root/engine handles, and replacing the source must not change either
+  # the queried engine or the installed bytes.
+  cat > "$fake_bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -u ] && [ "$2" = fixture-operator ] && [ "$3" = -- ] || exit 90
+shift 3
+[ "$1" = env ] && [ "$5" = _publication-contracts ] || exit 91
+case "$2" in SUBYARD_REPOSITORY_ROOT=/proc/self/fd/[0-9]*) ;; *) exit 92 ;; esac
+case "$4" in /proc/self/fd/[0-9]*) ;; *) exit 93 ;; esac
+[ -r "${2#*=}/config/systemd/subyard-power-reconcile.service.in" ] || exit 94
+cmp "$4" "$SUBYARD_POWER_ENGINE_SOURCE" || exit 95
+mv "$SUBYARD_POWER_ENGINE_SOURCE" "$SUBYARD_POWER_ENGINE_SOURCE.before"
+printf '#!/bin/sh\nexit 87\n' > "$SUBYARD_POWER_ENGINE_SOURCE"
+chmod 0700 "$SUBYARD_POWER_ENGINE_SOURCE"
+exec "$@"
+EOF
+  chmod 0700 "$fake_bin/runuser"
+  export SUBYARD_USER=fixture-operator
+  if ! bash "$ROOT/scripts/install-power-reconciler.sh" --yes \
+      > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
+    cat "$temporary/install/stderr" >&2
+    fail 'operator handoff did not retain the pinned root and engine'
+  fi
+  cmp "$SUBYARD_POWER_ENGINE_SOURCE.before" "$SUBYARD_POWER_RECONCILER_PATH" \
+    || fail 'operator handoff installed replacement engine bytes'
+  mv "$SUBYARD_POWER_ENGINE_SOURCE.before" "$SUBYARD_POWER_ENGINE_SOURCE"
+  export SUBYARD_USER=root
   cp "$SUBYARD_POWER_RECONCILER_PATH" "$temporary/install/before-engine"
   cp "$SUBYARD_POWER_UNIT_PATH" "$temporary/install/before-unit"
   export TEST_READER_BOUNDARY_FAIL=1

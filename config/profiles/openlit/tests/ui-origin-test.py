@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Owning fixture checks for real local-account and onboarding request contracts."""
 import http.server
+import contextlib
+import io
 import json
 from pathlib import Path
 import re
@@ -14,11 +16,39 @@ import urllib.parse
 SCRIPT=Path(__file__).with_name('e2e')/'ui-origin.py'
 
 class UIOriginTest(unittest.TestCase):
+    def test_remote_dashboard_failure_reports_only_closed_state(self):
+        parser=runpy.run_path(str(SCRIPT.with_name('remote-owner.py')))['dashboard_instruction']
+        for status,present,state,instruction in (
+                ('private-sentinel',False,'UNKNOWN',False),
+                ('openlit dashboard down private-sentinel',True,'down',False),
+                ('openlit dashboard private-sentinel',True,'UNKNOWN',False),
+                ('openlit dashboard down (open http://127.0.0.1:22222/telemetry?tab=logs after: private-sentinel)',True,'down',True)):
+            with self.subTest(state=state,present=present,instruction=instruction):
+                output=io.StringIO()
+                with contextlib.redirect_stdout(output),self.assertRaises(RuntimeError) as error:
+                    parser(status)
+                self.assertEqual(json.loads(output.getvalue().split('=',1)[1]),
+                                 {'row_present':present,'state':state,'instruction_present':instruction})
+                self.assertNotIn('private-sentinel',str(error.exception)+output.getvalue())
+
     def test_remote_native_landing_url_keeps_api_origin_and_rendered_tunnel(self):
         parser=runpy.run_path(str(SCRIPT.with_name('remote-owner.py')))['dashboard_instruction']
         origin,command=parser('openlit dashboard up (open http://127.0.0.1:22222/telemetry?tab=logs after: ssh -N -L 22222:127.0.0.1:3000 yard-demo)')
         self.assertEqual(origin,'http://127.0.0.1:22222/')
         self.assertEqual(command,['ssh','-N','-L','22222:127.0.0.1:3000','yard-demo'])
+
+    def test_remote_down_row_preserves_only_validated_original_check_facts(self):
+        parser=runpy.run_path(str(SCRIPT.with_name('remote-owner.py')))['dashboard_instruction']
+        for category,native,budget,expected in (('deadline','none',5000,True),('deadline','none',30000,True),('native-failure','7',30000,True),('private-sentinel','none',30000,False),('native-failure','999',30000,False),('deadline','7',30000,False),('deadline','none',30001,False)):
+            with self.subTest(category=category,native=native,budget=budget):
+                status='openlit dashboard down (private-sentinel (profile check reason='+category+' native_exit='+native+' elapsed_ms=5001 budget_ms='+str(budget)+'))'
+                output=io.StringIO()
+                with contextlib.redirect_stdout(output),self.assertRaises(RuntimeError): parser(status)
+                value=json.loads(output.getvalue().split('=',1)[1])
+                self.assertEqual('profile_check' in value,expected)
+                if expected:
+                    self.assertEqual(value['profile_check'],{'category':category,'native_exit':None if native=='none' else 7,'elapsed_ms':5001,'budget_ms':budget})
+                self.assertNotIn('private-sentinel',output.getvalue())
 
     def exercise(self, reject=False, telemetry=None, llm_count=0, metric_service='codex_cli_rs', metric_key='serviceName'):
         class Handler(http.server.BaseHTTPRequestHandler):

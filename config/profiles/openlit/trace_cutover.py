@@ -507,7 +507,7 @@ def new_flow(state, value, runner=run):
     ns = value['cutover_ns']
     if not re.fullmatch('[a-f0-9]{32}', token) or not isinstance(ns, int) or ns < 0:
         raise ValueError('invalid trace evidence identity')
-    query = ("SELECT count() FROM otel_traces WHERE ServiceName = 'codex_cli_rs' AND TraceId != '' "
+    query = ("SELECT count() FROM otel_traces WHERE ServiceName IN ('codex_cli_rs', 'codex_exec', 'codex-app-server') AND TraceId != '' "
              f"AND ResourceAttributes['{ATTRIBUTE}'] = '{token}' AND Timestamp > fromUnixTimestamp64Nano({ns})")
     result = runner(['docker', 'compose', '--project-directory', str(state), '--env-file', str(state/'database.env'),
                      '-f', str(state/'compose.yaml'), 'exec', '-T', 'clickhouse', 'bash', '-c',

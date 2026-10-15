@@ -180,12 +180,12 @@ OBSERVE = r'''(() => {
  const params=new URLSearchParams(location.search);
  const tab=['logs','metrics','traces'].includes(params.get('tab'))?params.get('tab'):'UNKNOWN';
  const rows=[...document.querySelectorAll('section .grid.gap-2 > button.w-full.text-left.border')].filter(visible);
- const kinds=new Map([['codex_cli_rs','CODEX'],['claude-code','CLAUDE'],['unknown service','UNKNOWN_SERVICE'],['all services','ALL_SERVICES'],['','EMPTY']]);
+ const kinds=new Map([['codex_cli_rs','CODEX'],['codex_exec','CODEX'],['codex-app-server','CODEX'],['claude-code','CLAUDE'],['unknown service','UNKNOWN_SERVICE'],['all services','ALL_SERVICES'],['','EMPTY']]);
  const kind=text=>kinds.get(text.trim().toLowerCase())||'OTHER';
  // Structural service fields from pinned OpenLIT 2.1.0 SignalRecords.
  // Hidden labels and adjacent metadata cannot establish a rendered service.
  const selectors={logs:'div.grid.min-w-0.grow > span.max-w-36.truncate',metrics:'div.mt-1.flex.flex-wrap > span.rounded:not(.font-medium)',traces:'div.mt-1.flex.flex-wrap.gap-x-3 > span:not(.font-mono)'};
- const service=(row,name)=>[...row.querySelectorAll(selectors[tab]||'nonexistent-service-field')].some(e=>rendered(e)&&e.innerText.trim().toLowerCase()===name);
+ const service=(row,category)=>[...row.querySelectorAll(selectors[tab]||'nonexistent-service-field')].some(e=>rendered(e)&&kind(e.innerText)===category);
  const fields=rows.flatMap(row=>[...row.querySelectorAll(selectors[tab]||'nonexistent-service-field')]);
  const categories={CODEX:0,CLAUDE:0,UNKNOWN_SERVICE:0,ALL_SERVICES:0,EMPTY:0,OTHER:0};
  const visibleCategories={...categories};
@@ -197,7 +197,7 @@ OBSERVE = r'''(() => {
  else if(alerts.length) errors.push('rendered-alert');
  const labels=[...document.querySelectorAll('button')].filter(visible).map(e=>e.innerText.trim());
  const activeRange=[...document.querySelectorAll('[role="tab"][aria-selected="true"], [role="tab"][data-state="active"]')].filter(rendered).some(e=>['7d','7days'].includes(e.innerText.trim().toLowerCase().replace(/\s/g,'')));
- return {path:location.pathname==='/telemetry'?'/telemetry':'OTHER',tab,title:document.title.includes('OpenLIT')?'OpenLIT':'rendered',rows:rows.length,codexRows:rows.filter(e=>service(e,'codex_cli_rs')).length,claudeRows:rows.filter(e=>service(e,'claude-code')).length,errors,tabs:['Logs','Metrics','Traces'].every(t=>labels.includes(t)),rowElements:{buttons:rows.length,visible:rows.filter(rendered).length,serviceFields:fields.length,visibleServiceFields:fields.filter(rendered).length,categories,visibleCategories},range:{url:params.get('tr')==='7D'?'7D':'OTHER',selected7D:activeRange},clearControlPresent:labels.includes('Clear Filters')};
+ return {path:location.pathname==='/telemetry'?'/telemetry':'OTHER',tab,title:document.title.includes('OpenLIT')?'OpenLIT':'rendered',rows:rows.length,codexRows:rows.filter(e=>service(e,'CODEX')).length,claudeRows:rows.filter(e=>service(e,'CLAUDE')).length,errors,tabs:['Logs','Metrics','Traces'].every(t=>labels.includes(t)),rowElements:{buttons:rows.length,visible:rows.filter(rendered).length,serviceFields:fields.length,visibleServiceFields:fields.filter(rendered).length,categories,visibleCategories},range:{url:params.get('tr')==='7D'?'7D':'OTHER',selected7D:activeRange},clearControlPresent:labels.includes('Clear Filters')};
 })()'''
 
 DATABASE = r'''(async()=>{
@@ -206,7 +206,7 @@ DATABASE = r'''(async()=>{
   const values=await r.json();
   if(!r.ok||!Array.isArray(values))return 'UNKNOWN';
   const current=values.filter(v=>v&&v.isCurrent===true);
-  return current.length===1?(current[0].database==='default'?'CURRENT_DEFAULT':'CURRENT_OTHER'):'UNKNOWN';
+  return current.length===1?(current[0].name==='Default DB'&&current[0].database==='openlit'?'CURRENT_DEFAULT':'CURRENT_OTHER'):'UNKNOWN';
  }catch{return 'UNKNOWN';}
 })()'''
 

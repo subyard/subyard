@@ -10,7 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
+
+// ReadinessTimeout bounds read-only profile readiness observation.
+const ReadinessTimeout = 30 * time.Second
 
 // ServiceCheckError contains only a validated public owner and native status.
 type ServiceCheckError struct {

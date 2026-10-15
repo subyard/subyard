@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
@@ -768,7 +769,8 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return err
 	}
 	if verified.Changed {
-		return errors.New("integration reconcile verification failed; desired selection retained for retry")
+		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
+			profile.IntegrationDefinition{}, "verify", "convergence-failed")
 	}
 	return nil
 }

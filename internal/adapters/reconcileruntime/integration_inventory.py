@@ -58,6 +58,13 @@ def actual_metadata(entry):
     mode = stat.S_IMODE(st.st_mode) if entry['kind'] == 'file' else None
     return [st.st_uid, st.st_gid, mode]
 
+def inventory_identity(entry, current):
+    # Structured writers bind protected metadata and owned fields separately.
+    # Other owners may change their fields without changing this inventory.
+    if entry['kind'] == 'structured' and current not in (None, 'foreign'):
+        return 'structured'
+    return current
+
 def expected_metadata(entry, home, uid):
     owner = uid if entry['path'].startswith(home + '/') else OWNER
     mode = entry.get('mode', 0o644) if entry['kind'] == 'file' else None
@@ -258,7 +265,7 @@ def main():
     adopted = []
     for name, entry in previous.items():
         current = actual(entry)
-        observed[name] = current
+        observed[name] = inventory_identity(entry, current)
         current_metadata = actual_metadata(entry)
         if current_metadata is not None:
             metadata[name] = current_metadata
@@ -271,7 +278,7 @@ def main():
             retired.append(entry)
     for name, entry in wanted.items():
         current = actual(entry)
-        observed[name] = current
+        observed[name] = inventory_identity(entry, current)
         if entry['kind'] == 'link':
             mount = '/' + '/'.join(entry['target'].strip('/').split('/')[:3])
             if not os.path.isdir(mount):

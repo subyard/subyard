@@ -27,6 +27,7 @@ TEMP = {'otlp-http': {'endpoint': 'http://127.0.0.1:4319/v1/traces', 'protocol':
 NATIVE = {'otlp-http': {'endpoint': 'http://127.0.0.1:4318/v1/traces', 'protocol': 'binary'}}
 ATTRIBUTE = 'subyard.openlit.trace_cutover'
 TIMEOUT = 45
+CODEX_SERVICES = "('codex_cli_rs', 'codex_exec', 'codex-app-server')"
 
 
 def run(arguments, timeout=15):
@@ -182,25 +183,32 @@ class Proof:
                 '-c', 'model_providers.fixture.name="Local fixture"',
                 '-c', 'model_providers.fixture.base_url="'+base+'"',
                 '-c', 'model_providers.fixture.wire_api="responses"',
-                '-c', 'model_providers.fixture.requires_openai_auth=false', 'app-server']
+                '-c', 'model_providers.fixture.requires_openai_auth=false',
+                # App-server defaults metrics off; keep this synthetic session's
+                # default enabled without overriding explicit user configuration.
+                'app-server', '--analytics-default-enabled']
         env = {'HOME': str(HOME), 'PATH': '/usr/local/bin:/usr/bin:/bin',
                'OTEL_METRIC_EXPORT_INTERVAL': '1000', 'OTEL_LOGS_EXPORT_INTERVAL': '1000'}
         return App(argv, env, self.workspace, user='dev', group='dev', extra_groups=[])
 
-    def query(self, sql):
+    def query(self, sql, deadline=None):
+        timeout = 15 if deadline is None else min(15, deadline-time.monotonic())
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired('signal query', 0)
         return run(['docker', 'compose', '--env-file', str(STATE/'database.env'), '-f', str(STATE/'compose.yaml'),
                     'exec', '-T', 'clickhouse', 'bash', '-c',
                     'exec clickhouse-client --user openlit --password "$CLICKHOUSE_PASSWORD" --database openlit --query "$1"',
-                    'fixture', sql])
+                    'fixture', sql], timeout=timeout)
 
-    def trace_count(self, native=False):
+    def trace_count(self, native=False, deadline=None):
         predicate = "ResourceAttributes['"+ATTRIBUTE+"']=''"
         if native:
             record = json.loads((STATE/'trace-cutover.json').read_text())
             if not re.fullmatch('[0-9a-f]{32}', record['token']) or not isinstance(record['cutover_ns'], int):
                 raise RuntimeError('invalid adoption correlation')
             predicate = "ResourceAttributes['"+ATTRIBUTE+"']='"+record['token']+"' AND Timestamp>fromUnixTimestamp64Nano("+str(record['cutover_ns'])+")"
-        return int(self.query("SELECT count() FROM otel_traces WHERE ServiceName='codex_cli_rs' AND TraceId!='' AND "+predicate))
+        return int(self.query("SELECT count() FROM otel_traces WHERE ServiceName IN "+CODEX_SERVICES+" AND TraceId!='' AND "+predicate,
+                              deadline=deadline))
 
     def wait_trace(self, previous, native=False):
         deadline = time.monotonic()+90
@@ -313,16 +321,32 @@ class Proof:
             if app.identity() == self.old_identity:
                 raise RuntimeError('fresh backend reused the old process')
             app.turn()
-            count = self.wait_trace(before, native=True)
             app.close()
         except BaseException:
             app.abort()
             raise
-        logs = int(self.query("SELECT count() FROM otel_logs WHERE lower(ServiceName) LIKE '%codex%'"))
-        metrics = int(self.query("SELECT count() FROM otel_metrics_sum WHERE lower(ServiceName) LIKE '%codex%'"))
-        if not logs or not metrics:
-            raise RuntimeError('genuine Codex logs or metrics are missing')
-        return {'marked_codex_traces': count, 'codex_logs': logs, 'codex_metrics': metrics}
+        # Normal closure flushes the native exporters; ClickHouse ingestion can
+        # still lag. All three signals share one deadline, including query time.
+        deadline = time.monotonic()+90
+        # Negative counts distinguish an unobserved signal from an observed zero.
+        count, logs, metrics = before, -1, -1
+        predicate = 'ServiceName IN '+CODEX_SERVICES
+        while time.monotonic() < deadline:
+            try:
+                count = self.trace_count(native=True, deadline=deadline)
+                logs = int(self.query('SELECT count() FROM otel_logs WHERE '+predicate, deadline=deadline))
+                metrics = int(self.query('SELECT (SELECT count() FROM otel_metrics_sum WHERE '+predicate+
+                                         ') + (SELECT count() FROM otel_metrics_histogram WHERE '+predicate+')',
+                                         deadline=deadline))
+            except subprocess.TimeoutExpired:
+                pass
+            if count > before and logs > 0 and metrics > 0 and time.monotonic() < deadline:
+                return {'marked_codex_traces': count, 'codex_logs': logs, 'codex_metrics': metrics}
+            remaining = deadline-time.monotonic()
+            if remaining > 0:
+                time.sleep(min(2, remaining))
+        raise RuntimeError('genuine Codex signal ingestion deadline expired: marked_codex_traces='+str(count)+
+                           ' previous_marked_codex_traces='+str(before)+' codex_logs='+str(logs)+' codex_metrics='+str(metrics))
 
     def retain(self):
         # Observe an actual automatic retry while old process is alive. No manual

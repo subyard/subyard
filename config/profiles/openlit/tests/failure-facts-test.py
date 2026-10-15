@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import types
@@ -16,6 +17,98 @@ spec.loader.exec_module(facts)
 
 
 class FailureFactsTest(unittest.TestCase):
+    def health(self, *, changed=None, endpoints=None, ids=None, timeout=False, malformed=False, cost=0):
+        images = [name+':1@sha256:'+character*64 for name, character in zip(facts.SERVICES, 'abc')]
+        container = 'd'*64
+        snapshot = {'project': 'subyard-openlit', 'service': 'openlit', 'image': images[1],
+                    'state': 'running', 'running': True, 'restarting': False, 'oom_killed': False,
+                    'exit_code': 0, 'restart_count': 0, 'health': 'starting', 'failing_streak': 7}
+        snapshot.update(changed or {})
+        calls = []
+        clock = 0
+        def native(argv, **options):
+            nonlocal clock
+            calls.append(argv)
+            self.assertIs(options['stderr'], subprocess.DEVNULL)
+            self.assertLessEqual(options['timeout'], 5)
+            self.assertGreater(options['timeout'], 0)
+            if cost and len(calls) == 3:
+                self.assertEqual(options['timeout'], 4)
+            if timeout:
+                clock += options['timeout']
+                raise subprocess.TimeoutExpired('PRIVATE_SENTINEL', options['timeout'])
+            if argv[1] == 'ps':
+                self.assertIn('label=com.docker.compose.project=subyard-openlit', argv)
+                self.assertIn('label=com.docker.compose.service=openlit', argv)
+                output = (container+'\n') if ids is None else ids
+            elif argv[1] == 'inspect':
+                self.assertEqual(argv[-1], container)
+                self.assertNotIn('{{json .State}}', argv)
+                output = 'PRIVATE_SENTINEL' if malformed else json.dumps(snapshot)
+            else:
+                self.assertEqual(argv[:4], ['docker', 'exec', container, 'node'])
+                self.assertNotIn('logs', argv[:2])
+                output = json.dumps(endpoints if endpoints is not None else {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405})
+            clock += cost
+            return subprocess.CompletedProcess(argv, 0, output.encode(), None)
+        with patch.object(facts.subprocess, 'run', side_effect=native), \
+             patch.object(facts.time, 'monotonic', side_effect=lambda: clock):
+            result = facts.openlit_health(images)
+        self.assertNotIn('PRIVATE_SENTINEL', json.dumps(result))
+        self.assertNotIn(container, json.dumps(result))
+        self.assertNotIn(images[1], json.dumps(result))
+        return result, calls
+
+    def test_owned_openlit_health_projects_only_fixed_state_and_endpoint_statuses(self):
+        result, calls = self.health()
+        self.assertEqual(result, {'category': 'observed', 'state': 'running', 'running': True,
+            'restarting': False, 'oom_killed': False, 'exit_code': 0, 'restart_count': 0,
+            'health': 'starting', 'failing_streak': 7,
+            'endpoints': {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405}})
+        self.assertEqual(len(calls), 3)
+        result, calls = self.health(changed={'health': 'healthy'})
+        self.assertNotIn('endpoints', result)
+        self.assertEqual(len(calls), 2)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is needed to exercise the native endpoint probe')
+    def test_endpoint_program_emits_statuses_without_bodies_or_error_messages(self):
+        _, calls = self.health(cost=4)
+        script = calls[-1][-1]
+        fake = """globalThis.fetch=async(url,options)=>{
+if(options.redirect!=='manual')throw Error('PRIVATE_SENTINEL');
+const codes={'http://localhost:3000':200,'http://localhost:4318/v1/metrics':405,'http://localhost:4318/v1/traces':405};
+if(!(url in codes))throw Error('PRIVATE_SENTINEL');
+return {status:codes[url],body:{cancel:async()=>{}}};};"""
+        result = subprocess.run(['node', '-e', fake+script], capture_output=True, timeout=3,
+                                text=True, env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405})
+        self.assertNotIn('PRIVATE_SENTINEL', result.stdout+result.stderr)
+
+    def test_openlit_health_refuses_foreign_ambiguous_or_malformed_projection(self):
+        for changed in ({'project': 'PRIVATE_SENTINEL'}, {'service': 'collector'}, {'image': 'foreign'},
+                        {'running': 1}, {'health': 'PRIVATE_SENTINEL'}, {'exit_code': -1},
+                        {'failing_streak': True}, {'extra': 'PRIVATE_SENTINEL'}):
+            with self.subTest(changed=changed):
+                result, calls = self.health(changed=changed)
+                self.assertEqual(result, {'category': 'invalid-projection'})
+                self.assertEqual(len(calls), 2)
+        for ids in ('', 'd'*64+'\n'+'e'*64+'\n', 'PRIVATE_SENTINEL\n'):
+            result, calls = self.health(ids=ids)
+            self.assertEqual(result['category'], 'absent' if not ids else 'invalid-projection')
+            self.assertEqual(len(calls), 1)
+        result, _ = self.health(endpoints={'ui': 'PRIVATE_SENTINEL', 'logs': 405, 'metrics': 405, 'traces': 405})
+        self.assertEqual(result['endpoint_category'], 'invalid-projection')
+        self.assertNotIn('endpoints', result)
+        result, calls = self.health(malformed=True)
+        self.assertEqual(result, {'category': 'invalid-projection'})
+        self.assertEqual(len(calls), 2)
+
+    def test_openlit_health_timeout_is_safe_and_does_not_retry(self):
+        result, calls = self.health(timeout=True)
+        self.assertEqual(result, {'category': 'deadline'})
+        self.assertEqual(len(calls), 1)
+
     def test_pull_context_requires_real_api_and_cold_cache_and_keeps_raw_journals_private(self):
         for info_exit, image_state in ((0, 'absent'), (1, 'absent'), (0, 'present'), (0, 'unknown')):
             with self.subTest(info_exit=info_exit, image_state=image_state), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
@@ -273,8 +366,12 @@ class FailureFactsTest(unittest.TestCase):
                 if argv[0] == 'journalctl':
                     return subprocess.CompletedProcess(argv, 0, b'PRIVATE_SENTINEL\nOut of memory: Killed process\n', b'')
                 return subprocess.CompletedProcess(argv, 1, b'PRIVATE_SENTINEL', b'PRIVATE_SENTINEL')
-            with patch.object(Path, 'stat', stat), patch.object(facts, 'registries', return_value={}), patch.object(facts.subprocess, 'run', side_effect=run):
+            with patch.object(Path, 'stat', stat), patch.object(facts, 'registries', return_value={}), \
+                 patch.object(facts.subprocess, 'run', side_effect=run), \
+                 patch.object(facts, 'openlit_health', return_value={'category': 'observed', 'health': 'starting'}) as health:
                 value = facts.failure(state, ['a', 'b', 'c'])
+                health.assert_called_once_with(['a', 'b', 'c'])
+            self.assertEqual(value['openlit_health'], {'category': 'observed', 'health': 'starting'})
             self.assertEqual(value['pull_category'], 'timeout')
             self.assertEqual(value['pull_errors'][-1]['message'], 'TLS handshake timeout')
             self.assertEqual(value['pull_context'], {'operation': 'docker compose pull --quiet',
@@ -293,8 +390,10 @@ class FailureFactsTest(unittest.TestCase):
             # A symlinked runtime directory must not expose even pull-log facts.
             link = state/'link'
             link.symlink_to(state, target_is_directory=True)
-            with patch.object(facts, 'registries', return_value={}), patch.object(facts, 'cache', return_value={}), patch.object(facts, 'journals', return_value={}):
+            with patch.object(facts, 'registries', return_value={}), patch.object(facts, 'cache', return_value={}), \
+                 patch.object(facts, 'journals', return_value={}), patch.object(facts, 'openlit_health') as health:
                 unsafe = facts.failure(link, [])
+                health.assert_not_called()
             self.assertFalse(unsafe['runtime_directory_owned'])
             self.assertNotIn('pull_log_bytes', unsafe)
 

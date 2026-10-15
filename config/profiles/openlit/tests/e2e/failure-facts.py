@@ -253,6 +253,74 @@ def pull_errors(text):
     return errors
 
 
+def openlit_health(images):
+    """Read only selected state and fixed loopback statuses, never logs/config."""
+    deadline = time.monotonic()+12
+    def probe(argv):
+        remaining = deadline-time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('health probe', 0)
+        result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=min(5, remaining))
+        if result.returncode or len(result.stdout) > 65536:
+            raise ValueError('invalid projection')
+        return result.stdout
+
+    def category(error):
+        return 'deadline' if isinstance(error, subprocess.TimeoutExpired) else (
+            'unavailable' if isinstance(error, OSError) else 'invalid-projection')
+
+    if len(images) != 3 or any(not re.fullmatch(r'[a-z0-9./:-]+@sha256:[a-f0-9]{64}', image) for image in images):
+        return {'category': 'invalid-projection'}
+    try:
+        containers = probe(['docker', 'ps', '-aq', '--no-trunc',
+                            '--filter', 'label=com.docker.compose.project=subyard-openlit',
+                            '--filter', 'label=com.docker.compose.service=openlit']).decode('ascii').split()
+        if not containers:
+            return {'category': 'absent'}
+        if len(containers) != 1 or not re.fullmatch('[a-f0-9]{64}', containers[0]):
+            raise ValueError('invalid container identity')
+        template = ('{"project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+                    '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
+                    '"image":{{json .Config.Image}},"state":{{json .State.Status}},'
+                    '"running":{{.State.Running}},"restarting":{{.State.Restarting}},'
+                    '"oom_killed":{{.State.OOMKilled}},"exit_code":{{.State.ExitCode}},'
+                    '"restart_count":{{.RestartCount}},'
+                    '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"absent"{{end}},'
+                    '"failing_streak":{{if .State.Health}}{{.State.Health.FailingStreak}}{{else}}0{{end}}}')
+        value = json.loads(probe(['docker', 'inspect', '--format', template, containers[0]]))
+        keys = {'project', 'service', 'image', 'state', 'running', 'restarting', 'oom_killed',
+                'exit_code', 'restart_count', 'health', 'failing_streak'}
+        if (not isinstance(value, dict) or set(value) != keys
+                or (value['project'], value['service'], value['image']) != ('subyard-openlit', 'openlit', images[1])
+                or value['state'] not in ('created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead')
+                or value['health'] not in ('absent', 'starting', 'healthy', 'unhealthy')
+                or any(type(value[key]) is not bool for key in ('running', 'restarting', 'oom_killed'))
+                or any(type(value[key]) is not int or not 0 <= value[key] <= 2147483647
+                       for key in ('exit_code', 'restart_count', 'failing_streak'))
+                or value['exit_code'] > 255):
+            raise ValueError('invalid health projection')
+        for key in ('project', 'service', 'image'):
+            del value[key]
+        value['category'] = 'observed'
+    except (OSError, subprocess.TimeoutExpired, ValueError, UnicodeError, RecursionError) as error:
+        return {'category': category(error)}
+    if value['running'] and value['health'] != 'healthy':
+        # Match the shipped healthcheck's four endpoints, without following
+        # redirects, reading bodies, sending authentication or retrying.
+        script = """const urls={ui:'http://localhost:3000',logs:'http://localhost:4318/v1/logs',metrics:'http://localhost:4318/v1/metrics',traces:'http://localhost:4318/v1/traces'};
+Promise.all(Object.entries(urls).map(async ([name,url])=>{try{const r=await fetch(url,{signal:AbortSignal.timeout(1500),redirect:'manual'});await r.body?.cancel();return [name,r.status]}catch{return [name,0]}})).then(rows=>console.log(JSON.stringify(Object.fromEntries(rows))));"""
+        try:
+            endpoints = json.loads(probe(['docker', 'exec', containers[0], 'node', '-e', script]))
+            if (not isinstance(endpoints, dict) or set(endpoints) != {'ui', 'logs', 'metrics', 'traces'}
+                    or any(type(code) is not int or not (code == 0 or 100 <= code <= 599) for code in endpoints.values())):
+                raise ValueError('invalid endpoint projection')
+            value['endpoints'] = endpoints
+        except (OSError, subprocess.TimeoutExpired, ValueError, UnicodeError, RecursionError) as error:
+            value['endpoint_category'] = category(error)
+    return value
+
+
 def failure(state, images):
     owned = (state.is_dir() and not state.is_symlink() and state.stat().st_uid == 0
              and state.stat().st_mode & 0o777 == 0o700)
@@ -271,6 +339,13 @@ def failure(state, images):
     value['registry_transport'] = registries()
     value['image_cache'] = cache(images)
     value['journal_categories'] = journals()
+    if value['files_present']['marker']:
+        try:
+            with (state/'marker').open('rb') as marker:
+                if marker.read(64) == b'subyard-openlit-v1\n':
+                    value['openlit_health'] = openlit_health(images)
+        except OSError:
+            value['openlit_health'] = {'category': 'unavailable'}
     return value
 
 

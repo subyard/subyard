@@ -12,6 +12,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -26,8 +27,8 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 		cause          error
 		message, retry string
 	}{
-		{"raw", errors.New("private transport detail"), "yard default: cannot reconcile integrations for release activation", "run yard -Y default integration status"},
-		{"stale", domain.ErrPlanStale, "yard default: cannot reconcile integrations for release activation", "run yard -Y default integration status"},
+		{"raw", errors.New("private transport detail"), "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard -Y default integration status"},
+		{"stale", domain.ErrPlanStale, "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard -Y default integration status"},
 		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{}), "known integration ownership conflict", "run yard -Y default integration status"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +58,84 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 			}
 		})
 	}
+}
+
+type activationIntegrationExecutor struct{}
+
+func (activationIntegrationExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if request.Command[0] == "python3" {
+		return ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}, nil
+	}
+	if strings.Contains(strings.Join(request.Command, " "), "mode=$1") {
+		return ports.InstanceExecResult{Stdout: []byte("changed=0\n")}, nil
+	}
+	return ports.InstanceExecResult{}, nil
+}
+
+func TestIntegrationActivationFailureBoundaries(t *testing.T) {
+	for _, stage := range []string{"lock", "legacy-adoption", "observe-fresh", "compare-projected", "compare-exact", "apply"} {
+		t.Run(stage, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			loaded.Integrations = config.IntegrationSelection{Present: true}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: incus, Executor: activationIntegrationExecutor{},
+				Integrations: []profile.IntegrationDefinition{}, Environment: []string{}, Yard: loaded.Context}
+			approved, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			projected := stage != "compare-exact" && stage != "legacy-adoption"
+			switch stage {
+			case "lock":
+				writeConfigCommandFile(t, filepath.Join(configHome, "generated/integration-locks/default.lock"), "private-sentinel", 0o644)
+			case "legacy-adoption":
+				loaded.Integrations.AllowsCodingTools = true
+				runtime.Executor = &testkit.Incus{Err: errors.New("private-sentinel")}
+			case "observe-fresh":
+				incus.Err = errors.New("private-sentinel")
+			case "compare-projected", "compare-exact":
+				approved.Fingerprint = "private-sentinel"
+			case "apply":
+				// Fail the apply observation after a successful fresh comparison.
+				runtime.Executor = &activationApplyFailureExecutor{activationIntegrationExecutor: activationIntegrationExecutor{}}
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &materializedConfigActivationReconciler{projectedIntegrationPlans: projected,
+				integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
+			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
+			if err == nil {
+				t.Fatal("injected failure was accepted")
+			}
+			boundary := materializedConfigActivationError{cause: err, yard: "default", phase: "integrations", action: "reconcile", command: "integration status"}
+			message, _ := boundary.ActivationDiagnostic()
+			if !strings.Contains(message, "stage="+stage+" projected=") || strings.Contains(message, "private-sentinel") || len(message) > 512 {
+				t.Fatalf("unsafe or unattributed failure: %s", message)
+			}
+			comparison := strings.HasPrefix(stage, "compare-")
+			if strings.Contains(message, "fingerprint_equal=false scope_equal=true approved_changed=false fresh_changed=false plan_stale=true") != comparison || errors.Is(err, domain.ErrPlanStale) != comparison {
+				t.Fatalf("comparison facts or stale identity lost: %s", message)
+			}
+		})
+	}
+}
+
+type activationApplyFailureExecutor struct {
+	activationIntegrationExecutor
+	observations int
+}
+
+func (fixture *activationApplyFailureExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if request.Command[0] == "python3" {
+		fixture.observations++
+		if fixture.observations == 2 {
+			return ports.InstanceExecResult{}, errors.New("private-sentinel")
+		}
+	}
+	return fixture.activationIntegrationExecutor.Exec(ctx, project, instance, request)
 }
 
 type publicReconcileTestError struct{}

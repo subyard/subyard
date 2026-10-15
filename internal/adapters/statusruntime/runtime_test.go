@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -742,5 +744,185 @@ func TestProfileDashboardStatusUsesOwnedReadinessAndExistingProjection(t *testin
 	runtime.Environment["ENVIRONMENT_PROFILES"] = ""
 	if got := runtime.profileDashboardStatus(context.Background(), yard, true); len(got) != 0 {
 		t.Fatal("unselected profile exposed dashboard")
+	}
+}
+
+func TestProfileDashboardCheckFailureDiagnostics(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\nprintf 'private-sentinel' >&2\nexit 7\n"), 0o700)
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample"}, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{}}}}
+	for _, category := range []string{"native-failure", "deadline", "cancelled", "unavailable"} {
+		t.Run(category, func(t *testing.T) {
+			ctx := context.Background()
+			if category == "deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer cancel()
+			}
+			if category == "cancelled" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			probeRuntime := runtime
+			if category == "unavailable" {
+				probeRuntime.Profiles = append([]profile.Definition(nil), runtime.Profiles...)
+				probeRuntime.Profiles[0].OwnerService = "missing-private-sentinel"
+			}
+			status := probeRuntime.profileDashboardStatus(ctx, domain.Context{YardName: "fixture", YardKind: domain.YardVM}, true)
+			if len(status) != 1 || status[0].State != "down" || status[0].URL != "" || !strings.Contains(status[0].Hint, "profile check reason="+category+" ") || !strings.Contains(status[0].Hint, "budget_ms=30000") || strings.Contains(status[0].Hint, "private-sentinel") || strings.Contains(status[0].Hint, root) {
+				t.Fatalf("unsafe failure projection: %+v", status)
+			}
+			if category == "native-failure" && !strings.Contains(status[0].Hint, "native_exit=7 elapsed_ms=") {
+				t.Fatalf("native exit omitted: %s", status[0].Hint)
+			}
+		})
+	}
+}
+
+func TestProfileDashboardFullCheckMayExceedFormerFiveSeconds(t *testing.T) {
+	t.Parallel()
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\n[ \"$1\" = --check ] && [ \"$SUBYARD_PROFILE_SELECTED\" = 1 ] || exit 7\nprintf private-sentinel >&2\nexec sleep 5.2\n"), 0o700)
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "PORT": "22222"}, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{Scheme: "http", PortSetting: "PORT"}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got := runtime.profileDashboardStatus(ctx, domain.Context{YardKind: domain.YardVM}, true)
+	if len(got) != 1 || got[0].State != "up" || got[0].URL != "http://127.0.0.1:22222" || strings.Contains(got[0].Hint, "private-sentinel") {
+		t.Fatalf("full owner check was not verified: %+v", got)
+	}
+}
+
+func TestProfileDashboardBudgetIsSharedAcrossSelectedProfiles(t *testing.T) {
+	t.Parallel()
+	root := testkit.TempDir(t)
+	marker := filepath.Join(root, "third-started")
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "first second third", "PORT": "22222", "MARKER": marker}}
+	for _, name := range []string{"first", "second", "third"} {
+		directory := filepath.Join(root, name)
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := "#!/bin/sh\nexec sleep 16\n"
+		if name == "third" {
+			body = "#!/bin/sh\nprintf started > \"$MARKER\"\n"
+		}
+		testkit.WriteFile(t, filepath.Join(directory, "owner.sh"), []byte(body), 0o700)
+		runtime.Profiles = append(runtime.Profiles, profile.Definition{Name: name, Root: directory, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{Scheme: "http", PortSetting: "PORT"}})
+	}
+	started := time.Now()
+	got := runtime.profileDashboardStatus(context.Background(), domain.Context{YardKind: domain.YardVM}, true)
+	if elapsed := time.Since(started); elapsed > 35*time.Second {
+		t.Fatalf("aggregate profile phase took %s", elapsed)
+	}
+	if len(got) != 3 || got[0].State != "up" {
+		t.Fatalf("first full check failed: %+v", got)
+	}
+	for _, row := range got[1:] {
+		if row.State != "down" || row.URL != "" || !strings.Contains(row.Hint, "reason=deadline ") {
+			t.Fatalf("exhausted phase claimed readiness: %+v", row)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("launched a later owner after aggregate deadline")
+	}
+}
+
+func TestProfileDashboardCancellationKillsDescendants(t *testing.T) {
+	for _, reason := range []string{"deadline", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			pidFile := filepath.Join(root, "child")
+			testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\nsleep 30 &\nprintf '%s\\n' \"$!\" > \"$CHILD_PID\"\nwait\n"), 0o700)
+			runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "CHILD_PID": pidFile}, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{}}}}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			result := make(chan []domain.SharedResourceStatus, 1)
+			go func() { result <- runtime.profileDashboardStatus(ctx, domain.Context{YardKind: domain.YardVM}, true) }()
+			var pid int
+			for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+				if data, err := os.ReadFile(pidFile); err == nil {
+					pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+					if pid > 0 {
+						break
+					}
+				}
+			}
+			if pid <= 0 {
+				t.Fatal("synthetic owner did not start its child")
+			}
+			process := func() []string {
+				data, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+				if last := strings.LastIndexByte(string(data), ')'); last >= 0 {
+					return strings.Fields(string(data)[last+1:])
+				}
+				return nil
+			}
+			identity := process()
+			if len(identity) <= 19 {
+				t.Fatal("synthetic child identity unavailable")
+			}
+			t.Cleanup(func() {
+				if current := process(); len(current) > 19 && current[19] == identity[19] {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			if reason == "cancelled" {
+				cancel()
+			}
+			select {
+			case rows := <-result:
+				if len(rows) != 1 || rows[0].State != "down" || rows[0].URL != "" || !strings.Contains(rows[0].Hint, "reason="+reason+" ") {
+					t.Fatalf("cancellation projection: %+v", rows)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("shorter parent did not bound owner check")
+			}
+			for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+				if current := process(); len(current) <= 19 || current[0] == "Z" || current[19] != identity[19] {
+					return
+				}
+			}
+			t.Fatal("read-only owner descendant survived cancellation")
+		})
+	}
+}
+
+type dashboardURLDeadline struct {
+	ports.Incus
+	calls int
+}
+
+func (fake *dashboardURLDeadline) Instance(ctx context.Context, _, _ string) (ports.InstanceInfo, error) {
+	fake.calls++
+	<-ctx.Done()
+	return ports.InstanceInfo{}, ctx.Err()
+}
+
+func TestProfileDashboardParentDeadlineAlsoGatesURLVerification(t *testing.T) {
+	root := testkit.TempDir(t)
+	marker := filepath.Join(root, "started")
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\nprintf started > \"$MARKER\"\n"), 0o700)
+	incus := &dashboardURLDeadline{}
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "MARKER": marker}, Incus: incus, Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{ContainerRoute: &profile.IntegrationRoute{}}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := runtime.profileDashboardStatus(ctx, domain.Context{YardKind: domain.YardContainer}, true)
+	if len(got) != 1 || got[0].State != "down" || got[0].URL != "" || !strings.Contains(got[0].Hint, "reason=deadline ") || incus.calls != 1 {
+		t.Fatalf("URL verification escaped parent budget: %+v", got)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	got = runtime.profileDashboardStatus(ctx, domain.Context{YardKind: domain.YardContainer}, true)
+	if len(got) != 1 || !strings.Contains(got[0].Hint, "reason=deadline ") || incus.calls != 1 {
+		t.Fatal("expired phase ran another probe")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("expired phase launched owner")
+	}
+	runtime.profileDashboardStatus(context.Background(), domain.Context{YardKind: domain.YardContainer}, false)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stopped yard launched owner")
 	}
 }

@@ -76,21 +76,24 @@ class BrowserDOMTest(unittest.TestCase):
         return self.cdp.evaluate(browser.OBSERVE)
 
     def test_rendered_service_field_and_range_have_closed_facts(self):
-        for tab in ('logs', 'metrics', 'traces'):
-            with self.subTest(tab=tab):
-                value = self.render(tab=tab)
-                self.assertEqual(value['rows'], 1)
-                self.assertEqual(value['codexRows'], 1)
-                self.assertEqual(value['rowElements']['visibleCategories']['CODEX'], 1)
-                self.assertEqual(value['range'], {'url': '7D', 'selected7D': True})
-                self.assertNotIn('PRIVATE_BODY_SENTINEL', json.dumps(value))
-                self.assertNotIn(str(self.root), json.dumps(value))
+        for service in ('codex_cli_rs', 'codex_exec', 'codex-app-server'):
+            for tab in ('logs', 'metrics', 'traces'):
+                with self.subTest(service=service, tab=tab):
+                    value = self.render(service=service, tab=tab)
+                    self.assertEqual(value['rows'], 1)
+                    self.assertEqual(value['codexRows'], 1)
+                    self.assertEqual(value['rowElements']['visibleCategories']['CODEX'], 1)
+                    self.assertEqual(value['range'], {'url': '7D', 'selected7D': True})
+                    self.assertNotIn('PRIVATE_BODY_SENTINEL', json.dumps(value))
+                    self.assertNotIn(str(self.root), json.dumps(value))
 
     def test_hidden_service_is_diagnosed_and_never_counted_as_visible_codex(self):
-        value = self.render(hidden=True)
-        self.assertEqual(value['rowElements']['serviceFields'], 1)
-        self.assertEqual(value['rowElements']['visibleServiceFields'], 0)
-        self.assertEqual(value['codexRows'], 0)
+        for service in ('codex_cli_rs', 'codex_exec', 'codex-app-server'):
+            with self.subTest(service=service):
+                value = self.render(service=service, hidden=True)
+                self.assertEqual(value['rowElements']['serviceFields'], 1)
+                self.assertEqual(value['rowElements']['visibleServiceFields'], 0)
+                self.assertEqual(value['codexRows'], 0)
 
     def test_unknown_service_cannot_be_replaced_by_body_identity(self):
         value = self.render(service='PRIVATE_SERVICE_SENTINEL')
@@ -107,7 +110,7 @@ class BrowserDOMTest(unittest.TestCase):
 
     def test_inherited_property_names_remain_closed_service_categories(self):
         expected = {'CODEX', 'CLAUDE', 'UNKNOWN_SERVICE', 'ALL_SERVICES', 'EMPTY', 'OTHER'}
-        for service in ('constructor', '__proto__', 'toString'):
+        for service in ('constructor', '__proto__', 'toString', 'codex_exec-other'):
             with self.subTest(service=service):
                 value = self.render(service=service)
                 self.assertEqual(value['codexRows'], 0)
@@ -120,10 +123,13 @@ class BrowserDOMTest(unittest.TestCase):
 
     def test_database_acknowledgment_never_returns_connection_fields(self):
         self.render()
-        self.cdp.evaluate('window.fetch=async()=>({ok:true,json:async()=>[{isCurrent:true,database:"default",password:"PRIVATE_PASSWORD_SENTINEL",host:"private.invalid"}]})')
+        self.cdp.evaluate('window.fetch=async()=>({ok:true,json:async()=>[{isCurrent:true,name:"Default DB",database:"openlit",password:"PRIVATE_PASSWORD_SENTINEL",host:"private.invalid"}]})')
         self.assertEqual(self.cdp.evaluate(browser.DATABASE), 'CURRENT_DEFAULT')
-        self.cdp.evaluate('window.fetch=async()=>({ok:true,json:async()=>[{isCurrent:true,database:"PRIVATE_DATABASE_SENTINEL"}]})')
-        self.assertEqual(self.cdp.evaluate(browser.DATABASE), 'CURRENT_OTHER')
+        for name, database in (('Default DB', 'PRIVATE_DATABASE_SENTINEL'), ('PRIVATE_NAME_SENTINEL', 'openlit')):
+            with self.subTest(name=name, database=database):
+                values = [{'isCurrent': True, 'name': name, 'database': database}]
+                self.cdp.evaluate('window.fetch=async()=>({ok:true,json:async()=>'+json.dumps(values)+'})')
+                self.assertEqual(self.cdp.evaluate(browser.DATABASE), 'CURRENT_OTHER')
 
     def test_clear_filters_acknowledges_actual_control_click(self):
         self.render()

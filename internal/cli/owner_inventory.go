@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/state"
 )
 
@@ -154,6 +155,8 @@ func (cli *CLI) ownerInventoryReadOnly(ctx context.Context, loaded config.Loaded
 	}).Read(ctx)
 }
 
+const remoteYardStatusTimeout = profile.ReadinessTimeout + 8*time.Second
+
 func (cli *CLI) remoteYardStatus(ctx context.Context, yard domain.Context) (domain.YardStatus, error) {
 	ownerYard := yard.OwnerYardName
 	if ownerYard == "" {
@@ -163,7 +166,7 @@ func (cli *CLI) remoteYardStatus(ctx context.Context, yard domain.Context) (doma
 	if err != nil {
 		return domain.YardStatus{}, err
 	}
-	process.Timeout = 8 * time.Second
+	process.Timeout = remoteYardStatusTimeout
 	return (ownerinventory.Client{Transport: process}).YardStatus(ctx)
 }
 
@@ -190,7 +193,7 @@ func (cli *CLI) remoteOwnerYardStatus(
 	if err != nil {
 		return domain.YardStatus{}, "", err
 	}
-	process.Timeout = 8 * time.Second
+	process.Timeout = remoteYardStatusTimeout
 	status, err := (ownerinventory.Client{Transport: process}).YardStatus(ctx)
 	return status, destination, err
 }

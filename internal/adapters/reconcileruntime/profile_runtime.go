@@ -23,7 +23,7 @@ import (
 
 const (
 	profileRuntimeOutputLimit  = 64 << 10
-	profileRuntimeObserveLimit = 30 * time.Second
+	profileRuntimeObserveLimit = profile.ReadinessTimeout
 	profileRuntimeApplyLimit   = 2 * time.Minute
 )
 

@@ -20,8 +20,20 @@ def run(*args, **options):
 
 
 def dashboard_instruction(status):
-    line = next(line for line in status.splitlines() if re.search(r'openlit\s+dashboard\s+up', line))
-    match = re.search(r'\(open (http://127\.0\.0\.1:[0-9]+/telemetry\?tab=logs) after: (.*)\)$', line)
+    row = next((re.search(r'openlit\s+dashboard\s+(\S+)(.*)', line)
+                for line in status.splitlines() if re.search(r'openlit\s+dashboard\s+', line)), None)
+    state = row[1] if row and row[1] in ('up', 'down') else 'UNKNOWN'
+    match = re.search(r'\(open (http://127\.0\.0\.1:[0-9]+/telemetry\?tab=logs) after: (.*)\)$', row[0]) if row else None
+    observation = {'row_present': row is not None, 'state': state, 'instruction_present': match is not None}
+    check = re.search(r'\(profile check reason=(deadline|cancelled|native-failure|unavailable) native_exit=(none|[1-9][0-9]{0,2}) elapsed_ms=([0-9]{1,7}) budget_ms=(5000|30000)\)\)$', row[0]) if row and state == 'down' else None
+    if check:
+        category, native, elapsed, budget = check.groups()
+        native = None if native == 'none' else int(native)
+        if int(elapsed) <= 1320000 and (native is None and category != 'native-failure' or native is not None and native <= 255 and category == 'native-failure'):
+            observation['profile_check'] = {'category': category, 'native_exit': native, 'elapsed_ms': int(elapsed), 'budget_ms': int(budget)}
+    print('openlit_e2e_remote_dashboard='+json.dumps(observation), flush=True)
+    if state != 'up':
+        raise RuntimeError('remote OpenLIT dashboard is not up: '+state)
     if not match:
         raise RuntimeError('remote status omitted the exact native dashboard tunnel instruction')
     url, command = match.groups()

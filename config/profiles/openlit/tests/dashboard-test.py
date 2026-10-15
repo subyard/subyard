@@ -268,6 +268,21 @@ class DashboardTest(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError): ORIGINAL_RUN('incus')
         self.assertEqual(captured.getvalue(),'openlit: guest progress=image-pull\nopenlit: guest image-pull exit=124\n')
 
+    def test_compose_failure_reason_is_closed_and_keeps_native_error(self):
+        for message, reason in (
+                ('application not healthy after 3m0s', 'wait-deadline'),
+                ('dependency failed to start: container PRIVATE_SENTINEL is unhealthy', 'unhealthy'),
+                ('dependency failed to start: PRIVATE_SENTINEL', 'dependency-start'),
+                ('PRIVATE_SENTINEL unknown timeout payload', 'unknown')):
+            with self.subTest(reason=reason):
+                error=subprocess.CalledProcessError(1,['incus'],stderr=(
+                    'PRIVATE_SENTINEL\nopenlit: guest stage=compose-start\n'+message+'\n').encode())
+                captured=io.StringIO()
+                with patch.object(dashboard.subprocess,'run',side_effect=error),contextlib.redirect_stderr(captured):
+                    with self.assertRaises(subprocess.CalledProcessError) as caught: ORIGINAL_RUN('incus')
+                self.assertIs(caught.exception,error)
+                self.assertEqual(captured.getvalue(),'openlit: guest progress=compose-start\nopenlit: compose-start reason='+reason+'\n')
+
 
 class ColdTransportTest(unittest.TestCase):
     def setUp(self):

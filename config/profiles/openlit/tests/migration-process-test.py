@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,20 @@ class ProtocolTests(unittest.TestCase):
         finally:
             app.abort()
 
+    def test_native_launch_enables_default_metrics_without_config_override(self):
+        proof = driver.Proof.__new__(driver.Proof)
+        proof.workspace = Path(self.root.name)
+        proof.server = mock.Mock(server_port=12345)
+        with mock.patch.object(driver, 'run', return_value='codex-cli 0.162.1'), \
+             mock.patch.object(driver, 'App') as launch:
+            self.assertIs(proof.app(), launch.return_value)
+        arguments = launch.call_args.args[0]
+        self.assertEqual(arguments[-2:], ['app-server', '--analytics-default-enabled'])
+        # The default flag lets Codex honor an explicit analytics.enabled=false;
+        # this fixture must not force that user setting through a -c override.
+        self.assertFalse(any(argument.startswith('analytics.') for argument in arguments))
+        self.assertEqual(launch.call_args.kwargs['user'], 'dev')
+
     def test_guest_guard_fails_before_allocating_or_building(self):
         env = {'PATH': '/usr/bin:/bin', 'SUBYARD_E2E_VM': '0'}
         result = subprocess.run(['bash', str(source.parent/'migration.sh')], env=env,
@@ -102,6 +117,105 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('requires a disposable allocated owner VM', result.stderr)
         self.assertNotIn('openlit_migration_stage=', result.stdout)
+
+
+class SignalTests(unittest.TestCase):
+    def exercise(self, *, service='codex_exec', logs=True, metrics='histogram',
+                 delay=0, trace=('trace', 'a'*32, 101), query_timeout=False):
+        with tempfile.TemporaryDirectory(prefix='subyard-migration-signals-', dir='/tmp') as temporary:
+            state = Path(temporary)
+            (state/'trace-cutover.json').write_text(json.dumps({'token': 'a'*32, 'cutover_ns': 100}))
+            with sqlite3.connect(':memory:') as db:
+                self.addCleanup(db.close)
+                db.create_function('fromUnixTimestamp64Nano', 1, lambda ns: ns)
+                db.execute('CREATE TABLE otel_traces (ServiceName TEXT, TraceId TEXT, cutover TEXT, Timestamp INTEGER)')
+                for table in ('logs', 'metrics_sum', 'metrics_histogram'):
+                    db.execute('CREATE TABLE otel_'+table+' (ServiceName TEXT)')
+                proof = driver.Proof.__new__(driver.Proof)
+                proof.old_identity = {'pid': 1, 'start': 1}
+                app = mock.Mock()
+                app.identity.return_value = {'pid': 2, 'start': 2}
+                proof.app = lambda: app
+                clock = 0
+                inserted = False
+                timeouts = []
+
+                def ingest():
+                    nonlocal inserted
+                    if inserted:
+                        return
+                    inserted = True
+                    if logs:
+                        db.execute('INSERT INTO otel_logs VALUES (?)', (service,))
+                    if metrics:
+                        db.execute('INSERT INTO otel_metrics_'+metrics+' VALUES (?)', (service,))
+
+                def turn():
+                    if trace is not None:
+                        db.execute('INSERT INTO otel_traces VALUES (?, ?, ?, ?)', (service, *trace))
+                    if not delay:
+                        ingest()
+
+                def sleep(seconds):
+                    nonlocal clock
+                    clock += seconds
+                    if clock >= delay:
+                        ingest()
+
+                def query(arguments, timeout=15):
+                    nonlocal clock
+                    if query_timeout and app.close.called:
+                        timeouts.append(timeout)
+                        clock += timeout
+                        raise subprocess.TimeoutExpired('private-sentinel', timeout)
+                    sql = arguments[-1].replace("ResourceAttributes['"+driver.ATTRIBUTE+"']", 'cutover')
+                    return str(db.execute(sql).fetchone()[0])
+
+                app.turn.side_effect = turn
+                with mock.patch.object(driver, 'STATE', state), \
+                     mock.patch.object(driver, 'run', side_effect=query), \
+                     mock.patch.object(driver.time, 'monotonic', side_effect=lambda: clock), \
+                     mock.patch.object(driver.time, 'sleep', side_effect=sleep):
+                    try:
+                        result = proof.fresh_turn()
+                    except RuntimeError as error:
+                        self.assertNotIn('private-sentinel', str(error))
+                        return str(error), clock, timeouts
+                app.close.assert_called_once_with()
+                app.abort.assert_not_called()
+                return result, clock, timeouts
+
+    def test_histogram_and_sum_metrics_from_exact_codex_services(self):
+        for service in ('codex_cli_rs', 'codex_exec', 'codex-app-server'):
+            for table in ('sum', 'histogram'):
+                with self.subTest(service=service, table=table):
+                    result, _, _ = self.exercise(service=service, metrics=table)
+                    self.assertEqual(result, {'marked_codex_traces': 1, 'codex_logs': 1, 'codex_metrics': 1})
+
+    def test_delayed_ingestion_keeps_all_three_signal_gates(self):
+        result, elapsed, _ = self.exercise(delay=4)
+        self.assertEqual(result, {'marked_codex_traces': 1, 'codex_logs': 1, 'codex_metrics': 1})
+        self.assertEqual(elapsed, 4)
+
+    def test_missing_signal_or_prefixed_identity_never_passes(self):
+        for missing in ({'logs': False}, {'metrics': None}, {'trace': None}, {'service': 'codex_exec-other'},
+                        {'trace': ('', 'a'*32, 101)}, {'trace': ('trace', 'b'*32, 101)},
+                        {'trace': ('trace', 'a'*32, 100)}):
+            with self.subTest(missing=missing):
+                error, elapsed, _ = self.exercise(**missing)
+                self.assertIn('deadline expired', error)
+                for name in ('marked_codex_traces', 'codex_logs', 'codex_metrics'):
+                    self.assertRegex(error, name+r'=\d+')
+                self.assertEqual(elapsed, 90)
+
+    def test_query_timeouts_share_the_ingestion_deadline(self):
+        error, elapsed, timeouts = self.exercise(query_timeout=True)
+        self.assertIn('deadline expired', error)
+        self.assertIn('codex_logs=-1', error)
+        self.assertIn('codex_metrics=-1', error)
+        self.assertEqual(elapsed, 90)
+        self.assertTrue(all(0 < timeout <= 15 for timeout in timeouts))
+        self.assertLess(timeouts[-1], 15)
 
 
 class RetentionTests(unittest.TestCase):

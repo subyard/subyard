@@ -200,6 +200,7 @@ func TestIntegrationInventoryRejectsArtifactAppearingAfterObservation(t *testing
 
 type retryableIntegrationExecutor struct {
 	pending        bool
+	keepPending    bool
 	serviceChanged bool
 	commits        int
 	hookAttempts   int
@@ -458,7 +459,7 @@ func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string
 		case "apply":
 			fixture.pending = true
 		case "commit":
-			fixture.pending = false
+			fixture.pending = fixture.keepPending
 			fixture.commits++
 		}
 		return ports.InstanceExecResult{}, nil
@@ -515,6 +516,34 @@ func TestIntegrationConvergenceNeverExecutesHealthProbes(t *testing.T) {
 		if slices.Contains(request.Command, "sentinel-health") {
 			t.Fatal("service health entered installation convergence")
 		}
+	}
+}
+
+func TestIntegrationFinalVerificationHasPublicDiagnostic(t *testing.T) {
+	root := testkit.TempDir(t)
+	for _, directory := range []string{"config", "scripts"} {
+		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "scripts/reconcile-integrations.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	executor := &retryableIntegrationExecutor{pending: true, keepPending: true}
+	runtime := Runtime{RepositoryRoot: root, Executor: executor,
+		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+		Yard:  domain.Context{YardName: "example", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}}
+	plan, err := runtime.IntegrationPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.ApplyIntegrations(context.Background(), plan)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if err == nil || !errors.As(err, &diagnostic) || executor.commits != 1 {
+		t.Fatalf("verification boundary not reached: %v", err)
+	}
+	message, retry := diagnostic.ActivationDiagnostic()
+	if message != "integration lifecycle verify in yard example: native lifecycle did not converge" || retry != "yard -Y example integration status --json" || strings.Contains(message, root) {
+		t.Fatalf("unsafe verification diagnostic: %q / %q", message, retry)
 	}
 }
 
@@ -1394,5 +1423,67 @@ func TestIntegrationRetirementRemembersReleasedStructuredDocuments(t *testing.T)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal("structured document deleted", err)
+	}
+}
+
+func TestStructuredInventoryPreservesIndependentFieldChanges(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			home := filepath.Join(root, "home")
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, "settings."+format)
+			desired, before, after := `{"managed":true}`, `{"managed":true,"independent":1}`, `{"managed":true,"independent":2}`
+			if format == "toml" {
+				desired, before, after = "managed=true\n", "managed=true\nindependent=1\n", "managed=true\nindependent=2\n"
+			}
+			testkit.WriteFile(t, path, []byte(before), 0o644)
+			entries := []integrationArtifact{{ID: "sample", Kind: "structured", Format: format, Path: path, Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(desired)))}}
+			program := strings.ReplaceAll(strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", filepath.Join(root, "state")), "@STATE_UID@", fmt.Sprint(os.Getuid()))
+			run := func(mode string) integrationObservation {
+				t.Helper()
+				payload, _ := json.Marshal(map[string]any{"home": home, "uid": os.Getuid(), "entries": entries})
+				command := exec.Command("python3", "-B", "-c", program, mode)
+				command.Stdin = strings.NewReader(string(payload))
+				output, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("%s: %v %s", mode, err, output)
+				}
+				var observation integrationObservation
+				if mode == "observe" {
+					if err := json.Unmarshal(output, &observation); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return observation
+			}
+			run("apply")
+			run("commit")
+			approved := run("observe")
+			testkit.WriteFile(t, path, []byte(after), 0o644)
+			fresh := run("observe")
+			if approved.Changed || fresh.Changed || approved.Fingerprint != fresh.Fingerprint {
+				t.Fatalf("independent field edit: approved_changed=%t fresh_changed=%t fingerprint_equal=%t", approved.Changed, fresh.Changed, approved.Fingerprint == fresh.Fingerprint)
+			}
+			entries[0].Digest = strings.Repeat("b", 64)
+			if changed := run("observe"); !changed.Changed || changed.Fingerprint == approved.Fingerprint {
+				t.Fatal("desired source drift lost its inventory binding")
+			}
+			entries[0].Digest = fmt.Sprintf("%x", sha256.Sum256([]byte(desired)))
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if missing := run("observe"); missing.Fingerprint == approved.Fingerprint {
+				t.Fatal("missing document lost its binding")
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if foreign := run("observe"); foreign.Fingerprint == approved.Fingerprint {
+				t.Fatal("foreign document type lost its binding")
+			}
+		})
 	}
 }

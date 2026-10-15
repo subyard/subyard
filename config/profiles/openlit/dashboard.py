@@ -39,6 +39,16 @@ def guest_error(error):
     if isinstance(stderr, bytes): stderr = stderr.decode(errors='replace')
     stages = re.findall(r'^openlit: guest stage=(guard|image-inventory|image-pull|assets|native-disable|compose-start|account-bootstrap|unit-start|native-enable|publication)$', stderr, re.MULTILINE)
     if stages: print('openlit: guest progress='+stages[-1], file=sys.stderr)
+    if stages and stages[-1] == 'compose-start':
+        reason = 'unknown'
+        for category, pattern in (
+                ('wait-deadline', r'^(?:application not healthy after [0-9a-z.]+|timed out waiting for .+)$'),
+                ('unhealthy', r'^(?:dependency failed to start: )?container .+ is unhealthy$'),
+                ('dependency-start', r'^dependency failed to start: .+$')):
+            if re.search(pattern, stderr[-65536:], re.MULTILINE):
+                reason = category
+                break
+        print('openlit: compose-start reason='+reason, file=sys.stderr)
     pulls = re.findall(r'^openlit: pinned image pull exit=([1-9][0-9]{0,2})$', stderr, re.MULTILINE)
     if pulls: print('openlit: guest image-pull exit='+pulls[-1], file=sys.stderr)
     for tool in ('Docker Engine', 'Docker Compose'):

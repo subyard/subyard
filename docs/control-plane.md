@@ -1559,5 +1559,11 @@ Profile declarations may expose a `dashboard` with an owned listener setting, co
 and device, guest port, scheme and path. The owning owner service/runtime binds route and guest
 readiness. Core projects selected, ready dashboards into shared status and renders VM/remote
 SSH instructions using shipped metadata, without extending the closed owner-response schema.
+Selected dashboard owner checks and container URL verification share one 30-second read-only
+work deadline, respecting shorter caller deadlines. Exhaustion leaves unverified dashboards down
+and launches no further checks; cancellation terminates the check's process group with up to
+two additional seconds for cleanup/drain. Direct remote yard-status processes have a 38-second
+execution timeout plus their existing two-second cleanup/drain allowance. SSH trust setup retains
+its existing timeout policy. These bounds preserve the full owning readiness check.
 Retired integration declarations live under `config/retired-integrations/`; they permit only
 bounded cleanup lifecycle and discarded-input metadata, with no provisioning or native binaries.

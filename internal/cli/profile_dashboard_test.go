@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,16 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestRemoteDownProfileDashboardPreservesCheckHint(t *testing.T) {
+	var output bytes.Buffer
+	program := &CLI{options: Options{Stdout: &output}}
+	hint := "yard init (profile check reason=deadline native_exit=none elapsed_ms=5001 budget_ms=5000)"
+	program.printRemoteStatusFacts(domain.YardStatus{Facts: domain.StatusFacts{Shared: []domain.SharedResourceStatus{{Profile: "sample", Name: "dashboard", State: "down", Hint: hint}}}}, "owner")
+	if !strings.Contains(output.String(), hint) {
+		t.Fatalf("down status lost original check diagnostic: %s", output.String())
+	}
+}
 
 func TestProfileDashboardRenderingPreservesClosedStatusSchema(t *testing.T) {
 	root := testkit.TempDir(t)

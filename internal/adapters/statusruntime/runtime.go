@@ -537,6 +537,8 @@ func environment(values map[string]string) []string {
 }
 
 func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.Context, running bool) []domain.SharedResourceStatus {
+	phaseCtx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
 	var result []domain.SharedResourceStatus
 	for _, definition := range runtime.Profiles {
 		dashboard := definition.Dashboard
@@ -545,24 +547,52 @@ func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.C
 		}
 		status := domain.SharedResourceStatus{Profile: definition.Name, Name: "dashboard", State: "down", Hint: runtime.program() + " init"}
 		if running {
-			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			probe := exec.CommandContext(probeCtx, filepath.Join(definition.Root, definition.OwnerService), "--check")
-			probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
-			err := probe.Run()
-			cancel()
+			started := time.Now()
+			err := phaseCtx.Err()
 			if err == nil {
+				probe := exec.CommandContext(phaseCtx, filepath.Join(definition.Root, definition.OwnerService), "--check")
+				probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
+				probe.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				probe.Cancel = func() error {
+					if probe.Process == nil {
+						return nil
+					}
+					return syscall.Kill(-probe.Process.Pid, syscall.SIGKILL)
+				}
+				probe.WaitDelay = 2 * time.Second
+				err = probe.Run()
+			}
+			if err == nil && phaseCtx.Err() == nil {
 				status.State = "up"
 				if yard.YardKind == domain.YardVM {
 					status.URL = dashboard.Scheme + "://127.0.0.1:" + runtime.Environment[dashboard.PortSetting] + dashboard.Path
 				} else {
-					status.URL = runtime.integrationDashboardURL(ctx, yard, dashboard)
+					status.URL = runtime.integrationDashboardURL(phaseCtx, yard, dashboard)
 				}
 				if status.URL == "" {
 					status.State = "down"
 				}
 			}
+			if contextErr := phaseCtx.Err(); err != nil || contextErr != nil {
+				status.State, status.URL = "down", ""
+				status.Hint += profileCheckDiagnostic(err, contextErr, time.Since(started))
+			}
 		}
 		result = append(result, status)
 	}
 	return result
+}
+
+func profileCheckDiagnostic(err, contextErr error, elapsed time.Duration) string {
+	category, native := "unavailable", "none"
+	var exit *exec.ExitError
+	switch {
+	case errors.Is(contextErr, context.DeadlineExceeded):
+		category = "deadline"
+	case errors.Is(contextErr, context.Canceled):
+		category = "cancelled"
+	case errors.As(err, &exit) && exit.ExitCode() > 0 && exit.ExitCode() <= 255:
+		category, native = "native-failure", strconv.Itoa(exit.ExitCode())
+	}
+	return fmt.Sprintf(" (profile check reason=%s native_exit=%s elapsed_ms=%d budget_ms=%d)", category, native, max(0, elapsed.Milliseconds()), profile.ReadinessTimeout.Milliseconds())
 }

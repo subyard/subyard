@@ -842,8 +842,35 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 		return fmt.Sprintf("yard %s, %s %s: %s", err.yard, err.phase, err.action, source), retry
 	}
 	// Only validated yard names and fixed phase/command text cross this boundary.
-	return fmt.Sprintf("yard %s: cannot %s %s for release activation", err.yard, err.action, err.phase),
-		retry
+	message := fmt.Sprintf("yard %s: cannot %s %s for release activation", err.yard, err.action, err.phase)
+	var integration *integrationActivationFailure
+	if errors.As(err.cause, &integration) {
+		message += integration.diagnostic()
+	}
+	return message, retry
+}
+
+// Attribute a failed activation without exposing plans, sources or native errors.
+type integrationActivationFailure struct {
+	cause      error
+	stage      string
+	projected  bool
+	comparison *integrationComparison
+}
+
+type integrationComparison struct {
+	fingerprintEqual, scopeEqual, approvedChanged, freshChanged bool
+}
+
+func (failure *integrationActivationFailure) Error() string { return failure.cause.Error() }
+func (failure *integrationActivationFailure) Unwrap() error { return failure.cause }
+func (failure *integrationActivationFailure) diagnostic() string {
+	text := fmt.Sprintf(" (stage=%s projected=%t", failure.stage, failure.projected)
+	if facts := failure.comparison; facts != nil {
+		text += fmt.Sprintf(" fingerprint_equal=%t scope_equal=%t approved_changed=%t fresh_changed=%t plan_stale=%t",
+			facts.fingerprintEqual, facts.scopeEqual, facts.approvedChanged, facts.freshChanged, errors.Is(failure.cause, domain.ErrPlanStale))
+	}
+	return text + ")"
 }
 
 func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
@@ -1478,11 +1505,18 @@ func readReleaseTransitionGrant() (releasetransition.Authorization, error) {
 	return releasetransition.Authorization(payload), nil
 }
 
-func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTarget(ctx context.Context, operation *CLI, target configTarget) error {
+func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTarget(ctx context.Context, operation *CLI, target configTarget) (err error) {
 	approved, selected := reconciler.integrationPlans[target.Name]
 	if !selected {
 		return nil
 	}
+	stage := "lock"
+	var comparison *integrationComparison
+	defer func() {
+		if err != nil {
+			err = &integrationActivationFailure{cause: err, stage: stage, projected: reconciler.projectedIntegrationPlans, comparison: comparison}
+		}
+	}()
 	unlock, err := lockIntegrationYard(ctx, target.Loaded)
 	if err != nil {
 		return err
@@ -1490,6 +1524,7 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 	defer unlock()
 	platform := operation.initPlatform(target.Loaded, nil)
 	if !reconciler.projectedIntegrationPlans {
+		stage = "legacy-adoption"
 		platform, _, err = prepareLegacyIntegrationAdoption(ctx, target.Loaded.Integrations, platform)
 		if err != nil {
 			return err
@@ -1500,16 +1535,23 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 		runtime.AdoptLegacyIntegrations = approved.AdoptionFingerprint != ""
 		runtime.LegacyIntegrationFingerprint = approved.AdoptionFingerprint
 	}
+	stage = "observe-fresh"
 	plan, err := runtime.IntegrationPlan(ctx)
 	if err != nil {
 		return err
 	}
+	comparison = &integrationComparison{approved.Fingerprint == plan.Fingerprint, approved.Scope == plan.Scope, approved.Changed, plan.Changed}
 	if reconciler.projectedIntegrationPlans {
+		stage = "compare-projected"
 		if err := reconcileruntime.CheckIntegrationPlan(approved, plan); err != nil {
 			return err
 		}
-	} else if plan.Fingerprint != approved.Fingerprint {
-		return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
+	} else {
+		stage = "compare-exact"
+		if plan.Fingerprint != approved.Fingerprint {
+			return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
+		}
 	}
+	stage, comparison = "apply", nil
 	return runtime.ApplyIntegrations(ctx, plan)
 }
