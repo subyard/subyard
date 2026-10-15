@@ -8,15 +8,40 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('browser', Path(__file__).parent/'e2e/ui-browser.py')
 browser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser)
 BINARY = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
+CAPTURE_ROOT = Path(__file__).resolve().parents[4]/'.build/test-runs'
+
+
+def preserve_startup_failure(process, log):
+    status = process.poll()
+    info = os.fstat(log.fileno())
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('startup-log-not-regular')
+    limit = 256*1024
+    payload = os.pread(log.fileno(), limit, 0)
+    CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
+    output = Path(tempfile.mkdtemp(prefix='openlit-chromium.', dir=CAPTURE_ROOT))
+    output.chmod(0o700)
+    facts = {'category': 'chromium-startup', 'process_poll': status,
+             'process_running': status is None, 'log_bytes': len(payload),
+             'log_truncated': info.st_size > len(payload)}
+    for name, data in (('chromium.log', payload),
+                       ('startup.json', (json.dumps(facts)+'\n').encode())):
+        with (output/name).open('xb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+    return output, status
 
 
 @unittest.skipUnless(BINARY, 'rendered DOM prerequisite: Chromium')
@@ -28,7 +53,7 @@ class BrowserDOMTest(unittest.TestCase):
         cls.root.chmod(0o700)
         cls.profile = cls.root/'profile'
         cls.profile.mkdir(mode=0o700)
-        cls.log = (cls.root/'chromium.log').open('wb')
+        cls.log = (cls.root/'chromium.log').open('w+b')
         os.chmod(cls.root/'chromium.log', 0o600)
         argv = [BINARY, '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir='+str(cls.profile), '--disable-background-networking', '--disable-dev-shm-usage', '--no-first-run', 'about:blank']
         if os.getuid() == 0:
@@ -38,7 +63,16 @@ class BrowserDOMTest(unittest.TestCase):
             cls.cdp = browser.CDP(browser.discover(cls.profile, time.monotonic()+15), time.monotonic()+90)
             cls.cdp.call('Page.enable')
         except Exception:
-            cls.tearDownClass()
+            try:
+                output, status = preserve_startup_failure(cls.process, cls.log)
+                print(f'openlit_chromium_startup capture=saved process_poll={status} path={output}', file=sys.stderr)
+            except Exception as failure:
+                print('openlit_chromium_startup capture=failed category='+type(failure).__name__, file=sys.stderr)
+            try:
+                cls.tearDownClass()
+                print('openlit_chromium_startup cleanup=complete', file=sys.stderr)
+            except Exception as failure:
+                print('openlit_chromium_startup cleanup=failed category='+type(failure).__name__, file=sys.stderr)
             raise
 
     @classmethod
@@ -138,6 +172,60 @@ class BrowserDOMTest(unittest.TestCase):
         self.assertTrue(self.cdp.evaluate(browser.OBSERVE)['clearControlPresent'])
         self.assertEqual(self.cdp.evaluate(browser.CLEAR_FILTERS), 'CLICKED')
         self.assertFalse(self.cdp.evaluate(browser.OBSERVE)['clearControlPresent'])
+
+
+class StartupCaptureTest(unittest.TestCase):
+    def test_failed_child_evidence_survives_cleanup_and_failure_is_preserved(self):
+        # Exercise the real setup failure boundary without launching a browser.
+        class FailedBrowser(BrowserDOMTest):
+            pass
+        native_popen = subprocess.Popen
+        sentinel = b'controlled Chromium startup stderr\n'
+        failure = browser.Failure('chromium-startup')
+        def launch(argv, **options):
+            return native_popen([sys.executable, '-c',
+                                 'import sys; sys.stderr.buffer.write('+repr(sentinel)+'); sys.exit(23)'], **options)
+        def discover(*args):
+            FailedBrowser.process.wait(timeout=5)
+            raise failure
+        with tempfile.TemporaryDirectory(prefix='openlit-startup-capture-', dir='/tmp') as name:
+            output = Path(name)/'captures'
+            diagnostics = io.StringIO()
+            with patch(__name__+'.CAPTURE_ROOT', output), patch(__name__+'.BINARY', sys.executable), \
+                 patch.object(subprocess, 'Popen', side_effect=launch), \
+                 patch.object(browser, 'discover', side_effect=discover), contextlib.redirect_stderr(diagnostics):
+                with self.assertRaises(browser.Failure) as raised:
+                    FailedBrowser.setUpClass()
+            self.assertIs(raised.exception, failure)
+            self.assertFalse(FailedBrowser.root.exists())
+            self.assertEqual(FailedBrowser.process.poll(), 23)
+            capture, = output.iterdir()
+            self.assertEqual((capture/'chromium.log').read_bytes(), sentinel)
+            facts = json.loads((capture/'startup.json').read_text())
+            self.assertEqual(facts, {'category': 'chromium-startup', 'process_poll': 23,
+                                    'process_running': False, 'log_bytes': len(sentinel), 'log_truncated': False})
+            self.assertEqual(stat.S_IMODE(capture.stat().st_mode), 0o700)
+            for path in capture.iterdir():
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertNotIn(sentinel.decode().strip(), diagnostics.getvalue())
+            cleanup = FailedBrowser.tearDownClass
+            def failed_cleanup():
+                cleanup()
+                raise RuntimeError('PRIVATE_CLEANUP_SENTINEL')
+            diagnostics = io.StringIO()
+            with patch(__name__+'.BINARY', sys.executable), \
+                 patch.object(subprocess, 'Popen', side_effect=launch), \
+                 patch.object(browser, 'discover', side_effect=discover), \
+                 patch(__name__+'.preserve_startup_failure', side_effect=OSError('PRIVATE_CAPTURE_SENTINEL')), \
+                 patch.object(FailedBrowser, 'tearDownClass', side_effect=failed_cleanup), \
+                 contextlib.redirect_stderr(diagnostics):
+                with self.assertRaises(browser.Failure) as raised:
+                    FailedBrowser.setUpClass()
+            self.assertIs(raised.exception, failure)
+            self.assertFalse(FailedBrowser.root.exists())
+            self.assertIn('capture=failed category=OSError', diagnostics.getvalue())
+            self.assertIn('cleanup=failed category=RuntimeError', diagnostics.getvalue())
+            self.assertNotIn('PRIVATE_', diagnostics.getvalue())
 
 
 if __name__ == '__main__':
