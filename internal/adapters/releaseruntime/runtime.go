@@ -20,21 +20,25 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/blang/semver/v4"
 	"golang.org/x/sys/unix"
 )
 
 type Config struct {
-	Inputs         CommandInputs
-	Context        RuntimeContext
-	Installer      string
-	RepositoryRoot string
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Progress       io.Writer
-	HTTPClient     *http.Client
+	Inputs                    CommandInputs
+	Context                   RuntimeContext
+	Installer                 string
+	RepositoryRoot            string
+	Stdout                    io.Writer
+	Stderr                    io.Writer
+	Progress                  io.Writer
+	HTTPClient                *http.Client
+	InstalledRuntimePresence  func(context.Context, string, config.Loaded, string) (ports.RuntimePresence, error)
+	ProfileRuntimeObservation func(context.Context, string, config.Loaded, string) (ports.RuntimeObservation, error)
 }
 
 type Prepared struct {
@@ -1041,6 +1045,33 @@ func (runtime *Runtime) prepareRetainedTransition(
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
 		}}
 	}
+	activeRoot := filepath.Join(parsed.root, links.current.target)
+	var targetOwners map[string]bool
+	applicable, err := retainedRuntimeApplicable(activeRoot)
+	if err != nil {
+		return Prepared{}, verifiedPreparation(err)
+	}
+	if applicable && verified.registryDigest != "" {
+		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, parsed.root, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
+		if capabilityErr == nil {
+			targetOwners = map[string]bool{}
+			for _, id := range capabilities.ActivationOwners {
+				targetOwners[id] = true
+			}
+		} else {
+			var rejected *exec.ExitError
+			if !errors.As(capabilityErr, &rejected) || rejected.ExitCode() != 2 {
+				return Prepared{}, verifiedPreparation(errors.New("retained runtime activation capability probe failed"))
+			}
+			// Frozen owners reject this exact input-free mode as unsupported (exit 2).
+			// They may retain only the identical public core contract checked below.
+		}
+	}
+	runtimeBinding, err := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
+	if err != nil {
+		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
+			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
+	}
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		Mode:          releasetransition.ProcessInspect,
@@ -1131,7 +1162,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 			return execute(ctx)
 		}
 	}
-	return prepared, nil
+	return runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners), nil
 }
 
 type candidateVerification struct {

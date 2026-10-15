@@ -293,7 +293,12 @@ func (handler Handler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 			http.Error(writer, "github broker is not configured", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"configured": true})
+		status, err := runtimeStatus(true)
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(writer, http.StatusOK, status)
 	case "/token":
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)

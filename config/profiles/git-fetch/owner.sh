@@ -8,19 +8,27 @@ root="$(cd "$profile/../../.." && pwd)"
 subyard_require_engine_context || exit 2
 selected=${SUBYARD_PROFILE_SELECTED:-0}
 mode=apply
-[ "$#" = 1 ] || exit 2
+extra=()
+[ "$#" -ge 1 ] || exit 2
 case "$1" in
   --yes) ;;
   --check) mode=check ;;
   --remove) selected=0 ;;
   --pause) mode=pause ;;
   --resume) mode=resume ;;
+  --observe) [ "$#" = 2 ] || exit 2; mode=observe; extra=("$2") ;;
+  --refresh) [ "$#" = 5 ] || exit 2; mode=refresh; extra=("${@:2}") ;;
   *) exit 2 ;;
 esac
+if [ "$mode" != observe ] && [ "$mode" != refresh ]; then [ "$#" = 1 ] || exit 2; fi
 state="$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -f csv -c s 2>/dev/null)" || exit 2
 case "$state" in
   RUNNING) ;;
-  ''|STOPPED) exit 0 ;;
+  ''|STOPPED)
+    if [ "$mode" = observe ]; then
+      if [ -z "$state" ]; then printf '{"state":"absent"}\n'; else printf '{"state":"deferred"}\n'; fi
+    elif [ "$mode" = refresh ]; then exit 2; fi
+    exit 0 ;;
   *) printf 'git-fetch: yard is not ready for profile reconciliation\n' >&2; exit 2 ;;
 esac
 rc=0
@@ -30,7 +38,7 @@ output="$(tar -C "$profile" -cf - guest.py fetch.py subyard-git-fetch.service.in
     trap '\''rm -rf -- "$bundle"'\'' EXIT
     tar -xf - -C "$bundle"
     python3 -B "$bundle/guest.py" "$@"
-  ' subyard "$mode" "$selected" "$DEV_USER" "${SUBYARD_PROFILE_STOPPED:-0}")" || rc=$?
+  ' subyard "$mode" "$selected" "$DEV_USER" "${SUBYARD_PROFILE_STOPPED:-0}" "${extra[@]}")" || rc=$?
 # A successful guest check emits only a measured-drift token. Transport failures
 # never share expected-drift exit1, even when Incus itself exits1.
 [ "$rc" = 0 ] || exit 2

@@ -16,6 +16,7 @@ REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 UNIT_DIR="${SUBYARD_KEYS_SYSTEMD_DIR:-$SUBYARD_OPERATOR_HOME/.config/systemd/user}"
 SERVICE="$UNIT_DIR/subyard-keys-sync.service"
 TIMER="$UNIT_DIR/subyard-keys-sync.timer"
+RECEIPT="$UNIT_DIR/.subyard-keys-sync.json"
 SERVICE_TEMPLATE="$REPO/config/systemd/subyard-keys-sync.service.in"
 TIMER_TEMPLATE="$REPO/config/systemd/subyard-keys-sync.timer.in"
 SKIP_ENABLE="${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-0}"
@@ -34,6 +35,43 @@ fi
 
 render_service() {
   sed -e "s|@YARD_BIN@|$YARD_BIN|g" "$SERVICE_TEMPLATE"
+}
+
+render_receipt() {
+  jq -n --arg yard "$YARD_BIN" '{schema:1,yard:$yard}'
+}
+
+publish_receipt() {
+  local temporary
+  temporary="$(mktemp "$UNIT_DIR/.keys-sync-receipt.XXXXXX")"
+  render_receipt > "$temporary"
+  chmod 0600 "$temporary"
+  mv -f -- "$temporary" "$RECEIPT"
+}
+
+receipt_current() {
+  [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] \
+    && [ "$(stat -c '%a:%u' "$RECEIPT")" = "600:$(id -u)" ] \
+    && cmp -s <(render_receipt) "$RECEIPT"
+}
+
+units_owned() {
+  # A protected receipt records a prior explicit install. Without one, only
+  # the exact shipped legacy recipes establish ownership; names alone do not.
+  [ -e "$SERVICE" ] || [ -e "$TIMER" ] || return 1
+  [ ! -L "$UNIT_DIR" ] && [ ! -L "$SERVICE" ] && [ ! -L "$TIMER" ] && [ ! -L "$RECEIPT" ] || return 1
+  local path
+  for path in "$SERVICE" "$TIMER"; do
+    if [ -e "$path" ]; then
+      [ -f "$path" ] && [ "$(stat -c '%a:%u' "$path")" = "644:$(id -u)" ] || return 1
+    fi
+  done
+  if [ -e "$RECEIPT" ]; then
+    receipt_current
+  else
+    { [ ! -e "$SERVICE" ] || cmp -s <(render_service) "$SERVICE"; } \
+      && { [ ! -e "$TIMER" ] || cmp -s "$TIMER_TEMPLATE" "$TIMER"; }
+  fi
 }
 
 user_systemctl() {
@@ -70,7 +108,10 @@ ensure_user_systemd_manager() {
 }
 
 units_current() {
-  [ -r "$SERVICE" ] && [ -r "$TIMER" ] \
+  [ ! -L "$UNIT_DIR" ] && [ ! -L "$SERVICE" ] && [ ! -L "$TIMER" ] \
+    && [ -r "$SERVICE" ] && [ -r "$TIMER" ] \
+    && [ "$(stat -c '%a:%u' "$SERVICE")" = "644:$(id -u)" ] \
+    && [ "$(stat -c '%a:%u' "$TIMER")" = "644:$(id -u)" ] \
     && cmp -s <(render_service) "$SERVICE" && cmp -s "$TIMER_TEMPLATE" "$TIMER"
 }
 
@@ -81,8 +122,36 @@ timer_enabled() {
   [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" = yes ] || return 1
 }
 
+units_loaded_current() {
+  [ "$SKIP_ENABLE" = 1 ] && return 0
+  # A stopped manager loads these files on its next explicit start.
+  user_systemctl show-environment >/dev/null 2>&1 || return 0
+  [ "$(user_systemctl show subyard-keys-sync.service --property=NeedDaemonReload --value)" = no ] \
+    && [ "$(user_systemctl show subyard-keys-sync.timer --property=NeedDaemonReload --value)" = no ]
+}
+
 case "${1:-}" in
   --check) units_current && timer_enabled; exit ;;
+  --check-owned) units_owned; exit ;;
+  --check-refresh) receipt_current && units_owned && units_current && units_loaded_current; exit ;;
+  --refresh)
+    # Release activation updates an existing timer without enabling or starting it.
+    [ -e "$SERVICE" ] || [ -e "$TIMER" ] || die "credential timer is not installed"
+    [ ! -L "$UNIT_DIR" ] && [ ! -L "$SERVICE" ] && [ ! -L "$TIMER" ] || die "unsafe credential timer managed path"
+    units_owned || die "credential timer files are not owned by Subyard"
+    if units_current && units_loaded_current; then
+      [ -e "$RECEIPT" ] || publish_receipt
+      exit 0
+    fi
+    if ! units_current; then
+      install -d -m 700 "$UNIT_DIR"
+      render_service > "$SERVICE.tmp"; chmod 0644 "$SERVICE.tmp"; mv -f "$SERVICE.tmp" "$SERVICE"
+      install -m 0644 "$TIMER_TEMPLATE" "$TIMER.tmp"; mv -f "$TIMER.tmp" "$TIMER"
+    fi
+    [ -e "$RECEIPT" ] || publish_receipt
+    # A stopped user manager loads the refreshed files when explicitly resumed.
+    if user_systemctl show-environment >/dev/null 2>&1; then user_systemctl daemon-reload; fi
+    exit ;;
   -h|--help)
     cat <<EOF
 Usage: install-keys-auto-sync.sh [--check] [-y]
@@ -107,6 +176,7 @@ proceed_or_die
 install -d -m 700 "$UNIT_DIR"
 render_service > "$SERVICE.tmp"; chmod 0644 "$SERVICE.tmp"; mv -f "$SERVICE.tmp" "$SERVICE"
 install -m 0644 "$TIMER_TEMPLATE" "$TIMER.tmp"; mv -f "$TIMER.tmp" "$TIMER"
+publish_receipt
 
 if [ "$SKIP_ENABLE" = 1 ]; then
   ok "installed credential auto-sync unit files (enable skipped by test override)"

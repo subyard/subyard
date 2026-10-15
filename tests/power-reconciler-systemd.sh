@@ -71,6 +71,13 @@ fi
 set -euo pipefail
 if [ "$*" = _publication-contracts ]; then
   [ "$TEST_READER_BOUNDARY_FAIL" = 0 ] || exit 1
+  case "$0:$SUBYARD_REPOSITORY_ROOT" in /proc/self/fd/*:/proc/self/fd/*) ;; *) exit 65 ;; esac
+  [ "$SUBYARD_REPOSITORY_ROOT/config/systemd/subyard-power-reconcile.service.in" -ef "$TEST_POWER_SOURCE_TEMPLATE" ] || exit 66
+  if [ "${TEST_PARENT_PID:-}" ]; then
+    [ "$(/usr/bin/id -g)" = "$TEST_READER_GID" ] || exit 67
+    [ ! -r "/proc/$TEST_PARENT_PID/fd/${SUBYARD_REPOSITORY_ROOT##*/}/config/systemd/subyard-power-reconcile.service.in" ] || exit 68
+    printf 'cross-group-self-fd\n' > "$TEST_READER_MARKER"
+  fi
   printf 'eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n'; exit 0
 fi
 [ "$*" = '_network-lock ensure' ] || exit 64
@@ -108,6 +115,7 @@ case "$1" in
 esac
 EOF
   chmod +x "$SUBYARD_POWER_ENGINE_SOURCE" "$fake_bin"/*
+  export TEST_POWER_SOURCE_TEMPLATE="$TEMPLATE"
   export PATH="$fake_bin:$PATH"
   if ! bash "$ROOT/scripts/install-power-reconciler.sh" --yes \
       > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
@@ -126,6 +134,40 @@ EOF
   cmp "$temporary/install/before-unit" "$SUBYARD_POWER_UNIT_PATH" || fail 'boundary refusal changed unit'
   [ ! -s "$TEST_SYSTEMCTL_LOG" ] || fail 'boundary refusal changed service state'
   export TEST_READER_BOUNDARY_FAIL=0
+
+  # A real group switch must not dereference the original process's proc FD.
+  original_gid="$(/usr/bin/id -g)"
+  alternate_gid=''
+  for group_gid in $(/usr/bin/id -G); do
+    [ "$group_gid" = "$original_gid" ] || { alternate_gid="$group_gid"; break; }
+  done
+  if [ -n "$alternate_gid" ] && command -v sg >/dev/null; then
+    export TEST_READER_GROUP
+    TEST_READER_GROUP="$(getent group "$alternate_gid" | cut -d: -f1)"
+    [ -n "$TEST_READER_GROUP" ] || fail 'alternate reader group is unavailable'
+    export TEST_READER_GID="$alternate_gid" TEST_READER_MARKER="$temporary/install/reader-marker"
+    cat > "$fake_bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -u ] && [ "$3" = -- ]
+shift 3
+printf -v command '%q ' env "TEST_PARENT_PID=$PPID" "$@"
+exec sg "$TEST_READER_GROUP" -c "exec $command"
+EOF
+    chmod 0755 "$fake_bin/runuser"
+    export SUBYARD_USER
+    SUBYARD_USER="$(/usr/bin/id -un)"
+    [ "$SUBYARD_USER" != root ] || SUBYARD_USER=fixture-operator
+    if ! bash "$ROOT/scripts/install-power-reconciler.sh" --yes > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
+      cat "$temporary/install/stderr" >&2
+      fail 'publication reader lost its pinned engine or source after a primary-group change'
+    fi
+    [ "$(cat "$TEST_READER_MARKER")" = cross-group-self-fd ] || fail 'native group switch was not exercised'
+    unset SUBYARD_USER
+    printf 'ok: publication reader retains engine and source across a native primary-group change\n'
+  else
+    printf 'native alternate-primary-group probe unavailable; physical runuser prerequisite remains required\n'
+  fi
 
   export TEST_NETWORK_LOCK_FAIL=1
   : > "$TEST_SYSTEMCTL_LOG"

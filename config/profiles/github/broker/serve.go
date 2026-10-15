@@ -142,7 +142,12 @@ func serveSSH(ctx context.Context, cfg RuntimeConfig) error {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			if r.Method == http.MethodGet && r.URL.Path == "/status" && r.URL.RawQuery == "" {
-				_, _ = io.WriteString(w, "{\"configured\":false}\n")
+				status, identityErr := runtimeStatus(false)
+				if identityErr != nil {
+					http.Error(w, identityErr.Error(), http.StatusServiceUnavailable)
+					return
+				}
+				writeJSON(w, http.StatusOK, status)
 				return
 			}
 			http.Error(w, "GitHub App is not configured on the owner host", http.StatusServiceUnavailable)

@@ -132,7 +132,7 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}
-	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities
+	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities
 	if !capabilityProbe &&
 		(request.RegistryDigest != owner.registryDigest || request.ArtifactDigest != owner.manifestDigest || request.Target != owner.candidate.release) {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("recovery request does not match its sealed owner")
@@ -159,6 +159,12 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		return releasetransition.RecoveryProcessResponse{}, err
 	}
 	if capabilityProbe {
+		if request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities {
+			if len(response.ActivationOwners) == 0 {
+				return releasetransition.RecoveryProcessResponse{}, errors.New("runtime capability probe returned transition results")
+			}
+			return response, nil
+		}
 		if response.Capabilities == nil {
 			return releasetransition.RecoveryProcessResponse{}, errors.New("recovery capability probe returned transition results")
 		}

@@ -622,7 +622,7 @@ def verify_power_publication_boundary(release, version, baseline, arch, root, ba
 
 
 def compatible_power_release(release, version, arch, root):
-    """Build a sealed fixture bridge with the exact historical epoch-1 registry.
+    """Build a sealed fixture bridge with historical power-1/settings-2 epochs.
 
     Its production reader gate remains enabled, so this package cannot mint a
     publication snapshot or write deferred state. This is never the candidate.
@@ -646,10 +646,22 @@ def compatible_power_release(release, version, arch, root):
     registry = json.loads(registry_path.read_text())
     exact = {"id": "introduce-owner-publication-state-v1", "domain": "power-metadata",
              "fromEpoch": 1, "toEpoch": 2, "kind": "owner-publication-state-v1"}
+    exact_settings = {"id": "localize-ssh-port-settings-v3", "domain": "settings",
+                      "fromEpoch": 2, "toEpoch": 3, "kind": "local-ssh-port-settings-v2-to-v3",
+                      "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]}
     require(registry["currentEpochs"]["power-metadata"] == 2
-            and registry["migrations"].count(exact) == 1, "fixture bridge boundary differs")
+            and registry["currentEpochs"]["settings"] == 3
+            and registry["migrations"].count(exact) == 1
+            and registry["migrations"].count(exact_settings) == 1, "fixture bridge boundary differs")
     registry["migrations"].remove(exact)
+    registry["migrations"].remove(exact_settings)
     registry["currentEpochs"]["power-metadata"] = 1
+    registry["currentEpochs"]["settings"] = 2
+    require(registry["currentEpochs"] == {"owner-registration": 2, "power-metadata": 1,
+                                          "project-state": 1, "settings": 2}
+            and [entry["id"] for entry in registry["migrations"]] == [
+                "canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"],
+            "fixture bridge is not the exact historical compatible registry")
     registry_path.write_text(json.dumps(registry, indent=2) + "\n")
     destination.mkdir()
     for path in release.iterdir():
@@ -659,8 +671,8 @@ def compatible_power_release(release, version, arch, root):
                          "--arch", arch, "--output-dir", str(destination)], env=None, timeout=180)
     require(built.returncode == 0, f"cannot package compatible fixture bridge: {built.stdout}{built.stderr}")
     bundle = destination / f"subyard-{bridge_version}-linux-{arch}.tar.gz"
-    print(f"FIXTURE: sealed compatible power-1 bridge {bridge_version} sha256={digest(bundle)}; "
-          "only exact publication migration removed; production reader gate retained", flush=True)
+    print(f"FIXTURE: sealed compatible power-1/settings-2 bridge {bridge_version} sha256={digest(bundle)}; "
+          "exact publication and SSH-settings migrations removed; production reader gate retained", flush=True)
     return destination, bridge_version
 
 
@@ -944,16 +956,29 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
             and not unexpected.exists(), "ordinary update changed retained state or invoked a host mutation")
     if registry_advanced:
         before_ledger, after_ledger = json.loads(ledger_before), json.loads(ledger.read_text())
+        current_registry = json.loads((fixture.runtime / "current/config/release-transition.json").read_text())
+        settings_migration = {"id": "localize-ssh-port-settings-v3", "domain": "settings",
+                              "fromEpoch": 2, "toEpoch": 3, "kind": "local-ssh-port-settings-v2-to-v3",
+                              "dependsOn": ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"]}
+        require(current_registry["currentEpochs"]["settings"] == 3
+                and current_registry["migrations"].count(settings_migration) == 1,
+                "ordinary update fixture differs from the declared settings migration")
         require(before_ledger["domains"]["power-metadata"] == {"epoch": 1, "applied": []}
                 and after_ledger["domains"]["power-metadata"] == {
                     "epoch": 2, "applied": ["introduce-owner-publication-state-v1"]}
+                and before_ledger["domains"]["settings"]["epoch"] == 2
+                and after_ledger["domains"]["settings"] == {
+                    "epoch": 3, "applied": before_ledger["domains"]["settings"]["applied"]
+                    + [settings_migration["id"]]}
                 and {key: value for key, value in before_ledger.items() if key != "domains"}
                 == {key: value for key, value in after_ledger.items() if key != "domains"}
-                and {key: value for key, value in before_ledger["domains"].items() if key != "power-metadata"}
-                == {key: value for key, value in after_ledger["domains"].items() if key != "power-metadata"},
-                "ordinary update changed historical domains or failed the new publication reader boundary")
-        print(f"PASS: separately authorized ordinary update reaches {version} publication epoch 2 "
-              "and preserves every original non-publication ledger domain", flush=True)
+                and {key: value for key, value in before_ledger["domains"].items()
+                     if key not in ("power-metadata", "settings")}
+                == {key: value for key, value in after_ledger["domains"].items()
+                    if key not in ("power-metadata", "settings")},
+                "ordinary update changed undeclared history or failed the publication/settings migrations")
+        print(f"PASS: separately authorized ordinary update reaches {version} publication epoch 2/settings epoch 3 "
+              "and preserves the settings prefix and every other original ledger domain", flush=True)
     else:
         require(ledger.read_bytes() == ledger_before, "same-registry ordinary update changed migration ledger")
     print(f"PASS: released {ACTIVATION_BASELINE} ordinary updater reaches {version} after delegated recovery "

@@ -222,7 +222,7 @@ func readCredentialInput(input io.Reader) (credentialInput, error) {
 func printHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: subyard-github [--socket PATH] run [--repo OWNER/REPO] -- COMMAND [ARGS...]")
 	fmt.Fprintln(output, "       subyard-github [--socket PATH] credential get|store|erase")
-	fmt.Fprintln(output, "       subyard-github [--socket PATH] status")
+	fmt.Fprintln(output, "       subyard-github [--socket PATH] status [--runtime]")
 	fmt.Fprintln(output, "run supplies short-lived GitHub CLI and Git HTTPS authorization only to COMMAND.")
 }
 
@@ -309,8 +309,8 @@ func RunClient(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stdout)
 		return 0
 	case "status":
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, "github-broker: status takes no arguments")
+		if len(args) != 1 && (len(args) != 2 || args[1] != "--runtime") {
+			fmt.Fprintln(stderr, "github-broker: status accepts only --runtime")
 			return 2
 		}
 		body, _, err := client.request(ctx, http.MethodGet, "/status", nil)
@@ -319,13 +319,24 @@ func RunClient(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 			return 1
 		}
 		var status struct {
-			Configured *bool `json:"configured"`
+			Configured *bool  `json:"configured"`
+			Protocol   int    `json:"protocol"`
+			Executable string `json:"executable_sha256"`
 		}
 		if json.Unmarshal(body, &status) != nil || status.Configured == nil {
 			fmt.Fprintln(stderr, "github-broker: invalid broker status")
 			return 1
 		}
-		_ = json.NewEncoder(stdout).Encode(status)
+		if len(args) == 2 {
+			clientDigest, identityErr := loadedRuntime()
+			if identityErr != nil || status.Protocol != runtimeProtocol || !validRuntimeDigest(status.Executable) {
+				fmt.Fprintln(stderr, "github-broker: incompatible broker runtime")
+				return 1
+			}
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"protocol": status.Protocol, "broker_sha256": status.Executable, "client_sha256": clientDigest})
+		} else {
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"configured": status.Configured})
+		}
 		return 0
 	default:
 		fmt.Fprintln(stderr, "github-broker: unknown command")

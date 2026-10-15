@@ -37,6 +37,25 @@ func (runtime Runtime) ObserveProfileRuntimes(ctx context.Context) (map[string]p
 	return runtime.observeProfileRuntimes(ctx, definitions)
 }
 
+// ObserveProfileRuntime narrows native observation to one declared owner. A
+// retained-release admission check must not invoke unrelated profile hooks.
+func (runtime Runtime) ObserveProfileRuntime(ctx context.Context, id string) (ports.RuntimeObservation, error) {
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	for _, definition := range definitions {
+		if definition.Runtime.ActivationID == id {
+			if probe, ok := runtime.Incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+				return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
+			}
+			observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+			return observations[id], err
+		}
+	}
+	return ports.RuntimeObservation{}, errors.New("profile runtime owner is unavailable")
+}
+
 func (runtime Runtime) observeProfileRuntimes(
 	ctx context.Context,
 	definitions []profile.Definition,
@@ -282,6 +301,9 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	}
 	if observation.HookBinding != "" && !profileRuntimeDigest.MatchString(observation.HookBinding) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid hook binding")
+	}
+	if observation.OwnershipAbsent && observation.State != ports.RuntimeStateCurrent {
+		return ports.RuntimeObservation{}, errors.New("runtime ownership absence requires current state")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

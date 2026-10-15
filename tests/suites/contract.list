@@ -26,3 +26,4 @@ test-vms.sh
 workflow-real-adapter-gate.sh
 yard-extras-convergence.sh
 yard-usage.sh
+installed-runtime-refresh.sh

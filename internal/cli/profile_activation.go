@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
@@ -13,9 +14,10 @@ import (
 // Refresh only installed profile files; the profile adapter owns their contract.
 // The transition owns confirmation, recovery, and verification across local yards.
 type profileRuntimeActivationReconciler struct {
-	cli     *CLI
-	request releasetransition.ProcessRequest
-	id      string
+	cli      *CLI
+	request  releasetransition.ProcessRequest
+	id       string
+	recovery map[string]ports.RuntimeObservation
 }
 
 func (cli *CLI) profileActivationReconciler(request releasetransition.ProcessRequest, id string) releasetransition.V2ActivationReconciler {
@@ -25,7 +27,11 @@ func (cli *CLI) profileActivationReconciler(request releasetransition.ProcessReq
 func (reconciler *profileRuntimeActivationReconciler) ID() string { return reconciler.id }
 
 func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string, cause error) error {
-	return materializedConfigActivationError{cause, yard, "profile " + reconciler.id + " runtime", "status", phase, reconciler.request.ConfigHome}
+	owner := "profile " + reconciler.id + " runtime"
+	if coreInstalledRuntimeID(reconciler.id) {
+		owner = reconciler.id
+	}
+	return materializedConfigActivationError{cause, yard, owner, "status", phase, reconciler.request.ConfigHome}
 }
 
 func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configTarget, error) {
@@ -43,7 +49,7 @@ func (reconciler *profileRuntimeActivationReconciler) targets() (*CLI, []configT
 	// absent local installation has none; raw runtime observation still reports
 	// unavailable transport so init can retain its approved prerequisite slots.
 	incus, _ := operation.statusPorts()
-	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); reconciler.id != "key-tools-runtime" && ok && probe.LocalInstallationAbsent() {
 		targets = nil
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
@@ -98,11 +104,10 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
 	}
 	type observation struct {
-		Yard, Project, Instance, State, Digest string
+		Yard, Project, Instance, State, Digest, Desired string
 	}
 	actual := make([]observation, 0, len(targets))
 	converged := true
-	var warnings []string
 	for _, target := range targets {
 		state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
 		if err != nil {
@@ -113,19 +118,15 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			kind = "installed"
 		}
 		entry := observation{Yard: target.Name, Project: target.Loaded.Context.IncusProject,
-			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual}
+			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual, Desired: state.Desired}
 		actual = append(actual, entry)
 		converged = converged && state.State != "stale"
-		if state.State == "deferred" {
-			warnings = append(warnings, fmt.Sprintf(
-				"yard %s: installed profile handler refresh deferred while the yard is stopped; run init after starting it", target.Name))
-		}
 	}
 	actualDigest := desiredDigest
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Warnings: warnings}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged}, err
 }
 
 func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Context, _ releasetransition.ReleaseLinks) error {
@@ -140,16 +141,32 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	if err != nil {
 		return err
 	}
+	if reconciler.recovery != nil && len(targets) != len(reconciler.recovery) {
+		return domain.ErrPlanStale
+	}
 	for _, target := range targets {
 		platform := profileActivationPlatform(operation, target)
 		state, err := observeProfileRuntime(ctx, platform, reconciler.id)
 		if err != nil {
 			return reconciler.failure(target.Name, "inspect", err)
 		}
+		if reconciler.recovery != nil {
+			if _, exists := reconciler.recovery[target.Name]; !exists {
+				return domain.ErrPlanStale
+			}
+		}
+		if approved, exists := reconciler.recovery[target.Name]; exists && state != approved &&
+			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) {
+			return reconciler.failure(target.Name, "apply", domain.ErrPlanStale)
+		}
 		if state.State != "stale" {
 			continue
 		}
-		if err := platform.ApplyProfileRuntime(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
+		apply := platform.ApplyProfileRuntime
+		if coreInstalledRuntimeID(reconciler.id) {
+			apply = platform.ApplyInstalledRuntime
+		}
+		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
 			return reconciler.failure(target.Name, "apply", err)
 		}
 		state, err = observeProfileRuntime(ctx, platform, reconciler.id)
@@ -164,6 +181,9 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 }
 
 func observeProfileRuntime(ctx context.Context, platform ports.InitPlatform, id string) (ports.RuntimeObservation, error) {
+	if coreInstalledRuntimeID(id) {
+		return platform.ObserveInstalledRuntime(ctx, id)
+	}
 	observations, err := platform.ObserveProfileRuntimes(ctx)
 	if err != nil {
 		return ports.RuntimeObservation{}, err
@@ -173,6 +193,46 @@ func observeProfileRuntime(ctx context.Context, platform ports.InitPlatform, id 
 		return ports.RuntimeObservation{}, fmt.Errorf("profile runtime %s observation is missing", id)
 	}
 	return observation, nil
+}
+
+func coreInstalledRuntimeID(id string) bool {
+	return id == "core-guest-runtime" || id == "key-tools-runtime"
+}
+
+// Runtime hooks own guarded, repeatable convergence from partial delivery. Bind
+// a fresh native plan to each yard's current CAS contract before new consent.
+func (reconciler *profileRuntimeActivationReconciler) PrepareActivationRecovery(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks) (releasetransition.Fingerprint, error) {
+	complete, err := reconciler.sourceMigrationsComplete()
+	if err != nil {
+		return "", err
+	}
+	if !complete {
+		return "", fmt.Errorf("runtime recovery requires completed source migrations")
+	}
+	operation, targets, err := reconciler.targets()
+	if err != nil {
+		return "", err
+	}
+	type entry struct {
+		Yard, Project, Instance string
+		Runtime                 ports.RuntimeObservation
+	}
+	var entries []entry
+	reconciler.recovery = make(map[string]ports.RuntimeObservation, len(targets))
+	for _, target := range targets {
+		state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), reconciler.id)
+		if err != nil {
+			return "", reconciler.failure(target.Name, "inspect", err)
+		}
+		entries = append(entries, entry{target.Name, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, state})
+		reconciler.recovery[target.Name] = state
+	}
+	return activationStageFingerprint(struct {
+		ID       string
+		Releases releasetransition.ReleasePair
+		Links    releasetransition.ReleaseLinks
+		Targets  []entry
+	}{reconciler.id, releases, links, entries})
 }
 func (cli *CLI) profileRuntimeIDs() []string {
 	var result []string

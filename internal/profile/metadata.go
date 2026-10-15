@@ -215,6 +215,9 @@ func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) e
 			settings[setting.Name] = true
 		}
 		if definition.Runtime != nil {
+			if definition.Runtime.ActivationID == "core-guest-runtime" || definition.Runtime.ActivationID == "key-tools-runtime" {
+				return errors.New("profile runtime activation ID collides with a core owner")
+			}
 			if activations[definition.Runtime.ActivationID] {
 				return fmt.Errorf("duplicate profile runtime activation ID %s", definition.Runtime.ActivationID)
 			}

@@ -85,7 +85,7 @@ run_hook() { # <version> <arch> <dest> <amd64-sha> <arm64-sha>
     CCUSAGE_REGISTRY_URL="file://$registry" \
     CCUSAGE_SHA256_AMD64="$4" \
     CCUSAGE_SHA256_ARM64="$5" \
-    bash "$HOOK"
+    bash "$HOOK" "${6:-}"
 }
 
 dest="$tmp/install/ccusage"
@@ -216,5 +216,33 @@ else
   fi
 fi
 grep -Fq 'must run as root' "$nonroot_err" || fail "non-root refusal is unclear"
+
+# A version string cannot authorize a new pin or bytes replaced after publication.
+receipt_dest="$tmp/install/receipt-case"
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" >/dev/null
+count="$(fetch_count)"
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" --check
+[ "$(fetch_count)" = "$count" ] || fail 'read-only receipt check fetched an archive'
+# Published predecessors have a valid binary without the newer trusted receipt.
+legacy_binary="$(sha256sum "$receipt_dest" | cut -d' ' -f1)"
+rm "$receipt_dest.subyard-runtime.json"
+if run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" --check; then fail 'legacy binary without receipt reported current'; fi
+[ "$(fetch_count)" = "$count" ] && [ ! -e "$receipt_dest.subyard-runtime.json" ] \
+  && [ "$(sha256sum "$receipt_dest" | cut -d' ' -f1)" = "$legacy_binary" ] \
+  || fail 'legacy readiness check downloaded or changed installed state'
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" >/dev/null
+[ "$(fetch_count)" -eq "$((count + 1))" ] || fail 'legacy receipt repair trusted the version instead of a verified archive'
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" --check
+count="$(fetch_count)"
+printf 'replaced bytes' >> "$receipt_dest"
+if run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" --check; then fail 'version-only check accepted replaced binary'; fi
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" >/dev/null
+[ "$(fetch_count)" -eq "$((count + 1))" ] || fail 'replaced ccusage did not reinstall from verified archive'
+receipt_before="$(sha256sum "$receipt_dest.subyard-runtime.json" | cut -d' ' -f1)"
+wrong_pin="$(printf '0%.0s' {1..64})"
+if run_hook 1.2.3 amd64 "$receipt_dest" "$wrong_pin" "$sha_123_arm64" --check; then fail 'same-version changed archive pin accepted'; fi
+if run_hook 1.2.3 amd64 "$receipt_dest" "$wrong_pin" "$sha_123_arm64" > "$tmp/receipt-pin.err" 2>&1; then fail 'unchecked same-version binary installed'; fi
+[ "$(sha256sum "$receipt_dest.subyard-runtime.json" | cut -d' ' -f1)" = "$receipt_before" ] || fail 'failed archive verification changed trusted receipt'
+run_hook 1.2.3 amd64 "$receipt_dest" "$sha_123_amd64" "$sha_123_arm64" --check
 
 printf 'ok: native ccusage provision\n'

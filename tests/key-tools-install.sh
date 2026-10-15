@@ -66,6 +66,32 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 [ "$(wc -l < "$KEY_TOOL_CURL_LOG")" = 2 ] || fail 'converged installer downloaded again'
 
+receipt="$SUBYARD_KEYS_TOOLS_DIR/bin/.subyard-native-tools.json"
+[ "$(stat -c '%a' "$receipt")" = 600 ] || fail 'native tool receipt is not protected'
+# The same operator may invoke yard through sg with a different primary group.
+KEY_TOOL_REAL_ID="$(command -v id)"
+export KEY_TOOL_REAL_ID
+cat > "$TMP/bin/id" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = '-g' ]; then printf '4294967294\n'; else exec "$KEY_TOOL_REAL_ID" "$@"; fi
+SH
+chmod 0755 "$TMP/bin/id"
+receipt_inode="$(stat -c '%i' "$receipt")"
+PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check
+PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
+[ "$(wc -l < "$KEY_TOOL_CURL_LOG")" = 2 ] || fail 'changed primary group downloaded trusted tools again'
+[ "$(stat -c '%i' "$receipt")" = "$receipt_inode" ] || fail 'changed primary group rewrote trusted receipt'
+printf '\n# replaced bytes, same reported version\n' >> "$SUBYARD_KEYS_TOOLS_DIR/bin/age"
+if PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check; then fail 'replaced native bytes accepted by version only'; fi
+PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
+[ "$(wc -l < "$KEY_TOOL_CURL_LOG")" = 4 ] || fail 'replaced tool did not use verified archive repair'
+receipt_before="$(sha256sum "$receipt" | cut -d' ' -f1)"
+wrong_pin="$(printf '0%.0s' {1..64})"
+if SUBYARD_AGE_SHA256_AMD64="$wrong_pin" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check; then fail 'same-version changed pin accepted'; fi
+if SUBYARD_AGE_SHA256_AMD64="$wrong_pin" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes > "$TMP/same-version-pin.out" 2>&1; then fail 'unchecked same-version replacement installed'; fi
+[ "$(sha256sum "$receipt" | cut -d' ' -f1)" = "$receipt_before" ] || fail 'failed pin verification replaced trusted receipt'
+PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check
+
 export SUBYARD_KEYS_TOOLS_DIR="$TMP/bad-tools"
 SUBYARD_AGE_SHA256_AMD64="$(printf '0%.0s' {1..64})"
 export SUBYARD_AGE_SHA256_AMD64

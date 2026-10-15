@@ -39,6 +39,14 @@ func TestProfileRuntimeColdInstallationPreservesDependencyLoss(t *testing.T) {
 			if err == nil {
 				t.Fatalf("dependency loss treated as absent: %#v", observations)
 			}
+			observation, presenceErr := runtime.ObserveProfileRuntime(context.Background(), "synthetic-runtime")
+			if scenario == "cold" {
+				if presenceErr != nil || observation.State != ports.RuntimeStateAbsent {
+					t.Fatalf("verified cold presence not absent: %#v %v", observation, presenceErr)
+				}
+			} else if presenceErr == nil {
+				t.Fatal("retained/ambiguous installation accepted as absent")
+			}
 			plan, err := runtime.PrepareProfileRuntimes(context.Background(), true, false)
 			if scenario == "cold" {
 				if err != nil || !plan.unavailable || plan.approved["synthetic-runtime"].State != ports.RuntimeStateDeferred {
@@ -81,6 +89,30 @@ exit 9
 	converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProfileRuntimes)
 	if err != nil || !converged || !strings.Contains(diagnostics.String(), "deferred") {
 		t.Fatalf("stopped check = %v, %v, diagnostics %q", converged, err, diagnostics.String())
+	}
+}
+
+func TestObserveSingleProfileRuntimeSkipsUnrelatedHooksAndPreservesUnavailable(t *testing.T) {
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nprintf '{\"state\":\"absent\"}\\n'\n")
+	other := filepath.Join(runtime.RepositoryRoot, "config/profiles/unrelated")
+	if err := os.MkdirAll(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(other, "profile.json"), []byte(`{"schema_version":1,"runtime":{"activation_id":"unrelated-runtime","handler":"runtime.sh"}}`), 0600)
+	testkit.WriteFile(t, filepath.Join(other, "runtime.sh"), []byte("#!/bin/sh\nexit 9\n"), 0700)
+	observation, err := runtime.ObserveProfileRuntime(context.Background(), "synthetic-runtime")
+	if err != nil || observation.State != ports.RuntimeStateAbsent {
+		t.Fatalf("single owner observation failed: %#v %v", observation, err)
+	}
+	if _, err := runtime.ObserveProfileRuntimes(context.Background()); err == nil {
+		t.Fatal("unrelated failing hook fixture was not exercised")
+	}
+	runtime.Incus = &testkit.Incus{Err: errors.New("native unavailable")}
+	if _, err := runtime.ObserveProfileRuntime(context.Background(), "synthetic-runtime"); err == nil {
+		t.Fatal("unavailable native transport accepted as absence")
+	}
+	if _, err := runtime.ObserveProfileRuntime(context.Background(), "missing-runtime"); err == nil {
+		t.Fatal("unknown owner accepted as absence")
 	}
 }
 
@@ -146,6 +178,11 @@ func TestObserveProfileRuntimeValidatesBoundedStrictJSON(t *testing.T) {
 		{name: "bad digest", output: `{"state":"current","actual":"abc","desired":"abc"}`},
 		{name: "unknown field", output: `{"state":"absent","actual":"","desired":"","extra":true}`},
 		{name: "trailing", output: `{"state":"absent","actual":"","desired":""} {}`},
+		{name: "absent ownership without current", output: `{"state":"absent","ownership_absent":true}`},
+		{name: "deferred ownership", output: `{"state":"deferred","ownership_absent":true}`},
+		{name: "stale ownership", output: `{"state":"stale","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","ownership_absent":true}`},
+		{name: "unbound ownership", output: `{"state":"current","ownership_absent":true}`},
+		{name: "wrong ownership type", output: `{"state":"current","actual":"` + testRuntimeNewDigest + `","desired":"` + testRuntimeNewDigest + `","ownership_absent":"yes"}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -181,14 +218,14 @@ case "$1" in
     if [ "$(cat "$STATE")" = stale ]; then
       printf '{"state":"stale","actual":"%s","desired":"%s"}\n' "$OLD" "$NEW"
     else
-      printf '{"state":"current","actual":"%s","desired":"%s"}\n' "$NEW" "$NEW"
+      printf '{"state":"current","actual":"%s","desired":"%s","ownership_absent":true}\n' "$NEW" "$NEW"
     fi
     ;;
   apply)
     printf '%s\n' "$*" > "$LOG"
     [ "$2" = "$OPERATION" ] && [ "$3" = "$OLD" ] && [ "$4" = "$NEW" ]
     printf current > "$STATE"
-    printf '{"state":"current","actual":"%s","desired":"%s"}\n' "$NEW" "$NEW"
+    printf '{"state":"current","actual":"%s","desired":"%s","ownership_absent":true}\n' "$NEW" "$NEW"
     ;;
 esac
 `

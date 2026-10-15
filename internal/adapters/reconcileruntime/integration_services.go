@@ -54,7 +54,15 @@ if [ "$allowed" = false ] && { [ -e /usr/local/bin/ccusage ] || [ -L /usr/local/
   fi
   sha256sum /usr/local/bin/ccusage
   changed=1
-  if [ "$mode" = apply ]; then rm -- /usr/local/bin/ccusage "$receipt"; fi
+  activation_receipt=/usr/local/bin/ccusage.subyard-runtime.json
+  if [ -e "$activation_receipt" ] || [ -L "$activation_receipt" ]; then
+    [ -f "$activation_receipt" ] && [ ! -L "$activation_receipt" ] &&
+      [ "$(stat -c '%u:%g:%a' "$activation_receipt")" = 0:0:600 ] &&
+      jq -e --arg binary "$(sha256sum /usr/local/bin/ccusage | cut -d' ' -f1)" \
+        '.schema == 1 and .binary == $binary and (.version | type == "string") and (.archive | test("^[0-9a-f]{64}$"))' "$activation_receipt" >/dev/null || conflict ccusage
+    sha256sum "$activation_receipt"
+  fi
+  if [ "$mode" = apply ]; then rm -- /usr/local/bin/ccusage "$receipt"; rm -f -- "$activation_receipt"; fi
 fi
 printf 'changed=%s\n' "$changed"
 `, "subyard", mode, runtime.environmentValue("CODING_TOOL_INTEGRATIONS"), runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}})

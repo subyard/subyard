@@ -8,6 +8,7 @@ SHA256_ARM64="${CCUSAGE_SHA256_ARM64:-}"
 INSTALL_PATH="${CCUSAGE_INSTALL_PATH:-/usr/local/bin/ccusage}"
 REGISTRY_URL="${CCUSAGE_REGISTRY_URL:-https://registry.npmjs.org}"
 ARCH="${CCUSAGE_ARCH:-}"
+RECEIPT="$INSTALL_PATH.subyard-runtime.json"
 
 die() { printf 'ccusage provision: %s\n' "$*" >&2; exit 1; }
 
@@ -57,7 +58,25 @@ is_expected_binary() {
   [ "$output" = "ccusage $VERSION" ]
 }
 
-if is_expected_binary "$INSTALL_PATH"; then
+render_receipt() {
+  jq -n --arg version "$VERSION" --arg archive "$EXPECTED_SHA256" \
+    --arg binary "$(sha256sum "${1:-$INSTALL_PATH}" | cut -d' ' -f1)" \
+    '{schema:1,version:$version,archive:$archive,binary:$binary}'
+}
+receipt_matches() {
+  local owner
+  owner="$(id -u):$(id -g)"
+  [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] \
+    && [ "$(stat -c '%a:%u:%g' "$RECEIPT")" = "600:$owner" ] \
+    && cmp -s <(render_receipt) "$RECEIPT"
+}
+
+if [ "${1:-}" = --check ]; then
+  is_expected_binary "$INSTALL_PATH" && receipt_matches
+  exit
+fi
+
+if is_expected_binary "$INSTALL_PATH" && receipt_matches; then
   printf 'ccusage %s is already installed at %s\n' "$VERSION" "$INSTALL_PATH"
   exit 0
 fi
@@ -112,6 +131,12 @@ mv -fT -- "$stage" "$INSTALL_PATH"
 stage=""
 
 is_expected_binary "$INSTALL_PATH" || die "installed binary verification failed"
+receipt_temp="$(mktemp "$install_dir/.ccusage-receipt.XXXXXX")"
+render_receipt "$source_bin" > "$receipt_temp"
+chmod 0600 "$receipt_temp"
+if [ "$(id -u)" -eq 0 ]; then chown 0:0 "$receipt_temp"; fi
+mv -fT -- "$receipt_temp" "$RECEIPT"
+receipt_matches || die "installed binary receipt verification failed"
 [ "$(stat -c '%a' "$INSTALL_PATH")" = 755 ] || die "installed binary mode is not 0755"
 if [ "$(id -u)" -eq 0 ]; then
   [ "$(stat -c '%u:%g' "$INSTALL_PATH")" = 0:0 ] \

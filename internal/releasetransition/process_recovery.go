@@ -14,6 +14,7 @@ type RecoveryProcessMode string
 const (
 	RecoveryProcessCapabilities          RecoveryProcessMode = "capabilities"
 	RecoveryProcessLifecycleCapabilities RecoveryProcessMode = "lifecycle-capabilities"
+	RecoveryProcessRuntimeCapabilities   RecoveryProcessMode = "runtime-activation-capabilities"
 	RecoveryProcessInspect               RecoveryProcessMode = "inspect"
 	RecoveryProcessConverge              RecoveryProcessMode = "converge"
 )
@@ -73,7 +74,7 @@ func (request RecoveryProcessRequest) Validate() error {
 	if request.SchemaVersion != ProcessRecoverySchemaV2 {
 		return invalid("unsupported recovery process schema")
 	}
-	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities {
+	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities || request.Mode == RecoveryProcessRuntimeCapabilities {
 		if request.RuntimeRoot != "" || request.ConfigHome != "" || request.Yard != "" || request.Target != "" ||
 			request.Direction != "" || request.ArtifactDigest != "" || request.RegistryDigest != "" ||
 			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil || request.Contract != "" {
@@ -121,6 +122,7 @@ type RecoveryProcessResponse struct {
 	SchemaVersion                 int                   `json:"schemaVersion"`
 	ActivationReconciliationOwned bool                  `json:"activationReconciliationOwned"`
 	Capabilities                  *RecoveryCapabilities `json:"capabilities,omitempty"`
+	ActivationOwners              []string              `json:"activationOwners,omitempty"`
 	Inspection                    *Inspection           `json:"inspection,omitempty"`
 	Outcome                       *Outcome              `json:"outcome,omitempty"`
 }
@@ -129,6 +131,7 @@ type recoveryProcessResponseWire struct {
 	SchemaVersion                 int                    `json:"schemaVersion"`
 	ActivationReconciliationOwned bool                   `json:"activationReconciliationOwned"`
 	Capabilities                  *RecoveryCapabilities  `json:"capabilities,omitempty"`
+	ActivationOwners              []string               `json:"activationOwners,omitempty"`
 	Inspection                    *protocolv1.Inspection `json:"inspection,omitempty"`
 	Outcome                       *protocolv1.Outcome    `json:"outcome,omitempty"`
 }
@@ -142,7 +145,8 @@ func (response RecoveryProcessResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(recoveryProcessResponseWire{
 		SchemaVersion: response.SchemaVersion, ActivationReconciliationOwned: response.ActivationReconciliationOwned,
 		Capabilities: response.Capabilities, Inspection: protocolPointer(response.Inspection, inspectionV1),
-		Outcome: protocolPointer(response.Outcome, outcomeV1),
+		ActivationOwners: response.ActivationOwners,
+		Outcome:          protocolPointer(response.Outcome, outcomeV1),
 	})
 }
 
@@ -154,7 +158,8 @@ func (response *RecoveryProcessResponse) UnmarshalJSON(payload []byte) error {
 	parsed := RecoveryProcessResponse{
 		SchemaVersion: wire.SchemaVersion, ActivationReconciliationOwned: wire.ActivationReconciliationOwned,
 		Capabilities: wire.Capabilities, Inspection: protocolPointer(wire.Inspection, inspectionFromV1),
-		Outcome: protocolPointer(wire.Outcome, outcomeFromV1),
+		ActivationOwners: wire.ActivationOwners,
+		Outcome:          protocolPointer(wire.Outcome, outcomeFromV1),
 	}
 	if err := parsed.Validate(); err != nil {
 		return err
@@ -166,6 +171,20 @@ func (response *RecoveryProcessResponse) UnmarshalJSON(payload []byte) error {
 func (response RecoveryProcessResponse) Validate() error {
 	if response.SchemaVersion != ProcessRecoverySchemaV2 {
 		return invalid("unsupported recovery response schema")
+	}
+	if len(response.ActivationOwners) != 0 {
+		if len(response.ActivationOwners) > 128 || response.Capabilities != nil || response.Inspection != nil || response.Outcome != nil || response.ActivationReconciliationOwned {
+			return invalid("runtime capability response carries invalid results")
+		}
+		for index, id := range response.ActivationOwners {
+			if err := validateSafeID(id, "runtime activation owner"); err != nil {
+				return err
+			}
+			if index > 0 && response.ActivationOwners[index-1] >= id {
+				return invalid("runtime activation owners are not unique and sorted")
+			}
+		}
+		return nil
 	}
 	if response.Capabilities != nil {
 		if response.Inspection != nil || response.Outcome != nil || response.ActivationReconciliationOwned {

@@ -118,6 +118,17 @@ func (fixture *initPlatformFixture) ApplyProfileRuntime(ctx context.Context, _, 
 	return fixture.ApplyStage(ctx, ports.ReconcileStageProfileRuntimes)
 }
 
+func (fixture *initPlatformFixture) ObserveInstalledRuntime(context.Context, string) (ports.RuntimeObservation, error) {
+	return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
+}
+func (fixture *initPlatformFixture) InstalledRuntimePresence(context.Context, string) (ports.RuntimePresence, error) {
+	return ports.RuntimePresence{}, nil
+}
+
+func (fixture *initPlatformFixture) ApplyInstalledRuntime(context.Context, string, string, string, string) error {
+	return nil
+}
+
 func (fixture *initPlatformFixture) ConfigsConverged(context.Context) (bool, error) {
 	fixture.configChecks = append(fixture.configChecks, fixture.configsConverged)
 	return fixture.configsConverged, nil

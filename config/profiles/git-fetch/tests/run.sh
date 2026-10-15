@@ -10,6 +10,7 @@ export GIT_FETCH_TEST_GITHUB_CLIENT="$root/.build/git-fetch/github-client"
 python3 -B "$profile/tests/fetch-test.py"
 python3 -B "$profile/tests/guest-test.py"
 bash "$profile/tests/owner-lifecycle.sh"
-bash -n "$profile/owner.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
-shellcheck -S warning "$profile/owner.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
+bash -n "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
+shellcheck -S warning "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
 bash "$profile/tests/e2e/acceptance.sh" --help >/dev/null
+bash "$profile/tests/e2e/acceptance.sh" --preflight

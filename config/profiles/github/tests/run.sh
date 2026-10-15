@@ -14,3 +14,4 @@ bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \
 bash "$ROOT/config/profiles/github/tests/cleanup.sh"
 bash "$ROOT/config/profiles/github/tests/teardown-identity.sh"
 bash "$ROOT/config/profiles/github/tests/composition.sh"
+python3 "$ROOT/config/profiles/github/tests/runtime-test.py"

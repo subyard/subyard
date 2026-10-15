@@ -1465,13 +1465,64 @@ in generic owner-port collision checks.
 A `runtime` declaration contains an `activation_id` and relative executable `handler`. The ID is
 unique across profile and core activation stages and remains durable across release transitions.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
-bounded JSON object with `state`, `actual`, `desired` and optional `hook_binding`. States are `absent`, `deferred`, `current`
+bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
+`ownership_absent`. States are `absent`, `deferred`, `current`
 and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 Core bounds execution and output, checks the assessment before apply, and verifies the resulting
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
 Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
 The Orca profile retains its existing `orca-runtime` identity and wire fingerprints.
+`ownership_absent: true` is valid only with `current` and its ordinary equal SHA-256
+digests. It proves no owned artifacts remain for retained-owner admission; successful
+cleanup still converges to the approved desired digest. It does not relax apply verification.
+
+GitHub declares `github-runtime`, reusing its owner-service lifecycle for release delivery,
+restart and verification. Its authenticated status includes the loaded broker's executable
+SHA-256 and protocol; `subyard-github status --runtime` returns the loaded broker and guest
+client identities. Ordinary status retains its configured-only JSON. Readiness requires the
+installed owner and guest files and both loaded identities to match the shipped executable.
+No GitHub API call or key import is required for runtime activation.
+
+Git-fetch declares `git-fetch-runtime`, reusing its owned guest lifecycle and
+installation lock. Release refresh checks exact worker/unit assets and loaded
+systemd policy, preserves a disabled timer, and leaves absent installations
+absent even when selected. Deselected installed files remain release consumers;
+refresh keeps their timer disabled. Observations bind public file metadata and
+manager readiness without inspecting repositories, URLs or credentials.
+
+Core also registers `core-guest-runtime` and `key-tools-runtime` for already installed helpers.
+Provisioning's preview/ccusage ownership markers authorize bounded helper refresh; missing
+artifacts with those markers remain drift. Unprovisioned guests without the markers are absent.
+Preview delivery and the pinned ccusage installer are shared with ordinary provisioning;
+release refresh does not rerun base packages or profile provisioning. Existing tool publication
+or a durable key-identity file permits age/SOPS repair; activation never initializes credentials.
+The tool installers publish protected receipts binding verified archive pins and installed
+binary SHA-256 values. Missing receipts require a checksum-verified installation, rather than
+accepting an existing version string. An installed credential timer receives refreshed unit
+files and manager reload while retaining enabled/running intent. A protected ownership receipt
+or exact shipped legacy unit recipes must establish timer ownership before refresh; a same-name
+foreign unit is refused without changing either peer. The first verified legacy refresh publishes
+the receipt. Both absent timer units stay absent, including when an old receipt remains. Host key
+tools and timers are inspected independently of Incus installation or guest availability. Stopped
+guest deferral is expected drift and does not emit a warning or require a separate init command.
+
+Runtime owners bind safe fresh recovery plans to complete per-yard native observations after
+partial delivery. New authorization and the native compare-and-swap guards remain required;
+completed migrations are not replayed for runtime repair. The input-free schema-2
+`runtime-activation-capabilities` process probe reports the sealed engine's compiled activation
+IDs. It leaves frozen recovery capability responses unchanged. Rollback refuses a retained
+release that loses an installed profile's runtime owner, including deselected owner or guest
+artifacts, or a selected guest-only runtime contract. When host receipts are absent, before
+losing an owner admission asks that one native observer to prove guest absence; stopped, missing or failed
+observations cannot prove absence. That observation is rechecked before effects.
+A historical owner without the new probe may retain
+the identical installed core helper payloads, timer templates and native archive pins; different
+installed contracts require an explicitly advertised target activation owner. Proven absent
+consumers impose no payload or pin requirement. Each installed local yard uses its own effective
+pins and tool roots; stopped guests remain conservative when absence cannot be proved. Unavailable
+observations refuse rollback. Refusal happens before runtime-link mutation, and installed presence,
+metadata and effective settings are rechecked after consent.
 
 Optional `runtime.projects_changed_hooks` declares installed hooks owned by that runtime.
 Entries must be unique, clean absolute paths directly inside

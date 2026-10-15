@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -91,15 +92,40 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 	}, nil
 }
 
-func (cli *CLI) releaseRuntimeConfig(context releaseruntime.RuntimeContext) releaseruntime.Config {
+func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContext) releaseruntime.Config {
 	return releaseruntime.Config{
 		Inputs:         cli.commandInputs,
-		Context:        context,
+		Context:        runtimeContext,
 		Installer:      filepath.Join(cli.options.RepositoryRoot, "scripts", "install-runtime-release.sh"),
 		RepositoryRoot: cli.options.RepositoryRoot,
 		Stdout:         cli.options.Stdout,
 		Stderr:         cli.options.Stderr,
 		Progress:       cli.updateProgress,
+		InstalledRuntimePresence: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimePresence, error) {
+			operation := cli.releaseActivationOperation()
+			operation.options.RepositoryRoot = root
+			platform := operation.initPlatformWithDispatcher(loaded, nil, filepath.Join(root, "bin", "yard-engine"))
+			return platform.InstalledRuntimePresence(ctx, id)
+		},
+		ProfileRuntimeObservation: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimeObservation, error) {
+			operation := cli.releaseActivationOperation()
+			operation.options.RepositoryRoot = root
+			platform := operation.initPlatformWithDispatcher(loaded, nil, filepath.Join(root, "bin", "yard-engine"))
+			if observer, ok := platform.(interface {
+				ObserveProfileRuntime(context.Context, string) (ports.RuntimeObservation, error)
+			}); ok {
+				return observer.ObserveProfileRuntime(ctx, id)
+			}
+			observations, err := platform.ObserveProfileRuntimes(ctx)
+			if err != nil {
+				return ports.RuntimeObservation{}, err
+			}
+			observation, ok := observations[id]
+			if !ok {
+				return ports.RuntimeObservation{}, errors.New("profile runtime owner is unavailable")
+			}
+			return observation, nil
+		},
 	}
 }
 

@@ -104,6 +104,81 @@ class GuestTests(unittest.TestCase):
         self.assertTrue(disabled.apply())
         self.assertTrue(enabled.apply())
 
+    def test_release_refresh_native_identity_cas_repeat_and_disabled_intent(self):
+        runtime = self.runtime()
+        binding = 'a'*64
+        self.assertEqual(runtime.observe(binding), {'state': 'absent'})
+        self.assertFalse(self.state.exists())
+        runtime.apply()
+        worker = self.state/'fetch.py'
+        worker.write_bytes(b'owned older worker\n')
+        before = runtime.observe(binding)
+        self.assertEqual(before['state'], 'stale')
+        self.assertNotIn('Environment', str(before))
+        worker.write_bytes(b'concurrent replacement\n')
+        self.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'changed before apply'):
+            runtime.refresh(binding, 'operation', before['actual'], before['desired'])
+        self.assertTrue(all(call[0] == 'show' for call in self.calls))
+        before = runtime.observe(binding)
+        after = runtime.refresh(binding, 'operation', before['actual'], before['desired'])
+        self.assertEqual(after['state'], 'current')
+        self.assertEqual(worker.read_bytes(), runtime.assets[worker])
+        inode = worker.stat().st_ino
+        self.calls.clear()
+        runtime.refresh(binding, 'operation', after['actual'], after['desired'])
+        self.assertEqual(worker.stat().st_ino, inode)
+        self.assertTrue(all(call[0] == 'show' for call in self.calls))
+        self.timer[:] = ['inactive', 'disabled']
+        worker.write_bytes(b'owned disabled drift\n')
+        before = runtime.observe(binding)
+        runtime.refresh(binding, 'operation', before['actual'], before['desired'])
+        self.assertEqual(self.timer, ['inactive', 'disabled'])
+        self.assertTrue(runtime.observe(binding)['state'] == 'current')
+        deselected = self.runtime(False)
+        worker.write_bytes(b'owned deselected drift\n')
+        before = deselected.observe(binding)
+        deselected.refresh(binding, 'operation', before['actual'], before['desired'])
+        self.assertEqual(self.timer, ['inactive', 'disabled'])
+
+    def test_release_observation_refuses_foreign_and_changed_source(self):
+        runtime = self.runtime()
+        runtime.apply()
+        worker = self.state/'fetch.py'
+        worker.write_bytes(b'old\n')
+        before = runtime.observe('a'*64)
+        self.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'inputs changed'):
+            runtime.refresh('b'*64, 'operation', before['actual'], before['desired'])
+        self.assertTrue(all(call[0] == 'show' for call in self.calls))
+        self.overrides[guest.SERVICE] = {'Environment': 'PRIVATE=must-not-be-projected'}
+        with self.assertRaisesRegex(ValueError, 'foreign loaded'):
+            runtime.observe('a'*64)
+
+    def test_release_refresh_retries_after_delivery_and_loaded_restart_failure(self):
+        runtime = self.runtime()
+        runtime.apply()
+        worker = self.state/'fetch.py'
+        worker.write_bytes(b'old worker\n')
+        before = runtime.observe('a'*64)
+        native = self.systemctl
+        def interrupted(*args):
+            if args[0] == 'start':
+                raise OSError('interrupted after delivery before start')
+            return native(*args)
+        with patch.object(guest, 'systemctl', interrupted):
+            with self.assertRaises(OSError):
+                runtime.refresh('a'*64, 'operation', before['actual'], before['desired'])
+        self.assertEqual(worker.read_bytes(), runtime.assets[worker])
+        self.assertEqual(runtime.observe('a'*64)['state'], 'stale')
+        retry = runtime.observe('a'*64)
+        runtime.refresh('a'*64, 'retry', retry['actual'], retry['desired'])
+        self.assertEqual(self.timer, ['active', 'enabled'])
+        deselected = self.runtime(False)
+        before = deselected.observe('a'*64)
+        deselected.refresh('a'*64, 'disable', before['actual'], before['desired'])
+        self.assertEqual(self.timer, ['inactive', 'disabled'])
+
     def test_absent_parent_disabled_is_read_only_and_selected_creates_it(self):
         self.state = self.base/'missing-parent'/'state'
         disabled = self.runtime(False)

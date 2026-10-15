@@ -2,6 +2,8 @@
 """Owned yard-local timer installation, readiness and opt-out."""
 import fcntl
 import grp
+import hashlib
+import json
 import os
 from pathlib import Path
 import pwd
@@ -115,7 +117,7 @@ class Runtime:
         fields = self.manager_details(unit)
         return fields.get('ActiveState'), fields.get('UnitFileState')
 
-    def check(self, stopped=None):
+    def check(self, stopped=None, refresh=False):
         installed = self.owned()
         ready = installed
         present = False
@@ -133,6 +135,8 @@ class Runtime:
         if not installed and not self.selected and not present:
             return True
         active, enabled = details[TIMER].get('ActiveState'), details[TIMER].get('UnitFileState')
+        if refresh and self.selected and enabled == 'disabled':
+            return ready and active == 'inactive' and details[SERVICE].get('ActiveState') in ('inactive', 'failed')
         if self.selected:
             stopped = self.stopped if stopped is None else stopped
             return (ready and enabled == 'enabled' and active == ('inactive' if stopped else 'active')
@@ -206,34 +210,97 @@ class Runtime:
             if staging.exists():
                 shutil.rmtree(staging)
 
-    def apply(self):
-        if self.check():
+    def apply(self, refresh=False):
+        if self.check(refresh=refresh):
             return True
         installed = self.owned()
+        if refresh and not installed:
+            raise ValueError('release refresh requires owned installation')
+        disabled = refresh and self.manager(TIMER)[1] == 'disabled'
         self.stop_owned_units(installed)
         if not installed:
             self.create_state()
         for path, content in self.assets.items():
             self.publish(path, content)
         systemctl('daemon-reload')
-        if self.selected:
+        if self.selected and not disabled:
             systemctl('enable', TIMER)
             if not self.stopped:
                 systemctl('start', TIMER)
         else:
             systemctl('disable', TIMER)
-        if not self.check():
+        if not self.check(refresh=refresh):
             raise ValueError('runtime verification failed')
         return True
 
+    def observe(self, binding):
+        if not re.fullmatch('[a-f0-9]{64}', binding):
+            raise ValueError('invalid release source binding')
+        ready = self.check(refresh=True)
+        installed = self.owned()
+        if not installed:
+            # check() also rejects orphan/foreign units before absence is trusted.
+            if any(self.fact(path) is not None for path in self.assets):
+                raise ValueError('unowned runtime artifacts')
+            return {'state': 'absent'}
+        details = {unit: self.manager_details(unit) for unit in (TIMER, SERVICE)}
+        desired = digest({'source': binding, 'selected': self.selected,
+                          'disabled': self.selected and details[TIMER].get('UnitFileState') == 'disabled',
+                          'assets': {str(path): hashlib.sha256(content).hexdigest()
+                                     for path, content in self.assets.items()}})
+        facts = {}
+        for path in (self.state, self.state/'marker', *self.assets):
+            self.safe(path)
+            try:
+                info = path.lstat()
+                facts[str(path)] = [info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+                                    info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+                if path != self.state:
+                    facts[str(path)].append(hashlib.sha256(path.read_bytes()).hexdigest())
+            except FileNotFoundError:
+                facts[str(path)] = None
+        # check() validates the effective security envelope. Only public manager
+        # readiness enters the CAS; never export or hash arbitrary environment.
+        facts['manager'] = {unit: {key: fields.get(key, '') for key in
+                            ('ActiveState', 'UnitFileState', 'LoadState', 'NeedDaemonReload')}
+                            for unit, fields in details.items()}
+        return {'state': 'current' if ready else 'stale',
+                'actual': desired if ready else digest(facts), 'desired': desired}
+
+    def refresh(self, binding, operation, actual, desired):
+        if not re.fullmatch('[a-zA-Z0-9_-]+', operation) or any(
+                not re.fullmatch('[a-f0-9]{64}', value) for value in (actual, desired)):
+            raise ValueError('invalid release activation request')
+        observed = self.observe(binding)
+        if observed.get('desired') != desired:
+            raise ValueError('release inputs changed before apply')
+        if observed['state'] == 'current' and observed['actual'] == desired:
+            return observed
+        if observed.get('actual') != actual:
+            raise ValueError('runtime changed before apply')
+        self.apply(refresh=True)
+        verified = self.observe(binding)
+        if verified != {'state': 'current', 'actual': desired, 'desired': desired}:
+            raise ValueError('release runtime verification failed')
+        return verified
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
 
 def main():
-    mode, selected, user, stopped = sys.argv[1:]
-    if mode not in ('check', 'apply', 'pause', 'resume') or selected not in ('0', '1') or stopped not in ('0', '1'):
+    mode, selected, user, stopped, *extra = sys.argv[1:]
+    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh') or selected not in ('0', '1') or stopped not in ('0', '1'):
         raise ValueError('invalid lifecycle request')
+    if len(extra) != {'observe': 1, 'refresh': 4}.get(mode, 0):
+        raise ValueError('invalid lifecycle arguments')
     if os.geteuid() != 0:
         raise ValueError('invalid lifecycle authority')
     runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1', stopped == '1')
+    if mode == 'observe':
+        print(json.dumps(runtime.observe(*extra)))
+        return
     if mode == 'check':
         if not runtime.check():
             print('git-fetch-drift')
@@ -247,6 +314,9 @@ def main():
     try:
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if mode == 'refresh':
+            print(json.dumps(runtime.refresh(*extra)))
+            return
         if mode in ('pause', 'resume'):
             if mode == 'pause' and runtime.pause():
                 print('paused')

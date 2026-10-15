@@ -72,11 +72,17 @@ fi
 [ -f "$ENGINE_SOURCE" ] && [ -x "$ENGINE_SOURCE" ] \
   || die "power engine source must be an executable regular file: $ENGINE_SOURCE"
 # Read the protected epoch as its approved operator before copying any runtime.
-publication_args=(env "SUBYARD_REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
+# The operator may have a different primary group after runuser. Inherited
+# descriptors retain the approved source without crossing a parent's proc gate.
+exec {publication_root}< "$SCRIPT_DIR/.."
+exec {publication_engine}< "$ENGINE_SOURCE"
+publication_args=(env "SUBYARD_REPOSITORY_ROOT=/proc/self/fd/$publication_root" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
 if [ "$(id -u)" = 0 ] && [ "${SUBYARD_USER:-root}" != root ]; then
   publication_args=(runuser -u "$SUBYARD_USER" -- "${publication_args[@]}")
 fi
-publication_contracts="$("${publication_args[@]}" "$ENGINE_SOURCE" _publication-contracts)"
+publication_contracts="$("${publication_args[@]}" "/proc/self/fd/$publication_engine" _publication-contracts)"
+exec {publication_engine}<&-
+exec {publication_root}<&-
 [[ "$publication_contracts" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || die 'invalid publication contract snapshot'
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$(dirname "$UNIT_PATH")"
 install -o root -g root -m 0755 "$ENGINE_SOURCE" "$RECONCILER_PATH"

@@ -49,6 +49,22 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 			cli.errorf("release recovery request is invalid")
 			return 2
 		}
+		if parsed.Mode == releasetransition.RecoveryProcessRuntimeCapabilities {
+			var ids []string
+			for _, owner := range cli.nonConfigActivationReconcilers(releasetransition.ProcessRequest{}) {
+				ids = append(ids, owner.ID())
+			}
+			slices.Sort(ids)
+			encoded, err := releasetransition.MarshalRecoveryProcessResponse(releasetransition.RecoveryProcessResponse{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, ActivationOwners: ids})
+			if err != nil {
+				return 1
+			}
+			_, err = fmt.Fprintln(protocolOutput, string(encoded))
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
 		if parsed.Mode == releasetransition.RecoveryProcessCapabilities || parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
 			capabilities := releasetransition.ActivationOnlyRecoveryCapabilities()
 			if parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
@@ -132,6 +148,8 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		result = append(result, cli.profileActivationReconciler(request, id))
 	}
 	return append(result, []releasetransition.V2ActivationReconciler{
+		cli.profileActivationReconciler(request, "core-guest-runtime"),
+		cli.profileActivationReconciler(request, "key-tools-runtime"),
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
 		cli.powerActivationReconciler(request),

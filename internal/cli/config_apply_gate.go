@@ -387,7 +387,7 @@ func (cli *CLI) prepareActivationRepair(
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
 			return nil, nil
 		}
-		if _, runtime := reconciler.(*profileRuntimeActivationReconciler); (profileInit || teardown != nil) && runtime {
+		if runtime, ok := reconciler.(*profileRuntimeActivationReconciler); (profileInit || teardown != nil) && ok && !coreInstalledRuntimeID(runtime.id) {
 			// Per-target contracts bind profile drift; teardown requires an exact locked recheck.
 			observation.Actual, observation.Converged = observation.Desired, true
 		}

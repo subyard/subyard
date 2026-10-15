@@ -101,7 +101,13 @@ guest_hook() {
 
 guest_status() {
   incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
-    -- runuser -u "$DEV_USER" -- /usr/local/bin/subyard-github status
+    -- runuser -u "$DEV_USER" -- /usr/local/bin/subyard-github status "$@"
+}
+guest_runtime_current() {
+  local wanted
+  wanted="$(sha256sum "$engine" | cut -d' ' -f1)"
+  guest_status --runtime | jq -e --arg wanted "$wanted" \
+    '.protocol == 1 and .broker_sha256 == $wanted and .client_sha256 == $wanted' >/dev/null
 }
 
 if [ "$enabled" != 1 ]; then
@@ -175,7 +181,7 @@ if [ "$mode" = check ]; then
   actual="$(incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -- sha256sum "$guest_engine" 2>/dev/null | cut -d' ' -f1)" || exit 1
   [ "$actual" = "$wanted" ] || exit 1
   guest_hook --check >/dev/null || exit 1
-  guest_status >/dev/null 2>&1 || exit 1
+  guest_runtime_current >/dev/null 2>&1 || exit 1
   exit
 fi
 
@@ -210,7 +216,7 @@ user_systemctl enable "$unit_file" >/dev/null
 user_systemctl restart "$unit"
 ready=0
 for _ in {1..30}; do
-  if guest_status >/dev/null 2>&1; then ready=1; break; fi
+  if guest_runtime_current >/dev/null 2>&1; then ready=1; break; fi
   sleep 1
 done
 [ "$ready" = 1 ] || die "GitHub broker did not connect; inspect systemctl --user status $unit"

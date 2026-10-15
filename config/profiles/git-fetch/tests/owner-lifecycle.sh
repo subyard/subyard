@@ -53,7 +53,25 @@ expect_exit 1 env GIT_FETCH_FIXTURE_DRIFT=1 bash "$root/config/profiles/git-fetc
 expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=list bash "$root/config/profiles/git-fetch/owner.sh" --check
 expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=exec bash "$root/config/profiles/git-fetch/owner.sh" --check
 expect_exit 2 env GIT_FETCH_FIXTURE_STATE=ERROR bash "$root/config/profiles/git-fetch/owner.sh" --check
+bash "$root/config/profiles/git-fetch/runtime.sh" observe > "$state/observation"
+python3 - "$state/calls" "$state/observation" <<'PY'
+import json,re,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['observe','1','dev','0'] and len(args)==5 and re.fullmatch('[a-f0-9]{64}',args[4])
+assert json.load(open(sys.argv[2]))['state']=='current'
+PY
+expected=$(printf '%064d' 0)
+ENVIRONMENT_PROFILES='' bash "$root/config/profiles/git-fetch/runtime.sh" apply operation "$expected" "$expected" > /dev/null
+python3 - "$state/calls" "$expected" <<'PY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['refresh','0','dev','0'] and args[5:]==['operation',sys.argv[2],sys.argv[2]]
+PY
+[ "$(GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" observe)" = '{"state":"deferred"}' ]
+[ "$(GIT_FETCH_FIXTURE_STATE='' bash "$root/config/profiles/git-fetch/runtime.sh" observe)" = '{"state":"absent"}' ]
+expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=exec bash "$root/config/profiles/git-fetch/runtime.sh" observe
+expect_exit 2 env GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" apply operation "$expected" "$expected"
 if SUBYARD_ENGINE_CONTEXT=0 bash "$root/config/profiles/git-fetch/owner.sh" --yes >/dev/null 2>&1; then
   echo 'FAIL: unprepared owner invocation accepted' >&2; exit 1
 fi
-printf 'ok: git-fetch owner transport, selection, pause and stopped runtime\n'
+printf 'ok: git-fetch owner transport, lifecycle and release activation selection/absence/stopped/errors\n'

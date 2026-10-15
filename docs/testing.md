@@ -24,6 +24,16 @@ broker protected-file checks under `0002` and `0077`.
 
 ## Coverage ownership
 
+The GitHub owning release-activation fixture checks an authentic published predecessor upgrade,
+delivery/restart interruption and fresh-consent retry, loaded broker/client identities, core helper
+delivery, differing local profile selections, stopped-yard deferred convergence and retained data.
+It also checks refusal of an incompatible published rollback and a supported rollback between two
+compatible packaged fixture versions. The second version contains explicit skill/preview fixture
+deltas; it is synthetic compatibility evidence. Run its local `--preflight` before allocating a VM,
+then provide the frozen public candidate bundle and SHA-256 to
+`config/profiles/github/tests/e2e/release-activation.sh --slot N` as described in the VM guide.
+This focused lane does not replace release publication or external GitHub-account acceptance.
+
 Logical matrices belong to their unit or local integration owner. Physical E2E keeps
 installed-runtime, real Incus/systemd, routing, reboot and retained-data evidence.
 The IDs below are the existing registry/check-set names in `tests/impact-map.json`;

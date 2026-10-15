@@ -717,6 +717,25 @@ gated lanes. A generic dependency-free resource pass does not report those handl
 
 ### Fixture preflight
 
+For GitHub/native-helper release activation, the owning singleton controller requires the same
+frozen public bundle used by supported candidate transport. Package candidate version
+`0.19.1-activation-e2e`, include its normal `.subyard-acceptance` metadata/assets, and run:
+
+```sh
+bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --preflight
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot"
+```
+
+The controller packages its explicitly synthetic compatible successor before lease acquisition;
+the original candidate's verified assets remain intact. The guest uses the actual checksum-pinned
+0.19.0 installer/updater, two container yards and a config-only absent yard. A first transition may
+download unchanged native tool pins once to establish trustworthy activation receipts. The lane
+has a 45-minute work budget and bounded marker-owned cleanup; its terminal output retains native
+phase logs and reports cleanup separately. It does not use external GitHub accounts or manage the
+outer yard's lifecycle.
+
 Use the skill's [check order](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk)
 before an expensive affected lane. Inspect the fixture's changed assumptions at its owning boundary:
 required commands must be usable by the execution user, including the effective service user or

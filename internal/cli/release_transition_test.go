@@ -317,7 +317,7 @@ func TestProfileRuntimeActivationRepairsAllLocalInstalledContracts(t *testing.T)
 	}
 	oldDigest, newDigest := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	stale := fmt.Sprintf(`{"state":"stale","actual":%q,"desired":%q}`, oldDigest, newDigest)
-	current := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, newDigest, newDigest)
+	current := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q,"ownership_absent":true}`, newDigest, newDigest)
 	writeCLIFile(t, handler, `#!/bin/sh
 set -eu
 [ "$SUBYARD_ENGINE_CONTEXT" = 1 ]
@@ -358,8 +358,28 @@ esac
 	if _, err := os.Stat(filepath.Join(home, "sample-applied")); !os.IsNotExist(err) {
 		t.Fatal("assessment changed guest files")
 	}
-	if len(before.Warnings) != 1 || !strings.Contains(before.Warnings[0], "yard stopped:") || !strings.Contains(before.Warnings[0], "deferred") {
-		t.Fatalf("stopped yard deferral was hidden: %v", before.Warnings)
+	assertStoppedDeferred := func() {
+		t.Helper()
+		owner := reconciler.(*profileRuntimeActivationReconciler)
+		operation, targets, err := owner.targets()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, target := range targets {
+			if target.Name != "stopped" {
+				continue
+			}
+			state, err := observeProfileRuntime(ctx, profileActivationPlatform(operation, target), owner.id)
+			if err != nil || state.State != ports.RuntimeStateDeferred {
+				t.Fatalf("stopped yard lost its native deferred state: %#v, %v", state, err)
+			}
+			return
+		}
+		t.Fatal("stopped local yard was omitted from native observation")
+	}
+	assertStoppedDeferred()
+	if len(before.Warnings) != 0 {
+		t.Fatalf("expected stopped deferral emitted a warning or init advice: %v", before.Warnings)
 	}
 	if diagnostics.Len() != 0 {
 		t.Fatalf("ProfileRuntime observation wrote console output: %s", diagnostics.String())
@@ -386,6 +406,10 @@ esac
 	after, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
 	if err != nil || !after.Converged || after.Actual != after.Desired || after.Desired != before.Desired {
 		t.Fatalf("final observation: %#v, %v", after, err)
+	}
+	assertStoppedDeferred()
+	if len(after.Warnings) != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("completed activation emitted expected-drift diagnostics: %v %q", after.Warnings, diagnostics.String())
 	}
 	if err := reconciler.Reconcile(ctx, releasetransition.ReleaseLinks{}); err != nil {
 		t.Fatal(err)

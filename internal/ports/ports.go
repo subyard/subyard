@@ -220,12 +220,22 @@ type InitPlatform interface {
 	RefreshConfigs(context.Context) error
 	ObserveProfileRuntimes(context.Context) (map[string]RuntimeObservation, error)
 	ApplyProfileRuntime(context.Context, string, string, string, string) error
+	ObserveInstalledRuntime(context.Context, string) (RuntimeObservation, error)
+	InstalledRuntimePresence(context.Context, string) (RuntimePresence, error)
+	ApplyInstalledRuntime(context.Context, string, string, string, string) error
 	ProjectHooksApplicable(context.Context) (bool, error)
 	RunProjectHooks(context.Context) error
 	Teardown(context.Context) error
 }
 
 type RuntimeState string
+
+// RuntimePresence binds public installed-leaf metadata without running readiness
+// commands or importing credentials. Stopped guest leaves remain conservative.
+type RuntimePresence struct {
+	Preview, CCUsage, KeyTools, KeyTimer bool
+	Actual                               string
+}
 
 const (
 	RuntimeStateAbsent   RuntimeState = "absent"
@@ -242,6 +252,9 @@ type RuntimeObservation struct {
 	Desired string       `json:"desired"`
 	// HookBinding is an optional owner-private native project-hook scope digest.
 	HookBinding string `json:"hook_binding,omitempty"`
+	// OwnershipAbsent proves no owned installation remains after convergence.
+	// It is valid only for current, with the ordinary desired digest retained.
+	OwnershipAbsent bool `json:"ownership_absent,omitempty"`
 }
 
 type RemoteTransport interface {

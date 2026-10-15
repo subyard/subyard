@@ -28,8 +28,14 @@ installed. SSH uses the developer's existing forwarded-agent socket and known
 host trust. Authentication is noninteractive. Journal diagnostics contain counts
 and generic failures, without remote URLs or Git output.
 
-Repeated `yard init` checks and refreshes installed assets, including after a
-release update or interrupted installation. Disable stops the timer and the
+Ordinary release installation, update, migrate and compatible rollback refresh
+already installed worker and unit files through `git-fetch-runtime`. Native
+ownership, exact public assets and loaded systemd policy are checked before and
+after delivery. A stale assessment is refused before mutation; interrupted
+delivery can be retried through the same ordinary operation. Refresh preserves a
+disabled timer and never installs the profile into an absent or stopped yard.
+Stopped yards converge on the next supported operation after they start.
+Repeated `yard init` also checks and refreshes installed assets. Disable stops the timer and the
 entire active fetch process group; installed files remain for re-enabling.
 Lifecycle hooks validate owned files and loaded units before mutation. OS-wide
 container service policy is supported; the worker enforces no new privileges
@@ -37,6 +43,15 @@ with `setpriv`. Conflicting unit-specific overrides are refused and left intact.
 
 Run `config/profiles/git-fetch/tests/run.sh` for host-free checks. The disposable
 component check is `config/profiles/git-fetch/tests/e2e/acceptance.sh --slot N`.
-It installs the actual service directly in a leased systemd guest and tests local
-remotes, nested discovery, serial fetching, recurrence and disable. It does not
-bootstrap a full yard or verify external GitHub/SSH accounts.
+Supply the frozen candidate through `SUBYARD_E2E_CANDIDATE_BUNDLE` and
+`SUBYARD_E2E_CANDIDATE_SHA256`. The check first installs the actual service directly
+in the leased systemd guest and tests local remotes, nested discovery, serial
+fetching, recurrence and disable. In the same lease, it bootstraps one isolated
+native yard through the installed candidate, then verifies ordinary migrate
+repairs worker drift, repeats without rewriting current files, and retains
+disabled and deselected intent. Capacity and the cached image's configured
+developer UID are checked before init. The payload has a 20-minute bound plus
+two minutes to drain; it does not verify external GitHub/SSH accounts.
+Run `config/profiles/git-fetch/tests/e2e/acceptance.sh --preflight` for fixture
+syntax checks without acquiring a lease; native Incus and image prerequisites
+are verified at the start of the installed-yard check.

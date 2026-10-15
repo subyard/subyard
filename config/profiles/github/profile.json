@@ -4,6 +4,7 @@
   "disabled_when": {"NESTED_E2E_VMS": "1"},
   "selected_provision_only": true,
   "owner_service": "owner.sh",
+  "runtime": {"activation_id": "github-runtime", "handler": "runtime.sh"},
   "native": [{"package": "cmd/broker", "path": "bin/broker"}],
   "consumers": [{"id": "github-app-key", "zone": "global", "path": "github/connection.json", "legacy_path": "github/github-app.pem", "format": "rsa-private-key-with-settings"}],
   "managed_paths": [
