@@ -69,14 +69,12 @@ requirements remain as documented; local passes do not replace them.
 Follow [test execution and delegation](../.agents/skills/subyard-dev-flow/SKILL.md#test-execution-and-delegation)
 for roles and model settings. Preserve required coverage and candidate identity.
 
-- Only the assigned observer reads active progress/logs. The developer ends its bounded phase
-  after handing off the exact candidate, command, handles, evidence and deadlines/stop policy;
-  it retains writer ownership without an idle wait loop. The coordinator resumes that same
-  developer with `followup_task` for diagnosis or the next phase after native terminal evidence,
-  or a material event requiring an owned decision. This handoff is not readiness. Process control,
-  lease heartbeats and cleanup remain runner-owned.
+- One assigned polling owner reads active progress/logs; the developer and coordinator use
+  its events and evidence instead of parallel polling. Interactive root-console work also has
+  one owner. Process control, lease heartbeats and cleanup remain with the existing runner.
 - Prefer completion events. For capacity shortages, use long adaptive waits and retry guarded
-  acquisition when availability may reasonably have changed.
+  acquisition when availability may reasonably have changed. Necessary timed waits may still
+  invoke the model.
   Send routine/material progress to one responsible canonical recipient named in the assignment
   (normally the coordinator while the developer phase has ended). Preserve operator updates.
   Do not send duplicate progress to both roles or acknowledge/follow up merely to say still running.
@@ -89,7 +87,9 @@ for roles and model settings. Preserve required coverage and candidate identity.
   run/check identity, check and overall candidate statuses where applicable, original exit code, total duration and
   evidence paths. Verify every field; mark unavailable values explicitly. Use native duration
   or launch-to-completion time, never an individual wait's wall time. Preserve full logs;
-  identify shortened output and include a relevant failure excerpt with its complete log path.
+  identify shortened output and include a bounded safe failure excerpt with its complete log path.
+  Keep the original test exit distinct from capture failure/refusal and cleanup status; none of
+  these can overwrite or turn that exit into a pass.
 - Preserve failed, blocked, interrupted and incomplete outcomes. Missing expected final
   evidence is incomplete; heartbeats, process disappearance or one passing check do not
   prove complete acceptance.
@@ -196,17 +196,28 @@ keep observing the same controller through completion and cleanup unless the ass
 directs an owned interruption. Then return the final report and end the bounded assignment.
 Make the native final summary/evidence available to both developer and coordinator; they need
 not rewrite it. Stopping an observer does not establish that its runner or lease has drained.
-The developer remains the sole writer when resumed. Assign independent review only after the
-writer has stopped and relevant checks have finished; a long-run handoff alone does not meet that gate.
 
 ### Evidence handoff and cache cleanup
 
+Before an expensive run, identify the smallest useful existing failure artifacts and which
+will disappear with fixture/VM cleanup. Preserve their original bytes in the task's existing
+private output directory before disposal, with bounded capture and restrictive access; hashes
+and paths alone cannot recover deleted content. Keep secrets out of model output and tracked
+files; return only safe bounded excerpts. Use the existing runner/fixture capture path rather
+than another collector. A missing capture capability belongs to the owning fixture's repair.
+
+On failure, save the native outcome first when available, then the minimal useful failure bytes
+and safe excerpt with existing artifact paths, let runner cleanup/release finish, and return one
+result. Capture from disposable storage must happen before it is deleted, even when the final
+native outcome arrives only after cleanup. Preserve capture failure/refusal separately from the
+original test exit; missing evidence stays incomplete and never authorizes a blind rerun.
+
 Logs, receipts, native terminal objects and candidate bundles are temporary task artifacts.
-Retain the original redacted records, launch bindings and complete logs while the task is active,
-including failed, interrupted, blocked and incomplete outcomes and unavailable measurements.
-If controller retention would expire during the task, copy the needed records into its own
-output directory under `.build` and verify their hashes. Never reconstruct missing artifacts.
-Copying records does not import a PASS onto another candidate.
+Retain original records, launch bindings and complete logs while the task is active, including
+failed, interrupted, blocked and incomplete outcomes and unavailable measurements. Keep sensitive
+artifacts private; preserve safe redacted views for handoff. If retention would expire, copy the
+needed bytes into the task's existing `.build` output directory and verify their hashes.
+Never reconstruct missing artifacts. Copying records does not import a PASS onto another candidate.
 
 After checks, review and runner cleanup, retain only concise key findings in the owning reference
 or private overlay: the tested scope, source/candidate and baseline identities, outcomes, remaining
@@ -219,6 +230,20 @@ finished and that no registered live
 worktree or running application uses those paths. Preserve active sibling runs and shared build
 outputs; never clear the whole `.build` as a handoff step. Keep original records until their review
 and concise findings are complete. Cache cleanup does not require another VM acceptance run.
+
+### Repair after a failure
+
+Start with the observed native outcome and bounded failure excerpt linked to its full log.
+Classify the cause as product, fixture or environment, then choose the smallest existing
+diagnostic. State the hypothesis, owning files/check, expected difference and stop condition
+before expanding reads. Fix the cause and run affected checks; batch independent repairs before
+freezing a new candidate when needed. Before an expensive retry, verify the changed prerequisite
+with its existing check and consult installed CLI help when invocation/compatibility is uncertain.
+Record the concrete rerun reason in the current task, using existing evidence pointers.
+
+Reassess a rebase or changed candidate by affected contracts. Reuse only supported, still-bound
+results under the [candidate import/transfer limits](#one-release-candidate); supporting diagnostics
+do not replace required fresh, continuous or full end-to-end gates.
 
 ### Report deviations from the guide
 

@@ -15,18 +15,12 @@ candidate identity covering dirty/untracked inputs, evidence, risks and remainin
 Resume repairs only when assigned.
 
 Run short checks directly. For a necessary long check, assign at most one observer
-using this skill's agents/subyard_observer.toml contract with gpt-6-luna/medium and
-fork_turns="none"; run locally if unavailable. Include canonical developer and
-coordinator targets, the exact runner, evidence paths and existing deadlines/stop
-conditions, plus one responsible recipient for routine/material progress. After handing
-off exact candidate/command, handles, evidence and deadlines/stop policy, end this
-bounded phase without an idle wait loop; retain sole writer ownership. Handoff is not
-readiness. The coordinator receives native terminal evidence and resumes this same
-developer via followup_task for failures or the next phase; an earlier material decision
-may also need resumption. Do not duplicate observer polling or still-running acknowledgements.
-Own diagnosis and rerun decisions. Start with native outcome and a bounded failure
-excerpt linked to the full log; state hypothesis, owning files/check, expected difference
-and stop condition before expanding reads. Follow docs/testing.md execution
-protocol. Inherit existing permissions/approvals; do not expand them or perform
-operator-only actions. Before compaction send concise remaining state to the coordinator.
+under agents/subyard_observer.toml and the skill's assignment policy; run directly if
+unavailable. Transfer candidate/command, handles, evidence and deadlines/stop policy,
+then end this phase while retaining writer ownership. Handoff is not readiness. The
+coordinator resumes this same developer via followup_task for failures, decisions or
+the next phase. Follow docs/testing.md#execution-and-reporting-principles for execution
+and docs/testing.md#repair-after-a-failure for diagnosis and rerun decisions. Inherit
+existing permissions/approvals; keep operator-only actions with the operator.
+Before compaction send concise remaining state to the coordinator.
 """

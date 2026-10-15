@@ -45,9 +45,10 @@ coordinator, and do not create or close shared task files or start another full 
 3. Run the applicable checks against the final changes using the policy below.
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
-4. Batch independent reads/searches and short checks without shared mutable resources;
-   use `Promise.allSettled` where available and inspect every result/exit code.
-   Keep dependencies, edits, approvals and decisions sequential.
+4. Use `rg` and targeted excerpts. Set a total output budget before batching independent
+   reads/searches or short checks; use `Promise.allSettled` where available and inspect every
+   result/exit. Broaden reads for new evidence or insufficient excerpts, rather than rereading
+   truncated batches. Keep dependencies, edits, approvals and decisions sequential.
 5. Before handoff or compaction, update the concise task plan: remaining work, decisions,
    evidence and candidate identities. Preserve required rules and relevant architecture,
    without a chat journal or full history; leave compaction defaults unchanged.
@@ -113,103 +114,56 @@ coordinator, and do not create or close shared task files or start another full 
 
 ## Test execution and delegation
 
-- Use `model="gpt-6.1-sol"`, `reasoning_effort="high"` for main development tasks,
-  developer and independent reviewer.
-- Run short checks directly. For long runs, use one mechanical observer with
-  `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"`;
-  run locally if unavailable.
-- Give each bounded phase a self-contained assignment: working directory, exact commands,
-  source state, known facts, relevant references, stop conditions and evidence paths.
-  The observer reads mandatory repository/overlay and applicable testing/VM rules,
-  without copied chat history, whole documents or repeated project discovery.
-- The observer runs prescribed checks only; the main developer owns failure analysis,
-  repairs and rerun decisions.
-- A long-check assignment names one recipient for routine/material progress and both canonical
-  targets for failure, blocker, interruption, cleanup and terminal evidence. After transferring
-  exact candidate/command, handles, evidence and deadlines/stop policy, the developer ends that
-  bounded phase and retains writer ownership without a parallel idle wait loop. The coordinator
-  receives native terminal evidence and uses `followup_task` to resume the same developer for
-  failures or the next phase; an earlier material decision may also require resumption.
-  Phase handoff is not readiness. Controller heartbeat/cleanup and candidate binding stay intact.
-- Follow the guide's [execution and reporting protocol](../../../docs/testing.md#execution-and-reporting-principles),
-  including waits, cleanup and evidence. Promptly report guide deviations to the operator
-  under its [deviation contract](../../../docs/testing.md#report-deviations-from-the-guide).
+Keep short mechanical/doc edits and read-only answers direct; add review for a concrete risk.
+For substantial changes in an explicitly selected, bounded role pilot, use one sole writer and
+one independent reviewer. The governing task owns eligible blocks, deadline and quality/rollback
+conditions; this does not claim universal savings or promote the pilot to a global default. Add a
+second reviewer only for an explicit two-axis request or a concrete independent risk. Preserve
+the risk-based checks above; orchestration does not add acceptance runs.
 
-## Coordinator role pilot
+Role-specific obligations live in the [developer](agents/subyard_developer.toml),
+[reviewer](agents/subyard_reviewer.toml) and [observer](agents/subyard_observer.toml) contracts.
+Read the selected contract when assigning a role. These files are not automatically loaded as
+native custom agents; use their instructions in a self-contained assignment with supported
+model/effort/fork fields. Use `model="gpt-6.1-sol"`, `reasoning_effort="high"`,
+`fork_turns="none"` for developers and fresh reviewers; record a comparable available alternative
+if needed. A necessary long check may use one `gpt-6-luna`/`medium` observer with
+`fork_turns="none"`; run it directly if unavailable. Short checks stay with the developer.
 
-The coordinator → developer → independent reviewer workflow is an explicitly selected,
-bounded pilot, not yet the default for all development. During the pilot, delegate substantial
-implementation, behavioral fixes and changes spanning related components as complete,
-reviewable blocks. Keep typos, formatting, simple mechanical edits and short read-only answers
-direct; add review only for a concrete risk. Preserve every existing acceptance requirement
-and the risk-based check policy above. Do not add test runs just to exercise the workflow.
+The coordinator owns original requirements, editable scope, one shared task and final acceptance:
 
-Role contracts belong to this skill: [developer](agents/subyard_developer.toml),
-[reviewer](agents/subyard_reviewer.toml) and [observer](agents/subyard_observer.toml).
-Read the selected contract when assigning that role. For tool-based orchestration, use its
-instructions in a self-contained assignment and only supported model/effort/fork fields.
-These files are not automatically discovered as native custom agents from the skill directory;
-CLI/IDE integration requires a separate supported project configuration, not a global change.
-
-The coordinator owns original requirements, editable scope, one shared task and final acceptance.
-Do only the discovery needed to assign work or resolve a finding; do not duplicate implementation,
-observer polling or the whole review. Use this cycle:
-
-1. Assign one sole writer a complete block. Start developer and fresh reviewer with
-   `model="gpt-6.1-sol"`, `reasoning_effort="high"`, `fork_turns="none"`. Record a comparable
-   available alternative if needed; do not downgrade independent review to an observer.
-2. Wait for the developer to stop writing and finish relevant checks, including terminal evidence
-   for an observer handoff, then assign independent
-   review of the exact dirty/untracked candidate. Preliminary review with incomplete checks must
-   state that limit and cannot establish readiness. Read-only is a contract unless effective
-   isolation is verified; live parent overrides can defeat native sandbox defaults.
+1. Assign a complete block to one developer. Do only the discovery needed to assign work or
+   resolve a finding; delegate implementation and use its evidence pointers.
+2. After the writer stops and relevant checks reach native terminal outcomes, assign review of
+   that exact dirty/untracked candidate. An observer handoff alone does not meet this condition.
+   Preliminary review with incomplete checks cannot establish readiness.
 3. Resolve unsupported findings with a reason; return confirmed repairs via `followup_task` to
-   the same developer while its context is relevant. Recheck affected claims after writing stops,
-   broadening only when the delta warrants it. Unresolved correctness/coverage blockers remain.
-4. Accept only when original requirements, findings and required evidence match the final
-   candidate. Read native receipts and concrete risky areas as needed. No findings alone is
-   not acceptance; only the coordinator closes the task and responds to the operator.
+   the same developer while its context is relevant. Recheck affected claims after writing stops.
+4. Accept when original requirements, findings and required evidence match the final candidate.
+   Read native receipts and concrete risky areas as needed, using the reviewer's independent
+   binding check without repeating the whole review or generating another report. A substantial
+   change stays review-pending if an independent reviewer is unavailable; self-review cannot
+   replace it. Only the coordinator closes the shared task and responds to the operator.
 
-Keep assignments short: role, canonical coordinator/developer targets, working directory,
-original requirements, editable scope/exclusions, known facts and source links, acceptance,
-candidate/evidence paths, a bounded checkpoint and stop conditions, and the expected result.
-Do not copy the full chat or guides. Only a necessary long check adds one observer, assigned by
-the developer with both canonical targets, one responsible progress recipient, an exact runner
-command and existing deadlines. Do not broadcast routine progress or acknowledge/follow up for
-unchanged still-running status. Preserve operator updates and prompt alert delivery to both targets.
+Keep assignments compact: role and canonical coordinator/developer targets, working directory,
+requirements, editable scope/exclusions, known facts and source links, acceptance,
+candidate/evidence pointers, checkpoint/stop conditions and expected result. Long-check
+assignments also name the exact command and one progress recipient. Reuse existing candidate
+bindings and native receipts; one concise result per role is enough. Copy relevant pointers
+rather than the chat or whole guides. Workers report remaining work to the coordinator and
+follow only their assigned phase.
 
-Before handoff/compaction preserve remaining work, decisions, active writer/runner ownership,
-candidate identities and evidence in the shared task; workers send updates instead of editing it.
-Loss of context or an unavailable agent is not success. Before takeover confirm the former
-writer stopped and establish runner/cleanup status; stopping an agent does not drain its lease.
-Use supported event waits within runtime limits, without duplicate raw polling or periodic
-status requests. An unchanged timeout continues the same wait with the same handles/cursor;
-do not reread plans/logs. Use the testing guide's single-poll 60000/55000 ms template and bounded
-JSONL projection in the same cell; drain backlog without another long poll. Save the full native
-terminal tool object before final reads. Observation errors never authorize a runner restart.
-A missed checkpoint or concrete stall permits one targeted ownership/blocker
-check, then a reasoned continuation with a new bounded deadline, owned interruption or takeover.
-Do not restart blindly or extend indefinitely. A substantial block still needs an independent
-reviewer; if none is available, leave review pending and finish other executable work. Self-review
-does not satisfy that requirement. Workers do not recursively orchestrate this cycle.
+Before handoff/compaction, the coordinator preserves remaining work, decisions, active
+writer/runner ownership, candidate and evidence pointers in the shared task. Workers send
+concise state instead of editing it. Before takeover, confirm the former writer stopped and
+establish runner/cleanup status; agent termination does not drain a lease. At checkpoint expiry
+or a concrete stall, obtain one targeted ownership/blocker result, report partial work and any
+blocker, then choose owned interruption/takeover or a reasoned continuation with a new finite
+bound. Loss of context and missed deadlines never imply success or a silent extension.
 
-For diagnosis, start with the native outcome and a bounded failure excerpt linked to its full log.
-State the failure, hypothesis, owning files/check, expected difference and stop condition before
-expanding reads. Read the targeted source once and batch independent reads; broaden only when
-new evidence or insufficient excerpts justify it. A handoff preserves current state, hypothesis,
-next action, exact candidate and evidence pointers, including unknown/failed/inconclusive results;
-do not copy historical measurements or create a second reporting ledger.
-
-Set the pilot's eligible blocks, baseline, model settings, deadline and promotion/rollback
-criteria in the governing task before using it. Keep it bounded to three suitable ordinary
-blocks or fourteen calendar days, whichever comes first; retain the direct path for a needed
-small edit. At the boundary, keep, narrow or roll back only for classes supported by evidence.
-Missing comparable baseline or usage leaves savings unknown. Missed requirements/checks,
-false readiness, lost changes/evidence or unsafe authority expansion stop the affected class
-until repaired; do not trade quality for lower usage. Unexplained repeated growth above 20%
-in two comparable blocks calls for narrowing or rollback, not a causal claim from mixed data.
-Unobserved failure, compaction or long-run cases remain unverified. Leave compaction defaults,
-global settings and existing runner infrastructure unchanged.
+Execution, polling/cursors, native outcomes, repair and evidence handling belong to the testing
+guide's [execution protocol](../../../docs/testing.md#execution-and-reporting-principles).
+Keep compaction defaults, global settings and existing runner infrastructure unchanged.
 
 ## Boundaries
 

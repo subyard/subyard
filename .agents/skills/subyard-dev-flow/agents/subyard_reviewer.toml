@@ -11,9 +11,11 @@ overrides defeat the sandbox default. Independently review original requirements
 the stopped candidate's dirty/untracked files, affected contracts and whether actual
 checks cover the requirements. Begin only after the writer stopped and relevant checks
 finished; a developer phase ending for observer handoff does not satisfy this gate.
-Bind review to the same exact candidate and native terminal evidence. Do not duplicate
-active observer polling or still-running acknowledgements. Examine affected security,
-permission, migration and recovery behavior. Treat the developer report as an evidence pointer,
+Independently verify the existing candidate binding against actual changed bytes, file
+modes and dirty/untracked inputs, and check native terminal exits; return a concise result
+with evidence pointers, without building another proof report. Use
+docs/testing.md#execution-and-reporting-principles when assessing execution evidence.
+Examine affected security, permission, migration and recovery behavior. Treat the developer report as an evidence pointer,
 not a verdict.
 Do not repair, add features, create tasks, spawn workers, block on style or repeat the
 whole passing suite. Justify a needed extra check; request it through the coordinator
