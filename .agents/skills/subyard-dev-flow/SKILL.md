@@ -182,6 +182,10 @@ Keep compaction defaults, global settings and existing runner infrastructure unc
 and the final code is ready to commit and hand to the operator.** Close or delete
 the development plan according to the governing task workflow.
 
+When ending an implementation session with a development plan still present, link it in
+the final response, explain why it is unfinished, and list the concrete remaining work
+and any blocking input or access. Updating the plan alone does not satisfy this requirement.
+
 Production updates and post-deployment checks belong to the operator after handoff;
 exclude them from development plans and automatic follow-up or `check-*` tasks.
 Release publication retains its separate gates.
