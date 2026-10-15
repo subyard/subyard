@@ -7,6 +7,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+# The simulated guest account must not depend on a matching controller account.
+export DEV_USER=staging-fixture-dev
 if [ "${1:-}" = --prepare-parser-fixture ]; then
   export INCUS_PROJECT=subyard-openclaw-bootstrap-5b9fe2b7ea30
   export YARD_INSTANCE_NAME=yard-openclaw-bootstrap-5b9fe2b7ea30
@@ -26,6 +28,11 @@ case "$1" in
  list) printf 'RUNNING\n'; exit 0 ;;
  exec)
   shift; while [ "$1" != -- ]; do shift; done; shift
+  if [ "$1" = id ]; then
+   [ "$#" -eq 3 ] && [ "$3" = "$DEV_USER" ] || exit 1
+   case "$2" in -u|-g) printf '%s\n' "$DEV_UID" ;; *) exit 1 ;; esac
+   exit 0
+  fi
   if [ "$1" = docker ]; then
    shift
    case "$1" in
