@@ -226,6 +226,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	var report struct {
 		Current string `json:"current"`
 		Domains []struct {
+			Domain  string   `json:"domain"`
 			Pending []string `json:"pending"`
 		} `json:"domains"`
 		Outcome releasetransition.Outcome `json:"outcome"`

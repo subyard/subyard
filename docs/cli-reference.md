@@ -176,10 +176,10 @@ Usage: yard stop [--force]
 
 ## teardown
 
-delete the yard; optionally keep data or reset its local settings.
+delete this yard or explicitly remove this local installation.
 
 ```text
-Usage: yard teardown [--keep-data | --reset-config]
+Usage: yard teardown [--keep-data | --reset-config | --full] [--yes]
   --reset-config  remove selected local settings after cleanup; suppress previous nonlocal yard fallback
 ```
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 )
 
 type teardownConfigDirectory struct {
@@ -66,7 +67,7 @@ func captureTeardownConfig(yard domain.Context) (*teardownConfigSnapshot, error)
 		}
 		snapshot.Artifacts = append(snapshot.Artifacts, teardownArtifact{Path: path, Binding: binding})
 	}
-	payload, err := json.Marshal(snapshot.Artifacts)
+	payload, err := json.Marshal(ports.ArtifactBindings(snapshot.Artifacts))
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func checkTeardownConfig(before, after *teardownConfigSnapshot) error {
 	if before == nil || after == nil {
 		return errors.New("captured local configuration reset scope is required")
 	}
-	if before.Marker != after.Marker {
+	if before.Marker.Path != after.Marker.Path || before.Marker.Binding != after.Marker.Binding {
 		return fmt.Errorf("%w: selected local configuration reset scope changed", domain.ErrPlanStale)
 	}
 	approvedArtifacts := make(map[string]string, len(before.Artifacts))
@@ -113,7 +114,7 @@ func (cli *CLI) resetTeardownConfiguration(ctx context.Context, loaded config.Lo
 		return path == filepath.Join(yard.Paths.ConfigHome, "yards", yard.YardName, "config.env") || path == filepath.Join(yard.Paths.ConfigHome, "yards", yard.YardName+".env")
 	}
 	remove := func(registrations bool) error {
-		payload, err := json.Marshal(execution.configSnapshot.Artifacts)
+		payload, err := json.Marshal(ports.ArtifactBindings(execution.configSnapshot.Artifacts))
 		if err != nil {
 			return err
 		}

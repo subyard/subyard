@@ -7,6 +7,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# shellcheck source=tests/helpers/test-context.sh
+. "$ROOT/tests/helpers/test-context.sh"
+
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/getent" <<'SH'
 #!/usr/bin/env bash
@@ -97,29 +100,32 @@ cat > "$TMP/bin/dispatcher" <<'SH'
 SH
 chmod 0755 "$TMP/bin"/*
 
-run_installer() {
-  local data_home="$1" command_path installer_path
+run_installer() (
+  local data_home="$1" command_path installer_path operator_user operator_group
   shift
   command_path="${TEST_COMMAND_PATH:-$TMP/bin:$PATH}"
   installer_path="${TEST_INSTALLER_PATH:-$ROOT/scripts/01-install-incus.sh}"
-  PATH="$command_path" \
+  operator_user="$(id -un)"
+  operator_group="$(id -gn)"
+  export PATH="$command_path" \
   TEST_OPERATOR_HOME="$TMP/operator" \
-  TEST_OPERATOR_USER="$(id -un)" \
+  TEST_OPERATOR_USER="$operator_user" \
   TEST_DATA_HOME="$data_home" \
   TEST_CHOWN_LOG="$TMP/chown.log" \
   TEST_INSTALL_LOG="$TMP/install.log" \
-  TEST_OPERATOR_GROUP="$(id -gn)" \
+  TEST_OPERATOR_GROUP="$operator_group" \
   TEST_INCUS_VERSION="${TEST_INCUS_VERSION:-}" \
   TEST_INCUS_FIXTURE="${TEST_INCUS_FIXTURE:-}" \
   TEST_FAKE_BIN="${TEST_FAKE_BIN:-}" \
   SUBYARD_DISPATCHER_PATH="${TEST_DISPATCHER_PATH-$TMP/bin/dispatcher}" \
   SUBYARD_ENGINE_CONTEXT=1 \
   SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
-  SUBYARD_USER="$(id -un)" \
+  SUBYARD_USER="$operator_user" \
   SUBYARD_OPERATOR_HOME="$TMP/operator" \
   SUBYARD_CONFIG_DIR="$TMP/config" \
   SUBYARD_CONFIG_HOME="$TMP/operator/.config/subyard" \
   SUBYARD_HOME="$data_home" \
+  SUBYARD_STATE_DIR="$data_home/state" \
   STORAGE_PATH="${TEST_STORAGE_PATH:-$data_home/incus/storage}" \
   STORAGE_POOL=default \
   HOST_BASE="$TMP/host-base" \
@@ -130,14 +136,18 @@ run_installer() {
   INCUS_PROJECT=subyard-test \
   INCUS_BRIDGE=incusbr0 \
   SSH_HOST=yard-test \
+  SSH_PORT=2222 \
+  SHIFT_MODE=shift \
   DEV_USER=dev \
   DEV_UID=1000 \
   DEV_SUDO=0 \
   FORWARD_SSH_AGENT=0 \
   NESTED_E2E_VMS=0 \
-  ASSUME_YES=1 \
+  ASSUME_YES=1
+  SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
+  export SUBYARD_INSTALLATION_CONTEXT
   "$installer_path" --yes "$@"
-}
+)
 
 # Every shared broad root and the exact operator home must be rejected before host operations.
 for broad_home in / /boot /dev /etc /home /opt /proc /root /run /srv /sys /usr /var "$TMP/operator"; do
@@ -251,7 +261,7 @@ subyard_home_validate_root() {
 SH
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk dpkg find stat cp sed sort grep tr install cat; do
+for command_name in bash dirname cut realpath awk dpkg find stat cp sed sort grep tr install cat python3; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl; do

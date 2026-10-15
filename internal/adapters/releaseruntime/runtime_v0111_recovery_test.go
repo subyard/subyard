@@ -400,15 +400,26 @@ func seedV0111PostActivationScopeJournal(
 		journal.RegistryDigest != bindings.registry || journal.CatalogDigest != bindings.catalog {
 		t.Fatalf("seeded source journal = %#v", journal)
 	}
+	expectedMigrations := map[string]string{
+		"canonicalize-test-vms-settings-v2": "ledger.settings",
+		"canonicalize-test-yard-owner-v2":   "ledger.owner-registration",
+	}
 	for _, step := range journal.Steps {
 		if !pending[step.ID] {
 			t.Fatalf("source journal lost the fixture's intended migration steps: %#v", step)
 		}
 		delete(pending, step.ID)
+		if expectedMigrations[string(step.Migration)] != step.Resource {
+			t.Fatalf("unexpected seeded source migration: %#v", step)
+		}
+		delete(expectedMigrations, string(step.Migration))
 		if step.Checkpoint != releasetransition.StepVerified || step.Evidence == nil ||
 			step.Evidence.Checkpoint != releasetransition.EvidenceVerified {
 			t.Fatalf("seeded source step = %#v", step)
 		}
+	}
+	if len(pending) != 0 || len(expectedMigrations) != 0 {
+		t.Fatalf("missing seeded source migrations: %v, %v", pending, expectedMigrations)
 	}
 	ledger, err := store.ReadLedger()
 	if err != nil || !ledger.Exists {

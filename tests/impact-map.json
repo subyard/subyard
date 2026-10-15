@@ -93,6 +93,8 @@
     "go-contracttest": ["go:contracttest", "host-free:core"],
     "go-domain": ["go:domain"],
     "go-ownerinventory": ["go:ownerinventory"],
+    "full-uninstall": ["go:uninstall", "go:cli", "go:architecture", "go:adapters/statusruntime", "shell:full-uninstall", "p0:full-uninstall"],
+    "owner-publication": ["go:ownerpublication", "host-free:core", "shell:proxy-address-boot-controller"],
     "owner-api": ["go:ownerapi", "go:cli"],
     "yard-rpc-contract": ["go:cli", "go:rpc", "go:ownerapi", "veranda:rust-test"],
     "go-operatoraccess": ["go:operatoraccess"],
@@ -821,7 +823,7 @@
       "id": "internal-ownerpublication",
       "priority": 564,
       "pattern": "^internal/ownerpublication/.*$",
-      "check_sets": ["boot-power"],
+      "check_sets": ["boot-power", "owner-publication"],
       "risk_domains": ["boot-lifecycle", "profile-resource", "migration"]
     },
     {
@@ -851,6 +853,20 @@
       "pattern": "^internal/configsync/.*$",
       "check_sets": ["go-configsync", "host-free-core"],
       "risk_domains": ["config-state"]
+    },
+    {
+      "id": "full-uninstall-owner",
+      "priority": 580,
+      "pattern": "^(tests/full-uninstall\\.sh|dev/e2e/full-uninstall\\.sh|scripts/lib/teardown-(files|services|profile-checks)\\.(sh|py))$",
+      "check_sets": ["full-uninstall"],
+      "risk_domains": ["boot-lifecycle", "config-state"]
+    },
+    {
+      "id": "internal-uninstall",
+      "priority": 542,
+      "pattern": "^internal/uninstall/.*$",
+      "check_sets": ["full-uninstall"],
+      "risk_domains": ["boot-lifecycle", "config-state"]
     },
     {
       "id": "internal-ownerinventory",

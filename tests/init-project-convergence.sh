@@ -2,17 +2,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-init-project.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+export SRV_POOL=default SRV_VOLUME=yard-srv STORAGE_POOL=default
 export HOME="$TMP/home"
 export PATH="$TMP/bin:$PATH"
 export MOCK_INCUS_LOG="$TMP/incus.log"
 export MOCK_PROJECT="$TMP/project"
+export MOCK_PROJECT_OWNER="$TMP/project-owner"
 export MOCK_RAW_EFFECTIVE=''
 export MOCK_RAW_LOCAL=''
 export MOCK_PROFILE_RAW=''
@@ -34,8 +36,18 @@ case "${1:-} ${2:-}" in
     fi
     touch "$MOCK_PROJECT"
     ;;
-  'project set' | 'project unset') ;;
-  'project get') ;;
+  'project set')
+    if [[ "${4:-}" = user.subyard.installation=* ]]; then
+      printf '%s\n' "${@:4}" > "$MOCK_PROJECT_OWNER"
+      chmod 0600 "$MOCK_PROJECT_OWNER"
+    fi
+    ;;
+  'project unset') ;;
+  'project get')
+    if [ -e "$MOCK_PROJECT_OWNER" ]; then
+      awk -F= -v key="${4:-}" '$1==key {sub(/^[^=]*=/, ""); print}' "$MOCK_PROJECT_OWNER"
+    fi
+    ;;
   'profile get')
     [ "${4:-}" != raw.qemu.conf ] || printf '%s\n' "$MOCK_PROFILE_RAW"
     ;;
@@ -71,6 +83,28 @@ printf 'must-not-reach-incus\n' | "$ROOT/scripts/02-create-project.sh" --yes >/d
 [ "$(grep -Fc 'default|project create subyard' "$MOCK_INCUS_LOG")" = 1 ] \
   || fail 'project creation did not use the default Incus context exactly once'
 printf 'ok: project creation closes stdin and is independent of its absent context\n'
+
+cp "$MOCK_PROJECT_OWNER" "$TMP/owned-project"
+rm "$MOCK_PROJECT_OWNER"
+: > "$MOCK_INCUS_LOG"
+if "$ROOT/scripts/02-create-project.sh" --yes > "$TMP/unmarked.out" 2>&1; then
+  fail 'existing unmarked project was claimed'
+fi
+! grep -Eq 'project (set|unset)|profile device add' "$MOCK_INCUS_LOG" || fail 'unmarked project changed before ownership refusal'
+grep -Fq 'no proven installation ownership' "$TMP/unmarked.out" || fail 'unmarked legacy project lacked continuation diagnostic'
+cp "$TMP/owned-project" "$MOCK_PROJECT_OWNER"
+sed -i "s|^user.subyard.data_home=.*|user.subyard.data_home=$TMP/another-installation|" "$MOCK_PROJECT_OWNER"
+: > "$MOCK_INCUS_LOG"
+if "$ROOT/scripts/02-create-project.sh" --yes > "$TMP/foreign.out" 2>&1; then
+  fail 'another installation project was claimed'
+fi
+! grep -Eq 'project (set|unset)|profile device add' "$MOCK_INCUS_LOG" || fail 'foreign project changed before refusal'
+cp "$TMP/owned-project" "$MOCK_PROJECT_OWNER"
+
+# The native CLI supplies canonical SRV_POOL; STORAGE_POOL is a physical alias.
+env -u STORAGE_POOL SRV_POOL=custom-approved-pool "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
+grep -F 'user.subyard.srv_pool=custom-approved-pool' "$MOCK_INCUS_LOG" | grep -Fq 'user.subyard.storage_pool=custom-approved-pool' \
+  || fail 'project ownership did not retain the approved canonical custom pool without an alias'
 
 cat > "$TMP/bin/qemu-system-x86_64" <<'MOCK'
 #!/usr/bin/env bash

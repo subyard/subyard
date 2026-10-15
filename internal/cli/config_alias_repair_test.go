@@ -5,14 +5,92 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+type sourceRepairConsent struct {
+	ready, proceed chan struct{}
+	offset         int
+}
+
+func (reader *sourceRepairConsent) Read(target []byte) (int, error) {
+	if reader.offset == 0 {
+		close(reader.ready)
+		<-reader.proceed
+	}
+	if reader.offset == len("yes\n") {
+		return 0, io.EOF
+	}
+	n := copy(target, "yes\n"[reader.offset:])
+	reader.offset += n
+	return n, nil
+}
+
+func TestQueuedSourceRepairCannotRecreateRetiredConfiguration(t *testing.T) {
+	_, home, configHome, environment := configCommandFixture(t)
+	runtimeRoot := aliasRepairRuntimeFixture(t, home)
+	root := filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
+	testkit.WriteFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=claude\nCODING_TOOL_INTEGRATIONS=codex\n"), 0o600)
+	consent := &sourceRepairConsent{ready: make(chan struct{}), proceed: make(chan struct{})}
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Arguments: []string{"config", "repair-alias", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "host", "--local"}, Stdin: consent, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	program.promptInputTerminal = func() bool { return true }
+	dataHome := filepath.Join(home, ".subyard")
+	_, release, err := uninstall.OwnerLock(context.Background(), dataHome, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan int, 1)
+	go func() { done <- program.Run(ctx) }()
+	select {
+	case <-consent.ready:
+	case code := <-done:
+		t.Fatalf("source repair did not reach consent: %d %s", code, stderr.String())
+	case <-ctx.Done():
+		t.Fatal("source repair did not reach consent before its deadline")
+	}
+	close(consent.proceed)
+	select {
+	case code := <-done:
+		t.Fatalf("source repair did not wait for the owner barrier: %d", code)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := uninstall.AdvanceOwnerEpoch(dataHome, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(configHome); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release = nil
+	if code := <-done; code == 0 || !strings.Contains(stderr.String(), "epoch changed") {
+		t.Fatalf("retired source repair outcome = %d %s", code, stderr.String())
+	}
+	if _, err := os.Lstat(configHome); !os.IsNotExist(err) {
+		t.Fatal("queued source repair recreated configuration or migration lock state")
+	}
+}
 
 func runAliasRepairFixture(t *testing.T, options Options) int {
 	t.Helper()

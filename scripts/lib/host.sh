@@ -136,14 +136,6 @@ incus_project_has_isolated_images() {
   [ "$(incus project get "$1" features.images 2>/dev/null)" != false ]
 }
 
-incus_remove_default_profile_device_if_matches() {
-  local device="$1" property="$2" expected="$3" actual
-  actual="$(incus profile device get default "$device" "$property" \
-    --project default 2>/dev/null || true)"
-  [ "$actual" = "$expected" ] || return 0
-  incus profile device remove default "$device" --project default
-}
-
 nm_incus_bridge_names() {
   local inventory
   command -v incus >/dev/null 2>&1 || return 1
@@ -284,6 +276,42 @@ ufw_rules_set_probe_access() {
     *) return 2 ;;
   esac
   chgrp "$group" "$rules" && chmod 0640 "$rules"
+}
+
+# The caller must first verify that this exact approved bridge is absent.
+ufw_yard_rules_remove() {
+  local bridge="${1:?bridge is required}" rules="${SUBYARD_UFW_RULES_FILE:-/etc/ufw/user.rules}" status
+  command -v ufw >/dev/null 2>&1 || return 0
+  [[ "$bridge" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 2
+  incus network list --project default -f json | jq -e --arg bridge "$bridge" \
+    'all(.[]; .name != $bridge)' >/dev/null || return 1
+  ufw --force delete allow in on "$bridge" to any port 67 proto udp || return
+  ufw --force delete allow in on "$bridge" to any port 53 || return
+  ufw --force route delete allow in on "$bridge" || return
+  ufw --force route delete allow out on "$bridge" || return
+  [ -e "$rules" ] || return 0
+  [ -r "$rules" ] || return 1
+  # Verify every removed tuple, including partially installed policies.
+  awk -v bridge="$bridge" '
+    $1 == "###" && $2 == "tuple" && $3 == "###" {
+      if (($4 == "allow" && ($6 == "67" || $6 == "53") && $10 == "in_" bridge) ||
+          ($4 == "route:allow" && ($10 == "in_" bridge || $10 == "out_" bridge))) found = 1
+    }
+    END { exit found }
+  ' "$rules" || return 1
+  # Other surviving yard policies still need the shared read-only probe grant.
+  if awk '
+    $1 == "###" && $2 == "tuple" && $3 == "###" &&
+    (($4 == "allow" && ($6 == "67" || $6 == "53") && $10 ~ /^in_/) ||
+     ($4 == "route:allow" && $10 ~ /^(in_|out_)/)) { found = 1 }
+    END { exit !found }
+  ' "$rules"; then
+    return 0
+  else
+    status=$?
+    [ "$status" = 1 ] || return "$status"
+    ufw_rules_set_probe_access disable || return
+  fi
 }
 
 incus_instance_primary_ipv4() {

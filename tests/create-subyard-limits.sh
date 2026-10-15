@@ -261,6 +261,7 @@ MOCK
 cat > "$TMP/bin/cpu-dispatcher" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+# This fixture has no optional owner publication to reconcile before start.
 if [ "$#" = 3 ] && [ "$1 $2 $3" = '_publications subyard yard' ]; then exit 0; fi
 [ "$#" = 5 ] && [ "$1 $2 $3 $4" = '_vm-cpu apply subyard yard' ] || exit 90
 pid="$(cat "$MOCK_STATE_DIR/qemu-pid")"

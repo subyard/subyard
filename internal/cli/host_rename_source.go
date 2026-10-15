@@ -198,6 +198,7 @@ type hostRenameAuthority struct {
 	installed          bool
 	configDir, tooling string
 	admission          releaseruntime.SourceAdmission
+	owner              ownerWriteAdmission
 }
 
 func (authority *hostRenameAuthority) close() { _ = authority.runtime.Close() }
@@ -209,6 +210,13 @@ func (cli *CLI) observeHostRenameAuthority(ctx context.Context, home string) (au
 			authority.close()
 		}
 	}()
+	values := cli.configSourceEnvironment()
+	authority.owner, err = captureOwnerWriteAdmission(config.Loaded{Context: domain.Context{Paths: domain.RuntimePaths{
+		DataHome: firstNonempty(values["SUBYARD_HOME"], filepath.Join(values["SUBYARD_OPERATOR_HOME"], ".subyard")), ConfigHome: home,
+	}}}, cli.options.RepositoryRoot)
+	if err != nil {
+		return authority, err
+	}
 	authority.store, err = releasetransition.NewPOSIXV2Store(home)
 	if err != nil {
 		return authority, err
@@ -247,6 +255,11 @@ func (cli *CLI) observeHostRenameAuthority(ctx context.Context, home string) (au
 	return authority, nil
 }
 func (authority *hostRenameAuthority) withLock(ctx context.Context, cli *CLI, apply func() error) error {
+	release, err := cli.acquireOwnerMutation(ctx, authority.owner, false, true)
+	if err != nil {
+		return err
+	}
+	defer release()
 	unlock, err := authority.store.Lock()
 	if err != nil {
 		return err

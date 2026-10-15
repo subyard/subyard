@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type Runtime struct {
@@ -207,6 +208,28 @@ func (runtime Runtime) space(ctx context.Context, yard domain.Context, running b
 
 func (runtime Runtime) startSpaceRefresh(yard domain.Context, cache string) bool {
 	directory := filepath.Dir(cache)
+	generation, err := uninstall.CaptureRoot(directory)
+	if err != nil || len(generation.Entries) == 0 {
+		return false
+	}
+	epoch, epochErr := uninstall.ReadOwnerEpoch(directory)
+	if epochErr != nil {
+		return false
+	}
+	probeContext, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, release, err := uninstall.OwnerLock(probeContext, directory, nil)
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	if err := uninstall.Admit(directory, []uninstall.Tree{generation}, epoch, false, true); err != nil {
+		return false
+	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return false
 	}
@@ -224,10 +247,14 @@ func (runtime Runtime) startSpaceRefresh(yard domain.Context, cache string) bool
 	}
 	refresh := exec.Command(
 		"/bin/sh", "-c", spaceRefreshScript, "yard-space-refresh",
-		cache, yard.IncusProject, yard.YardInstanceName,
+		cache, yard.IncusProject, yard.YardInstanceName, uninstall.OwnerLockPath(directory), fmt.Sprintf("%d:%d", generation.Entries[0].Device, generation.Entries[0].Inode), strconv.FormatUint(epoch, 10),
 	)
 	refresh.Env = environment(runtime.Environment)
 	refresh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// The asynchronous child takes its own barrier and rechecks the original
+	// generation. Release our completed probe before it can attempt that lock.
+	release()
+	release = nil
 	if err := refresh.Start(); err != nil {
 		return false
 	}
@@ -262,6 +289,25 @@ func (runtime Runtime) RefreshSpace(
 	dataHome := yard.Paths.DataHome
 	if dataHome == "" {
 		dataHome = runtime.Environment["SUBYARD_HOME"]
+	}
+	generation, err := uninstall.CaptureRoot(dataHome)
+	if err != nil {
+		return SpaceMeasurement{}, err
+	}
+	if len(generation.Entries) == 0 {
+		return SpaceMeasurement{}, errors.New("space cache installation root is absent; no cache was created")
+	}
+	epoch, epochErr := uninstall.ReadOwnerEpoch(dataHome)
+	if epochErr != nil {
+		return SpaceMeasurement{}, epochErr
+	}
+	_, release, err := uninstall.OwnerLock(ctx, dataHome, nil)
+	if err != nil {
+		return SpaceMeasurement{}, err
+	}
+	defer release()
+	if err := uninstall.Admit(dataHome, []uninstall.Tree{generation}, epoch, false, true); err != nil {
+		return SpaceMeasurement{}, err
 	}
 	cache := spaceCachePath(dataHome, yard.YardName)
 	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
@@ -357,6 +403,25 @@ set -eu
 cache=$1
 project=$2
 instance=$3
+owner_lock=$4
+root_identity=$5
+approved_epoch=$6
+# This existing stable account lock protects the cache root through publication.
+# A queued process keeps its original root identity and never reinstalls it.
+[ -f "$owner_lock" ] && [ ! -L "$owner_lock" ] || exit 0
+exec 8<>"$owner_lock"
+flock -n 8 || exit 0
+[ ! -e "$(dirname "$cache").uninstall" ] || exit 0
+# Publication is atomic in a separate nonsecret file: never replace fd 8's inode.
+epoch=0
+epoch_path=$owner_lock.epoch
+if [ -e "$epoch_path" ] || [ -L "$epoch_path" ]; then
+  [ -f "$epoch_path" ] && [ ! -L "$epoch_path" ] || exit 0
+  [ "$(stat -c '%a:%u' "$epoch_path")" = "600:$(id -u)" ] || exit 0
+  epoch=$(cat "$epoch_path") || exit 0
+fi
+[ "$epoch" = "$approved_epoch" ] || exit 0
+[ "$(stat -c '%d:%i' "$(dirname "$cache")" 2>/dev/null)" = "$root_identity" ] || exit 0
 lock=$cache.lock
 temporary=$cache.tmp
 umask 077

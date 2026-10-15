@@ -50,14 +50,19 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	fake := filepath.Join(root, "incus")
 	testkit.WriteFile(t, fake, []byte("#!/bin/sh\ncase \"$2\" in */snapshots\\?*) cat \"$SNAPSHOT_DATA\";; *) cat \"$INSTANCE_DATA\";; esac\n"), 0o700)
 	guard := filepath.Join("..", "..", "..", "scripts", "lib", "teardown-plan.py")
+	var output []byte
 	run := func(args ...string) error {
 		command := exec.Command("python3", append([]string{guard}, args...)...)
 		command.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "INSTANCE_DATA="+data, "SNAPSHOT_DATA="+snapshots, "SUBYARD_TEARDOWN_INVENTORY="+string(inventory))
-		_, err := command.CombinedOutput()
+		var err error
+		output, err = command.CombinedOutput()
 		return err
 	}
 	if err := run("guard", "instance", "yard", "fixture"); err != nil {
 		t.Fatalf("captured physical metadata was rejected: %v", err)
+	}
+	if err := run("guard-all", "fixture"); err != nil || len(output) != 0 {
+		t.Fatal("unchanged aggregate guard did not remain silent", err)
 	}
 	if err := run("guard", "instance", "unapproved", "fixture"); err == nil {
 		t.Fatal("unapproved physical deletion target accepted")
@@ -66,6 +71,24 @@ func TestPhysicalTeardownGuardMatchesCapturedMetadataAndSnapshots(t *testing.T) 
 	if err := run("guard", "instance", "yard", "fixture"); err == nil {
 		t.Fatal("newly created snapshot expanded physical deletion")
 	}
+	assertRefusal := func(wanted string) {
+		t.Helper()
+		err := run("guard-all", "fixture")
+		exit, ok := err.(*exec.ExitError)
+		if !ok || exit.ExitCode() != 1 || !strings.Contains(string(output), `"action":"guard-all"`) || !strings.Contains(string(output), wanted) || strings.Contains(string(output), "synthetic-private") {
+			t.Fatal("aggregate guard lost its refusal or safe diagnostic")
+		}
+	}
+	assertRefusal(`"reason":"teardown resource changed after confirmation"`)
+	delete(observed, "config")
+	observed["private-fixture"] = "synthetic-private-field-value"
+	raw, _ = json.Marshal(observed)
+	testkit.WriteFile(t, data, raw, 0600)
+	assertRefusal(`"field":"config"`)
+	testkit.WriteFile(t, fake, []byte("#!/bin/sh\nprintf synthetic-private-query-output\nprintf synthetic-private-query-error >&2\nexit 23\n"), 0700)
+	assertRefusal(`"query_exit":23`)
+	inventory = []byte(`[{"kind":"synthetic-private-kind"}]`)
+	assertRefusal(`"stage":"inventory"`)
 }
 
 func TestTeardownResourceContainment(t *testing.T) {

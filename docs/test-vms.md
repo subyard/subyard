@@ -603,6 +603,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
 | `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
+| `full-uninstall` | one allocated VM and installed current candidate; bounded phase/reboot deadlines and a sink delay longer than 60 seconds | marker-owned yards, producers, credentials and installation roots; preserve foreign resources and selected-yard neighbors | singleton held-lease uninstall, interruption/retry and reboot acceptance |
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
@@ -1239,3 +1240,22 @@ Verified builder cleanup emits an exact-incident `base_builder.cleaned` receipt.
 uses that receipt only for the matching source and builder artifact, including builders created
 for real allocation slots. Ordinary slot recovery/reuse cannot close builder evidence. The receipt
 creates no allocation recovery transition. An unpersisted cleanup receipt leaves the observation open.
+
+The targeted `full-uninstall` P0 lane uses the existing 8 GiB singleton allocation (`android-test`)
+for its ordinary Linux fixture and holds one disposable lease across candidate packaging and
+supported installation, selected-yard preservation, explicit full removal, fresh-process retry,
+a delayed sink tick longer than one minute, guest reboot and repeated verification:
+
+```sh
+dev/e2e/p0-acceptance.sh --slot "$slot" --lane full-uninstall
+```
+
+Its marker-owned fixture runs lifecycle commands as an ordinary isolated owner, with root helpers
+confined to the leased VM. It includes direct/custom installer-only and bootstrap-only cases,
+default/named/stopped/partial ownership, credentials and the real host sink, a connected SSH refusal,
+foreign workload/shared-volume/user-service/SSH/shell controls, a bound Git project and an ordinary
+foreign file inside the custom host root. Reboot readiness checks transport and a changed boot ID;
+it does not require the power reconciler which full removal has retired. Host-free
+`tests/full-uninstall.sh` additionally removes Incus from the actual executable path so the normal
+P0 Incus baseline cannot mask the cold-install boundary. These fixtures do not establish acceptance
+until their native phases and cleanup have completed against the frozen current candidate.

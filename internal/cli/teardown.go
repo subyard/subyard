@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
@@ -19,22 +20,51 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 type teardownExecution struct {
-	keepData        bool
-	resetConfig     bool
-	configSnapshot  *teardownConfigSnapshot
-	completedReset  bool
-	changed         bool
-	physicalChanged bool
-	networkRemoval  *yardnetwork.RemovalPlan
-	snapshot        *teardownSnapshot
-	liveSnapshot    *teardownSnapshot
-	pool            string
-	volume          string
-	revokeAgent     bool
+	uninstall.RecoveryPlan
+	full, holdShared, keepData, resetConfig, completedReset bool
+	configSnapshot                                          *teardownConfigSnapshot
+	changed, physicalChanged, revokeAgent                   bool
+	liveSnapshot                                            *teardownSnapshot
+	activeYard                                              *uninstall.RecoveryYard
+	RecoveryBinding                                         *uninstall.Tree
+	Assessed, resumed                                       bool
+	ManagedRoots, PreservedRoots, MutableRoots              []string
+}
+
+type fullTeardown = teardownExecution
+
+func (execution *teardownExecution) snapshot() *teardownSnapshot {
+	if execution.activeYard == nil {
+		return nil
+	}
+	return execution.activeYard.Snapshot
+}
+func (execution *teardownExecution) networkRemoval() *yardnetwork.RemovalPlan {
+	if execution.activeYard == nil {
+		return nil
+	}
+	return execution.activeYard.Network
+}
+func (execution *teardownExecution) selectYard(loaded config.Loaded) {
+	for index := range execution.Yards {
+		if execution.Yards[index].Context.IncusProject == loaded.Context.IncusProject && execution.Yards[index].Context.YardInstanceName == loaded.Context.YardInstanceName {
+			execution.activeYard = &execution.Yards[index]
+			return
+		}
+	}
+	execution.Yards = append(execution.Yards, uninstall.RecoveryYard{Context: loaded.Context, Environment: structuredCommandContext(loaded)})
+	execution.activeYard = &execution.Yards[len(execution.Yards)-1]
+}
+func (cli *CLI) teardownLoaded(yard uninstall.RecoveryYard) config.Loaded {
+	loaded := config.Loaded{Catalog: cli.catalog, Context: yard.Context, Environment: yard.Environment}
+	loaded.Context.Paths.RepositoryRoot = cli.options.RepositoryRoot
+	loaded.Context.Paths.ConfigDir = filepath.Join(cli.options.RepositoryRoot, "config")
+	return loaded
 }
 
 // resetTeardownBaseline retains the same approved physical and artifact scope
@@ -57,7 +87,7 @@ func (baseline *resetTeardownBaseline) binding() string {
 	return operationStateDigest(struct {
 		Snapshot *teardownSnapshot
 		Network  *yardnetwork.RemovalPlan
-	}{baseline.execution.snapshot, baseline.execution.networkRemoval})
+	}{baseline.execution.snapshot(), baseline.execution.networkRemoval()})
 }
 
 func (baseline *resetTeardownBaseline) steps() []domain.OperationStep {
@@ -65,11 +95,11 @@ func (baseline *resetTeardownBaseline) steps() []domain.OperationStep {
 }
 
 func (baseline *resetTeardownBaseline) resources() []ports.TeardownResource {
-	return append([]ports.TeardownResource{}, baseline.execution.snapshot.Resources...)
+	return append([]ports.TeardownResource{}, baseline.execution.snapshot().Resources...)
 }
 
 func (baseline *resetTeardownBaseline) artifacts() []ports.TeardownArtifact {
-	return append([]ports.TeardownArtifact{}, baseline.execution.snapshot.Artifacts...)
+	return append([]ports.TeardownArtifact{}, baseline.execution.snapshot().Artifacts...)
 }
 
 func (baseline *resetTeardownBaseline) check(ctx context.Context, cli *CLI) error {
@@ -89,6 +119,8 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 			execution.keepData = true
 		case "--reset-config":
 			execution.resetConfig = true
+		case "--full":
+			execution.full = true
 		case "-h", "--help":
 			return nil, errors.New("help is not an executable teardown operation")
 		default:
@@ -98,7 +130,71 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 	if execution.keepData && execution.resetConfig {
 		return nil, errors.New("--reset-config cannot be combined with --keep-data")
 	}
+	if execution.full && execution.keepData {
+		return nil, errors.New("--full cannot be combined with --keep-data")
+	}
 	return execution, nil
+}
+
+// Scope selection is a conversation before assessment, never deletion consent.
+// Read one byte at a time so a buffered reader cannot consume the later answer.
+func (cli *CLI) chooseTeardownScope(yard domain.Context, arguments []string) ([]string, error) {
+	execution, err := prepareTeardownExecution(arguments)
+	if err != nil {
+		return nil, err
+	}
+	if execution.full && yard.AccessKind != domain.AccessLocal {
+		return nil, errors.New("--full must run locally on the owner host; run yard teardown --full there")
+	}
+	if execution.full || cli.env["ASSUME_YES"] == "1" || cli.promptInputTerminal == nil || !cli.promptInputTerminal() {
+		return arguments, nil
+	}
+	for _, argument := range arguments {
+		if argument == "--yes" || argument == "-y" {
+			return arguments, nil
+		}
+	}
+	owner := "this local owner host"
+	if yard.AccessKind != domain.AccessLocal {
+		owner = yard.OwnerEndpoint
+	}
+	fmt.Fprintf(cli.options.Stdout, "Teardown scope for yard %s on %s:\n  1. Only this yard (default)\n  2. Fully remove Subyard and all local yards on the owner host\nSelect [1/2], or q to cancel: ", yard.YardName, owner)
+	for {
+		var answer strings.Builder
+		one := []byte{0}
+		for {
+			n, readErr := cli.options.Stdin.Read(one)
+			if n != 0 {
+				if one[0] == '\n' {
+					break
+				}
+				if answer.Len() >= 32 {
+					return nil, errors.New("teardown scope answer is too long")
+				}
+				answer.WriteByte(one[0])
+			}
+			if readErr != nil {
+				return nil, fmt.Errorf("%w: teardown scope input ended", domain.ErrOperationDeclined)
+			}
+		}
+		switch strings.TrimSpace(strings.ToLower(answer.String())) {
+		case "", "1":
+			return arguments, nil
+		case "2":
+			selected := append(append([]string{}, arguments...), "--full")
+			if _, err := prepareTeardownExecution(selected); err != nil {
+				return nil, err
+			}
+			if yard.AccessKind != domain.AccessLocal {
+				return nil, errors.New("full removal must run locally on the owner host")
+			}
+			return selected, nil
+		case "q", "quit", "cancel":
+			return nil, domain.ErrOperationDeclined
+		default:
+			fmt.Fprint(cli.options.Stdout, "Select 1, 2, or q: ")
+		}
+	}
 }
 
 func (execution *teardownExecution) policy(definition command.Definition, yard domain.Context) domain.CommandPolicy {
@@ -116,8 +212,8 @@ func (execution *teardownExecution) policy(definition command.Definition, yard d
 			"remove the NetworkManager guard only after the bridge disappears",
 		)
 	}
-	if execution.networkRemoval != nil {
-		consequences = append(consequences, execution.networkRemoval.Consequences...)
+	if execution.networkRemoval() != nil {
+		consequences = append(consequences, execution.networkRemoval().Consequences...)
 	}
 	if execution.resetConfig {
 		consequences = append(consequences, "remove all captured local settings and overrides for this yard after physical cleanup verifies", "keep a local ownership marker that suppresses previous Git and repository yard fallback; preserve shared and host settings")
@@ -139,12 +235,12 @@ func (execution *teardownExecution) actionPlan(
 	if execution.keepData {
 		action = "yard.teardown.keep-data"
 	}
-	if !execution.resetConfig && !execution.physicalChanged && execution.snapshot != nil && execution.snapshot.Agent != nil && execution.snapshot.Agent.State() == "locked" && execution.networkRemoval != nil && execution.networkRemoval.Cleanup {
+	if !execution.resetConfig && !execution.physicalChanged && execution.snapshot() != nil && execution.snapshot().Agent != nil && execution.snapshot().Agent.State() == "locked" && execution.networkRemoval() != nil && execution.networkRemoval().Cleanup {
 		action = "yard.network.save"
-		if execution.networkRemoval.Stored.Policy.Isolation {
+		if execution.networkRemoval().Stored.Policy.Isolation {
 			action = "yard.network.apply"
 		}
-		return action, domain.ActionDelta{Changed: true, Consequences: execution.networkRemoval.Consequences}, nil
+		return action, domain.ActionDelta{Changed: true, Consequences: execution.networkRemoval().Consequences}, nil
 	}
 	delta := domain.ActionDelta{Changed: execution.changed}
 	if delta.Changed {
@@ -153,14 +249,14 @@ func (execution *teardownExecution) actionPlan(
 	return action, delta, nil
 }
 
-func (cli *CLI) observeTeardownExecution(
-	ctx context.Context,
-	loaded config.Loaded,
-	execution *teardownExecution,
-) error {
+func (cli *CLI) observeTeardownExecution(ctx context.Context, loaded config.Loaded, execution *teardownExecution) error {
+	return cli.observeTeardownYard(ctx, loaded, execution, true)
+}
+func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, execution *teardownExecution, checkNetwork bool) error {
 	if execution == nil {
 		return errors.New("teardown execution is required")
 	}
+	execution.selectYard(loaded)
 	incusPort, _ := cli.statusPorts()
 	incusState, err := incusPort.ReconcileState(
 		ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName,
@@ -169,6 +265,10 @@ func (cli *CLI) observeTeardownExecution(
 	)
 	if err != nil {
 		return fmt.Errorf("inspect teardown target: %w", err)
+	}
+	if execution.full && !incusState.ProjectFound && !incusState.InstanceFound {
+		incusState.HostPoolFound = false
+		incusState.HostNetworkFound = false
 	}
 	execution.changed = incusState.InstanceFound
 	if !execution.keepData {
@@ -191,6 +291,9 @@ func (cli *CLI) observeTeardownExecution(
 		return err
 	}
 	for _, definition := range definitions {
+		if definition.LifecycleOnly {
+			continue // These paths belong to full installation cleanup, after yard verification.
+		}
 		for _, managed := range definition.ManagedPaths {
 			root := loaded.Context.Paths.DataHome
 			if managed.Root == "operator" {
@@ -199,19 +302,54 @@ func (cli *CLI) observeTeardownExecution(
 			paths = append(paths, filepath.Join(root, strings.ReplaceAll(managed.Path, "{yard}", loaded.Context.YardName)))
 		}
 	}
-	snapshot, err := cli.captureTeardownSnapshot(ctx, loaded, incusState, paths)
+	var registered []domain.Context
+	if execution.full && (execution.Assessed || execution.resumed) {
+		registered = execution.contexts()
+	}
+	snapshot, err := cli.captureTeardownSnapshot(ctx, loaded, incusState, paths, registered)
 	if err != nil {
 		return err
 	}
-	if execution.snapshot != nil {
-		if err := checkTeardownSnapshot(execution.snapshot, snapshot); err != nil {
+	if !execution.full {
+		owners := []string{"relay"}
+		others, err := incusPort.ListInstances(ctx)
+		if err != nil {
+			return err
+		}
+		managedNeighbor := hasOtherRegisteredLocalYard(loaded.Context.YardName, snapshot.Registered)
+		for _, instance := range others {
+			managedNeighbor = managedNeighbor || instance.Project != loaded.Context.IncusProject && instance.Config["user.subyard.managed"] == "true"
+		}
+		if !managedNeighbor {
+			owners = append(owners, "power")
+		}
+		installation := uninstall.Installation{DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: firstNonempty(loaded.Environment["YARD_RUNTIME_ROOT"], filepath.Join(loaded.Context.Paths.DataHome, "runtime")), OperatorUID: uint32(os.Getuid())}
+		snapshot.Services, err = cli.captureCoreServices(loaded, uninstall.RecoveryPlan{Installation: installation, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Snapshot: snapshot}}}, owners, loaded.Context.SSHPort)
+		if err != nil {
+			return err
+		}
+		for _, service := range snapshot.Services {
+			snapshot.Artifacts = append(snapshot.Artifacts, service.Artifacts...)
+		}
+	}
+	if execution.full && !incusState.ProjectFound && !incusState.InstanceFound {
+		filtered := snapshot.Resources[:0]
+		for _, resource := range snapshot.Resources {
+			if resource.Kind != "pool" && resource.Kind != "network" {
+				filtered = append(filtered, resource)
+			}
+		}
+		snapshot.Resources = filtered
+	}
+	if execution.snapshot() != nil {
+		if err := checkTeardownSnapshot(execution.snapshot(), snapshot); err != nil {
 			return err
 		}
 	} else {
-		execution.snapshot = snapshot
+		execution.activeYard.Snapshot = snapshot
 	}
 	execution.liveSnapshot = snapshot
-	execution.pool, execution.volume = loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"]
+
 	for _, path := range paths {
 		_, statErr := os.Lstat(path)
 		switch {
@@ -273,10 +411,12 @@ func (cli *CLI) observeTeardownExecution(
 	if err != nil {
 		return err
 	}
-	if execution.networkRemoval != nil && (execution.networkRemoval.Stored.Content != removal.Stored.Content || execution.networkRemoval.Stored.ETag != removal.Stored.ETag) {
+	if checkNetwork && execution.networkRemoval() != nil && (execution.networkRemoval().Stored.Content != removal.Stored.Content || execution.networkRemoval().Stored.ETag != removal.Stored.ETag) {
 		return domain.ErrPlanStale
 	}
-	execution.networkRemoval = &removal
+	if execution.activeYard.Network == nil {
+		execution.activeYard.Network = &removal
+	}
 	if execution.completedReset && removal.Cleanup {
 		return errors.New("unregistered reset yard acquired network policy; register the target before teardown")
 	}
@@ -284,7 +424,145 @@ func (cli *CLI) observeTeardownExecution(
 	return nil
 }
 
-func (cli *CLI) executeTeardown(
+func (cli *CLI) prepareTeardownPrivileges(ctx context.Context, execution *teardownExecution, diagnostics io.Writer) error {
+	needsRoot := execution.physicalChanged
+	if execution.full {
+		needsRoot = len(execution.Services) > 0 || len(execution.Shared) > 0 || len(execution.Yards) > 0
+		for _, tree := range execution.Trees {
+			needsRoot = needsRoot || tree.Opaque
+			for _, entry := range tree.Entries {
+				needsRoot = needsRoot || entry.UID != execution.Installation.OperatorUID
+			}
+		}
+	}
+	if needsRoot && cli.options.AdapterRunner == nil {
+		if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), "teardown"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (execution *teardownExecution) contexts() []domain.Context {
+	contexts := make([]domain.Context, 0, len(execution.Yards))
+	for _, yard := range execution.Yards {
+		contexts = append(contexts, yard.Context)
+	}
+	sort.Slice(contexts, func(i, j int) bool { return contexts[i].YardName < contexts[j].YardName })
+	return contexts
+}
+
+func (cli *CLI) executeTeardown(ctx context.Context, orchestrator *application.Orchestrator, loaded config.Loaded, plan domain.OperationPlan, execution *teardownExecution, diagnostics io.Writer) (domain.AdapterResult, error) {
+	if execution == nil {
+		return domain.AdapterResult{}, errors.New("teardown execution is required")
+	}
+	if execution.full {
+		return cli.executeFullTeardown(ctx, orchestrator, loaded, plan, execution, diagnostics)
+	}
+	if err := cli.observeTeardownExecution(ctx, loaded, execution); err != nil {
+		return domain.AdapterResult{}, err
+	}
+	if err := cli.prepareTeardownPrivileges(ctx, execution, diagnostics); err != nil {
+		return domain.AdapterResult{}, err
+	}
+	result, err := cli.executeTeardownYards(ctx, orchestrator, loaded, plan, execution, diagnostics, nil, nil, nil)
+	if err == nil && result.Status == "ok" && execution.resetConfig {
+		err = cli.resetTeardownConfiguration(ctx, loaded, execution)
+	}
+	return result, err
+}
+
+// One driver owns all operation-wide preparation. The physical leaf never
+// re-enters public execution or acquires a second network/owner lock.
+func (cli *CLI) executeTeardownYards(ctx context.Context, orchestrator *application.Orchestrator, current config.Loaded, plan domain.OperationPlan, execution *teardownExecution, diagnostics io.Writer, before, after func() error, leaf func(string, map[string]string) error) (domain.AdapterResult, error) {
+	result := domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}
+	execution.holdShared = execution.full
+	if execution.full && (len(execution.Yards) > 0 || len(execution.Shared) > 0) && cli.options.AdapterRunner == nil {
+		values := structuredCommandContext(current)
+		values["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
+		if err := leaf("prepare-lock", values); err != nil {
+			return result, err
+		}
+	}
+	apply := func() error {
+		for _, yard := range execution.Yards {
+			if execution.revokeAgent {
+				manager := sshagentruntime.Manager{Config: sshagentruntime.Config{Directory: sshagentruntime.Directory(yard.Context.Paths.DataHome, yard.Context.YardName)}}
+				if err := manager.LockPrepared(ctx, yard.Snapshot.Agent); err != nil {
+					return err
+				}
+			}
+			if execution.full {
+				loaded := cli.teardownLoaded(yard)
+				if err := cli.observeTeardownYard(ctx, loaded, execution, false); err != nil {
+					return err
+				}
+				values := structuredCommandContext(loaded)
+				values["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
+				payload, _ := json.Marshal(execution.liveSnapshot.Resources)
+				values["SUBYARD_TEARDOWN_INVENTORY"] = string(payload)
+				payload, _ = json.Marshal(ports.ArtifactBindings(yard.Snapshot.Artifacts))
+				values["SUBYARD_TEARDOWN_ARTIFACTS"] = string(payload)
+				if err := leaf("check-sessions", values); err != nil {
+					return err
+				}
+			}
+		}
+		if before != nil {
+			if err := before(); err != nil {
+				return err
+			}
+		}
+		for _, yard := range execution.Yards {
+			loaded := cli.teardownLoaded(yard)
+			if err := cli.observeTeardownYard(ctx, loaded, execution, false); err != nil {
+				return err
+			}
+			applied, err := cli.applyTeardownYard(ctx, orchestrator, loaded, plan, execution, diagnostics)
+			if err != nil {
+				return err
+			}
+			result = applied
+		}
+		return nil
+	}
+	var err error
+	if len(execution.Yards) == 0 && len(execution.Shared) == 0 {
+		err = apply()
+		if err == nil && after != nil {
+			err = after()
+		}
+	} else {
+		contexts := execution.contexts()
+		if !execution.full {
+			contexts = execution.snapshot().Registered
+		}
+		service := cli.networkService(contexts)
+		if service == nil {
+			return result, errors.New("prepared network cleanup is required for teardown")
+		}
+		removals := make([]yardnetwork.RemovalPlan, 0, len(execution.Yards))
+		for _, yard := range execution.Yards {
+			if yard.Network == nil {
+				return result, errors.New("approved network removal is missing")
+			}
+			removals = append(removals, *yard.Network)
+		}
+		err = service.WithRemovals(ctx, removals, apply, after)
+	}
+	if err == nil {
+		for _, yard := range execution.Yards {
+			loaded := cli.teardownLoaded(yard)
+			execution.selectYard(loaded)
+			if err = cli.verifyTeardown(ctx, loaded, execution); err != nil {
+				break
+			}
+		}
+	}
+	return result, err
+}
+
+func (cli *CLI) applyTeardownYard(
 	ctx context.Context,
 	orchestrator *application.Orchestrator,
 	loaded config.Loaded,
@@ -294,9 +572,6 @@ func (cli *CLI) executeTeardown(
 ) (domain.AdapterResult, error) {
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("teardown execution is required")
-	}
-	if err := cli.observeTeardownExecution(ctx, loaded, execution); err != nil {
-		return domain.AdapterResult{}, err
 	}
 	contextValues := structuredCommandContext(loaded)
 	contextValues["SUBYARD_DISPATCHER_PATH"] = cli.options.DispatcherPath
@@ -308,7 +583,7 @@ func (cli *CLI) executeTeardown(
 		return domain.AdapterResult{}, errors.New("teardown inventory exceeds physical guard limit")
 	}
 	contextValues["SUBYARD_TEARDOWN_INVENTORY"] = string(inventory)
-	artifacts, err := json.Marshal(execution.snapshot.Artifacts)
+	artifacts, err := json.Marshal(ports.ArtifactBindings(execution.snapshot().Artifacts))
 	if err != nil {
 		return domain.AdapterResult{}, err
 	}
@@ -316,10 +591,18 @@ func (cli *CLI) executeTeardown(
 		return domain.AdapterResult{}, errors.New("teardown artifacts exceed physical guard limit")
 	}
 	contextValues["SUBYARD_TEARDOWN_ARTIFACTS"] = string(artifacts)
-	if execution.physicalChanged && cli.options.AdapterRunner == nil {
-		if err := cli.prepareSudoPrivileges(
-			ctx, diagnostics, cli.effectiveUID(), "teardown",
-		); err != nil {
+	if !execution.full {
+		services, err := json.Marshal(execution.snapshot().Services)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		if len(services) > 64<<10 {
+			return domain.AdapterResult{}, errors.New("teardown producers exceed physical guard limit")
+		}
+		contextValues["SUBYARD_TEARDOWN_SERVICES"] = string(services)
+	}
+	if execution.full {
+		if err := execution.bindFullPlanContext(cli, contextValues); err != nil {
 			return domain.AdapterResult{}, err
 		}
 	}
@@ -335,55 +618,35 @@ func (cli *CLI) executeTeardown(
 	if execution.resetConfig {
 		contextValues["SUBYARD_TEARDOWN_RESET_CONFIG"] = "1"
 	}
-	yards, err := cli.powerYardContexts(loaded)
-	if err != nil {
-		return domain.AdapterResult{}, fmt.Errorf("discover local yards before teardown: %w", err)
-	}
+	yards := execution.snapshot().Registered
 	contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "0"
-	if hasOtherRegisteredLocalYard(loaded.Context.YardName, yards) {
+	if !execution.full && hasOtherRegisteredLocalYard(loaded.Context.YardName, yards) {
 		contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "1"
 	}
-	// Teardown must not leave a credential service reconnecting to a future yard.
-	agentManager := sshagentruntime.Manager{Config: sshagentruntime.Config{
-		Directory: sshagentruntime.Directory(loaded.Context.Paths.DataHome, loaded.Context.YardName),
-	}}
-	if execution.revokeAgent {
-		if agentErr := agentManager.LockPrepared(ctx, execution.snapshot.Agent); agentErr != nil {
-			return domain.AdapterResult{}, agentErr
-		}
+	if execution.holdShared {
+		contextValues["SUBYARD_TEARDOWN_KEEP_SHARED"] = "1"
+	}
+	contextValues["SUBYARD_TEARDOWN_FULL"] = "0"
+	if execution.full {
+		contextValues["SUBYARD_TEARDOWN_FULL"] = "1"
 	}
 	request := domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID,
 		Adapter: "teardown", Action: "apply", Arguments: []string{"--yes"}, Context: contextValues,
 	}
-	service := cli.networkService(yards)
-	if service == nil || execution.networkRemoval == nil {
-		return domain.AdapterResult{}, errors.New("prepared network cleanup is required for teardown")
-	}
 	var result domain.AdapterResult
 	var stderr string
-	err = service.WithRemoval(ctx, *execution.networkRemoval, func() error {
-		if !execution.physicalChanged {
-			result = domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}
-			return nil
-		}
-		var runErr error
-		result, stderr, runErr = orchestrator.RunAdapter(ctx, plan, request, nil)
-		if runErr == nil && result.Status != "ok" {
-			return errors.New("physical teardown did not succeed")
-		}
-		return runErr
-	})
+	if !execution.physicalChanged {
+		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Status: "ok"}, nil
+	}
+	result, stderr, err = orchestrator.RunAdapter(ctx, plan, request, nil)
+	if err == nil && result.Status != "ok" {
+		err = errors.New("physical teardown did not succeed")
+	}
 	writeAdapterDiagnostics(diagnostics, stderr)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == ports.TeardownPlanStaleExitCode {
 		err = fmt.Errorf("%w: teardown artifact changed before deletion", domain.ErrPlanStale)
-	}
-	if err == nil && result.Status == "ok" {
-		err = cli.verifyTeardown(ctx, loaded, execution)
-	}
-	if err == nil && result.Status == "ok" && execution.resetConfig {
-		err = cli.resetTeardownConfiguration(ctx, loaded, execution)
 	}
 	return result, err
 }

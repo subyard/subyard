@@ -54,6 +54,7 @@ import (
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -63,38 +64,39 @@ var Version = "0.1.0-dev"
 var operationCounter atomic.Uint64
 
 type Options struct {
-	RepositoryRoot     string
-	DispatcherPath     string
-	Program            string
-	Arguments          []string
-	Environment        []string
-	WorkingDir         string
-	Stdin              io.Reader
-	Stdout             io.Writer
-	Stderr             io.Writer
-	Incus              reconcileruntime.IncusReader
-	NetworkPolicy      *yardnetwork.Service
-	Executor           ports.InstanceExecutor
-	ProjectData        ports.YardExecutor
-	ProjectDevices     ports.InstanceDeviceManager
-	ProjectArchive     ports.DirectoryArchiver
-	ProjectExports     ports.ProjectExportStore
-	ProjectVSCode      ports.VSCode
-	ProjectObserver    ports.ProjectObserver
-	StatusFacts        ports.StatusFactsReader
-	LocalAddresses     func() ([]netip.Addr, error)
-	Credentials        ports.CredentialMetadataReader
-	AdapterRunner      ports.AdapterRunner
-	InitPlatform       ports.InitPlatform
-	IntegrationRuntime func(config.Loaded) IntegrationRuntime
-	ProfileRuntime     func(config.Loaded) ProfileServiceRuntime
-	RemoteControl      ports.RemoteControl
-	Prompt             ports.Prompter
-	Config             ports.ConfigApplier
-	Clock              ports.Clock
-	Audit              ports.AuditSink
-	ClientProjects     func(context.Context, string, clientprojects.Export, string) (clientprojects.Plan, error)
-	ClientYardProbe    func(context.Context, domain.Context, domain.OwnerYard) error
+	RepositoryRoot       string
+	DispatcherPath       string
+	Program              string
+	Arguments            []string
+	Environment          []string
+	WorkingDir           string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
+	Incus                reconcileruntime.IncusReader
+	NetworkPolicy        *yardnetwork.Service
+	Executor             ports.InstanceExecutor
+	ProjectData          ports.YardExecutor
+	ProjectDevices       ports.InstanceDeviceManager
+	ProjectArchive       ports.DirectoryArchiver
+	ProjectExports       ports.ProjectExportStore
+	ProjectVSCode        ports.VSCode
+	ProjectObserver      ports.ProjectObserver
+	StatusFacts          ports.StatusFactsReader
+	LocalAddresses       func() ([]netip.Addr, error)
+	Credentials          ports.CredentialMetadataReader
+	AdapterRunner        ports.AdapterRunner
+	InitPlatform         ports.InitPlatform
+	IntegrationRuntime   func(config.Loaded) IntegrationRuntime
+	ProfileRuntime       func(config.Loaded) ProfileServiceRuntime
+	ObserveCoreProducers func(config.Loaded, uninstall.RecoveryPlan, []string, int) ([]uninstall.RecoveryService, error)
+	RemoteControl        ports.RemoteControl
+	Prompt               ports.Prompter
+	Config               ports.ConfigApplier
+	Clock                ports.Clock
+	Audit                ports.AuditSink
+	ClientProjects       func(context.Context, string, clientprojects.Export, string) (clientprojects.Plan, error)
+	ClientYardProbe      func(context.Context, domain.Context, domain.OwnerYard) error
 }
 
 type CLI struct {
@@ -124,6 +126,11 @@ type CLI struct {
 	integrationCleanupRepair     *configApplyRepairPermit
 	teardownRepair               *configApplyRepairPermit
 	resourceShutdownRepair       *resourceShutdownPermit
+	fullTeardownRecovery         string
+	ownerMutationLock            *uninstall.Tree
+	ownerMutationLockExpected    *uninstall.Tree
+	ownerAdmission               *ownerWriteAdmission
+	ownerAdmissionMutex          *sync.Mutex
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -396,7 +403,7 @@ func New(options Options) (*CLI, error) {
 		activeEnvironment[name] = value
 	}
 	cli := &CLI{
-		catalog: settings, options: options, env: activeEnvironment, baseEnv: baseEnvironment,
+		catalog: settings, options: options, env: activeEnvironment, baseEnv: baseEnvironment, ownerAdmissionMutex: &sync.Mutex{},
 		commandInputs: releaseruntime.CaptureCommandInputs(options.Environment, func(name string) bool { _, ok := settings.LookupSetting(name); return ok }),
 		manifest:      manifest, resources: resources, inventoryRoutes: make(map[string]config.Loaded),
 		discoveredOwners: make(map[string]ownerinventory.Connection), coreActions: coreActions,
@@ -431,12 +438,42 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return code
 	}
 	name := remaining[0]
+	if name == "_uninstall-resume" {
+		return cli.runFullTeardownRecovery(ctx, remaining[1:])
+	}
 	commandArguments := append([]string(nil), remaining[1:]...)
 	if yes {
 		commandArguments = append([]string{"--yes"}, commandArguments...)
 	}
 	definition, core := cli.manifest.Lookup(name)
-	if core && definition.Handler == "@teardown" {
+	if core && definition.Handler == "@teardown" && !commandHelpRequested(commandArguments) {
+		if _, err := prepareTeardownExecution(commandArguments); err != nil {
+			cli.errorf("%v", err)
+			return 2
+		}
+		if slices.Contains(commandArguments, "--full") && strings.Contains(yard, "/") {
+			cli.errorf("--full must run locally on the owner host; remote selectors do not authorize host uninstall")
+			return 2
+		}
+		if slices.Contains(commandArguments, "--full") && !strings.Contains(yard, "/") {
+			home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
+			if root := runtimeRootForRepository(cli.options.RepositoryRoot, ""); root != "" {
+				if own, readErr := uninstall.ReadInstallationFile(filepath.Join(root, uninstall.ManifestName), "", uint32(os.Getuid())); readErr == nil {
+					home = own.DataHome
+				}
+			}
+			directory := home + ".uninstall"
+			if _, statErr := os.Lstat(directory); statErr == nil {
+				retry := []string{directory}
+				if slices.Contains(commandArguments, "--yes") || cli.env["ASSUME_YES"] == "1" {
+					retry = append(retry, "--yes")
+				}
+				return cli.runFullTeardownRecovery(ctx, retry)
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				cli.errorf("full uninstall recovery inventory: %v", statErr)
+				return 1
+			}
+		}
 		if execution, err := prepareTeardownExecution(commandArguments); err == nil && execution.resetConfig {
 			cli.allowResetYard = true
 		}
@@ -627,10 +664,30 @@ func (cli *CLI) Run(ctx context.Context) int {
 			ownerDataHome = filepath.Join(operatorHome, ".subyard")
 		}
 	}
-	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile")) {
-		if err := (ownerinventory.Connections{Root: filepath.Join(ownerDataHome, "owner-inventory")}).Recover(); err != nil {
-			cli.errorf("recover owner inventory transaction: %v", err)
+	if ownerDataHome != "" && !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown")) {
+		configHome, err := config.ResolveConfigHome(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), cli.env)
+		if err != nil {
+			cli.errorf("owner recovery context: %v", err)
 			return 1
+		}
+		owner := config.Loaded{Context: domain.Context{Paths: domain.RuntimePaths{DataHome: ownerDataHome, ConfigHome: configHome}}}
+		if _, err := cli.originalOwnerWrite(owner); err != nil {
+			cli.errorf("owner recovery context: %v", err)
+			return 1
+		}
+		root := filepath.Join(ownerDataHome, "owner-inventory")
+		// An absent controller store has no transaction to recover. Do not create
+		// the installation merely by dispatching an ordinary command.
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			release, err := cli.admitOwnerWrite(ctx, owner)
+			if err == nil {
+				err = (ownerinventory.Connections{Root: root}).Recover()
+				release()
+			}
+			if err != nil {
+				cli.errorf("recover owner inventory transaction: %v", err)
+				return 1
+			}
 		}
 	}
 	configSyncHome := ""
@@ -752,13 +809,23 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 2
 	}
-	if !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile")) {
+	if !readOnlyInvocation && !registrationRepair && !(core && (definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown")) {
 		if err := cli.recoverLocalHostRename(ctx, loaded); err != nil {
 			cli.errorf("recover owner HostID rename: %v", err)
 			return 1
 		}
 	}
 	loadedContext := loaded.Context
+	if core && definition.Handler == "@teardown" && !commandHelpRequested(commandArguments) {
+		commandArguments, err = cli.chooseTeardownScope(loaded.Context, commandArguments)
+		if err != nil {
+			cli.errorf("teardown: %v", err)
+			return 2
+		}
+		if slices.Contains(commandArguments, "--full") {
+			cli.env["SUBYARD_NO_AUDIT"] = "1"
+		}
+	}
 	cli.ensureOperationID()
 	if core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments) {
 		orchestrator := cli.operationOrchestrator(
@@ -1008,7 +1075,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.options.Program)
 		return 0
 	case "@teardown":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s teardown [--keep-data | --reset-config]\n", cli.options.Program)
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s teardown [--keep-data | --reset-config | --full] [--yes]\n", cli.options.Program)
 		fmt.Fprintln(cli.options.Stdout, "  --reset-config  remove selected local settings after cleanup; suppress previous nonlocal yard fallback")
 		return 0
 	}
@@ -2197,6 +2264,12 @@ func (cli *CLI) runProjectState(
 	if ownerEndpoint && len(arguments) > 0 && arguments[0] == "preview" {
 		store, err = state.NewFileStore(yard.Paths.StateDir)
 	} else {
+		release, admissionErr := cli.admitOwnerWrite(ctx, loaded)
+		if admissionErr != nil {
+			cli.errorf("project state: %v", admissionErr)
+			return 1
+		}
+		defer release()
 		store, err = openProjectStore(ctx, yard.Paths.StateDir)
 	}
 	if err != nil {
@@ -3242,7 +3315,10 @@ func (cli *CLI) operationOrchestrator(
 			"SUBYARD_POWER_DESIRED", "SUBYARD_SUDO_PREAUTHORIZED", "SUBYARD_TEARDOWN_KEEP_DATA",
 			"SUBYARD_TEARDOWN_KEEP_SHARED", "SUBYARD_TEARDOWN_RESET_CONFIG",
 			"SUBYARD_TEARDOWN_INVENTORY",
-			"SUBYARD_TEARDOWN_ARTIFACTS",
+			"SUBYARD_TEARDOWN_ARTIFACTS", "SUBYARD_TEARDOWN_SERVICES",
+			"SUBYARD_TEARDOWN_FULL", "SUBYARD_INSTALLATION_CONTEXT",
+			"SUBYARD_TEARDOWN_PARENT_ID",
+			"SUBYARD_TEARDOWN_PLAN", "SUBYARD_TEARDOWN_PLAN_SHA256",
 			"SUBYARD_DISPATCHER_PATH",
 		} {
 			contextKeys[key] = struct{}{}
@@ -3271,7 +3347,7 @@ func (cli *CLI) operationOrchestrator(
 		}
 		auditSink = audit.OperationLog{
 			Home: home, WorkingDir: cli.options.WorkingDir, Yard: loaded.Context.YardName,
-			Remote: loaded.Context.OwnerEndpoint, Maximum: audit.MaximumFrom(cli.env["SUBYARD_AUDIT_MAX_BYTES"]),
+			Remote: loaded.Context.OwnerEndpoint, Maximum: audit.MaximumFrom(cli.env["SUBYARD_AUDIT_MAX_BYTES"]), BeforeWrite: cli.auditWriteAdmission(home),
 		}
 	}
 	return &application.Orchestrator{
@@ -3341,6 +3417,8 @@ var structuredRuntimeRoleKeys = map[string]struct{}{
 
 func structuredCommandContext(loaded config.Loaded) map[string]string {
 	values := structuredAdapterContext(loaded.Context)
+	identity, _ := json.Marshal(loaded.Context)
+	values["SUBYARD_INSTALLATION_CONTEXT"] = string(identity)
 	for name, value := range loaded.Environment {
 		_, setting := loaded.Catalog.LookupSetting(name)
 		_, runtimeRole := structuredRuntimeRoleKeys[name]
@@ -3779,7 +3857,7 @@ func (cli *CLI) audit(commandName string, arguments []string, yard, remote strin
 	_ = audit.WriteInvocation(audit.Invocation{
 		Home: home, Command: commandName, Arguments: arguments, WorkingDir: cli.options.WorkingDir,
 		Yard: yard, Remote: remote, Maximum: audit.MaximumFrom(cli.env["SUBYARD_AUDIT_MAX_BYTES"]),
-		OperationID: cli.env["SUBYARD_OPERATION_ID"],
+		OperationID: cli.env["SUBYARD_OPERATION_ID"], BeforeWrite: cli.auditWriteAdmission(home),
 	})
 }
 

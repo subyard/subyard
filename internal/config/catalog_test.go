@@ -145,6 +145,31 @@ func TestAgentDependencySettingAcceptsDeclaredScopes(t *testing.T) {
 	}
 }
 
+func TestPowerArtifactSettingsRemainHostLocal(t *testing.T) {
+	for _, name := range []string{"SUBYARD_POWER_RECONCILER_PATH", "SUBYARD_POWER_UNIT_PATH"} {
+		for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeCommand} {
+			if err := ValidateSetting(scope, name, "/opt/subyard/power", false); err != nil {
+				t.Errorf("%s rejected %s scope: %v", name, scope, err)
+			}
+		}
+		for _, scope := range []SettingScope{ScopeShared, ScopeYard, SettingScope("unknown")} {
+			if err := ValidateSetting(scope, name, "/opt/subyard/power", false); err == nil {
+				t.Errorf("%s accepted %s scope", name, scope)
+			}
+		}
+		if err := ValidateSetting(ScopeHost, name, "relative/power", false); err == nil {
+			t.Errorf("%s accepted a relative host path", name)
+		}
+		definition, err := ValidateSettingName(ScopeHost, name, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if definition.Type != SettingAbsolutePath || definition.Application != SettingYardInit || definition.Syncable {
+			t.Fatalf("%s lost its local typed contract: %+v", name, definition)
+		}
+	}
+}
+
 func TestAgentCleanupSettingUsesProvisionHookContract(t *testing.T) {
 	const name = "AGENT_example_CLEANUP"
 	for _, scope := range []SettingScope{ScopeShipped, ScopeHost, ScopeYard, ScopeCommand} {

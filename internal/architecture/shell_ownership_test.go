@@ -139,7 +139,6 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 	expected := map[string][]string{
 		"install-power-reconciler.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
-			"scripts/teardown-physical.sh",
 		},
 		"lifecycle-guard.sh": {
 			"internal/adapters/reconcileruntime/runtime.go",
@@ -235,6 +234,7 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
 		"ssh-listener.sh":          true,
 		"teardown-session.sh":      true,
+		"teardown-services.sh":     true,
 		"owner-address.sh":         true,
 		"preview-proxy.sh":         true,
 		"lib-vm-page-reporting.sh": true, "lib-vm-storage.sh": true,
@@ -387,6 +387,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/lib/runtime.sh":               {"library", "scripts/01-install-incus.sh", `lib/runtime.sh`},
 		"scripts/lib/ssh-config.sh":            {"library", "scripts/07-ssh-access.sh", `lib/ssh-config.sh`},
 		"scripts/lib/ssh-listener.sh":          {"library", "scripts/lifecycle-guard.sh", `lib/ssh-listener.sh`},
+		"scripts/lib/teardown-services.sh":     {"library", "scripts/teardown-physical.sh", `lib/teardown-services.sh`},
 		"scripts/lib/teardown-session.sh":      {"library", "scripts/teardown-physical.sh", `lib/teardown-session.sh`},
 		"scripts/lib/ui.sh":                    {"library", "scripts/01-install-incus.sh", `lib/ui.sh`},
 		"scripts/lifecycle-guard.sh":           {"leaf", goPrepared, `"lifecycle-guard.sh"`},

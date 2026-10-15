@@ -356,7 +356,7 @@ func (cli *CLI) updateHistory() audit.UpdateHistory {
 		}
 	}
 	clock := cli.options.Clock
-	return audit.UpdateHistory{Home: home, Now: func() time.Time {
+	return audit.UpdateHistory{Home: home, BeforeWrite: cli.auditWriteAdmission(home), Now: func() time.Time {
 		if clock != nil {
 			return clock.Now()
 		}

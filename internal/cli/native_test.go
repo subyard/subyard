@@ -3959,6 +3959,7 @@ func TestSpaceListsEveryLocalYardFromCache(t *testing.T) {
 
 func TestSpaceRefreshesOnlyRunningYards(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {
@@ -4009,6 +4010,7 @@ func TestSpaceRefreshesOnlyRunningYards(t *testing.T) {
 
 func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	nativeInstallationFixture(t, environment)
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(dataHome, 0o700); err != nil {
 		t.Fatal(err)
@@ -4041,6 +4043,7 @@ func TestSpaceRefreshTimestampsEachCompletedMeasurement(t *testing.T) {
 
 func TestSpaceRefreshContinuesAfterFailureAndPreservesCache(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {
@@ -4094,6 +4097,7 @@ func TestSpaceRefreshContinuesAfterFailureAndPreservesCache(t *testing.T) {
 
 func TestSpaceRefreshReportsStateFailureAndContinues(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	nativeInstallationFixture(t, environment)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	dataHome := environmentValue(environment, "SUBYARD_HOME")
 	if err := os.MkdirAll(filepath.Join(configHome, "yards"), 0o700); err != nil {

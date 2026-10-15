@@ -444,6 +444,12 @@ func validateState(current state) error {
 func ensureStateDirectory(directory string) error {
 	parent := filepath.Dir(directory)
 	info, err := os.Lstat(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := ensureStateDirectory(parent); err != nil {
+			return err
+		}
+		info, err = os.Lstat(parent)
+	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !ownedByUser(info) {
 		if err != nil {
 			return fmt.Errorf("inspect endpoint state parent: %w", err)

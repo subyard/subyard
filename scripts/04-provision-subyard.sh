@@ -128,7 +128,7 @@ docker_install() (
   trap 'rm -f -- "$installer"' EXIT
   chmod 0600 "$installer"
   subyard_download_https_atomic https://get.docker.com "$installer" 0600 root root
-  sh "$installer"
+  timeout --signal=TERM --kill-after=5 600 sh "$installer"
 )
 if ! command -v docker >/dev/null 2>&1; then
   docker_install

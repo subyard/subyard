@@ -418,45 +418,6 @@ func (s Service) WithStart(ctx context.Context, y Yard, start func() error) erro
 
 // Keep cleanup intent pending on failure so reconcile can remove stale allow
 // rules before any managed start. The caller holds the host network lock.
-func (s Service) forgetLocked(ctx context.Context, y Yard) error {
-	stored, err := s.Host.ReadPolicy(ctx)
-	if err != nil {
-		return err
-	}
-	if stored.Content == "" {
-		return nil
-	}
-	observed, err := s.observe(ctx, y)
-	if err != nil {
-		return err
-	}
-	if observed.InstanceFound {
-		return errors.New("cannot forget a network endpoint before its instance is deleted")
-	}
-	p := stored.Policy
-	if !slices.Contains(p.Removing, y.Name) {
-		p.Removing = append(p.Removing, y.Name)
-	}
-	p.PendingStart = slices.DeleteFunc(slices.Clone(p.PendingStart), func(name string) bool { return name == y.Name })
-	p.Revision++
-	stored, err = s.Host.WritePolicy(ctx, stored, p)
-	if err != nil {
-		return err
-	}
-	yards, err := mergeYards([]Yard{y}, p)
-	if err != nil {
-		return err
-	}
-	snapshot, err := s.inspectNetwork(ctx, yards)
-	if err != nil {
-		return err
-	}
-	plan, err := buildPlan(stored, snapshot, Change{})
-	if err != nil {
-		return err
-	}
-	return s.applyLocked(ctx, plan)
-}
 
 type RemovalPlan struct {
 	Yard         Yard
@@ -501,6 +462,12 @@ func (s Service) PrepareRemoval(ctx context.Context, y Yard) (RemovalPlan, error
 
 // WithRemoval serializes deletion and policy cleanup with every policy apply/start.
 func (s Service) WithRemoval(ctx context.Context, approved RemovalPlan, remove func() error) error {
+	return s.WithRemovals(ctx, []RemovalPlan{approved}, remove, nil)
+}
+
+// WithRemovals validates one original policy under the real host lock, removes
+// the approved yards, then reconciles their combined removal intent once.
+func (s Service) WithRemovals(ctx context.Context, approved []RemovalPlan, remove, after func() error) error {
 	if s.Lock == nil {
 		return errors.New("host network policy lock is required")
 	}
@@ -509,18 +476,203 @@ func (s Service) WithRemoval(ctx context.Context, approved RemovalPlan, remove f
 		return err
 	}
 	defer release()
-	fresh, err := s.PrepareRemoval(ctx, approved.Yard)
+	if len(approved) == 0 {
+		if err := remove(); err != nil {
+			return err
+		}
+		if after != nil {
+			return after()
+		}
+		return nil
+	}
+	before := approved[0].Stored
+	targets := []string{}
+	seen := map[string]bool{}
+	for _, plan := range approved {
+		if plan.Stored.Content != before.Content || plan.Stored.ETag != before.ETag || seen[plan.Yard.Name] {
+			return domain.ErrPlanStale
+		}
+		seen[plan.Yard.Name] = true
+		bound := slices.Contains(before.Policy.Removing, plan.Yard.Name) || len(before.Policy.Peers(plan.Yard.Name)) > 0
+		for _, binding := range before.Policy.Bindings {
+			if binding.Yard.Name == plan.Yard.Name {
+				if binding.Yard != plan.Yard {
+					return domain.ErrPlanStale
+				}
+				bound = true
+			}
+		}
+		if plan.Cleanup != bound {
+			return domain.ErrPlanStale
+		}
+		if plan.Cleanup {
+			targets = append(targets, plan.Yard.Name)
+		}
+	}
+	current, err := s.Host.ReadPolicy(ctx)
 	if err != nil {
 		return err
 	}
-	if fresh.Stored.Content != approved.Stored.Content || fresh.Stored.ETag != approved.Stored.ETag {
+	pending, applying, complete, err := removalPolicies(before.Policy, targets)
+	if err != nil {
+		return err
+	}
+	progress := current.Content != before.Content
+	if !progress {
+		if current.ETag != before.ETag {
+			return domain.ErrPlanStale
+		}
+	} else if len(targets) == 0 || !removalProgress(current.Policy, pending, applying, complete, before.Policy, targets) {
 		return domain.ErrPlanStale
+	}
+	if len(targets) > 0 {
+		yards := []Yard{}
+		for _, plan := range approved {
+			yards = append(yards, plan.Yard)
+		}
+		yards, err = mergeYards(yards, current.Policy)
+		if err != nil {
+			return err
+		}
+		snapshot, inspectErr := s.inspectNetwork(ctx, yards)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		for _, observed := range snapshot.Yards {
+			if seen[observed.Name] || slices.ContainsFunc(before.Policy.Bindings, func(binding Binding) bool { return binding.Yard == observed.Yard }) {
+				if err = validateACLOwner(observed); err != nil {
+					return err
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if err = remove(); err != nil {
 		return err
 	}
-	if !fresh.Cleanup {
-		return nil
+	if len(targets) > 0 {
+		yards := []Yard{}
+		for _, plan := range approved {
+			yards = append(yards, plan.Yard)
+		}
+		yards, err = mergeYards(yards, current.Policy)
+		if err != nil {
+			return err
+		}
+		snapshot, inspectErr := s.inspectNetwork(ctx, yards)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		for _, target := range approved {
+			found := false
+			for _, observed := range snapshot.Yards {
+				if observed.Yard == target.Yard {
+					found = true
+					if err = validateACLOwner(observed); err != nil {
+						return err
+					}
+					if observed.InstanceFound {
+						return errors.New("cannot forget a network endpoint before its instance is deleted")
+					}
+				}
+			}
+			if !found {
+				return errors.New("network observation omitted target yard")
+			}
+		}
+		if !progress {
+			current, err = s.Host.WritePolicy(ctx, current, pending)
+			if err != nil {
+				return err
+			}
+		}
+		plan, planErr := buildPlan(current, snapshot, Change{})
+		if planErr != nil {
+			return planErr
+		}
+		// Retrying the same intent does not allocate another desired revision.
+		plan.Policy.Revision = applying.Revision
+		if !removalProgress(plan.Policy, pending, applying, complete, before.Policy, targets) {
+			return domain.ErrPlanStale
+		}
+		if err = s.applyLocked(ctx, plan); err != nil {
+			return err
+		}
 	}
-	return s.forgetLocked(ctx, approved.Yard)
+	if after != nil {
+		return after()
+	}
+	return nil
+}
+
+func removalPolicies(before Policy, targets []string) (Policy, Policy, Policy, error) {
+	pending := before
+	pending.PendingStart = slices.Clone(before.PendingStart)
+	for _, name := range pending.Removing {
+		if !slices.Contains(targets, name) {
+			return Policy{}, Policy{}, Policy{}, domain.ErrPlanStale
+		}
+	}
+	if len(targets) == 0 {
+		return pending, pending, pending, nil
+	}
+	if before.Revision > ^uint64(0)-2 {
+		return Policy{}, Policy{}, Policy{}, errors.New("network policy revision exhausted")
+	}
+	pending.Removing = slices.Clone(targets)
+	sort.Strings(pending.Removing)
+	pending.PendingStart = slices.DeleteFunc(pending.PendingStart, func(name string) bool { return slices.Contains(targets, name) })
+	pending.Revision++
+	applying := pending
+	applying.Links = slices.Clone(pending.Links)
+	for _, name := range targets {
+		applying.Links = slices.DeleteFunc(applying.Links, func(link Link) bool { return link.A == name || link.B == name })
+	}
+	applying.Revision++
+	complete := applying
+	complete.Links = slices.Clone(applying.Links)
+	complete.Bindings = slices.Clone(applying.Bindings)
+	for _, name := range targets {
+		complete.Forget(name)
+	}
+	complete.Removing, complete.PendingStart = nil, nil
+	if !complete.Isolation {
+		complete.Bindings = nil
+	}
+	complete.AppliedRevision, complete.AppliedIsolation = complete.Revision, complete.Isolation
+	return pending, applying, complete, nil
+}
+
+func removalProgress(actual, pending, applying, complete, original Policy, targets []string) bool {
+	// Existing applyLocked may persist restart acknowledgements for surviving
+	// peers whose owned ACL lost an approved link. No unrelated name is admitted.
+	allowed := slices.Clone(original.PendingStart)
+	for _, link := range original.Links {
+		if slices.Contains(targets, link.A) && !slices.Contains(targets, link.B) {
+			allowed = append(allowed, link.B)
+		}
+		if slices.Contains(targets, link.B) && !slices.Contains(targets, link.A) {
+			allowed = append(allowed, link.A)
+		}
+	}
+	for _, name := range actual.PendingStart {
+		if !slices.Contains(allowed, name) || slices.Contains(targets, name) {
+			return false
+		}
+	}
+	actual.PendingStart = nil
+	body, err := Encode(actual)
+	if err != nil {
+		return false
+	}
+	for _, expected := range []Policy{pending, applying, complete} {
+		expected.PendingStart = nil
+		encoded, err := Encode(expected)
+		if err == nil && string(body) == string(encoded) {
+			return true
+		}
+	}
+	return false
 }

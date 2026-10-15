@@ -162,6 +162,10 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 	var targetIdentity ports.InstanceInfo
 	var inputs *ownerInputBaseline
 	if invocation.verb == "unlock" {
+		if _, err = cli.originalOwnerWrite(loaded); err != nil {
+			cli.errorf("ssh-agent unlock: %v", err)
+			return 1
+		}
 		if cli.operatorTerminal == nil || !cli.operatorTerminal() {
 			cli.errorf("ssh-agent unlock requires a terminal on the owner host for the key passphrase")
 			return 1
@@ -247,6 +251,11 @@ func (cli *CLI) runSSHAgent(ctx context.Context, loaded config.Loaded, definitio
 			}
 			return nil
 		}
+		release, err := cli.admitOwnerWrite(ctx, loaded)
+		if err != nil {
+			return err
+		}
+		defer release()
 		if err := inputs.check(ctx, cli); err != nil {
 			return err
 		}

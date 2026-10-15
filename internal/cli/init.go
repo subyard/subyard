@@ -451,6 +451,7 @@ func (cli *CLI) prepareInitExecution(
 			execution.teardownResources = execution.resetBaseline.resources()
 			runtime.TeardownResources = slices.Clone(execution.teardownResources)
 			runtime.TeardownArtifacts = execution.resetBaseline.artifacts()
+			runtime.TeardownServices = execution.resetBaseline.execution.snapshot().Services
 		}
 		execution.platform = runtime
 	}
@@ -1073,6 +1074,7 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 		if execution.mode == initReset {
 			runtime.TeardownResources = slices.Clone(execution.teardownResources)
 			runtime.TeardownArtifacts = execution.resetBaseline.artifacts()
+			runtime.TeardownServices = execution.resetBaseline.execution.snapshot().Services
 		}
 		runtime.ProvisionProfile = execution.provisionProfile
 		runtime.ResourceCommand = execution.resourceCommand

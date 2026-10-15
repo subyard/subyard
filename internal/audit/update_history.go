@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -49,8 +50,9 @@ type UpdateEvent struct {
 }
 
 type UpdateHistory struct {
-	Home string
-	Now  func() time.Time
+	BeforeWrite func(context.Context) (func(), bool, error)
+	Home        string
+	Now         func() time.Time
 }
 
 type UpdateRecorder struct {
@@ -233,6 +235,16 @@ func (history UpdateHistory) Read(limit int) ([]UpdateRecord, error) {
 }
 
 func (history UpdateHistory) write(record UpdateRecord) error {
+	if history.BeforeWrite != nil {
+		release, write, err := history.BeforeWrite(context.Background())
+		if err != nil {
+			return err
+		}
+		if !write {
+			return nil
+		}
+		defer release()
+	}
 	logs := filepath.Join(history.Home, "logs")
 	if err := ensurePrivateDirectory(logs); err != nil {
 		return err

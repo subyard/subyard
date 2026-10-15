@@ -31,14 +31,15 @@ fi
 
 require_root "installing the VM SSH loopback relay needs a root-owned systemd socket"
 
+OPERATOR_USER="${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}"
 unit="subyard-ssh-relay-$port"
 socket_path="/etc/systemd/system/$unit.socket"
 service_path="/etc/systemd/system/$unit.service"
 if [ "$action" = --remove ]; then
-  systemctl disable --now "$unit.socket" >/dev/null 2>&1 || true
-  systemctl stop "$unit.service" >/dev/null 2>&1 || true
-  rm -f -- "$socket_path" "$service_path"
-  systemctl daemon-reload
+  # shellcheck source=scripts/lib/teardown-services.sh
+  . "$SCRIPT_DIR/lib/teardown-services.sh"
+  teardown_capture_producer relay "$port"
+  teardown_stop_services
   ok "removed VM SSH relay on 127.0.0.1:$port (if present)"
   exit 0
 fi
@@ -71,6 +72,8 @@ Description=Subyard VM SSH relay to $target:22
 After=network-online.target
 
 [Service]
+Environment="SUBYARD_RELAY_OWNER=$SUBYARD_HOME"
+Environment="SUBYARD_RELAY_UID=$(id -u "$OPERATOR_USER")"
 ExecStart=$proxyd $target:22
 NoNewPrivileges=yes
 PrivateTmp=yes

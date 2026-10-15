@@ -18,3 +18,5 @@ yard-keys.sh
 yard-remote.sh
 yard-shell.sh
 integration-retirement.sh
+
+full-uninstall.sh

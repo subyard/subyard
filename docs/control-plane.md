@@ -1567,3 +1567,39 @@ execution timeout plus their existing two-second cleanup/drain allowance. SSH tr
 its existing timeout policy. These bounds preserve the full owning readiness check.
 Retired integration declarations live under `config/retired-integrations/`; they permit only
 bounded cleanup lifecycle and discarded-input metadata, with no provisioning or native binaries.
+
+Full uninstall is a scope of the existing prepared teardown. It aggregates local yard executions
+through the same observation, stale checks, apply and verification methods. The existing
+`teardown-plan.py` owns ancestor-pinned filesystem inventory, removal and private publication;
+`internal/uninstall` carries installation ownership and the exact durable retry record. Installer entrypoints record actual
+runtime/data/config/cache/bin and shell integration paths; project and shared-resource owners
+persist public installation contexts while setup is still partial. Host mount setup records
+which namespaces it created, retaining pre-existing content as foreign. Assessment performs
+no elevation and captures native metadata rather than credential or settings payloads.
+
+Shipped profiles may contribute a `full_cleanup` executable and a bounded
+`full_cleanup_environment` allowlist. The read-only `--assess` response declares exact artifact
+bindings, system/user unit groups, owned data namespaces and preservation diagnostics. Core
+checks the generic contract and synchronously drains approved units before their data. A
+`conditional` response adds a shipped read-only `--verify-private` proof after consent,
+before stopping producers, again after draining, and before resource removal. The saved
+nonsecret source context cannot expand during retry. Unknown private ownership refuses
+dependent cleanup; private record contents never become adapter output or recovery data. A
+`lifecycle_only` declaration contributes cleanup hooks and exact managed paths for full installation
+cleanup, without provisioning, activation or enablement. Its paths remain outside selected-yard teardown;
+the test-VM host sink uses this contract. Per-yard profile services continue through their
+existing owning `owner_service` hooks.
+
+The prepared local mutation boundary holds a stable operator/installation lock outside removed
+roots and checks the prepared installation generation after acquisition. Full retains the owner
+lock inode while atomically publishing a separate nonsecret epoch beside it. Interrupted
+private epoch publication resumes the saved before/after intent; old queued mutations and
+audit/cache writers refuse the advanced generation, including when foreign root contents remain.
+Read/session writers require existing installation ownership and skip pending uninstall roots.
+Full retains the host network lock through resource, data, runtime and recovery verification.
+An interrupted caller's physical file leaf must retain that same owner barrier before continuing.
+Private unreadable trees
+receive only an exact conditional root approval; the privileged leaf durably publishes refined
+native metadata before its first unlink. Fresh-process retries permit disappearing approved
+entries and refuse replacements, additions, unsafe permissions, symlink ancestors and mounted
+owned descendants. Explicit owner namespaces preserve unrecorded content in custom roots.

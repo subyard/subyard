@@ -60,8 +60,10 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 exec "$SHELL" -l
 ```
 
-This requires `curl`, `jq`, `sha256sum`, `tar`, and `gzip`; it asks once before changing the host,
+This requires `curl`, `jq`, `sha256sum`, `tar`, `gzip`, Python 3, and `flock`; it asks once before changing the host,
 links `~/.local/bin/{yard,sy}` to the verified runtime, and configures login PATH and completion.
+The standalone runtime installer also uses Python 3 and `flock` to retain installation ownership
+and serialize publication with setup, updates, and full uninstall.
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,

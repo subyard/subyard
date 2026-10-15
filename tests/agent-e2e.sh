@@ -76,13 +76,23 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
   done
   for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource release \
-    source-upgrade power-systemd reboot-verify peer-cleanup cleanup; do
+    source-upgrade power-systemd reboot-verify peer-cleanup cleanup full-uninstall; do
     [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
   done
   P0_LANE=nested-teardown P0_NESTED_VM=2
   [ "$(lane_vm_count)" = 2 ] || fail 'explicit VM2 nested teardown lost its selected guest'
   BROKER_RECOVERY_ONLY=1
   [ "$(lane_vm_count)" = 1 ] || fail 'broker diagnostic requested an unused outer guest'
+  BROKER_RECOVERY_ONLY=0
+  for P0_LANE in smoke full-uninstall; do
+    ENVIRONMENT_TYPE=subyard-pair
+    eval "$(sed -n '/^LEASE_PURPOSE="p0-/,/^acquire_lease$/ { /^acquire_lease$/d; p; }' "$ROOT/dev/e2e/p0-acceptance.sh")"
+    if [ "$P0_LANE" = full-uninstall ]; then
+      [ "$ENVIRONMENT_TYPE" = android-test ] || fail 'full uninstall did not request the existing larger singleton'
+    else
+      [ "$ENVIRONMENT_TYPE" = subyard-pair ] || fail 'ordinary P0 allocation type changed'
+    fi
+  done
   for VM_COUNT in 1 2; do
     calls=''
     run_vm() {
@@ -4536,7 +4546,7 @@ done
     || fail "TERM-ignoring timeout fixture or descendant escaped the KILL deadline: rc=$timeout_rc elapsed=${timeout_elapsed}s child_state=${timeout_child_state:-gone}"
   child_pid=''
 )
-reboot_vm_function="$(sed -n '/^reboot_vm() {/,/^}/p' \
+reboot_vm_function="$(sed -n '/^wait_reboot_host_ready() {/,/^}/p; /^reboot_vm() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-acceptance.sh")"
 for reboot_scenario in transient empty degraded exhausted maintenance false-running; do
   reboot_probe_dir="$TMP/reboot-$reboot_scenario"

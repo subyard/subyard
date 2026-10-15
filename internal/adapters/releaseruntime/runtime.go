@@ -19,11 +19,13 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/blang/semver/v4"
 	"golang.org/x/sys/unix"
 )
@@ -2057,6 +2059,26 @@ func (runtime *Runtime) installWithOutput(
 ) error {
 	command := exec.CommandContext(ctx, runtime.config.Installer, arguments...)
 	command.Env = commandEnvironment(runtime.config.Inputs.environment(runtime.config.Context))
+	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
+	if home == "" {
+		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")
+	}
+	owner, borrowErr := uninstall.BorrowOwnerLock(home)
+	if borrowErr != nil {
+		return borrowErr
+	}
+	if owner != nil {
+		defer owner.Close()
+		epoch, epochErr := uninstall.ReadOwnerEpoch(home)
+		if epochErr != nil {
+			return epochErr
+		}
+		command.ExtraFiles = []*os.File{owner}
+		command.Env = append(command.Env, "SUBYARD_INSTALL_OWNER_FD=3", fmt.Sprintf("SUBYARD_INSTALL_OWNER_EPOCH=%d", epoch))
+	}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+	command.WaitDelay = 2 * time.Second
 	command.Stdout = stdout
 	command.Stderr = runtime.config.Stderr
 	return command.Run()

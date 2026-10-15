@@ -449,7 +449,7 @@ func TestHostExactRPCPlanUsesNativeTransactionAndRejectsReplay(t *testing.T) {
 			if len(stdout.String()) != 0 {
 				t.Fatalf("RPC preparation printed human output: %q", stdout.String())
 			}
-			before, err := store.List()
+			before, err := store.ListReadOnly()
 			if err != nil {
 				t.Fatal(err)
 			}

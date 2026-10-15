@@ -11,9 +11,56 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/lxc/incus/v6/shared/api"
 )
+
+func (client *Client) InstallationYards(ctx context.Context) ([]ports.InstallationYard, error) {
+	server, err := client.reconcileServer(ctx)
+	if err != nil {
+		if client.LocalInstallationAbsent() {
+			return []ports.InstallationYard{}, nil
+		}
+		return nil, err
+	}
+	projects, err := server.GetProjects()
+	if err != nil {
+		return nil, normalizeError("read installation yard ownership", err)
+	}
+	result := []ports.InstallationYard{}
+	for _, project := range projects {
+		values := project.Config
+		if values["user.subyard.installation"] == "" {
+			continue
+		}
+		if values["user.subyard.installation"] != "1" {
+			return nil, fmt.Errorf("unsupported Subyard installation ownership in project %s", project.Name)
+		}
+		var ownerContext *domain.Context
+		if raw := values["user.subyard.context"]; raw != "" {
+			if len(raw) > 16384 {
+				return nil, fmt.Errorf("oversized installation context in project %s", project.Name)
+			}
+			ownerContext = &domain.Context{}
+			if err := json.Unmarshal([]byte(raw), ownerContext); err != nil {
+				return nil, fmt.Errorf("invalid installation context in project %s", project.Name)
+			}
+			if err := ownerContext.Validate(); err != nil || ownerContext.AccessKind != domain.AccessLocal || ownerContext.IncusProject != project.Name || ownerContext.Paths.DataHome != values["user.subyard.data_home"] || ownerContext.Paths.ConfigHome != values["user.subyard.config_home"] {
+				return nil, fmt.Errorf("inconsistent installation context in project %s", project.Name)
+			}
+		}
+		result = append(result, ports.InstallationYard{
+			Context: ownerContext,
+			Project: project.Name, Name: values["user.subyard.yard_name"], Instance: values["user.subyard.instance_name"],
+			OperatorUID: values["user.subyard.operator_uid"], DataHome: values["user.subyard.data_home"], ConfigHome: values["user.subyard.config_home"],
+			HostBase: values["user.subyard.host_base"], Bridge: values["user.subyard.bridge"], Pool: values["user.subyard.srv_pool"],
+			Volume: values["user.subyard.srv_volume"], StoragePool: values["user.subyard.storage_pool"], StoragePath: values["user.subyard.storage_path"],
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Project < result[j].Project })
+	return result, nil
+}
 
 func (client *Client) TeardownInventory(ctx context.Context, project string) ([]ports.TeardownResource, error) {
 	if project == "" || project == "default" {
@@ -126,6 +173,16 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 }
 
 func (client *Client) TeardownSharedInventory(ctx context.Context, poolName, networkName string) ([]ports.TeardownResource, error) {
+	return client.sharedTeardownInventory(ctx, poolName, networkName, false)
+}
+
+// InstallationSharedInventory adds exact native backing paths and consumers
+// only for aggregate full removal. Ordinary selected-yard semantics are intact.
+func (client *Client) InstallationSharedInventory(ctx context.Context, poolName, networkName string) ([]ports.TeardownResource, error) {
+	return client.sharedTeardownInventory(ctx, poolName, networkName, true)
+}
+
+func (client *Client) sharedTeardownInventory(ctx context.Context, poolName, networkName string, installation bool) ([]ports.TeardownResource, error) {
 	server, err := client.reconcileServer(ctx)
 	if err != nil {
 		if client.LocalInstallationAbsent() {
@@ -134,28 +191,100 @@ func (client *Client) TeardownSharedInventory(ctx context.Context, poolName, net
 		return nil, err
 	}
 	resources := []ports.TeardownResource{}
-	add := func(kind, name string, value any) {
+	pools := []string{poolName}
+	networks := []string{networkName}
+	if installation && poolName == "" && networkName == "" {
+		pools, err = server.GetStoragePoolNames()
+		if err != nil {
+			return nil, err
+		}
+		networks, err = server.GetNetworkNames()
+		if err != nil {
+			return nil, err
+		}
+	}
+	owner := func(values map[string]string) (*ports.InstallationResourceOwner, error) {
+		if values["user.subyard.data_home"] == "" {
+			return nil, nil
+		}
+		result := &ports.InstallationResourceOwner{UID: values["user.subyard.operator_uid"], DataHome: values["user.subyard.data_home"], ConfigHome: values["user.subyard.config_home"]}
+		raw := values["user.subyard.context"]
+		if raw != "" {
+			result.Context = &domain.Context{}
+			if len(raw) > 16384 || json.Unmarshal([]byte(raw), result.Context) != nil || result.Context.Validate() != nil || result.Context.AccessKind != domain.AccessLocal || result.Context.Paths.DataHome != result.DataHome || result.Context.Paths.ConfigHome != result.ConfigHome {
+				return nil, fmt.Errorf("invalid shared installation context")
+			}
+		}
+		return result, nil
+	}
+	add := func(kind, name, path string, usedBy []string, values map[string]string, value any) error {
+		var ownership *ports.InstallationResourceOwner
+		var err error
+		if installation {
+			ownership, err = owner(values)
+		}
+		if !installation {
+			path = ""
+		}
+		if err != nil {
+			return err
+		}
 		payload, _ := json.Marshal(value)
-		digest := sha256.Sum256(payload)
-		resources = append(resources, ports.TeardownResource{Kind: kind, Name: name, Binding: hex.EncodeToString(digest[:])})
+		hash := sha256.Sum256(payload)
+		resources = append(resources, ports.TeardownResource{Kind: kind, Name: name, Path: path, UsedBy: usedBy, Binding: hex.EncodeToString(hash[:]), Owner: ownership})
+		return nil
 	}
-	if networkName != "" {
-		network, _, err := server.GetNetwork(networkName)
-		if err != nil && !api.StatusErrorCheck(err, http.StatusNotFound) {
-			return nil, normalizeError("read teardown shared network", err)
+	for _, name := range pools {
+		if name == "" {
+			continue
 		}
-		if err == nil {
-			add("network", networkName, map[string]any{"name": network.Name, "type": network.Type, "managed": network.Managed, "config": network.Config, "description": network.Description})
+		pool, _, err := server.GetStoragePool(name)
+		if api.StatusErrorCheck(err, http.StatusNotFound) {
+			continue
 		}
-	}
-	if poolName != "" {
-		pool, _, err := server.GetStoragePool(poolName)
-		if err != nil && !api.StatusErrorCheck(err, http.StatusNotFound) {
-			return nil, normalizeError("read teardown shared pool", err)
+		if err != nil {
+			return nil, err
 		}
-		if err == nil {
-			add("pool", poolName, map[string]any{"name": pool.Name, "driver": pool.Driver, "config": pool.Config, "description": pool.Description})
+		if err := add("pool", name, pool.Config["source"], pool.UsedBy, pool.Config, map[string]any{"name": pool.Name, "driver": pool.Driver, "config": pool.Config, "description": pool.Description}); err != nil {
+			return nil, err
 		}
 	}
+	for _, name := range networks {
+		if name == "" {
+			continue
+		}
+		network, _, err := server.GetNetwork(name)
+		if api.StatusErrorCheck(err, http.StatusNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := add("network", name, "", network.UsedBy, network.Config, map[string]any{"name": network.Name, "type": network.Type, "managed": network.Managed, "config": network.Config, "description": network.Description}); err != nil {
+			return nil, err
+		}
+	}
+	if len(resources) == 0 {
+		return resources, nil
+	}
+	profile, _, err := server.GetProfile("default")
+	if err != nil {
+		return nil, err
+	}
+	payload, _ := json.Marshal(map[string]any{"name": profile.Name, "config": profile.Config, "devices": profile.Devices, "description": profile.Description})
+	digest := sha256.Sum256(payload)
+	bindings := []string{}
+	for _, mask := range []int{1, 2, 3} {
+		devices := cloneDevices(profile.Devices)
+		for index, name := range []string{"root", "eth0"} {
+			if mask&(1<<index) != 0 {
+				delete(devices, name)
+			}
+		}
+		payload, _ := json.Marshal(map[string]any{"name": profile.Name, "config": profile.Config, "devices": devices, "description": profile.Description})
+		hash := sha256.Sum256(payload)
+		bindings = append(bindings, hex.EncodeToString(hash[:]))
+	}
+	resources = append(resources, ports.TeardownResource{Kind: "host-profile", Name: "default", Binding: hex.EncodeToString(digest[:]), UsedBy: profile.UsedBy, Bindings: bindings})
 	return resources, nil
 }

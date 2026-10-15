@@ -194,6 +194,7 @@ scenario=os.environ['TEST_DOWNLOAD']
 code=6 if scenario=='dns' or (scenario=='dns-recovery' and attempt==1) else 18 if scenario=='partial' or (scenario=='partial-recovery' and attempt==1) else 0
 body='printf "complete\\n" >> "$TEST_INSTALLED"\nexit "${TEST_INSTALL_EXIT:-0}"\n'
 if code==18:body='printf "partial\\n" >> "$TEST_INSTALLED"\n'
+if scenario=='stalled':body='printf "complete\\n" >> "$TEST_INSTALLED"\n/bin/sleep 30 &\nchild=$!\nprintf "%s\\n" "$child" > "$TEST_INSTALLER_CHILD"\ntrap \'wait "$child" || true; exit 143\' TERM\nwait "$child"\n'
 if code!=6:
     if output:output.write_text(body)
     else:sys.stdout.write(body)
@@ -216,7 +217,15 @@ cat > "$TMP/bin/sleep" <<'SH'
 #!/bin/sh
 exit 0
 SH
-chmod 0755 "$TMP/bin/curl" "$TMP/bin/sh" "$TMP/bin/chown" "$TMP/bin/sleep"
+cat > "$TMP/bin/timeout" <<'SH'
+#!/bin/sh
+if [ "$1" = --signal=TERM ] && [ "$2" = --kill-after=5 ] && [ "$3" = 600 ]; then
+  shift 3
+  exec /usr/bin/timeout --signal=TERM --kill-after=1 0.2 "$@"
+fi
+exec /usr/bin/timeout "$@"
+SH
+chmod 0755 "$TMP/bin/curl" "$TMP/bin/sh" "$TMP/bin/chown" "$TMP/bin/sleep" "$TMP/bin/timeout"
 command() {
   if [ "$#" = 2 ] && [ "$1" = -v ] && [ "$2" = docker ]; then
     [ "$TEST_DOWNLOAD" = installed ]; return
@@ -224,8 +233,8 @@ command() {
   builtin command "$@"
 }
 export -f command docker_forwarding_converge
-export TEST_INSTALLED="$TMP/installer-executed"
-for TEST_DOWNLOAD in dns-recovery partial-recovery dns partial installer-failure installed; do
+export TEST_INSTALLED="$TMP/installer-executed" TEST_INSTALLER_CHILD="$TMP/installer-child"
+for TEST_DOWNLOAD in dns-recovery partial-recovery dns partial installer-failure stalled installed; do
   export TEST_DOWNLOAD TEST_INSTALL_EXIT=0
   [ "$TEST_DOWNLOAD" != installer-failure ] || export TEST_INSTALL_EXIT=42
   rm -f "$TMP/fetch-count" "$TMP/fetch-paths" "$TEST_INSTALLED" "$TEST_LOG.installer-paths"
@@ -236,10 +245,11 @@ for TEST_DOWNLOAD in dns-recovery partial-recovery dns partial installer-failure
     dns-recovery|partial-recovery) [ "$status" = 0 ] && [ "$(cat "$TMP/fetch-count")" = 2 ] ;;
     dns|partial) [ "$status" = 1 ] && [ "$(cat "$TMP/fetch-count")" = 4 ] ;;
     installer-failure) [ "$status" = 42 ] && [ "$(cat "$TMP/fetch-count")" = 1 ] ;;
+    stalled) [ "$status" = 124 ] && [ "$(cat "$TMP/fetch-count")" = 1 ] ;;
     installed) [ "$status" = 0 ] && [ ! -e "$TMP/fetch-count" ] ;;
   esac || { printf 'FAIL: Docker installer download outcome %s exit=%s\n' "$TEST_DOWNLOAD" "$status" >&2; exit 1; }
   case "$TEST_DOWNLOAD" in
-    dns-recovery|partial-recovery|installer-failure)
+    dns-recovery|partial-recovery|installer-failure|stalled)
       [ "$(cat "$TEST_INSTALLED")" = complete ]
       [ "$(wc -l < "$TEST_LOG.installer-paths")" = 1 ] ;;
     *) [ ! -e "$TEST_INSTALLED" ] && [ ! -e "$TEST_LOG.installer-paths" ] ;;
@@ -248,5 +258,8 @@ for TEST_DOWNLOAD in dns-recovery partial-recovery dns partial installer-failure
     [ ! -e "$paths" ] || while IFS= read -r path; do [ ! -e "$path" ]; done < "$paths"
   done
 done
+
+! kill -0 "$(cat "$TEST_INSTALLER_CHILD")" 2>/dev/null \
+  || { printf 'FAIL: stalled Docker installer child remains\n' >&2; exit 1; }
 
 printf 'ok: Docker forwarding, service readiness and atomic installer download\n'

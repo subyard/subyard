@@ -51,4 +51,15 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export SSH_HOST=yard
   export DEV_USER=dev
   export SSH_PORT=2222
+  SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
+  export SUBYARD_INSTALLATION_CONTEXT
+}
+
+# Serialize only the exact typed values supplied by a prepared fixture caller.
+test_installation_context() { # [yard-name]
+  python3 - "${1:-default}" <<'PY_CONTEXT'
+import json,os,sys
+v=os.environ
+print(json.dumps({"yardName":sys.argv[1],"accessKind":"local","yardKind":v["YARD_KIND"],"yardInstanceName":v["YARD_INSTANCE_NAME"],"incusProject":v["INCUS_PROJECT"],"incusBridge":v["INCUS_BRIDGE"],"sshHost":v["SSH_HOST"],"sshPort":int(v["SSH_PORT"]),"devUser":v["DEV_USER"],"devUid":int(v["DEV_UID"]),"shiftMode":v["SHIFT_MODE"],"paths":{"repositoryRoot":v["SUBYARD_CONFIG_DIR"],"configDir":v["SUBYARD_CONFIG_DIR"],"operatorHome":v["SUBYARD_OPERATOR_HOME"],"dataHome":v["SUBYARD_HOME"],"configHome":v["SUBYARD_CONFIG_HOME"],"hostBase":v["HOST_BASE"],"storagePath":v["STORAGE_PATH"],"stateDir":v["SUBYARD_STATE_DIR"]}},separators=(",",":")))
+PY_CONTEXT
 }

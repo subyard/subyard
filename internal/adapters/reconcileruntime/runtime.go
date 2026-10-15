@@ -30,6 +30,7 @@ import (
 	"github.com/Subyard/Subyard/internal/sshidentity"
 	"github.com/Subyard/Subyard/internal/sshrelay"
 	"github.com/Subyard/Subyard/internal/systemdunit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -58,6 +59,7 @@ type Runtime struct {
 	SourceReader func(config.MaterializedAsset) ([]byte, error)
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
 	TeardownResources []ports.TeardownResource
+	TeardownServices  []uninstall.RecoveryService
 	TeardownArtifacts []ports.TeardownArtifact
 	// Profiles is the immutable per-operation profile snapshot when supplied by
 	// the caller. Nil falls back to loading the shipped declarations from disk.
@@ -394,6 +396,13 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.ProjectFound {
 		return false, err
+	}
+	if runtime.environmentValue("SUBYARD_HOME") == "" || runtime.environmentValue("SUBYARD_CONFIG_HOME") == "" ||
+		state.ProjectConfig["user.subyard.installation"] != "1" ||
+		state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) ||
+		state.ProjectConfig["user.subyard.data_home"] != runtime.environmentValue("SUBYARD_HOME") ||
+		state.ProjectConfig["user.subyard.config_home"] != runtime.environmentValue("SUBYARD_CONFIG_HOME") {
+		return false, nil
 	}
 	wantInterception := "block"
 	if runtime.Yard.NestedE2EVMs {
@@ -922,7 +931,7 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	if len(payload) > 64<<10 {
 		return errors.New("reset teardown inventory exceeds physical guard limit")
 	}
-	artifacts, err := json.Marshal(runtime.TeardownArtifacts)
+	artifacts, err := json.Marshal(ports.ArtifactBindings(runtime.TeardownArtifacts))
 	if err != nil {
 		return err
 	}
@@ -933,12 +942,21 @@ func (runtime Runtime) Teardown(ctx context.Context) error {
 	if hasOtherRegisteredLocalYard(runtime.Yard.YardName, runtime.powerYards()) {
 		keepShared = "1"
 	}
+	services := runtime.TeardownServices
+	if services == nil {
+		services = []uninstall.RecoveryService{}
+	}
+	producerPayload, err := json.Marshal(services)
+	if err != nil || len(producerPayload) > 64<<10 {
+		return errors.New("reset producer inventory exceeds physical guard limit")
+	}
 	err = runtime.withNetworkStart(ctx, func() error {
 		return runtime.runScriptEnvironment(ctx, runtime.Stdout,
 			map[string]string{
 				"SUBYARD_TEARDOWN_KEEP_DATA":   "0",
 				"SUBYARD_TEARDOWN_INVENTORY":   string(payload),
 				"SUBYARD_TEARDOWN_ARTIFACTS":   string(artifacts),
+				"SUBYARD_TEARDOWN_SERVICES":    string(producerPayload),
 				"SUBYARD_TEARDOWN_KEEP_SHARED": keepShared,
 			}, "teardown-physical.sh", "--yes")
 	})

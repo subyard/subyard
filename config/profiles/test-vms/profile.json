@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "managed_paths": [
+    {"root": "data", "path": "e2e/routes/{yard}"}
+  ],
+  "full_cleanup": "full-cleanup.py",
+  "full_cleanup_environment": [
+    "SUBYARD_TEST_VMS_SINK_LIBEXEC_DIR",
+    "SUBYARD_TEST_VMS_SINK_PATH",
+    "SUBYARD_TEST_VMS_SINK_SERVICE_PATH",
+    "SUBYARD_TEST_VMS_SINK_TIMER_PATH"
+  ],
+  "lifecycle_only": true
+}

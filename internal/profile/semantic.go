@@ -38,6 +38,22 @@ func (definition *Definition) validateSemantic() error {
 		}
 
 	}
+	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil) {
+		return errors.New("lifecycle-only profiles may declare only full cleanup hooks and managed paths")
+	}
+	if definition.FullCleanup != "" && !relative(definition.FullCleanup) {
+		return errors.New("full cleanup path escapes profile")
+	}
+	if len(definition.FullCleanupEnvironment) > 32 || len(definition.FullCleanupEnvironment) > 0 && definition.FullCleanup == "" {
+		return errors.New("invalid full cleanup environment declaration")
+	}
+	cleanupNames := map[string]bool{}
+	for _, name := range definition.FullCleanupEnvironment {
+		if name == "" || cleanupNames[name] || strings.IndexFunc(name, func(r rune) bool { return !(r == '_' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') }) >= 0 {
+			return errors.New("invalid full cleanup environment name")
+		}
+		cleanupNames[name] = true
+	}
 	nativePaths := map[string]bool{}
 	for _, native := range definition.Native {
 		if !relative(native.Path) || !relative(native.Package) || nativePaths[native.Path] {

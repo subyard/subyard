@@ -46,6 +46,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Validate existing installation ownership without changing the target.
+installation_inventory="$DATA_HOME/installation.json"
+if [ -e "$installation_inventory" ] || [ -L "$installation_inventory" ]; then
+  [ -f "$installation_inventory" ] && [ ! -L "$installation_inventory" ] \
+    && [ "$(stat -c '%u' "$installation_inventory")" = "$(id -u)" ] \
+    && [ "$(stat -c '%a' "$installation_inventory")" = 600 ] \
+    || { printf 'bootstrap-runtime: unsafe installation ownership inventory\n' >&2; exit 1; }
+  jq -e --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" --arg runtime "$RUNTIME_ROOT" \
+    --arg bin "$BIN_DIR" --argjson uid "$(id -u)" \
+    '.schema == 1 and .operatorUid == $uid and .dataHome == $data and .configHome == $config and .runtimeRoot == $runtime and .binDir == $bin' \
+    "$installation_inventory" >/dev/null \
+    || { printf 'bootstrap-runtime: installation paths conflict with the recorded installation; retain its inventory and repair the path selection\n' >&2; exit 1; }
+fi
+
 [ "$PUBLISH_ONLY" = 0 ] || [ -n "$VERSION" ] \
   || { printf 'bootstrap-runtime: --publish-only requires an explicitly chosen --version\n' >&2; exit 2; }
 
@@ -355,6 +369,39 @@ else
   env "YARD_RUNTIME_ROOT=$RUNTIME_ROOT" \
     "$candidate/bin/yard" migrate --yes
 fi
+
+inventory_shell_files="$(printf '%s\n' "${login_rcs[@]}" "${shell_rcs[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')"
+inventory_candidate="$(mktemp "$DATA_HOME/.installation.XXXXXX")"
+jq -n --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" --arg runtime "$RUNTIME_ROOT" \
+  --arg cache "$CACHE_ROOT" --arg bin "$BIN_DIR" --argjson uid "$(id -u)" \
+  --argjson shellFiles "$inventory_shell_files" \
+  '{schema:1,operatorUid:$uid,dataHome:$data,configHome:$config,runtimeRoot:$runtime,cacheRoot:$cache,binDir:$bin,shellFiles:$shellFiles}' \
+  > "$inventory_candidate"
+chmod 0600 "$inventory_candidate"
+# Preserve exact previous cache ownership and the runtime installer's newly
+# verified bundle records; add only the two helper files this bootstrap published.
+python3 - "$inventory_candidate" "$installation_inventory" "$RUNTIME_ROOT/installation.json" "$installer" "$installer_checksum" <<'PY_CACHE'
+import json,os,pathlib,stat,sys
+target=pathlib.Path(sys.argv[1]);value=json.loads(target.read_bytes());root=pathlib.Path(value["cacheRoot"])
+records={}
+for argument in sys.argv[2:4]:
+ path=pathlib.Path(argument)
+ if not path.exists():continue
+ info=path.lstat()
+ if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=value["operatorUid"]:raise SystemExit("bootstrap-runtime: unsafe cache ownership inventory")
+ previous=json.loads(path.read_bytes())
+ if previous.get("cacheRoot")!=str(root):raise SystemExit("bootstrap-runtime: cache root changed; retain its original ownership inventory")
+ for entry in previous.get("cacheFiles",[]):records[entry["Path"]]=entry
+for argument in sys.argv[4:]:
+ path=pathlib.Path(argument);relative=path.relative_to(root).as_posix();info=path.lstat()
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=value["operatorUid"]:raise SystemExit("bootstrap-runtime: unsafe published cache helper")
+ records[relative]={"Path":relative,"Device":info.st_dev,"Inode":info.st_ino,"Mode":info.st_mode,"UID":info.st_uid,"GID":info.st_gid,"Size":info.st_size,"Modified":info.st_mtime_ns,"Changed":info.st_ctime_ns,"Link":""}
+if len(records)>4096:raise SystemExit("bootstrap-runtime: cache ownership inventory is oversized")
+value["cacheFiles"]=[records[path] for path in sorted(records)]
+with target.open("w") as output:json.dump(value,output);output.write("\n");output.flush();os.fsync(output.fileno())
+PY_CACHE
+mv -fT -- "$inventory_candidate" "$installation_inventory"
+sync -d -- "$installation_inventory"
 
 if [ -z "$SOURCE_INGRESS_ROOT" ]; then
   ensure_directory "$BIN_DIR" 0755

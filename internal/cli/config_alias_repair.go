@@ -251,6 +251,11 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 		cli.errorf("%s", label+" must run on the local source owner")
 		return 2
 	}
+	owner, err := captureOwnerWriteAdmission(loaded, cli.options.RepositoryRoot)
+	if err != nil {
+		cli.errorf("%s: owner admission unavailable", label)
+		return 1
+	}
 	action := ""
 	if request.selection {
 		action = "selection-repair"
@@ -292,6 +297,12 @@ func (cli *CLI) runConfigSourceRepair(ctx context.Context, yard string, request 
 	if !cli.planConfigAction(ctx, loaded, operation, assumeYes || request.yes || cli.env["ASSUME_YES"] == "1", !changed, consequence) {
 		return 1
 	}
+	releaseOwner, err := cli.acquireOwnerMutation(ctx, owner, false, true)
+	if err != nil {
+		cli.errorf("%s: %v", label, err)
+		return 1
+	}
+	defer releaseOwner()
 	store, _ := releasetransition.NewPOSIXV2Store(configHome)
 	unlock, err := store.Lock()
 	if err != nil {

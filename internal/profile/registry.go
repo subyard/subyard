@@ -51,6 +51,9 @@ type Definition struct {
 	DisabledWhen               map[string]string     `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                  `json:"selected_provision_only,omitempty"`
 	OwnerService               string                `json:"owner_service,omitempty"`
+	LifecycleOnly              bool                  `json:"lifecycle_only,omitempty"`
+	FullCleanup                string                `json:"full_cleanup,omitempty"`
+	FullCleanupEnvironment     []string              `json:"full_cleanup_environment,omitempty"`
 	Native                     []Native              `json:"native,omitempty"`
 	Consumers                  []Consumer            `json:"consumers,omitempty"`
 	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
@@ -64,6 +67,9 @@ type Definition struct {
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
+	if definition.LifecycleOnly {
+		return false
+	}
 	for key, value := range definition.DisabledWhen {
 		if actual, ok := environment[key]; ok && actual == value {
 			return false
@@ -123,6 +129,19 @@ func (definition *Definition) validatePackage() error {
 		base, baseErr := filepath.EvalSymlinks(definition.Root)
 		if err != nil || baseErr != nil || resolved != filepath.Join(base, definition.OwnerService) {
 			return errors.New("owner service must not traverse symlinks")
+		}
+		definition.validationInputs = append(definition.validationInputs, resolved)
+	}
+	if definition.FullCleanup != "" {
+		path := filepath.Join(definition.Root, definition.FullCleanup)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+			return errors.New("full cleanup assessment must be an executable regular file")
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		base, baseErr := filepath.EvalSymlinks(definition.Root)
+		if err != nil || baseErr != nil || resolved != filepath.Join(base, definition.FullCleanup) {
+			return errors.New("full cleanup assessment must not traverse symlinks")
 		}
 		definition.validationInputs = append(definition.validationInputs, resolved)
 	}

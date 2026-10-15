@@ -3,6 +3,8 @@ package statusruntime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,18 @@ import (
 )
 
 type securityStub struct{ state string }
+
+func installationSpaceHome(t *testing.T) string {
+	t.Helper()
+	root := testkit.TempDir(t)
+	installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: root, ConfigHome: filepath.Join(root, "config"), RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "releases")}
+	body, err := uninstall.MarshalInstallation(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, uninstall.ManifestName), body, 0600)
+	return root
+}
 
 func (stub securityStub) CheckSecurity(context.Context, bool, bool) (string, error) {
 	return stub.state, nil
@@ -51,7 +65,7 @@ func (stub *spaceExecutorStub) Exec(
 }
 
 func TestRuntimeReadsAndRefreshesSpaceSynchronously(t *testing.T) {
-	root := t.TempDir()
+	root := installationSpaceHome(t)
 	oldTime := time.Unix(100, 0)
 	newTime := time.Unix(200, 0)
 	cache := filepath.Join(root, "space-demo.cache")
@@ -251,7 +265,7 @@ func TestSpaceMeasureCommandDoesNotExcludeUnverifiedInnerIncusStorageAlias(t *te
 }
 
 func TestRuntimeUsesTheSameMeasurementCommandForSyncAndAsyncRefresh(t *testing.T) {
-	root := t.TempDir()
+	root := installationSpaceHome(t)
 	commandPath := filepath.Join(root, "async-command")
 	executor := &spaceExecutorStub{result: ports.InstanceExecResult{Stdout: []byte("1G\n")}}
 	yard := domain.Context{IncusProject: "subyard", YardInstanceName: "yard", Paths: domain.RuntimePaths{DataHome: root}}
@@ -305,7 +319,7 @@ func TestValidSpaceFigureUsesStrictGrammar(t *testing.T) {
 }
 
 func TestRuntimeStartsAndReusesAsyncSpaceRefresh(t *testing.T) {
-	root := t.TempDir()
+	root := installationSpaceHome(t)
 	environment := fakeIncusEnvironment(t, "printf '1.5G\\n'\n")
 	yard := domain.Context{
 		YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
@@ -350,7 +364,17 @@ func TestSpaceRefreshPreservesCacheOnFailure(t *testing.T) {
 			if err := writeSpaceCache(cache, "2G", measured); err != nil {
 				t.Fatal(err)
 			}
-			command := exec.Command("sh", "-c", spaceRefreshScript, "yard-space-refresh", cache, "subyard-demo", "yard-demo")
+			root := filepath.Dir(cache)
+			generation, err := uninstall.CaptureRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, release, err := uninstall.OwnerLock(context.Background(), root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			command := exec.Command("sh", "-c", spaceRefreshScript, "yard-space-refresh", cache, "subyard-demo", "yard-demo", uninstall.OwnerLockPath(root), fmt.Sprintf("%d:%d", generation.Entries[0].Device, generation.Entries[0].Inode), "0")
 			command.Env = environment(fakeIncusEnvironment(t, body))
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("background refresh did not exit quietly: %s: %v", output, err)
@@ -924,5 +948,73 @@ func TestProfileDashboardParentDeadlineAlsoGatesURLVerification(t *testing.T) {
 	runtime.profileDashboardStatus(context.Background(), domain.Context{YardKind: domain.YardContainer}, false)
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("stopped yard launched owner")
+	}
+}
+
+func TestQueuedNativeSpaceWriterDoesNotRecreateRemovedRoot(t *testing.T) {
+	root := testkit.TempDir(t)
+	generation, err := uninstall.CaptureRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := uninstall.OwnerLock(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	command := exec.Command("/bin/sh", "-c", spaceRefreshScript, "queued-space", filepath.Join(root, "space.cache"), "fixture-project", "fixture-instance", uninstall.OwnerLockPath(root), fmt.Sprintf("%d:%d", generation.Entries[0].Device, generation.Entries[0].Inode), "0")
+	if err = os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("queued native writer: %v %s", err, output)
+	}
+	if _, err = os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("queued status producer recreated removed root", err)
+	}
+}
+
+func TestOldNativeSpaceWriterRefusesAdvancedEpochInRetainedRoot(t *testing.T) {
+	root := installationSpaceHome(t)
+	generation, err := uninstall.CaptureRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := uninstall.OwnerLock(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	command := exec.Command("/bin/sh", "-c", spaceRefreshScript, "old-space", filepath.Join(root, "space.cache"), "fixture-project", "fixture-instance", uninstall.OwnerLockPath(root), fmt.Sprintf("%d:%d", generation.Entries[0].Device, generation.Entries[0].Inode), "0")
+	command.Env = environment(fakeIncusEnvironment(t, "printf '2G\\n'\n"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("existing writer: %v %s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "space.cache")); err != nil {
+		t.Fatal("existing writer was not admitted", err)
+	}
+	if err := os.Remove(filepath.Join(root, "space.cache")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, uninstall.ManifestName)); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err = uninstall.OwnerLock(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = uninstall.AdvanceOwnerEpoch(root, 0, 1); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	release()
+	command = exec.Command("/bin/sh", "-c", spaceRefreshScript, "old-space", filepath.Join(root, "space.cache"), "fixture-project", "fixture-instance", uninstall.OwnerLockPath(root), fmt.Sprintf("%d:%d", generation.Entries[0].Device, generation.Entries[0].Inode), "0")
+	command.Env = environment(fakeIncusEnvironment(t, "printf '2G\\n'\n"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("old native writer: %v %s", err, output)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "space.cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("old native writer published after full cleanup", err)
 	}
 }

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d /tmp/subyard-power-network.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
@@ -403,3 +403,47 @@ grep -Fq 'incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"' \
   "$ROOT/scripts/lifecycle-guard.sh" || fail "yard start can return before the VM agent is ready"
 
 printf 'ok: NetworkManager power guard\n'
+
+# Exact bridge rule retirement: preserve another yard's shared probe grant,
+# propagate command failures, and reject successful commands leaving drift.
+export SUBYARD_UFW_RULES_FILE="$tmp/ufw.rules"
+incus() { [ "${TEST_BRIDGE_PRESENT:-0}" = 0 ] && printf '[]\n' || printf '[{"name":"owned"}]\n'; }
+ufw_rules_set_probe_access() { printf '%s\n' "$1" >> "$tmp/probe-access"; }
+ufw() {
+  [ "${TEST_UFW_ERROR:-0}" = 0 ] || return 4
+  [ "${TEST_UFW_STALE:-0}" = 0 ] || return 0
+  local bridge
+  if [ "$2" = route ]; then bridge="$7"; else bridge="$6"; fi
+  awk -v bridge="$bridge" '$10 != "in_" bridge && $10 != "out_" bridge' \
+    "$SUBYARD_UFW_RULES_FILE" > "$tmp/ufw.next"
+  mv "$tmp/ufw.next" "$SUBYARD_UFW_RULES_FILE"
+}
+write_ufw_fixture() {
+  printf '%s\n' \
+    '### tuple ### allow udp 67 0.0.0.0/0 any 0.0.0.0/0 in_owned' \
+    '### tuple ### allow any 53 0.0.0.0/0 any 0.0.0.0/0 in_owned' \
+    '### tuple ### route:allow any any 0.0.0.0/0 any 0.0.0.0/0 in_owned' \
+    '### tuple ### route:allow any any 0.0.0.0/0 any 0.0.0.0/0 out_owned' \
+    > "$SUBYARD_UFW_RULES_FILE"
+  chmod 0600 "$SUBYARD_UFW_RULES_FILE"
+}
+write_ufw_fixture
+TEST_BRIDGE_PRESENT=1
+if ufw_yard_rules_remove owned; then fail 'surviving bridge firewall rules were removed'; fi
+[ "$(wc -l < "$SUBYARD_UFW_RULES_FILE")" = 4 ] || fail 'surviving bridge rules changed'
+TEST_BRIDGE_PRESENT=0
+printf '%s\n' '### tuple ### route:allow any any 0.0.0.0/0 any 0.0.0.0/0 in_foreign' >> "$SUBYARD_UFW_RULES_FILE"
+ufw_yard_rules_remove owned || fail 'exact bridge rules did not retire'
+[ "$(wc -l < "$SUBYARD_UFW_RULES_FILE")" = 1 ] && grep -Fq in_foreign "$SUBYARD_UFW_RULES_FILE" \
+  || fail 'foreign bridge firewall policy changed'
+[ ! -e "$tmp/probe-access" ] || fail 'surviving yard lost shared probe grant'
+write_ufw_fixture
+TEST_UFW_ERROR=1
+if ufw_yard_rules_remove owned; then fail 'firewall command failure was suppressed'; fi
+TEST_UFW_ERROR=0 TEST_UFW_STALE=1
+if ufw_yard_rules_remove owned; then fail 'remaining approved rules were accepted'; fi
+TEST_UFW_STALE=0
+ufw_yard_rules_remove owned || fail 'final bridge firewall cleanup failed'
+[ ! -s "$SUBYARD_UFW_RULES_FILE" ] && grep -Fxq disable "$tmp/probe-access" \
+  || fail 'last owned policy retained its probe grant'
+printf 'ok: exact UFW bridge cleanup preserves shared rules and rejects failures\n'

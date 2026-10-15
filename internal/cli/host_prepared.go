@@ -247,6 +247,11 @@ func (prepared *preparedCommand) prepareHost(ctx context.Context, _ *initBootstr
 		prepared.displayOnly = prepared.CLI.hostUsage
 		return nil
 	}
+	release, err := prepared.CLI.admitOwnerWrite(ctx, prepared.Loaded)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if len(arguments) == 1 && arguments[0] == "list" {
 		connections, err := (ownerinventory.Connections{Root: filepath.Join(prepared.Loaded.Context.Paths.DataHome, "owner-inventory")}).List()
 		if err != nil {
@@ -289,6 +294,11 @@ func (prepared *preparedCommand) prepareHost(ctx context.Context, _ *initBootstr
 }
 
 func (operation *hostOperation) apply(ctx context.Context, cli *CLI, loaded config.Loaded) error {
+	release, err := cli.admitOwnerWrite(ctx, loaded)
+	if err != nil {
+		return err
+	}
+	defer release()
 	switch {
 	case operation.registration != nil:
 		if err := operation.store.ApplyRegistration(*operation.registration); err != nil {

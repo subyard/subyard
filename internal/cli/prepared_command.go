@@ -19,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // coreCommandBehavior binds a handler family to its preparation and physical
@@ -74,9 +75,11 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 	case "@teardown":
 		behavior.prepare = (*preparedCommand).prepareTeardown
 		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
-			return map[string]map[string]shelladapter.Action{"teardown": {
-				"apply": {Path: filepath.Join(root, "scripts/teardown-physical.sh"), Direct: true},
-			}}
+			actions := map[string]shelladapter.Action{}
+			for _, phase := range []string{"apply", "prepare-lock", "check-sessions", "check-profiles", "remove-shared", "remove-files", "stop-services"} {
+				actions[phase] = shelladapter.Action{Path: filepath.Join(root, "scripts/teardown-physical.sh"), Direct: true}
+			}
+			return map[string]map[string]shelladapter.Action{"teardown": actions}
 		}
 	case "@project", "@project-env":
 		behavior.prepare = (*preparedCommand).prepareProject
@@ -178,6 +181,114 @@ type preparedCommand struct {
 	executed         bool
 	closeOnce        sync.Once
 	closeErr         error
+	ownerAdmission   ownerWriteAdmission
+}
+
+// Both prepared commands and early source recovery capture these read-only
+// facts before consent, then share the same owner barrier before any lock writer.
+type ownerWriteAdmission struct {
+	home       string
+	generation []uninstall.Tree
+	epoch      uint64
+	err        error
+}
+
+func captureOwnerWriteAdmission(loaded config.Loaded, repositoryRoot string) (ownerWriteAdmission, error) {
+	admission := ownerWriteAdmission{home: loaded.Context.Paths.DataHome}
+	var err error
+	admission.epoch, err = uninstall.ReadOwnerEpoch(admission.home)
+	if err != nil {
+		return admission, err
+	}
+	for _, path := range []string{admission.home, loaded.Context.Paths.ConfigHome, repositoryRoot} {
+		if path == "" {
+			continue
+		}
+		tree, err := uninstall.CaptureRoot(path)
+		if err != nil {
+			return admission, err
+		}
+		admission.generation = append(admission.generation, tree)
+	}
+	return admission, nil
+}
+
+// Unprepared native writers retain the first generation observed by this
+// command, including startup recovery; later callbacks cannot adopt a new install.
+func (cli *CLI) originalOwnerWrite(loaded config.Loaded) (ownerWriteAdmission, error) {
+	cli.initializeOwnerAdmission()
+	cli.ownerAdmissionMutex.Lock()
+	defer cli.ownerAdmissionMutex.Unlock()
+	if cli.ownerAdmission == nil {
+		var contextErr error
+		if loaded.Context.Paths.ConfigHome == "" {
+			if operator := firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]); operator != "" {
+				loaded.Context.Paths.ConfigHome, contextErr = config.ResolveConfigHome(operator, cli.env)
+			}
+		}
+		admission, err := captureOwnerWriteAdmission(loaded, cli.options.RepositoryRoot)
+		admission.err = errors.Join(contextErr, err)
+		cli.ownerAdmission = &admission
+	}
+	if cli.ownerAdmission.home != loaded.Context.Paths.DataHome {
+		return ownerWriteAdmission{}, domain.ErrPlanStale
+	}
+	original := *cli.ownerAdmission
+	original.generation = append([]uninstall.Tree{}, original.generation...)
+	return original, original.err
+}
+
+func (cli *CLI) admitOwnerWrite(ctx context.Context, loaded config.Loaded) (func(), error) {
+	admission, err := cli.originalOwnerWrite(loaded)
+	if err != nil {
+		return nil, err
+	}
+	return cli.acquireOwnerMutation(ctx, admission, false, true)
+}
+
+func (cli *CLI) acquireOwnerMutation(ctx context.Context, admission ownerWriteAdmission, recovery, established bool) (func(), error) {
+	cli.initializeOwnerAdmission()
+	if cli.ownerMutationLock != nil {
+		borrowed, err := uninstall.BorrowOwnerLock(admission.home)
+		if err != nil {
+			return nil, err
+		}
+		if borrowed == nil {
+			return nil, errors.New("owner mutation barrier is no longer held")
+		}
+		defer borrowed.Close()
+		actual, err := borrowed.Stat()
+		current, statErr := os.Lstat(cli.ownerMutationLock.Path)
+		if err != nil || statErr != nil || cli.ownerMutationLock.Path != uninstall.OwnerLockPath(admission.home) || !os.SameFile(actual, current) {
+			return nil, domain.ErrPlanStale
+		}
+		if err := uninstall.CheckOwnerLockIdentity(*cli.ownerMutationLock); err != nil {
+			return nil, err
+		}
+		return func() {}, uninstall.Admit(admission.home, admission.generation, admission.epoch, recovery, established)
+	}
+	lock, unlock, err := uninstall.OwnerLock(ctx, admission.home, cli.ownerMutationLockExpected)
+	if err != nil {
+		return nil, err
+	}
+	if err := uninstall.Admit(admission.home, admission.generation, admission.epoch, recovery, established); err != nil {
+		unlock()
+		return nil, err
+	}
+	cli.ownerMutationLock = &lock
+	return func() {
+		for _, root := range admission.generation {
+			if root.Path == admission.home && len(root.Entries) == 0 {
+				if created, err := uninstall.CaptureRoot(admission.home); err == nil {
+					cli.ownerAdmissionMutex.Lock()
+					cli.acceptOwnerHomePublication(admission.home, admission.epoch, created)
+					cli.ownerAdmissionMutex.Unlock()
+				}
+			}
+		}
+		cli.ownerMutationLock = nil
+		unlock()
+	}, nil
 }
 
 type commandPreparationError struct {
@@ -194,6 +305,15 @@ func (failure *commandCommitError) Error() string { return failure.err.Error() }
 func (failure *commandCommitError) Unwrap() error { return failure.err }
 
 func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandRequest) (_ *preparedCommand, err error) {
+	if request.Definition.Handler == "@teardown" {
+		execution, parseErr := prepareTeardownExecution(request.Arguments)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if execution.full && request.Loaded.Context.AccessKind != domain.AccessLocal {
+			return nil, errors.New("--full must run locally on the owner host; remote operation plans cannot authorize full uninstall")
+		}
+	}
 	behavior, err := resolveCoreCommand(request.Definition)
 	if err != nil {
 		return nil, err
@@ -307,6 +427,12 @@ func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
 			return &commandPreparationError{phase: "plan", err: err}
 		}
 	}
+	if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
+		prepared.ownerAdmission, err = prepared.CLI.originalOwnerWrite(prepared.Loaded)
+		if err != nil {
+			return &commandPreparationError{phase: "owner generation", err: err}
+		}
+	}
 	return nil
 }
 
@@ -335,6 +461,14 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	}
 	if !prepared.Plan.Confirmed {
 		return domain.AdapterResult{}, domain.ErrConfirmationRequired
+	}
+	if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
+		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
+		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)
+		if lockErr != nil {
+			return domain.AdapterResult{}, lockErr
+		}
+		defer unlock()
 	}
 	prepared.executed = true
 	noOp := func() (domain.AdapterResult, error) {
@@ -721,8 +855,34 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 	if err != nil {
 		return err
 	}
+	if execution.full {
+		if err := prepared.bindFullInstallation(); err != nil {
+			return err
+		}
+
+		if prepared.CLI.fullTeardownRecovery != "" {
+			if err := prepared.CLI.restoreFullTeardown(execution); err != nil {
+				return err
+			}
+		}
+	}
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if execution.full {
+			full := execution
+			if full.resumed {
+				if err := full.RecoveryBinding.Check(); err != nil {
+					return "", domain.ActionDelta{}, err
+				}
+			} else if err := prepared.CLI.observeFullTeardown(ctx, prepared.Loaded, full); err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			prepared.exactState = full.installationBinding()
+			if permit := prepared.CLI.teardownRepair; permit != nil {
+				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
+			}
+			return "yard.teardown.full", domain.ActionDelta{Changed: true, Consequences: []string{"permanently remove this installation and all its local yards"}}, nil
+		}
 		if err := prepared.CLI.observeTeardownExecution(ctx, prepared.Loaded, execution); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -735,7 +895,12 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 	}
 	prepared.refresh = prepared.assess
-	prepared.steps = func() []domain.OperationStep { return execution.steps(prepared.Loaded.Context) }
+	prepared.steps = func() []domain.OperationStep {
+		if execution.full {
+			return execution.installationSteps(prepared.CLI)
+		}
+		return execution.steps(prepared.Loaded.Context)
+	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		permit := prepared.CLI.teardownRepair
 		if permit != nil {
@@ -746,7 +911,7 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 			defer unlock()
 		}
 		result, err := prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
-		if err == nil && result.Status == "ok" && permit != nil {
+		if err == nil && result.Status == "ok" && permit != nil && !execution.full {
 			err = prepared.CLI.finishTeardownRepair(ctx, permit)
 		}
 		return result, err

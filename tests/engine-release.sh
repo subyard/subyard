@@ -442,7 +442,7 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   export SUBYARD_INCUS_SOCKET='' INCUS_SOCKET='' INCUS_DIR="$TMP/bootstrap-cold-incus-state"
   native_tools="$TMP/bootstrap-cold-tools"
   mkdir "$native_tools"
-  for tool in bash dirname uname jq sha256sum tar gzip cp chmod mv mktemp cut install readlink basename ln sed awk sort find env date id getent python3 cat head stat tr grep wc realpath flock rm cmp comm mkdir rmdir; do
+  for tool in bash dirname uname jq sha256sum tar gzip cp chmod mv mktemp cut install readlink basename ln sed awk sort find env date id getent python3 cat head stat tr grep wc realpath flock rm cmp comm mkdir rmdir sync; do
     ln -s "$(command -v "$tool")" "$native_tools/$tool"
   done
   export PATH="$native_tools"
@@ -544,14 +544,15 @@ HOME="$override_home" ZDOTDIR="$override_home" SHELL=/bin/zsh \
 
 # Missing startup parents are private even under a permissive umask; creating
 # them must leave their existing shared ancestor unchanged.
+# Use a fresh installation: the override fixture already owns a different bin directory.
 absent_parent="$TMP/absent-shell-parents"
 install -d -m 0750 "$absent_parent"
 directory_sentinel "$absent_parent"
 absent_before="$(directory_identity "$absent_parent")"
 (
   umask 0000
-  HOME="$override_home" SUBYARD_HOME="$override_home/.subyard" \
-    SUBYARD_CONFIG_HOME="$override_home/.config/subyard" YARD_BIN_DIR="$absent_parent/bin"
+  HOME="$absent_parent/home" SUBYARD_HOME="$absent_parent/home/.subyard" \
+    SUBYARD_CONFIG_HOME="$absent_parent/home/.config/subyard" YARD_BIN_DIR="$absent_parent/bin"
   export HOME SUBYARD_HOME SUBYARD_CONFIG_HOME YARD_BIN_DIR
   SHELL=/bin/bash YARD_SHELL_RC="$absent_parent/interactive/nested/bashrc" \
     YARD_LOGIN_RC="$absent_parent/login/profile" \
@@ -629,7 +630,9 @@ legacy_bridge_runtime="$legacy_bridge_home/.subyard/runtime"
 legacy_bridge_bin="$legacy_bridge_home/bin"
 install -d "$legacy_bridge_home" "$legacy_bridge_bin" \
   "$legacy_bridge_home/.config/subyard"
-"$ROOT/scripts/install-runtime-release.sh" \
+HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$legacy_bridge_home/.config/subyard" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$legacy_bridge_runtime" \
   --bundle "$legacy_bridge_bundle" --checksum "$legacy_bridge_bundle.sha256" \
   --manifest "$legacy_bridge_bundle.manifest.json" \
@@ -801,14 +804,18 @@ install -d -m 0700 "$recovery_home" "$recovery_config/yards/recovery-yard"
 printf '%s\n' 'YARD_TEMPLATE=test-vms' 'SSH_PORT=2293' 'AGENTS=' \
   > "$recovery_config/yards/recovery-yard/config.env"
 chmod 0600 "$recovery_config/yards/recovery-yard/config.env"
-"$ROOT/scripts/install-runtime-release.sh" \
+HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$recovery_runtime" \
   --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
   --manifest "$recovery_previous_bundle.manifest.json" \
   --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
 recovery_previous_path="$(readlink "$recovery_runtime/current")"
 recovery_previous="${recovery_previous_path#releases/}"
-recovery_source_path="$("$ROOT/scripts/install-runtime-release.sh" \
+recovery_source_path="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$recovery_runtime" --publish-only \
   --bundle "$recovery_source_bundle" --checksum "$recovery_source_bundle.sha256" \
   --manifest "$recovery_source_bundle.manifest.json" \
@@ -855,14 +862,18 @@ source_version_config="$source_version_home/config"
 install -d -m 0700 "$source_version_home" "$source_version_config/yards/recovery-yard"
 cp "$recovery_config/yards/recovery-yard/config.env" \
   "$source_version_config/yards/recovery-yard/config.env"
-"$ROOT/scripts/install-runtime-release.sh" \
+HOME="$source_version_home" SUBYARD_HOME="$source_version_home/data" \
+  SUBYARD_CONFIG_HOME="$source_version_config" YARD_RELEASE_CACHE="$source_version_home/cache" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$source_version_runtime" \
   --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
   --manifest "$recovery_previous_bundle.manifest.json" \
   --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
 source_version_previous_path="$(readlink "$source_version_runtime/current")"
 source_version_previous="${source_version_previous_path#releases/}"
-source_version_source_path="$("$ROOT/scripts/install-runtime-release.sh" \
+source_version_source_path="$(HOME="$source_version_home" SUBYARD_HOME="$source_version_home/data" \
+  SUBYARD_CONFIG_HOME="$source_version_config" YARD_RELEASE_CACHE="$source_version_home/cache" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$source_version_runtime" --publish-only \
   --bundle "$recovery_older_source_bundle" --checksum "$recovery_older_source_bundle.sha256" \
   --manifest "$recovery_older_source_bundle.manifest.json" \
@@ -879,7 +890,9 @@ cp -a "$source_version_config" "$source_version_baseline/config"
 # Inspect the already-published candidate directly before the standalone
 # bootstrap mutates links or transition state. This is the exact Plan the
 # terminal replacement journal and immutable archive must retain.
-recovery_candidate_path="$("$ROOT/scripts/install-runtime-release.sh" \
+recovery_candidate_path="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
+  "$ROOT/scripts/install-runtime-release.sh" \
   --runtime-root "$recovery_runtime" --publish-only \
   --bundle "$recovery_candidate_bundle" --checksum "$recovery_candidate_bundle.sha256" \
   --manifest "$recovery_candidate_bundle.manifest.json" \
@@ -1016,6 +1029,17 @@ for recovery_mutation in $recovery_negative_mutations; do
   cp -a "$negative_baseline" "$negative_root"
   negative_runtime="$negative_root/runtime"
   negative_config="$negative_root/config"
+  # This is a new disposable installation, not a reuse of the original
+  # installation's absolute ownership record. Publish through its own context
+  # before capturing the negative case's protected state.
+  rm -f -- "$negative_runtime/installation.json"
+  HOME="$negative_root/home" SUBYARD_HOME="$negative_root/data" \
+    SUBYARD_CONFIG_HOME="$negative_config" YARD_RELEASE_CACHE="$negative_root/cache" \
+    "$ROOT/scripts/install-runtime-release.sh" \
+    --runtime-root "$negative_runtime" --publish-only \
+    --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
+    --manifest "$recovery_previous_bundle.manifest.json" \
+    --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
   negative_power_reconciler="$TMP/missing-power-reconciler"
   process_guard_only=0
   process_guard_candidate=
@@ -1046,7 +1070,9 @@ for recovery_mutation in $recovery_negative_mutations; do
         "$recovery_fixture" mutate \
           "$negative_runtime" "$negative_config" "$recovery_mutation"
       fi
-      process_guard_candidate="$("$ROOT/scripts/install-runtime-release.sh" \
+      process_guard_candidate="$(HOME="$negative_root/home" SUBYARD_HOME="$negative_root/data" \
+        SUBYARD_CONFIG_HOME="$negative_config" YARD_RELEASE_CACHE="$negative_root/cache" \
+        "$ROOT/scripts/install-runtime-release.sh" \
         --runtime-root "$negative_runtime" --publish-only \
         --bundle "$recovery_candidate_bundle" \
         --checksum "$recovery_candidate_bundle.sha256" \

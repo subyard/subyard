@@ -15,10 +15,88 @@ import (
 	"errors"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+func TestQueuedHostRenameCannotRecreateRetiredConfiguration(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	program := configExactProgram(t, root, environment, nil, nil)
+	authority, err := program.observeHostRenameAuthority(context.Background(), configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authority.close()
+	dataHome := filepath.Join(home, ".subyard")
+	_, release, err := uninstall.OwnerLock(context.Background(), dataHome, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- authority.withLock(ctx, program, func() error {
+			return os.WriteFile(filepath.Join(configHome, "late-rename"), []byte("unexpected"), 0o600)
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("rename did not wait for the owner barrier: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := uninstall.AdvanceOwnerEpoch(dataHome, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(configHome); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release = nil
+	if err := <-done; !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("retired rename outcome = %v", err)
+	}
+	if _, err := os.Lstat(configHome); !os.IsNotExist(err) {
+		t.Fatal("queued rename recreated configuration or migration lock state")
+	}
+}
+
+func TestEarlyOwnerMutationRequiresActualHeldBarrier(t *testing.T) {
+	home := testkit.TempDir(t)
+	admission, err := captureOwnerWriteAdmission(config.Loaded{Context: domain.Context{Paths: domain.RuntimePaths{DataHome: home}}}, repositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := &CLI{ownerMutationLock: &uninstall.Tree{Path: uninstall.OwnerLockPath(home)}}
+	if release, err := program.acquireOwnerMutation(context.Background(), admission, false, true); err == nil {
+		release()
+		t.Fatal("a pointer to an unheld barrier admitted an early writer")
+	}
+	lock, release, err := uninstall.OwnerLock(context.Background(), home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	program.ownerMutationLock = &lock
+	nested, err := program.acquireOwnerMutation(context.Background(), admission, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested()
+	borrowed, err := uninstall.BorrowOwnerLock(home)
+	if err != nil || borrowed == nil {
+		t.Fatal("nested source mutation released its parent's barrier")
+	}
+	borrowed.Close()
+}
 
 // Native fixture at the source-HEAD commit point: owner identity and cache
 // manifest still describe the old pair, while the prepared Git move is committed.

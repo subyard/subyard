@@ -1860,6 +1860,61 @@ func TestPowerActivationUsesPinnedCandidateEngine(t *testing.T) {
 	}
 }
 
+func TestPowerActivationReloadsHostLocalArtifactPaths(t *testing.T) {
+	home, configHome := testkit.TempDir(t), testkit.TempDir(t)
+	helper := filepath.Join(home, "host-helper", "power")
+	unit := filepath.Join(home, "system", "fixture-power.service")
+	path := filepath.Join(configHome, "config.env")
+	base := "CODING_TOOL_INTEGRATIONS=\nENVIRONMENT_PROFILES=\nFORWARD_SSH_AGENT=0\n"
+	testkit.WriteFile(t, path, []byte(base), 0o600)
+	program, err := New(Options{
+		RepositoryRoot: repositoryRoot(t),
+		Environment: []string{
+			"HOME=" + home, "SUBYARD_CONFIG_HOME=" + configHome,
+			"SUBYARD_HOME=" + filepath.Join(home, "data"),
+			"SUBYARD_POWER_RECONCILER_PATH=" + helper,
+			"SUBYARD_POWER_UNIT_PATH=" + unit,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, persisted := range []bool{false, true} {
+		if persisted {
+			testkit.WriteFile(t, path, []byte(base+
+				"SUBYARD_POWER_RECONCILER_PATH="+helper+"\nSUBYARD_POWER_UNIT_PATH="+unit+"\n"), 0o600)
+		}
+		ordinary, err := config.Load(config.LoadOptions{
+			Catalog: &program.catalog, RepositoryRoot: program.options.RepositoryRoot,
+			OperatorHome: home, YardName: "default", Environment: program.baseEnv,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ordinary.Environment["SUBYARD_POWER_RECONCILER_PATH"] != helper || ordinary.Environment["SUBYARD_POWER_UNIT_PATH"] != unit {
+			t.Fatal("ordinary load lost the custom power paths")
+		}
+		operation := program.releaseActivationOperation()
+		if operation.env["SUBYARD_POWER_UNIT_PATH"] != "" || operation.env["SUBYARD_POWER_RECONCILER_PATH"] != "" {
+			t.Fatal("activation inherited resolved command settings")
+		}
+		loaded, err := operation.resolveReleaseTransitionContext("default", configHome)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := operation.initPlatformWithDispatcher(loaded, nil,
+			filepath.Join(program.options.RepositoryRoot, "bin", "yard-engine")).(reconcileruntime.Runtime)
+		wantHelper, wantUnit := "/usr/local/libexec/subyard/yard-boot-reconcile", "/etc/systemd/system/subyard-power-reconcile.service"
+		if persisted {
+			wantHelper, wantUnit = helper, unit
+		}
+		if environmentValue(runtime.Environment, "SUBYARD_POWER_RECONCILER_PATH") != wantHelper ||
+			environmentValue(runtime.Environment, "SUBYARD_POWER_UNIT_PATH") != wantUnit {
+			t.Fatalf("persisted=%t: activation did not select the expected power paths", persisted)
+		}
+	}
+}
+
 func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.T) {
 	root := repositoryRoot(t)
 	home := t.TempDir()

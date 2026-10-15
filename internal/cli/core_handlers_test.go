@@ -23,6 +23,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
@@ -920,6 +921,9 @@ func TestCompletedTeardownUsesFreshConsentAndProtectedHistory(t *testing.T) {
 				options.Prompt = decline
 			}
 			options.InitPlatform, options.NetworkPolicy = platform, allowTestNetworkPolicy()
+			options.ObserveCoreProducers = func(config.Loaded, uninstall.RecoveryPlan, []string, int) ([]uninstall.RecoveryService, error) {
+				return nil, nil // This semantic adapter owns no host producers.
+			}
 			options.IntegrationRuntime = func(loaded config.Loaded) IntegrationRuntime {
 				if !inventoryCase || loaded.Context.YardName != "inventory" {
 					return integrations

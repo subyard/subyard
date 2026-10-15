@@ -36,6 +36,45 @@ func TestMetadataOwnsNestedSemanticValues(t *testing.T) {
 	}
 }
 
+func TestFullCleanupMetadataRoundTripOwnsEnvironment(t *testing.T) {
+	metadata, err := Decode("synthetic", []byte(`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"missing-inspect.sh","full_cleanup_environment":["FIXTURE_ROOT"],"managed_paths":[{"root":"data","path":"routes/{yard}"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := metadata.Data()
+	if err != nil || !data.LifecycleOnly || data.FullCleanup != "missing-inspect.sh" {
+		t.Fatalf("cleanup metadata lost: %#v, %v", data, err)
+	}
+	data.FullCleanupEnvironment[0] = "CHANGED"
+	data.ManagedPaths[0].Path = "changed"
+	definition := metadata.definition()
+	if !definition.LifecycleOnly || definition.FullCleanupEnvironment[0] != "FIXTURE_ROOT" || definition.ManagedPaths[0].Path != "routes/{yard}" || definition.Selected("default", map[string]string{"ENVIRONMENT_PROFILES": "synthetic"}) {
+		t.Fatal("cleanup ownership was lost or aliased")
+	}
+	definition.FullCleanupEnvironment[0] = "MUTATED"
+	definition.ManagedPaths[0].Path = "mutated"
+	again, _ := metadata.Data()
+	if again.FullCleanupEnvironment[0] != "FIXTURE_ROOT" || again.ManagedPaths[0].Path != "routes/{yard}" {
+		t.Fatal("native definition aliases semantic metadata")
+	}
+	for _, invalid := range []string{
+		`{"schema_version":1,"lifecycle_only":true}`,
+		`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"inspect.sh","default_yards":["default"]}`,
+		`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"inspect.sh","setup":{}}`,
+		`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"inspect.sh","managed_paths":[{"root":"data","path":"../escape"}]}`,
+		`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"inspect.sh","managed_paths":[{"root":"foreign","path":"routes/{yard}"}]}`,
+		`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"inspect.sh","managed_paths":[{"root":"data","path":"routes/{unknown}"}]}`,
+		`{"schema_version":1,"full_cleanup":"../escape"}`,
+		`{"schema_version":1,"full_cleanup_environment":["FIXTURE_ROOT"]}`,
+		`{"schema_version":1,"full_cleanup":"inspect.sh","full_cleanup_environment":["FIXTURE_ROOT","FIXTURE_ROOT"]}`,
+		`{"schema_version":1,"full_cleanup":"inspect.sh","full_cleanup_environment":["unsafe-name"]}`,
+	} {
+		if _, err := Decode("synthetic", []byte(invalid)); err == nil {
+			t.Fatalf("unsafe cleanup semantic declaration accepted: %s", invalid)
+		}
+	}
+}
+
 func TestIntegrationMetadataDoesNotRequireDeclaredFiles(t *testing.T) {
 	metadata, err := DecodeIntegration("synthetic", []byte(`{"schema_version":1,"provision":"missing.sh","lifecycle":{"handler":"missing-handler.sh","source_files":["missing.data"],"instance_config_keys":["user.subyard.synthetic"],"instance_devices":["synthetic"]}}`))
 	if err != nil {

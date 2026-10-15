@@ -800,3 +800,43 @@ Retired shipped integrations are normalized only by their compatibility declarat
 `aiobserver` selection entries and `AI_OBSERVER_HOST_PORT` assignments are ignored without
 rewriting their source files; other choices and explicit empty selections retain their authority.
 OpenLIT is not selected as a replacement automatically. See [retirement](openlit.md#predecessor-retirement).
+
+`yard teardown` and its `uninstall` alias offer a scope menu in an interactive terminal.
+The default removes only the selected yard. The second option removes this installation and
+all its local yards on the owner host. Scope selection precedes the read-only inventory and
+one final `Proceed? [y/N]` confirmation. `--full` selects the full scope explicitly;
+`--yes` and `ASSUME_YES=1` never select it. Remote selectors cannot perform full removal.
+
+```sh
+yard teardown --full
+```
+
+Full removal includes local settings, owned encrypted credential ledgers and identities,
+SSH transport state, caches, logs, runtime releases, launchers, matching host services, and
+installation-created host namespaces containing secrets, agent sessions and backups. Their
+loss is irreversible. `--full --keep-data` is invalid; `--reset-config` is redundant with
+`--full` and remains accepted. Ordinary teardown retains its selected-yard behavior.
+
+The exact plan lists owned targets and preservation boundaries. Foreign Incus consumers retain
+shared pools and backing data. Bound host projects, user Git repositories, unrecorded contents
+inside custom roots, other installations, shared packages, account lingering and unrelated shell,
+SSH and user-service state remain preserved. PATH entries serving other commands remain usable.
+Unknown ownership or changed native identities cause a nonzero refusal; a captured directory
+name alone does not establish ownership of all its contents.
+
+After consent, full removal saves the exact plan and a private recovery runtime beside the data
+root at `<data-root>.uninstall`. Producers stop synchronously before their data; yard resources
+and data precede runtime removal. If interrupted, retain that directory and run the exact recovery
+command printed by the failed operation. Its entrypoint remains usable after config/runtime loss:
+
+```sh
+/exact/data-root.uninstall/runtime/bin/yard _uninstall-resume /exact/data-root.uninstall
+```
+
+Retry uses the saved owner identity and approved paths, with a fresh confirmation. An ordinary
+local `teardown --full` also detects this saved plan when its original data root is selected.
+The recovery directory disappears only after verified cleanup. Stable, secret-free account
+coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-locks-<uid>` and the shared host-network lock under
+`/run/lock/subyard-network` remain: removing an active lock inode would let queued operations
+bypass serialization. Queued mutations and late audit/cache writers recheck their original
+installation generation before writing.

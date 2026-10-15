@@ -439,6 +439,13 @@ func (cli *CLI) allOwnerInventoriesForStatus(
 func (cli *CLI) observeOwnerInventories(
 	ctx context.Context, loaded config.Loaded, force, refreshTrusted bool,
 ) []ownerInventoryResult {
+	if refreshTrusted {
+		release, err := cli.admitOwnerWrite(ctx, loaded)
+		if err != nil {
+			return []ownerInventoryResult{{err: err}}
+		}
+		defer release()
+	}
 	local, err := cli.ownerInventoryReadOnly(ctx, loaded)
 	results := []ownerInventoryResult{{inventory: local, fetchedAt: local.ObservedAt, err: err}}
 	root := loaded.Context.Paths.DataHome + "/owner-inventory"

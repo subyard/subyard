@@ -61,7 +61,7 @@ func BuiltInRegistry() (Registry, error) {
 
 	goPackages := []string{
 		"application", "audit", "cli", "command", "config", "configsync", "credential",
-		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ownerpublication", "ports", "previewroute", "profile", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
+		"domain", "migration", "observation", "operatoraccess", "ownerapi", "ownerinventory", "ownerpublication", "uninstall", "ports", "previewroute", "profile", "releasetransition", "resource", "resourceendpoint", "rpc", "shellquote",
 		"sshidentity", "sshrelay", "sshtrust", "state", "systemdunit", "testyardmigration", "yardnetwork",
 		"adapters/codexdesktop", "adapters/configmaterial", "adapters/credentialmeta", "adapters/credentialruntime", "adapters/hostruntime",
 		"adapters/incusclient", "adapters/networkruntime", "adapters/projectruntime", "adapters/reconcileruntime",
@@ -88,7 +88,7 @@ func BuiltInRegistry() (Registry, error) {
 		"agent-e2e", "agent-selection", "integration-retirement", "build-engine", "release-acceptance", "release-publication",
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
 		"command-registry", "create-subyard-docker-apparmor", "create-subyard-limits", "docker-forwarding-convergence",
-		"engine-release", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
+		"engine-release", "full-uninstall", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
 		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
@@ -124,7 +124,7 @@ func BuiltInRegistry() (Registry, error) {
 	)
 
 	p0Lanes := []string{
-		"smoke", "boundary", "nested-teardown", "transport", "dependencies", "real-incus",
+		"smoke", "boundary", "full-uninstall", "nested-teardown", "transport", "dependencies", "real-incus",
 		"profile-resource", "release", "source-upgrade", "power-systemd", "reboot-verify", "release-smoke",
 		"peer", "peer-cleanup", "cleanup",
 	}

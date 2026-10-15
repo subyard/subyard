@@ -1219,12 +1219,25 @@ func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 		},
 	}
 	runtime := Runtime{
-		Incus: incus,
-		Yard:  domain.Context{IncusProject: "subyard", YardKind: domain.YardContainer},
+		Incus:       incus,
+		Environment: []string{"SUBYARD_HOME=/fixture-data", "SUBYARD_CONFIG_HOME=/fixture-config"},
+		Yard:        domain.Context{IncusProject: "subyard", YardKind: domain.YardContainer},
+	}
+	for key, value := range map[string]string{"user.subyard.installation": "1", "user.subyard.operator_uid": strconv.Itoa(os.Getuid()), "user.subyard.data_home": "/fixture-data", "user.subyard.config_home": "/fixture-config"} {
+		incus.Reconcile.ProjectConfig[key] = value
 	}
 	converged, err := runtime.CheckStage(context.Background(), "project")
 	if err != nil || !converged {
 		t.Fatalf("matching project rejected: %v, %v", converged, err)
+	}
+	for _, key := range []string{"user.subyard.installation", "user.subyard.operator_uid", "user.subyard.data_home", "user.subyard.config_home"} {
+		original := incus.Reconcile.ProjectConfig[key]
+		incus.Reconcile.ProjectConfig[key] = "foreign"
+		converged, err = runtime.CheckStage(context.Background(), "project")
+		if err != nil || converged {
+			t.Fatal("foreign project bypassed ownership apply guard", key, err)
+		}
+		incus.Reconcile.ProjectConfig[key] = original
 	}
 	incus.Reconcile.ProjectConfig["restricted"] = "false"
 	converged, err = runtime.CheckStage(context.Background(), "project")
@@ -1296,12 +1309,17 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 	}}
 	runtime := Runtime{
 		Incus: incus, RepositoryRoot: root, Environment: []string{
+			"SUBYARD_HOME=/fixture-data", "SUBYARD_CONFIG_HOME=/fixture-config",
 			"VM_FREE_PAGE_REPORTING=1", "VM_PIN_IPV4=1", "ALLOWS_HOST_ACCESS=false",
 			"LIMITS_CPU=1", "LIMITS_MEMORY=1GiB", "ROOT_DISK_SIZE=10GiB",
 		},
 		Yard: domain.Context{YardKind: domain.YardVM},
 	}
 	assertStage(t, runtime, "project", false, "missing low-level permission")
+	incus.Reconcile.ProjectConfig["user.subyard.installation"] = "1"
+	incus.Reconcile.ProjectConfig["user.subyard.operator_uid"] = strconv.Itoa(os.Getuid())
+	incus.Reconcile.ProjectConfig["user.subyard.data_home"] = "/fixture-data"
+	incus.Reconcile.ProjectConfig["user.subyard.config_home"] = "/fixture-config"
 	incus.Reconcile.ProjectConfig["restricted.virtual-machines.lowlevel"] = "allow"
 	assertStage(t, runtime, "project", true, "dedicated project permission")
 	assertStageConverged(t, runtime, false, "missing reporting override")
@@ -1387,7 +1405,7 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 		!strings.Contains(err.Error(), "Free Page Reporting preflight") || len(incus.ConfigUpdates) != 0 {
 		t.Fatalf("failed reporting preflight changed power metadata or gave no diagnostic: %v, %#v", err, incus.ConfigUpdates)
 	}
-	runtime.Environment = nil
+	runtime.Environment = []string{"SUBYARD_HOME=/fixture-data", "SUBYARD_CONFIG_HOME=/fixture-config"}
 	assertStage(t, runtime, "project", true, "ordinary yard ignores VM policy")
 	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
 		"#!/bin/sh\nexit 0\n"), 0o700)

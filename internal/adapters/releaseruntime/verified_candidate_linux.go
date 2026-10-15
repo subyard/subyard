@@ -19,6 +19,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"golang.org/x/sys/unix"
 )
 
@@ -480,6 +481,19 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	)
 	if grant != "" {
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
+	}
+	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
+	if home == "" {
+		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")
+	}
+	owner, borrowErr := uninstall.BorrowOwnerLock(home)
+	if borrowErr != nil {
+		return borrowErr
+	}
+	if owner != nil {
+		defer owner.Close()
+		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, owner)
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
 	err := command.Run()

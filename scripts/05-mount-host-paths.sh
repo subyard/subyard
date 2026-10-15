@@ -66,6 +66,7 @@ echo "Host directories:"
 # Shared dirs are owned by DEV_UID so the idmapped ('shift') mount maps them to the
 # yard's 'dev' (host uid == container uid under shift). install -d also fixes an
 # existing dir's owner/mode, so this self-heals dirs left root-owned by an older run.
+python3 "$SCRIPT_DIR/lib/host-path-ownership.py" begin "$HOST_BASE" "${m_name[@]}" backups
 for i in "${!m_name[@]}"; do
   install -d -m "${m_mode[$i]}" -o "$DEV_UID" -g "$DEV_UID" "$HOST_BASE/${m_name[$i]}"
   ok "$HOST_BASE/${m_name[$i]} (${m_mode[$i]}, owner $DEV_UID)"
@@ -73,6 +74,7 @@ done
 # 'backups' is a host-side backup target, never mounted into the yard — keep it root.
 install -d -m 0755 "$HOST_BASE/backups"
 ok "$HOST_BASE/backups (0755, root)"
+python3 "$SCRIPT_DIR/lib/host-path-ownership.py" finish "$HOST_BASE"
 
 # --- 2. reconcile host-mount devices to HOST_MOUNTS --------------------------
 echo "Host mounts → yard:"

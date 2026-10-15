@@ -31,6 +31,44 @@ func TestPreviewIsReadOnlyAndSelectsAutomaticEndpoint(t *testing.T) {
 	}
 }
 
+func TestCommitCreatesMissingPrivateParentAfterReadOnlyPreview(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		t.Run(map[bool]string{false: "private", true: "unsafe ancestor"}[unsafe], func(t *testing.T) {
+			root := t.TempDir()
+			mode := os.FileMode(0700)
+			if unsafe {
+				mode = 0777
+			}
+			if err := os.Chmod(root, mode); err != nil {
+				t.Fatal(err)
+			}
+			parent := filepath.Join(root, "data")
+			request := Request{Directory: filepath.Join(parent, "resource-endpoints"), Yard: "demo", Resource: "sample-runtime.sample-runtime", Host: "127.0.0.1", Port: "17000", PreferredPort: 6768}
+			manager := Manager{}
+			plan, err := manager.Preview(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = os.Lstat(parent); !os.IsNotExist(err) {
+				t.Fatal("preview created parent", err)
+			}
+			err = manager.Commit(context.Background(), request, plan)
+			if unsafe {
+				if err == nil {
+					t.Fatal("commit accepted unsafe ancestor")
+				}
+				if _, err = os.Lstat(parent); !os.IsNotExist(err) {
+					t.Fatal("refusal created parent", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if info, err := os.Lstat(parent); err != nil || info.Mode().Perm() != 0700 {
+				t.Fatal("commit parent is not private", err)
+			}
+		})
+	}
+}
+
 func TestCommitPersistsEndpointAndPreviewReusesItWithoutLiveProbe(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "resource-endpoints")
 	protectParent(t, directory)

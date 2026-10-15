@@ -32,6 +32,7 @@ if vm_page_reporting_required; then
   fi
 fi
 
+
 project_policy_summary="Apply the restricted policy: nesting allow, host disks/unix-char/proxy allowed (disk sources kept under '$RESTRICTED_DISK_PATHS' by tooling, not Incus policy — needed for idmapped 'shift' mounts)."
 if vm_page_reporting_required; then
   project_policy_summary+=" Permit low-level VM configuration in this project so the owner can set Free Page Reporting on its existing QEMU balloon."
@@ -43,12 +44,38 @@ announce_confirm "Subyard Phase 1 — create restricted Incus project" \
 
 # --- 1. create project (idempotent) ------------------------------------------
 echo "Project:"
+created_project=0
 if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
   ok "project '$INCUS_PROJECT' exists"
 else
   env INCUS_PROJECT=default incus project create "$INCUS_PROJECT" </dev/null >/dev/null
+  created_project=1
   ok "created project '$INCUS_PROJECT'"
 fi
+
+# Persist the exact installation boundary while the project may still be
+# partial. Full teardown must not infer these roots from a project's name.
+operator_uid="$(id -u "${SUBYARD_USER:-$(id -un)}")"
+existing_installation="$(incus project get "$INCUS_PROJECT" user.subyard.installation)"
+if [ "$created_project" = 0 ] && [ -z "$existing_installation" ]; then
+  die "existing project has no proven installation ownership; preserve its workloads and restore its original ownership record"
+fi
+if [ -n "$existing_installation" ]; then
+  [ "$existing_installation" = 1 ] \
+    && [ "$(incus project get "$INCUS_PROJECT" user.subyard.operator_uid)" = "$operator_uid" ] \
+    && [ "$(incus project get "$INCUS_PROJECT" user.subyard.data_home)" = "$SUBYARD_HOME" ] \
+    && [ "$(incus project get "$INCUS_PROJECT" user.subyard.config_home)" = "$SUBYARD_CONFIG_HOME" ] \
+    || die "project belongs to another or unknown installation"
+fi
+incus project set "$INCUS_PROJECT" \
+  user.subyard.installation=1 "user.subyard.operator_uid=$operator_uid" \
+  "user.subyard.context=${SUBYARD_INSTALLATION_CONTEXT:?}" \
+  "user.subyard.data_home=$SUBYARD_HOME" "user.subyard.config_home=$SUBYARD_CONFIG_HOME" \
+  "user.subyard.yard_name=${YARD_NAME:-default}" "user.subyard.instance_name=${YARD_INSTANCE_NAME:?}" \
+  "user.subyard.host_base=$HOST_BASE" "user.subyard.bridge=$INCUS_NETWORK" \
+  "user.subyard.srv_pool=$SRV_POOL" "user.subyard.srv_volume=$SRV_VOLUME" \
+  "user.subyard.storage_pool=${STORAGE_POOL:-$SRV_POOL}" "user.subyard.storage_path=$STORAGE_PATH" </dev/null
+
 
 # --- 2. apply restricted.* policy --------------------------------------------
 # restricted=true keeps sensitive features off; re-enable only what the yard needs.

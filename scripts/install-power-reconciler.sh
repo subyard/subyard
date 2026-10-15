@@ -41,14 +41,11 @@ proceed_or_die
 require_root "installing a host systemd unit and root-owned reconciler needs root"
 
 if [ "$action" = remove-if-unused ]; then
-  if [ ! -x "$RECONCILER_PATH" ]; then
-    if [ ! -e "$UNIT_PATH" ]; then
-      ok "$UNIT_NAME already absent"
-      exit 0
-    fi
-    warn "boot reconciler is unavailable — retaining $UNIT_NAME fail-closed"
-    exit 0
-  fi
+  # shellcheck source=scripts/lib/teardown-services.sh
+  . "$SCRIPT_DIR/lib/teardown-services.sh"
+  teardown_capture_producer power
+  [ -n "$SUBYARD_TEARDOWN_SERVICES" ] || die "producer inventory is unavailable"
+  [ -x "$RECONCILER_PATH" ] || { [ ! -e "$UNIT_PATH" ] || die "boot reconciler ownership is unavailable"; exit 0; }
   if "$RECONCILER_PATH" _power-reconcile has-managed; then
     ok "managed yards remain — keeping $UNIT_NAME"
     exit 0
@@ -59,10 +56,8 @@ if [ "$action" = remove-if-unused ]; then
       exit 0
     fi
   fi
-  systemctl disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
-  rm -f "$UNIT_PATH" "$RECONCILER_PATH"
+  teardown_stop_services
   rmdir "$LIBEXEC_DIR" 2>/dev/null || true
-  systemctl daemon-reload
   ok "removed unused $UNIT_NAME"
   exit 0
 fi

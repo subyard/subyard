@@ -85,6 +85,17 @@ ROOT_HOME="$(getent passwd root | cut -d: -f6)"
   E2E_VM_OVERHEAD=768MiB
   AGENT_CODEX_COMMAND=codex
   AWS_SECRET_ACCESS_KEY=do-not-copy
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  SUBYARD_INSTALLATION_CONTEXT="$(
+    export SUBYARD_OPERATOR_HOME SUBYARD_CONFIG_DIR SUBYARD_CONFIG_HOME SUBYARD_HOME \
+      STORAGE_PATH HOST_BASE ACCESS_KIND YARD_KIND YARD_INSTANCE_NAME INCUS_PROJECT \
+      INCUS_BRIDGE SSH_HOST DEV_USER DEV_UID
+    SSH_PORT=2222 SHIFT_MODE=shift SUBYARD_STATE_DIR="$SUBYARD_HOME/state" \
+      test_installation_context e2e-yard
+  )"
+  install -m 0600 /dev/null "$TMP/installation-context.before"
+  printf '%s\n' "$SUBYARD_INSTALLATION_CONTEXT" > "$TMP/installation-context.before"
   SUBYARD_SCRIPT_PATH="$TMP/phase.sh"
   SUBYARD_SCRIPT_ARGV=(--yes)
   warn() { :; }
@@ -108,6 +119,7 @@ for expected in \
   "SUBYARD_CONFIG_DIR=$TMP/repository/config" \
   "SUBYARD_CONFIG_HOME=$TMP/operator home/.config/subyard" \
   "SUBYARD_HOME=$TMP/operator home/.subyard" \
+  "SUBYARD_INSTALLATION_CONTEXT=$(cat "$TMP/installation-context.before")" \
   "YARD_RUNTIME_ROOT=$TMP/operator home/.subyard/runtime" \
   "STORAGE_PATH=$TMP/operator home/.subyard/incus/storage" \
   "HOST_BASE=$TMP/host data" \

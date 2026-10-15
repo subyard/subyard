@@ -40,27 +40,39 @@ type Invocation struct {
 	Maximum     int64
 	Now         time.Time
 	PID         int
+	BeforeWrite func(context.Context) (func(), bool, error)
 }
 
 type OperationLog struct {
-	Home       string
-	WorkingDir string
-	Yard       string
-	Remote     string
-	Maximum    int64
+	Home        string
+	WorkingDir  string
+	Yard        string
+	Remote      string
+	Maximum     int64
+	BeforeWrite func(context.Context) (func(), bool, error)
 }
 
 func (sink OperationLog) WriteAudit(_ context.Context, event domain.OperationEvent) error {
 	return WriteInvocation(Invocation{
 		Home: sink.Home, Command: event.Kind, WorkingDir: sink.WorkingDir,
 		Yard: sink.Yard, Remote: sink.Remote, Maximum: sink.Maximum,
-		OperationID: event.OperationID, Now: event.At,
+		OperationID: event.OperationID, Now: event.At, BeforeWrite: sink.BeforeWrite,
 	})
 }
 
 func WriteInvocation(invocation Invocation) error {
 	if invocation.Home == "" {
 		return nil
+	}
+	if invocation.BeforeWrite != nil {
+		release, write, err := invocation.BeforeWrite(context.Background())
+		if err != nil {
+			return err
+		}
+		if !write {
+			return nil
+		}
+		defer release()
 	}
 	directory := filepath.Join(invocation.Home, "logs")
 	if err := os.MkdirAll(directory, 0o700); err != nil {

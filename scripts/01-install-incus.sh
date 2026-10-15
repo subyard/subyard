@@ -44,6 +44,7 @@ OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
 [ -n "$OPERATOR_HOME" ] || die "cannot resolve home dir for user '$OPERATOR_USER'"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER")"
 operator_uid="$(id -u "$OPERATOR_USER")"
+context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
 [ -z "$APPROVED_OPERATOR_UID" ] || [ "$operator_uid" = "$APPROVED_OPERATOR_UID" ] \
   || die "operator numeric identity differs from the approved installer"
 
@@ -59,6 +60,7 @@ prepare_operator_data_home() {
 
   local operator_uid actual_owner
   operator_uid="$(id -u "$OPERATOR_USER")"
+context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
   if [ "$(id -u)" -ne 0 ] && [ ! -e "$SUBYARD_HOME" ]; then
     install -d -m 0700 -- "$SUBYARD_HOME" \
       || die "could not create operator data home: $SUBYARD_HOME"
@@ -236,6 +238,8 @@ fi
 # Reconcile the pool and the bridge INDEPENDENTLY: a host can arrive half-initialized
 # (e.g. a pool but no bridge from an earlier manual `incus admin init`), and gating on
 # the pool alone would skip the bridge forever — the yard's nic then fails at create.
+operator_uid="$(id -u "$OPERATOR_USER")"
+context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
 echo "Init:"
 if incus storage show "$STORAGE_POOL" --project default >/dev/null 2>&1; then
   ok "storage pool '$STORAGE_POOL' present"
@@ -247,11 +251,15 @@ if incus storage show "$STORAGE_POOL" --project default >/dev/null 2>&1; then
     # syslog unix socket ("cannot open log : Permission denied") — retry logging to a file
     # under the network's own state dir, which the generated profile does allow.
     if ! out="$(incus network create "$INCUS_BRIDGE" ipv4.address=auto ipv6.address=none \
+      "user.subyard.operator_uid=$operator_uid" "user.subyard.data_home=$SUBYARD_HOME" \
+      "user.subyard.config_home=$SUBYARD_CONFIG_HOME" "user.subyard.context=${SUBYARD_INSTALLATION_CONTEXT:?}" \
       --project default 2>&1)"; then
       case "$out" in
         *"cannot open log"*)
           warn "dnsmasq cannot reach syslog (nested/AppArmor host) — retrying with a file log"
           incus network create "$INCUS_BRIDGE" ipv4.address=auto ipv6.address=none \
+      "user.subyard.operator_uid=$operator_uid" "user.subyard.data_home=$SUBYARD_HOME" \
+      "user.subyard.config_home=$SUBYARD_CONFIG_HOME" "user.subyard.context=${SUBYARD_INSTALLATION_CONTEXT:?}" \
             raw.dnsmasq="log-facility=/var/lib/incus/networks/$INCUS_BRIDGE/dnsmasq.log" \
             --project default
           ;;
@@ -268,10 +276,18 @@ storage_pools:
     driver: dir
     config:
       source: $STORAGE_PATH
+      user.subyard.operator_uid: "$operator_uid"
+      user.subyard.data_home: "$SUBYARD_HOME"
+      user.subyard.config_home: "$SUBYARD_CONFIG_HOME"
+      user.subyard.context: $context_preseed
 networks:
   - name: $INCUS_BRIDGE
     type: bridge
     config:
+      user.subyard.operator_uid: "$operator_uid"
+      user.subyard.data_home: "$SUBYARD_HOME"
+      user.subyard.config_home: "$SUBYARD_CONFIG_HOME"
+      user.subyard.context: $context_preseed
       ipv4.address: auto
       ipv6.address: none
 profiles:

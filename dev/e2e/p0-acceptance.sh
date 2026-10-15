@@ -96,7 +96,7 @@ EOF
 }
 list_lanes() {
   printf '%s\n' \
-    smoke boundary nested-teardown transport dependencies real-incus profile-resource release source-upgrade \
+    smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
     power-systemd \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
@@ -126,7 +126,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -704,11 +704,44 @@ boot_power_reconciler_succeeded() {
     && grep -Fxq 'ExecMainStatus=0' <<<"$snapshot"
 }
 
+wait_reboot_host_ready() {
+  local vm="$1" host_deadline host_ready=0 host_state='' host_state_rc=0 remaining
+  # A new boot ID can precede stable SSH/systemd readiness. Keep every probe and retry
+  # inside one local monotonic budget, including a transport that stops responding.
+  host_deadline=$(($(p0_monotonic_seconds) + 180))
+  while :; do
+    remaining=$((host_deadline - $(p0_monotonic_seconds)))
+    [ "$remaining" -gt 0 ] || break
+    [ "$remaining" -le 10 ] || remaining=10
+    host_state_rc=0
+    host_state="$(timeout --foreground --signal=KILL "$remaining" \
+      ssh -F "$CONFIG" -T -o ConnectTimeout=3 -o ConnectionAttempts=1 \
+        -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+        "e2e-vm-$vm" -- systemctl is-system-running 2>/dev/null)" \
+      || host_state_rc=$?
+    case "$host_state:$host_state_rc" in
+      running:0 | degraded:1) host_ready=1; break ;;
+      initializing:1 | starting:1 | :0 | :1 | *:255 | *:124 | *:137) ;;
+      *) break ;;
+    esac
+    [ "$(p0_monotonic_seconds)" -lt "$host_deadline" ] || break
+    sleep 1
+  done
+  if [ "$host_ready" != 1 ]; then
+    # Do not print raw transport output or SSH configuration in failure evidence.
+    case "$host_state" in
+      initializing | starting | running | degraded | maintenance | stopping | offline | unknown) ;;
+      *) host_state=unknown ;;
+    esac
+    die "VM$vm boot did not reach a terminal systemd state: $host_state (probe_status=$host_state_rc)"
+  fi
+}
+
 reboot_vm() {
   local vm="$1"
-  local before_boot after_boot='' down=0 host_state='' up=0 unit_complete=0 route
+  local before_boot after_boot='' down=0 up=0 unit_complete=0 route
   local start_wait_deadline policy_deadline=0 local_policy_deadline=0
-  local started_seconds remaining now host_deadline host_ready=0 host_state_rc=0
+  local started_seconds remaining now
   POWER_RECONCILE_VM="$vm"
   before_boot="$(ssh -F "$CONFIG" -T "e2e-vm-$vm" -- \
     cat /proc/sys/kernel/random/boot_id)" \
@@ -742,35 +775,7 @@ reboot_vm() {
     sleep 1
   done
   [ "$up" = 1 ] || die "VM$vm did not return with a new boot ID"
-  # A new boot ID can precede stable SSH/systemd readiness. Keep every probe and retry
-  # inside one local monotonic budget, including a transport that stops responding.
-  host_deadline=$(($(p0_monotonic_seconds) + 180))
-  while :; do
-    remaining=$((host_deadline - $(p0_monotonic_seconds)))
-    [ "$remaining" -gt 0 ] || break
-    [ "$remaining" -le 10 ] || remaining=10
-    host_state_rc=0
-    host_state="$(timeout --foreground --signal=KILL "$remaining" \
-      ssh -F "$CONFIG" -T -o ConnectTimeout=3 -o ConnectionAttempts=1 \
-        -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
-        "e2e-vm-$vm" -- systemctl is-system-running 2>/dev/null)" \
-      || host_state_rc=$?
-    case "$host_state:$host_state_rc" in
-      running:0 | degraded:1) host_ready=1; break ;;
-      initializing:1 | starting:1 | :0 | :1 | *:255 | *:124 | *:137) ;;
-      *) break ;;
-    esac
-    [ "$(p0_monotonic_seconds)" -lt "$host_deadline" ] || break
-    sleep 1
-  done
-  if [ "$host_ready" != 1 ]; then
-    # Do not print raw transport output or SSH configuration in failure evidence.
-    case "$host_state" in
-      initializing | starting | running | degraded | maintenance | stopping | offline | unknown) ;;
-      *) host_state=unknown ;;
-    esac
-    die "VM$vm boot did not reach a terminal systemd state: $host_state (probe_status=$host_state_rc)"
-  fi
+  wait_reboot_host_ready "$vm"
   # Anchor the observation deadline to the unit's current-boot monotonic start. This covers the
   # complete production policy window even when activation begins after the host becomes ready.
   # The local deadline is a fail-safe for subsequent SSH or systemd transport failures.
@@ -1206,8 +1211,37 @@ cleanup_lane() {
   assert_no_worktrees
 }
 
+full_uninstall_vm() {
+ local mode="$1" rc=0
+ run_guest 1 "$P0_BUNDLE" "$P0_BUNDLE_HASH" bash dev/e2e/full-uninstall.sh "$mode" "$TOKEN" || rc=$?
+ # Save static fixture logs before releasing the disposable guest. Never copy
+ # credentials, private evidence records, configuration or environment dumps.
+ if [ "$mode" != cleanup ]; then
+   local logs="$STATE_ROOT/evidence/full-uninstall-$LEASE_RUN/$mode" file
+   install -d -m 0700 "$logs"
+   for file in direct-only.log bootstrap-only.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase; do
+     guest 1 sh -c 'state=$1; marker=$2; file=$3; [ ! -d "$state" ] || { [ ! -L "$state" ] && [ "$(cat "$state/.marker")" = "$marker" ] && { [ ! -f "$state/$file" ] || cat "$state/$file"; }; }' \
+       _ "/var/tmp/subyard-full-uninstall-$TOKEN" "subyard-full-uninstall-$TOKEN" "$file" > "$logs/$file" || rc=3
+     chmod 0600 "$logs/$file"
+   done
+ fi
+ cleanup_guest 1 || return 3
+ return "$rc"
+}
+full_uninstall_reboot() {
+ local before after='' down=0
+ before="$(guest 1 cat /proc/sys/kernel/random/boot_id)"
+ guest 1 systemctl reboot >/dev/null 2>&1 || true
+ for _ in {1..60}; do if ! ssh -F "$CONFIG" -T -o ConnectTimeout=2 e2e-vm-1 -- true </dev/null >/dev/null 2>&1;then down=1;break;fi;sleep 1;done
+ [ "$down" = 1 ] || die 'full-uninstall VM did not go down for reboot'
+ for _ in {1..180}; do after="$(ssh -F "$CONFIG" -T -o ConnectTimeout=3 e2e-vm-1 -- cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || after='';if [ -n "$after" ] && [ "$after" != "$before" ];then break;fi;sleep 1;done
+ [ -n "$after" ] && [ "$after" != "$before" ] || die 'full-uninstall VM did not return with a new boot ID'
+ wait_reboot_host_ready 1
+}
+
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
+[ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test
 [ "$P0_LANE" != full ] || LEASE_PURPOSE=p0-acceptance
 [ "$BROKER_RECOVERY_ONLY" = 0 ] || LEASE_PURPOSE=p0-broker-recovery
 acquire_lease
@@ -1255,6 +1289,17 @@ case "$P0_LANE" in
     run_phase capacity-report targeted_capacity_report
     find "$CAPACITY_LOG_DIR" -depth -delete
     CAPACITY_LOG_DIR=''
+    ;;
+  full-uninstall)
+    run_phase capacity-preflight run_vm 1 capacity-preflight
+    run_phase full-uninstall-platform run_vm 1 fixture-platform
+    run_phase full-uninstall-preflight full_uninstall_vm preflight
+    run_phase full-uninstall-prepare full_uninstall_vm prepare
+    run_phase full-uninstall-apply full_uninstall_vm apply
+    run_phase full-uninstall-delayed full_uninstall_vm verify
+    run_phase full-uninstall-reboot full_uninstall_reboot
+    run_phase full-uninstall-reboot-verify full_uninstall_vm reboot-verify
+    run_phase full-uninstall-cleanup full_uninstall_vm cleanup
     ;;
   transport) run_phase transport transport_probes ;;
   dependencies) run_phase dependencies dependency_lane ;;

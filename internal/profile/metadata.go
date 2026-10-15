@@ -19,6 +19,9 @@ type MetadataData struct {
 	DisabledWhen               map[string]string     `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                  `json:"selected_provision_only,omitempty"`
 	OwnerService               string                `json:"owner_service,omitempty"`
+	LifecycleOnly              bool                  `json:"lifecycle_only,omitempty"`
+	FullCleanup                string                `json:"full_cleanup,omitempty"`
+	FullCleanupEnvironment     []string              `json:"full_cleanup_environment,omitempty"`
 	Native                     []Native              `json:"native,omitempty"`
 	Consumers                  []Consumer            `json:"consumers,omitempty"`
 	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
@@ -51,7 +54,7 @@ func (declaration Definition) Metadata() (Metadata, error) {
 	if err := declaration.validateSemantic(); err != nil {
 		return Metadata{}, err
 	}
-	return Metadata{data: cloneMetadataData(MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}), valid: true}, nil
+	return Metadata{data: cloneMetadataData(MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}), valid: true}, nil
 }
 func (metadata Metadata) Data() (MetadataData, error) {
 	if !metadata.valid {
@@ -61,10 +64,11 @@ func (metadata Metadata) Data() (MetadataData, error) {
 }
 func (metadata Metadata) definition() Definition {
 	data := cloneMetadataData(metadata.data)
-	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
+	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
 }
 func cloneMetadataData(data MetadataData) MetadataData {
 	data.Dashboard = cloneIntegrationMetadataData(IntegrationMetadataData{Dashboard: data.Dashboard}).Dashboard
+	data.FullCleanupEnvironment = slices.Clone(data.FullCleanupEnvironment)
 	data.Native = slices.Clone(data.Native)
 	data.Settings = cloneSettings(data.Settings)
 	data.DefaultYards = slices.Clone(data.DefaultYards)

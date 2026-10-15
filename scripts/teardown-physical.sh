@@ -14,6 +14,49 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/ssh-config.sh
 . "$SCRIPT_DIR/lib/ssh-config.sh"
 
+# The same physical owner handles the aggregate full-cleanup phases. Parsing,
+# exact inventory and the single authorization stay at the prepared boundary.
+case "${1:-apply}" in
+  apply) [ "$#" = 0 ] || shift ;;
+  --yes) ;;
+  prepare-lock)
+    require_root "initializing the approved host coordination lock requires root"
+    exec "${SUBYARD_DISPATCHER_PATH:?}" _network-lock ensure ;;
+  check-sessions)
+    python3 "$SCRIPT_DIR/lib/teardown-plan.py" guard-all "$INCUS_PROJECT"
+    PROJ=(--project "$INCUS_PROJECT"); have_incus=1
+    # shellcheck source=scripts/lib/teardown-session.sh
+    . "$SCRIPT_DIR/lib/teardown-session.sh"
+    teardown_session_guard "$YARD_INSTANCE_NAME"
+    exit 0 ;;
+  check-profiles)
+    require_root "conditionally inspecting approved private owner metadata requires root"
+    exec python3 -B "$SCRIPT_DIR/lib/teardown-profile-checks.py" ;;
+  remove-shared)
+    require_root "retiring approved shared host resources requires root"
+    removed_bridges="$(python3 -B "$SCRIPT_DIR/lib/teardown-shared.py")" || exit "$?"
+    while IFS= read -r removed_bridge; do
+      [ -n "$removed_bridge" ] || continue
+      ufw_yard_rules_remove "$removed_bridge" || die "approved bridge firewall cleanup failed"
+    done <<< "$removed_bridges"
+    nm_unmanaged_guard_reconcile --yes
+    exit 0 ;;
+  remove-files)
+    if python3 - "$SUBYARD_TEARDOWN_PLAN" <<'PY_NEEDS_ROOT'
+import json,os,sys
+with open(sys.argv[1],encoding="utf-8") as handle: plan=json.load(handle)
+raise SystemExit(0 if any(tree.get("Opaque") or any(entry["UID"] != os.getuid() for entry in tree["Entries"]) for tree in plan["Trees"]) else 1)
+PY_NEEDS_ROOT
+    then require_root "removing approved private installation roots requires root"; fi
+    exec python3 -B "$SCRIPT_DIR/lib/teardown-files.py" ;;
+  stop-services)
+    # shellcheck source=scripts/lib/teardown-services.sh
+    . "$SCRIPT_DIR/lib/teardown-services.sh"
+    teardown_stop_services
+    exit 0 ;;
+  *) die "invalid prepared teardown phase" ;;
+esac
+
 OPERATOR_USER="${SUBYARD_USER:-${SUDO_USER:-${USER:-root}}}"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER" 2>/dev/null || printf '%s\n' "$OPERATOR_USER")"
 
@@ -57,6 +100,11 @@ python3 "$TEARDOWN_GUARD" guard-artifacts || exit 75
 # shellcheck source=scripts/lib/teardown-session.sh
 . "$SCRIPT_DIR/lib/teardown-session.sh"
 teardown_session_guard "$YARD_INSTANCE_NAME"
+if [ "${SUBYARD_TEARDOWN_FULL:-0}" != 1 ]; then
+  # shellcheck source=scripts/lib/teardown-services.sh
+  . "$SCRIPT_DIR/lib/teardown-services.sh"
+  teardown_stop_services
+fi
 bash "$SCRIPT_DIR/profile-services.sh" --remove
 
 echo "Instance:"
@@ -119,42 +167,17 @@ if [ "$KEEP_DATA" = 0 ]; then
       warn "other Incus instances exist — keeping shared bridge '$BRIDGE' and pool '$STORAGE_POOL':"
       printf '%s\n' "$others" | sed 's/^/      - /'
     else
-      incus_remove_default_profile_device_if_matches eth0 network "$BRIDGE" \
-        >/dev/null 2>&1 || true
-      incus_remove_default_profile_device_if_matches root pool "$STORAGE_POOL" \
-        >/dev/null 2>&1 || true
-      if ! incus network show "$BRIDGE" --project default >/dev/null 2>&1; then
-        bridge_gone=1; ok "bridge '$BRIDGE' absent"
-      elif guard_resource network "$BRIDGE" && incus network delete "$BRIDGE" --project default >/dev/null 2>&1; then
-        bridge_gone=1; ok "deleted bridge '$BRIDGE'"
-      else
-        warn "bridge '$BRIDGE' not deleted (still in use) — keeping the NetworkManager guard"
-      fi
-      if ! incus storage show "$STORAGE_POOL" --project default >/dev/null 2>&1; then
-        pool_gone=1; ok "storage pool '$STORAGE_POOL' absent"
-      elif guard_resource pool "$STORAGE_POOL" && incus storage delete "$STORAGE_POOL" --project default >/dev/null 2>&1; then
-        pool_gone=1; ok "deleted storage pool '$STORAGE_POOL'"
-      else
-        warn "pool '$STORAGE_POOL' not deleted (still in use) — keeping its data dir to avoid an orphan"
-      fi
+      removed_bridges="$(python3 -B "$SCRIPT_DIR/lib/teardown-shared.py" --selected)" || exit "$?"
+      while IFS= read -r removed_bridge; do
+        [ "$removed_bridge" != "$BRIDGE" ] || bridge_gone=1
+      done <<< "$removed_bridges"
+      incus storage show "$STORAGE_POOL" --project default >/dev/null 2>&1 || pool_gone=1
     fi
   fi
 fi
 
-echo "Boot power reconciler:"
-"$SCRIPT_DIR/install-power-reconciler.sh" --remove-if-unused --yes
-
-echo "Host config:"
-if [ -n "${SSH_PORT:-}" ]; then
-  "$SCRIPT_DIR/install-ssh-relay.sh" --remove "$SSH_PORT"
-fi
 if command -v ufw >/dev/null 2>&1 && [ "$bridge_gone" = 1 ]; then
-  ufw delete allow in on "$BRIDGE" to any port 67 proto udp >/dev/null 2>&1 || true
-  ufw delete allow in on "$BRIDGE" to any port 53 >/dev/null 2>&1 || true
-  ufw route delete allow in on "$BRIDGE" >/dev/null 2>&1 || true
-  ufw route delete allow out on "$BRIDGE" >/dev/null 2>&1 || true
-  ufw_rules_set_probe_access disable \
-    || warn "could not restore root-only ownership on /etc/ufw/user.rules"
+  ufw_yard_rules_remove "$BRIDGE" || die "approved bridge firewall cleanup failed"
   ok "removed Subyard ufw rules for '$BRIDGE' (if any)"
 elif command -v ufw >/dev/null 2>&1; then
   ok "kept ufw rules for '$BRIDGE' (bridge still exists — shared with other yards)"
@@ -170,7 +193,7 @@ snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
     cat "$TEARDOWN_GUARD" &&
     printf '%s\n' 'SUBYARD_TEARDOWN_GUARD_CODE' 'ssh_config_remove_exact "$2" "$3"'
 } | sudo -n -u "$OPERATOR_USER" -- env "SUBYARD_TEARDOWN_ARTIFACTS=$SUBYARD_TEARDOWN_ARTIFACTS" \
-  bash -s -- "$snip" "$cfg" "Include $YARD_SNIP" || {
+  "SUBYARD_TEARDOWN_PLAN=${SUBYARD_TEARDOWN_PLAN:-}" "SUBYARD_TEARDOWN_PLAN_SHA256=${SUBYARD_TEARDOWN_PLAN_SHA256:-}" bash -s -- "$snip" "$cfg" "Include $YARD_SNIP" || {
   cleanup_status=$?
   [ "$cleanup_status" != 75 ] || exit 75
   die "could not remove this yard's operator SSH config"
@@ -178,7 +201,7 @@ snip="$sshdir/$YARD_SNIP"; cfg="$sshdir/config"
 ok "removed ~/.ssh/$YARD_SNIP (if present)"
 ok "removed 'Include $YARD_SNIP' from ~/.ssh/config (if present)"
 known="$SUBYARD_HOME/ssh/known_hosts"
-if [ -f "$known" ] && [ -n "${SSH_PORT:-}" ]; then
+if [ "${SUBYARD_TEARDOWN_FULL:-0}" != 1 ] && [ -f "$known" ] && [ -n "${SSH_PORT:-}" ]; then
   ssh_known_host_remove "$known" "[127.0.0.1]:$SSH_PORT" "$OPERATOR_USER" "$OPERATOR_GROUP" \
     || die "could not clear this yard's SSH host-key entry"
   ok "cleared this yard's host-key entry ([127.0.0.1]:$SSH_PORT) from known_hosts"

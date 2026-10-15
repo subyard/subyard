@@ -611,3 +611,138 @@ func TestLinkChangeDoesNotRestartUnchangedYards(t *testing.T) {
 		}
 	}
 }
+
+// Inject at the existing native policy CAS seam, not at the batch algorithm.
+type interruptedRemovalHost struct {
+	Host
+	phase string
+}
+
+func (h *interruptedRemovalHost) WritePolicy(ctx context.Context, before StoredPolicy, policy Policy) (StoredPolicy, error) {
+	interrupt := h.phase == "after-intent" && len(policy.Removing) > 0 || h.phase == "before-final" && policy.AppliedRevision == policy.Revision && len(policy.Removing) == 0
+	if !interrupt {
+		return h.Host.WritePolicy(ctx, before, policy)
+	}
+	phase := h.phase
+	h.phase = ""
+	if phase == "after-intent" {
+		if _, err := h.Host.WritePolicy(ctx, before, policy); err != nil {
+			return StoredPolicy{}, err
+		}
+	}
+	return StoredPolicy{}, errors.New("interrupted policy publication")
+}
+
+func TestBatchRemovalUsesOriginalIntentAcrossInterruption(t *testing.T) {
+	for _, scenario := range []string{"complete", "before-intent", "after-intent", "before-final", "after-start", "foreign-policy", "foreign-etag", "late-drift", "foreign-ACL"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			h := newMemoryHost()
+			s := memoryService(h)
+			on := true
+			plan, err := s.Prepare(ctx, fixtureYards(h), Change{Isolation: &on, Link: &Link{A: "a", B: "c"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Apply(ctx, plan); err != nil {
+				t.Fatal(err)
+			}
+			plan, err = s.Prepare(ctx, fixtureYards(h), Change{Link: &Link{A: "b", B: "c"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.Apply(ctx, plan); err != nil {
+				t.Fatal(err)
+			}
+			foreign := map[string]string{"type": "disk", "source": "/foreign/control", "path": "/control"}
+			h.snapshot.Yards[2].ProfileDevices["control"] = maps.Clone(foreign)
+			h.snapshot.Yards[2].ProjectConfig["user.operator.control"] = "preserve"
+			approved := []RemovalPlan{}
+			for _, yard := range h.snapshot.Yards[:2] {
+				p, err := s.PrepareRemoval(ctx, yard.Yard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				approved = append(approved, p)
+			}
+			wrapped := &interruptedRemovalHost{Host: h, phase: scenario}
+			s.Host = wrapped
+			calls := 0
+			remove := func() error {
+				if !s.Lock.(*memoryLock).held {
+					t.Fatal("batch callback escaped the real lock")
+				}
+				calls++
+				for index := 0; index < 2; index++ {
+					y := &h.snapshot.Yards[index]
+					y.InstanceFound = false
+					y.ProjectFound = false
+					y.ProfileFound = false
+					y.InstanceInfo.Status = "Stopped"
+					y.ProfileDevices = nil
+				}
+				if scenario == "before-intent" && calls == 1 {
+					return errors.New("interrupted physical removal")
+				}
+				if scenario == "late-drift" {
+					p := cloneValue(h.stored.Policy)
+					p.Isolation = false
+					_, err := h.WritePolicy(ctx, h.stored, p)
+					return err
+				}
+				return nil
+			}
+			if scenario == "after-start" {
+				h.failPolicyAfterStart = true
+			}
+			if scenario == "foreign-policy" {
+				p := cloneValue(h.stored.Policy)
+				p.Isolation = false
+				if _, err = h.WritePolicy(ctx, h.stored, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "foreign-ACL" {
+				h.snapshot.Yards[2].ACL.Config = map[string]string{"user.operator.owner": "foreign"}
+			}
+			if scenario == "foreign-etag" {
+				h.stored.ETag = "foreign"
+			}
+			err = s.WithRemovals(ctx, approved, remove, nil)
+			if scenario == "foreign-ACL" {
+				if err == nil || calls != 0 || h.snapshot.Yards[2].ACL.Config["user.operator.owner"] != "foreign" {
+					t.Fatalf("foreign ACL admitted/mutated: %v calls=%d", err, calls)
+				}
+				return
+			}
+			if scenario == "foreign-policy" || scenario == "foreign-etag" {
+				if !errors.Is(err, domain.ErrPlanStale) || calls != 0 {
+					t.Fatalf("foreign policy admitted: %v calls=%d", err, calls)
+				}
+				return
+			}
+			if scenario == "late-drift" {
+				if !errors.Is(err, domain.ErrPlanStale) {
+					t.Fatalf("late policy mutation admitted: %v", err)
+				}
+				return
+			}
+			if scenario != "complete" {
+				if err == nil {
+					t.Fatal("interruption disappeared")
+				}
+				if err = s.WithRemovals(ctx, approved, remove, nil); err != nil {
+					t.Fatal("original batch retry failed", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if len(h.stored.Policy.Bindings) != 1 || h.stored.Policy.Bindings[0].Yard.Name != "c" || len(h.stored.Policy.Links) != 0 || len(h.stored.Policy.Removing) != 0 || len(h.stored.Policy.PendingStart) != 0 {
+				t.Fatalf("batch did not retire only its endpoints: %+v", h.stored.Policy)
+			}
+			if !h.snapshot.Yards[2].InstanceFound || h.snapshot.Yards[2].InstanceInfo.Status != "Running" || !h.snapshot.Yards[2].ACL.Exists || !maps.Equal(h.snapshot.Yards[2].ProfileDevices["control"], foreign) || h.snapshot.Yards[2].ProjectConfig["user.operator.control"] != "preserve" {
+				t.Fatal("foreign endpoint or ACL rule lost")
+			}
+		})
+	}
+}

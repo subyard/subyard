@@ -5,86 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
+	"slices"
 	"sort"
-	"syscall"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type teardownArtifact = ports.TeardownArtifact
-type teardownSnapshot struct {
-	Resources    []ports.TeardownResource
-	Artifacts    []teardownArtifact
-	Registered   []domain.Context
-	State        ports.ReconcileState
-	Agent        *sshagentruntime.PreparedLock `json:"-"`
-	AgentBinding string
-}
+type teardownSnapshot = uninstall.TeardownSnapshot
 
-// Only filesystem metadata is inspected; protected configuration is never read.
 func teardownArtifactBinding(root string) (string, error) {
-	type artifactEntry struct {
-		Path     string
-		Mode     uint32
-		Size     int64
-		Modified int64
-		Device   uint64
-		Inode    uint64
-		UID      uint32
-		GID      uint32
-		Changed  int64
-		Link     string
-	}
-	var entries []artifactEntry
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			if path == root && errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		if len(entries) >= 4096 {
-			return errors.New("teardown artifact exceeds bounded metadata inventory")
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return errors.New("native teardown artifact identity is unavailable")
-		}
-		link := ""
-		if info.Mode()&fs.ModeSymlink != 0 {
-			link, err = os.Readlink(path)
-			if err != nil {
-				return err
-			}
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		entries = append(entries, artifactEntry{relative, stat.Mode, info.Size(), info.ModTime().UnixNano(),
-			uint64(stat.Dev), stat.Ino, stat.Uid, stat.Gid, stat.Ctim.Nano(), link})
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(entries) == 0 {
-		return "", nil
-	}
-	return operationStateDigest(entries), nil
+	artifact, err := uninstall.CaptureArtifact(root)
+	return artifact.Binding, err
 }
 
-func (cli *CLI) captureTeardownSnapshot(ctx context.Context, loaded config.Loaded, state ports.ReconcileState, paths []string) (*teardownSnapshot, error) {
+func (cli *CLI) captureTeardownSnapshot(ctx context.Context, loaded config.Loaded, state ports.ReconcileState, paths []string, registered []domain.Context) (*teardownSnapshot, error) {
 	incusPort, _ := cli.statusPorts()
 	resources, err := incusPort.TeardownInventory(ctx, loaded.Context.IncusProject)
 	if err != nil {
@@ -106,15 +46,19 @@ func (cli *CLI) captureTeardownSnapshot(ctx context.Context, loaded config.Loade
 	if err != nil {
 		return nil, err
 	}
-	snapshot.Agent, snapshot.AgentBinding = agent, agent.Binding()
+	snapshot.Agent, snapshot.AgentBinding, snapshot.AgentState = agent, agent.Binding(), agent.State()
 	for _, path := range paths {
-		binding, err := teardownArtifactBinding(path)
+		artifact, err := uninstall.CaptureArtifact(path)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Artifacts = append(snapshot.Artifacts, teardownArtifact{Path: path, Binding: binding})
+		snapshot.Artifacts = append(snapshot.Artifacts, artifact)
 	}
-	snapshot.Registered, err = cli.powerYardContexts(loaded)
+	if registered != nil {
+		snapshot.Registered = append([]domain.Context{}, registered...)
+	} else {
+		snapshot.Registered, err = cli.powerYardContexts(loaded)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +92,13 @@ func checkTeardownSnapshot(before, after *teardownSnapshot) error {
 	}
 	for index, artifact := range before.Artifacts {
 		fresh := after.Artifacts[index]
-		if artifact.Path != fresh.Path || (fresh.Binding != "" && fresh.Binding != artifact.Binding) {
+		if artifact.Path != fresh.Path || (len(artifact.Entries) == 0 && fresh.Binding != "" && fresh.Binding != artifact.Binding) {
 			return fmt.Errorf("%w: teardown artifact changed", domain.ErrPlanStale)
+		}
+		if len(artifact.Entries) > 0 {
+			if err := (uninstall.Tree{Path: artifact.Path, Entries: artifact.Entries}).Check(); err != nil {
+				return err
+			}
 		}
 	}
 	old, new := before.State, after.State
@@ -166,26 +115,27 @@ func (execution *teardownExecution) binding() string {
 	return operationStateDigest(struct {
 		Physical      *teardownSnapshot
 		Configuration *teardownConfigSnapshot
-	}{execution.snapshot, execution.configSnapshot})
+	}{execution.snapshot(), execution.configSnapshot})
 }
 func (execution *teardownExecution) steps(yard domain.Context) []domain.OperationStep {
-	if execution == nil || execution.snapshot == nil {
+	if execution == nil || execution.snapshot() == nil {
 		return nil
 	}
 	var steps []domain.OperationStep
-	if execution.revokeAgent && execution.snapshot.Agent != nil {
+	if execution.revokeAgent && execution.snapshot().AgentState != "" {
 		decision := domain.StepApply
-		if execution.snapshot.Agent.State() == "locked" {
+		if execution.snapshot().AgentState == "locked" {
 			decision = domain.StepSkip
 		}
-		steps = append(steps, domain.OperationStep{ID: "ssh-signing-grant", Target: "yard/" + yard.YardName + "/ssh-signing-grant", Observed: execution.snapshot.Agent.State(), Desired: "locked", Decision: decision, Preconditions: []string{"captured worker identity and grant deadline unchanged"}, Verify: "native signing grant is locked", Consequence: "revoke the captured yard SSH signing grant"})
+		steps = append(steps, domain.OperationStep{ID: "ssh-signing-grant", Target: "yard/" + yard.YardName + "/ssh-signing-grant", Observed: execution.snapshot().AgentState, Desired: "locked", Decision: decision, Preconditions: []string{"captured worker identity and grant deadline unchanged"}, Verify: "native signing grant is locked", Consequence: "revoke the captured yard SSH signing grant"})
 	}
-	for index, resource := range execution.snapshot.Resources {
+
+	for index, resource := range execution.snapshot().Resources {
 		decision := domain.StepApply
 		desired := "absent"
-		if resource.Kind == "network" || resource.Kind == "pool" {
+		if resource.Kind == "network" || resource.Kind == "pool" || resource.Kind == "host-profile" {
 			decision = domain.StepConditional
-			desired = "absent only if no surviving instance or registered local yard uses shared infrastructure"
+			desired = "remove exact unused yard infrastructure; preserve surviving shared consumers"
 		}
 		if execution.completedReset || execution.keepData && resource.Kind != "instance" {
 			decision = domain.StepSkip
@@ -193,7 +143,7 @@ func (execution *teardownExecution) steps(yard domain.Context) []domain.Operatio
 		}
 		steps = append(steps, domain.OperationStep{ID: fmt.Sprintf("incus-%d", index), Target: "incus/" + yard.IncusProject + "/" + resource.Kind + "/" + resource.Pool + "/" + resource.Name, Observed: "present", Desired: desired, Decision: decision, Preconditions: []string{"captured resource identity and metadata remain unchanged"}, Verify: desired + " exact Incus resource", Consequence: desired + " " + resource.Kind + " " + resource.Name})
 	}
-	for index, artifact := range execution.snapshot.Artifacts {
+	for index, artifact := range execution.snapshot().Artifacts {
 		decision := domain.StepApply
 		if artifact.Binding == "" {
 			decision = domain.StepSkip
@@ -248,10 +198,20 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 	if err != nil {
 		return err
 	}
-	retainShared := hasOtherRegisteredLocalYard(loaded.Context.YardName, execution.snapshot.Registered) || len(survivors) != 0
-	for _, original := range execution.snapshot.Resources {
+	retainShared := execution.holdShared || hasOtherRegisteredLocalYard(loaded.Context.YardName, execution.snapshot().Registered) || len(survivors) != 0
+	for _, resource := range shared {
+		for _, consumer := range resource.UsedBy {
+			if !strings.HasPrefix(consumer, "/1.0/profiles/default") {
+				retainShared = true
+			}
+		}
+	}
+	for _, original := range execution.snapshot().Resources {
 		current, exists := remaining[original.Kind+"/"+original.Pool+"/"+original.Name]
 		preserve := execution.keepData && original.Kind != "instance"
+		if original.Kind == "host-profile" && exists && current.Binding != original.Binding && !slices.Contains(original.Bindings, current.Binding) {
+			return errors.New("shared host profile changed outside approved device removal")
+		}
 		if (original.Kind == "network" || original.Kind == "pool") && !execution.keepData && exists && !retainShared {
 			return errors.New("unused shared teardown infrastructure remains after apply")
 		}
@@ -259,11 +219,11 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 			if !exists || current.Binding != original.Binding {
 				return errors.New("teardown did not preserve an approved retained resource")
 			}
-		} else if exists && original.Kind != "network" && original.Kind != "pool" {
+		} else if exists && original.Kind != "network" && original.Kind != "pool" && original.Kind != "host-profile" {
 			return fmt.Errorf("teardown did not remove an approved resource: kind=%s name=%s pool=%s", original.Kind, original.Name, original.Pool)
 		}
 	}
-	for _, artifact := range execution.snapshot.Artifacts {
+	for _, artifact := range execution.snapshot().Artifacts {
 		binding, err := teardownArtifactBinding(artifact.Path)
 		if err != nil {
 			return err
@@ -272,14 +232,14 @@ func (cli *CLI) verifyTeardown(ctx context.Context, loaded config.Loaded, execut
 			return errors.New("teardown artifact remains after apply")
 		}
 	}
-	state, err := incusPort.ReconcileState(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName, execution.pool, execution.volume, loaded.Context.IncusBridge)
+	state, err := incusPort.ReconcileState(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName, loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"], loaded.Context.IncusBridge)
 	if err != nil {
 		return err
 	}
 	if state.InstanceFound || (!execution.keepData && state.ProjectFound) {
 		return errors.New("teardown physical postcondition did not converge")
 	}
-	if execution.keepData && ((execution.snapshot.State.HostPoolFound && !state.HostPoolFound) || (execution.snapshot.State.HostNetworkFound && !state.HostNetworkFound) || (execution.snapshot.State.VolumeFound && !state.VolumeFound)) {
+	if execution.keepData && ((execution.snapshot().State.HostPoolFound && !state.HostPoolFound) || (execution.snapshot().State.HostNetworkFound && !state.HostNetworkFound) || (execution.snapshot().State.VolumeFound && !state.VolumeFound)) {
 		return errors.New("teardown did not retain approved data infrastructure")
 	}
 	return nil

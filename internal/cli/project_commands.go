@@ -658,16 +658,11 @@ func (cli *CLI) prepareProjectInventory(
 		return &projectExecution{Loaded: loaded, Arguments: arguments,
 			Environment: map[string]string{"SUBYARD_PROJECT_PROFILES": ""}}, nil
 	}
-	store, err := openProjectPreparationStore(ctx, loaded.Context)
+	store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
 	if err != nil {
 		return nil, err
 	}
-	var records []domain.ProjectRecord
-	if loaded.Context.AccessKind == domain.AccessRemote {
-		records, err = store.ListReadOnly(ctx)
-	} else {
-		records, err = store.List(ctx)
-	}
+	records, err := store.List(ctx)
 	if err != nil {
 		return nil, err
 	}

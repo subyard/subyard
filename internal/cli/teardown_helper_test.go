@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +15,53 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+func TestFullSharedRemoverReportsOnlyVerifiedGoneBridges(t *testing.T) {
+	helper, err := filepath.Abs("../../scripts/lib/teardown-shared.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"removed", "absent-retry", "foreign", "selected-foreign", "changed", "delete-error", "still-present"} {
+		command := exec.Command("python3", "-c", `
+import contextlib,importlib.util,io,subprocess,sys
+path,kind=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("shared",path)
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+resource={"kind":"network","name":"owned"}
+module.guard.inventory=lambda:[{"kind":"host-profile","name":"default"},resource]
+present=kind!="absent-retry"
+module.present=lambda *_:present
+module.guard.query=lambda path,_:{"used_by":[],"devices":{}} if path.startswith("/1.0/profiles/") else {"used_by":["/1.0/instances/foreign"] if kind in ("foreign","selected-foreign") else []}
+def guard(*_):
+ if kind=="changed":raise ValueError("stale identity")
+module.guard.guard=guard
+calls=[]
+def delete(args,**_):
+ global present
+ calls.append(args)
+ if kind=="delete-error":raise subprocess.CalledProcessError(1,args)
+ if kind!="still-present":present=False
+module.subprocess.check_call=delete
+output=io.StringIO();failed=False
+with contextlib.redirect_stdout(output):
+ try:module.main(selected=kind=="selected-foreign")
+ except (ValueError,subprocess.CalledProcessError):failed=True
+if kind=="selected-foreign":
+ assert not failed and not output.getvalue() and not calls
+elif kind in ("removed","absent-retry"):
+ assert not failed and output.getvalue()=="owned\n"
+ assert len(calls)==(kind=="removed")
+else:
+ assert failed and not output.getvalue()
+ if kind in ("foreign","changed"):assert not calls
+`, helper, kind)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v: %s", kind, err, output)
+		}
+	}
+}
 
 func TestTeardownVolumeHelperFeedsNativeDeletionLoop(t *testing.T) {
 	root := testkit.TempDir(t)
@@ -306,5 +355,55 @@ subyard_state_remove_canonical "$2" "$3" ''
 				t.Fatalf("protected state was removed: %v", err)
 			}
 		})
+	}
+}
+
+func TestTeardownFullOriginalFactsUseBoundedWireAfterPartialRemoval(t *testing.T) {
+	root := testkit.TempDir(t)
+	owned := filepath.Join(root, "owned")
+	if err := os.Mkdir(owned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 500; index++ {
+		testkit.WriteFile(t, filepath.Join(owned, fmt.Sprintf("entry-%03d", index)), []byte("approved"), 0600)
+	}
+	original, err := uninstall.CaptureArtifact(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(original)
+	if len(body) <= 64<<10 {
+		t.Fatal("fixture does not exceed environment transport limit")
+	}
+	wire, _ := json.Marshal(ports.ArtifactBindings([]ports.TeardownArtifact{original}))
+	if len(wire) >= 64<<10 {
+		t.Fatal("bounded binding transport expanded")
+	}
+	plan, _ := json.Marshal(map[string]any{"Installation": map[string]any{"operatorUid": os.Getuid()}, "Services": []any{}, "Yards": []any{map[string]any{"Snapshot": map[string]any{"Artifacts": []ports.TeardownArtifact{original}}}}})
+	path := filepath.Join(root, "plan.json")
+	testkit.WriteFile(t, path, plan, 0600)
+	digest := sha256.Sum256(plan)
+	helper, err := filepath.Abs("../../scripts/lib/teardown-plan.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := func() error {
+		command := exec.Command("python3", "-B", helper, "guard-artifacts")
+		command.Env = append(os.Environ(), "SUBYARD_TEARDOWN_ARTIFACTS="+string(wire), "SUBYARD_TEARDOWN_PLAN="+path, "SUBYARD_TEARDOWN_PLAN_SHA256="+hex.EncodeToString(digest[:]))
+		return command.Run()
+	}
+	if err := os.Remove(filepath.Join(owned, "entry-000")); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard(); err != nil {
+		t.Fatal("partial retry rejected original surviving facts", err)
+	}
+	testkit.WriteFile(t, filepath.Join(owned, "foreign"), []byte("foreign"), 0600)
+	var exit *exec.ExitError
+	if err := guard(); !errors.As(err, &exit) || exit.ExitCode() != 75 {
+		t.Fatal("fresh artifact expanded original full plan", err)
+	}
+	if _, err := os.Stat(filepath.Join(owned, "foreign")); err != nil {
+		t.Fatal("assessment deleted foreign artifact", err)
 	}
 }
