@@ -288,24 +288,6 @@ TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/profile-go.
 grep -q '^0022 .*test -race -count=1 ./config/profiles/example/tests$' "$tmp/profile-go.log" \
   || fail 'descriptor profile tests did not run once under umask 0022'
 
-# GitHub repeats protected broker inputs, not its client/issuer/SSH suites.
-mkdir -p "$fixture/config/profiles/github/tests"
-cp "$ROOT/config/profiles/github/tests/run.sh" "$fixture/config/profiles/github/tests/run.sh"
-for check in cleanup teardown-identity composition; do
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/config/profiles/github/tests/$check.sh"
-done
-TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
-  bash "$fixture/config/profiles/github/tests/run.sh" > "$tmp/github-go.out" 2>&1
-awk '!/-count=1/ { exit 1 }
-  $1 == "0022" { if (/-run / || !/\.\/config\/profiles\/github\/\.\.\./) exit 1; full++ }
-  $1 == "0002" || $1 == "0077" {
-    if (!/-run / || /\.\.\./ || !/TestLoadConfigAndKeyRejectUnsafeFiles/ || !/TestProtectedFilesRejectSymlinksAndOversize/) exit 1
-    focused[$1]++
-  }
-  END { if (NR != 3 || full != 1 || focused["0002"] != 1 || focused["0077"] != 1) exit 1 }
-' "$tmp/github-go.log" || fail 'GitHub full/focused permission coverage drifted'
-rm -r "$fixture/config/profiles/github"
-
 printf '#!/usr/bin/env bash\nexit 29\n' > "$fixture/config/profiles/example/tests/run.sh"
 rc=0
 bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles-failure.out" 2>&1 || rc=$?

@@ -3,14 +3,43 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 cd "$ROOT"
-BASELINE=0.19.0
-BASELINE_INSTALLER_SHA=eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1
-CANDIDATE=0.19.1-activation-e2e
-SYNTHETIC=0.19.2-activation-fixture
 die() { printf 'release-activation: %s\n' "$*" >&2; exit 2; }
 stage() { printf 'release_activation_stage=%s\n' "$1"; }
+# Shared with the controller so both select the same authentic baseline and synthetic B.
+candidate_identity() {
+  python3 - "$1" "$2" <<'PY'
+import json,re,sys
+candidate=json.load(open(sys.argv[1]))
+baseline=sys.argv[2]
+if baseline not in ('0.19.0','0.20.0'):
+    raise SystemExit('unsupported authentic activation predecessor')
+version=candidate['version']
+match=re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?',version)
+if not match:
+    raise SystemExit('invalid activation candidate version')
+major,minor,patch=map(int,match.groups())
+if (major,minor,patch)<=tuple(map(int,baseline.split('.'))):
+    raise SystemExit('activation candidate must be newer than its authentic predecessor')
+if candidate['runtime_file'] not in (f'subyard-{version}-linux-amd64.tar.gz',f'subyard-{version}-linux-arm64.tar.gz'):
+    raise SystemExit('activation candidate archive differs from its version')
+if not re.fullmatch('[0-9a-f]{64}',candidate['runtime_sha256']):
+    raise SystemExit('invalid activation candidate checksum')
+print(version,f'{major}.{minor}.{patch+1}-activation-fixture',
+      'eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1',sep='\t')
+PY
+}
+if [ "${1:-}" = --candidate-identity ]; then
+  [ "$#" = 3 ] || die 'candidate identity requires metadata and baseline'
+  candidate_identity "$2" "$3"
+  exit
+fi
+BASELINE=0.19.0
 MODE="${1:-normal}"
-case "$MODE:$#" in normal:0|--local-probe:1) ;; *) die 'guest takes only optional --local-probe' ;; esac
+case "$MODE:$#" in
+  normal:0|--local-probe:1) ;;
+  --baseline:2) BASELINE="$2"; MODE=normal ;;
+  *) die 'guest takes only optional --local-probe or --baseline VERSION' ;;
+esac
 if [ "$MODE" = normal ]; then
   [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] || die 'allocated disposable VM1 required'
   [ "$(id -un)" = dev ] || die 'allocated dev user required'
@@ -551,7 +580,10 @@ printf 'release_activation_dev_uid=%s cached_image_availability=verified\n' "$FI
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
 FINAL_ENGINE="$(release_candidate_prepare "$ROOT")" || die 'frozen transported candidate is required'
-jq -e --arg version "$CANDIDATE" '.version==$version' "$ROOT/.subyard-acceptance/candidate.json" >/dev/null
+read -r CANDIDATE SYNTHETIC BASELINE_INSTALLER_SHA < <(candidate_identity "$ROOT/.subyard-acceptance/candidate.json" "$BASELINE") \
+  || die 'frozen candidate identity is invalid'
+[ "$("$FINAL_ENGINE" --version)" = "yard $CANDIDATE" ] || die 'frozen candidate engine version differs from metadata'
+printf 'release_activation_candidate=%s authentic_predecessor=%s synthetic_successor=%s\n' "$CANDIDATE" "$BASELINE" "$SYNTHETIC"
 FINAL_SOURCE="${FINAL_ENGINE%/bin/yard-engine}"
 FINAL_RELEASE="$ROOT/.subyard-acceptance/release"
 for unit in "$UNIT" "$NAMED_UNIT" subyard-keys-sync.service subyard-keys-sync.timer .subyard-keys-sync.json; do
@@ -638,11 +670,11 @@ finally:
 PY
 stage authentic-published-predecessor
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 \
-  https://api.github.com/repos/Subyard/Subyard/releases/tags/v0.19.0 > "$STATE/published-release.json"
-jq -e --arg pin "sha256:$BASELINE_INSTALLER_SHA" \
-  '[.assets[] | select(.name=="subyard-install.sh") | .digest] == [$pin]' "$STATE/published-release.json" >/dev/null
+  "https://api.github.com/repos/Subyard/Subyard/releases/tags/v$BASELINE" > "$STATE/published-release.json"
+jq -e --arg pin "sha256:$BASELINE_INSTALLER_SHA" --arg tag "v$BASELINE" \
+  '.immutable==true and .tag_name==$tag and ([.assets[] | select(.name=="subyard-install.sh") | .digest] == [$pin])' "$STATE/published-release.json" >/dev/null
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 \
-  https://github.com/Subyard/Subyard/releases/download/v0.19.0/subyard-install.sh > "$STATE/baseline-install.sh"
+  "https://github.com/Subyard/Subyard/releases/download/v$BASELINE/subyard-install.sh" > "$STATE/baseline-install.sh"
 [ "$(hash "$STATE/baseline-install.sh")" = "$BASELINE_INSTALLER_SHA" ] || die 'published installer pin differs'
 bash "$STATE/baseline-install.sh" --version "$BASELINE" --yes > "$STATE/baseline-install.log" 2>&1
 YARD_BIN="$STATE/bin/yard"
@@ -741,7 +773,7 @@ cmp -s "$STATE/ledger-retained" "$ledger" || die 'runtime retry changed complete
 
 stage authentic-predecessor-rollback-refusal
 links="$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")"
-if yard update --rollback --yes > "$STATE/predecessor-rollback.log" 2>&1; then die 'incompatible 0.19 predecessor rollback succeeded'; fi
+if yard update --rollback --yes > "$STATE/predecessor-rollback.log" 2>&1; then die "incompatible $BASELINE predecessor rollback succeeded"; fi
 grep -Eq 'rollback-incompatible|cannot verify selected installed consumers|compatible installed-consumer' "$STATE/predecessor-rollback.log" || die 'rollback failed for an unexpected reason'
 [ "$links" = "$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")" ] || die 'refused rollback changed runtime links'
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'refused rollback changed migration ledger'
@@ -798,4 +830,4 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/absent-timer.log" 2>&1
   && [ ! -e "$UNIT_DIR/subyard-keys-sync.timer" ] && [ ! -L "$UNIT_DIR/subyard-keys-sync.timer" ] \
   || die 'release activation recreated absent timer units'
 ready
-printf 'ok: authentic 0.19 upgrade/recovery/refusal and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n'
+printf 'ok: authentic %s upgrade/recovery/refusal and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n' "$BASELINE"

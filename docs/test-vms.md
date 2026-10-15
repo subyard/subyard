@@ -718,19 +718,23 @@ gated lanes. A generic dependency-free resource pass does not report those handl
 ### Fixture preflight
 
 For GitHub/native-helper release activation, the owning singleton controller requires the same
-frozen public bundle used by supported candidate transport. Package candidate version
-`0.19.1-activation-e2e`, include its normal `.subyard-acceptance` metadata/assets, and run:
+frozen public bundle used by supported candidate transport. Include its normal
+`.subyard-acceptance` metadata/assets; the lane derives the candidate version from that
+checksum-verified package and checks the engine identity. For a current candidate newer than
+0.20.0, select the authentic published predecessor explicitly:
 
 ```sh
-bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --preflight
+bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.20.0 --preflight
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot"
+  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.20.0
 ```
 
-The controller packages its explicitly synthetic compatible successor before lease acquisition;
-the original candidate's verified assets remain intact. The guest uses the actual checksum-pinned
-0.19.0 installer/updater, two container yards and a config-only absent yard. A first transition may
+The controller packages its explicitly synthetic compatible successor (the next patch version
+with an `activation-fixture` suffix) before lease acquisition; the original candidate's verified
+assets remain intact. The guest uses the actual checksum-pinned 0.20.0 installer/updater, verified
+against immutable published release metadata, two container yards and a config-only absent yard.
+The default `--baseline 0.19.0` preserves the original 0.19.1 activation fixture path. A first transition may
 download unchanged native tool pins once to establish trustworthy activation receipts. The lane
 has a 45-minute work budget and bounded marker-owned cleanup; its terminal output retains native
 phase logs and reports cleanup separately. It does not use external GitHub accounts or manage the

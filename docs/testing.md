@@ -32,6 +32,8 @@ compatible packaged fixture versions. The second version contains explicit skill
 deltas; it is synthetic compatibility evidence. Run its local `--preflight` before allocating a VM,
 then provide the frozen public candidate bundle and SHA-256 to
 `config/profiles/github/tests/e2e/release-activation.sh --slot N` as described in the VM guide.
+The candidate identity comes from its verified frozen metadata; select `--baseline 0.20.0`
+for the current published predecessor, or retain the original default 0.19.0 regression path.
 This focused lane does not replace release publication or external GitHub-account acceptance.
 
 Logical matrices belong to their unit or local integration owner. Physical E2E keeps

@@ -11,6 +11,20 @@ Run from the managed development checkout with Python 3, GitHub CLI authenticati
 the ordinary acceptance prerequisites. The dispatch workflows must already be on the
 repository's default branch. The source commit must contain the release tooling.
 
+Keep release repairs on a dedicated `release/X.Y.Z` branch. The workflow ref and source
+branch are separate: preparation pins the full source commit below, while dispatch
+workflows can remain on the default branch. Creating the release branch does not
+authorize committing or pushing changes.
+
+Before requesting a repair commit/push, finish every available required worktree check
+from the [release validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk),
+including all shipped profile suites.
+`make verify`, the core runner and the shared profile runner stop on failure. Repair and
+resume their remaining checks; run independent gates separately so one failure does not
+hide later failures. A focused regression pass is insufficient for this handoff. Exact-SHA
+CI and acceptance of its frozen assets remain required after the commit is pushed;
+unavailable access and explicitly authorized release exceptions stay visible as incomplete.
+
 ```sh
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
 dev/release.sh accept --candidate rRUN_ID-aATTEMPT --slots 1 2 3
