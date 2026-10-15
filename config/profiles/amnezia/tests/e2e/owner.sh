@@ -33,6 +33,66 @@ if [ "$YARD_BIN" = "$root/.build/yard" ]; then
   "$root/dev/build-engine.sh" --output "$fixture/yard"
   install -D -m 0755 "$fixture/yard" "$YARD_BIN"
 else
+  refresh_operator_session() {
+    # Product enrollment updates the account; this fixture shell can retain old groups.
+    if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+      && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+      local command
+      printf -v command '%q ' "$root/config/profiles/amnezia/tests/e2e/owner.sh" "$@"
+      exec sg incus-admin -c "exec $command"
+    fi
+  }
+  refresh_operator_session "$@"
+  runtime_source="$(dirname "$(dirname "$YARD_BIN")")"
+  if ! incus storage show default --project default >/dev/null 2>&1 \
+    || ! incus network show incusbr0 --project default >/dev/null 2>&1; then
+    (
+      # The base installs packages; product setup owns platform reconciliation and enrollment.
+      # shellcheck source=tests/helpers/test-context.sh
+      . "$root/tests/helpers/test-context.sh"
+      setup_test_context "$fixture/platform"
+      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$runtime_source/config"
+      SUBYARD_USER="$(id -un)"
+      export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
+      set -a
+      # shellcheck source=config/host.env
+      . "$runtime_source/config/host.env"
+      set +a
+      bash "$runtime_source/scripts/01-install-incus.sh" --yes
+    )
+    refresh_operator_session "$@"
+  fi
+  # Activation and yard commands must inspect Incus in the same approved dev session.
+  incus list --project default --format=json >/dev/null
+  incus storage show default --project default >/dev/null
+  incus network show incusbr0 --project default >/dev/null
+  platform_root="$HOME/.cache/subyard-e2e-platform"
+  platform_marker="$platform_root/.subyard-e2e-platform-marker"
+  for path in "$HOME" "$HOME/.cache" "$platform_root" "$platform_root/incus" \
+    "$platform_root/incus/incus" "$platform_root/incus/incus/storage"; do
+    [ -d "$path" ] && [ ! -L "$path" ] || die 'platform storage requires plain directories'
+    owner="$(stat -c '%u' "$path")" mode="$(stat -c '%a' "$path")"
+    [ "$owner" = 0 ] || [ "$owner" = "$(id -u)" ] || die 'unexpected platform storage owner'
+    [ "$((8#$mode & 0022))" = 0 ] || die 'platform storage must not be writable by other users'
+  done
+  [ -O "$platform_root" ] || die 'platform root must belong to the operator'
+  [ "$(incus storage get default source --project default)" = "$platform_root/incus/incus/storage" ] \
+    || die 'Incus storage is outside the expected platform'
+  if [ -e "$platform_marker" ] || [ -L "$platform_marker" ]; then
+    [ -f "$platform_marker" ] && [ ! -L "$platform_marker" ] && [ -O "$platform_marker" ] \
+      && [ "$(stat -c '%h' "$platform_marker")" = 1 ] || die 'unsafe platform marker'
+    mode="$(stat -c '%a' "$platform_marker")"
+    [ "$((8#$mode & 0022))" = 0 ] || die 'platform marker must not be writable by other users'
+    printf '%s\n' subyard-e2e-platform-v1 | cmp -s - "$platform_marker" \
+      || die 'unexpected platform marker'
+  fi
+  platform_marker_temp="$(mktemp "$platform_root/.platform-marker.XXXXXX")"
+  chmod 0600 "$platform_marker_temp"
+  printf '%s\n' subyard-e2e-platform-v1 >"$platform_marker_temp"
+  mv -fT -- "$platform_marker_temp" "$platform_marker"
+  [ "$(stat -c '%u:%a:%h' "$platform_marker")" = "$(id -u):600:1" ] \
+    && printf '%s\n' subyard-e2e-platform-v1 | cmp -s - "$platform_marker" \
+    || die 'platform marker publication failed'
   candidate_version="$(jq -er '.version | select(type == "string" and test("^[A-Za-z0-9._+-]+$"))' \
     "$root/.subyard-acceptance/candidate.json")"
   if [ ! -e "$fixture/bin/yard" ] && [ ! -L "$fixture/bin/yard" ]; then
@@ -166,6 +226,44 @@ capture_agent_loss_state() {
   ' >"$diagnostic" 2>&1 || true
   cat "$diagnostic"
 }
+capture_release_readiness() {
+  local phase="$1" diagnostic="$fixture/recovery-release.json" rc=0
+  install -m 0600 /dev/null "$diagnostic"
+  timeout 30 "$YARD_BIN" migrate --check --json >"$diagnostic" 2>/dev/null || rc=$?
+  python3 - "$diagnostic" "$phase" "$rc" <<'PY'
+import json
+import sys
+
+phase = sys.argv[2]
+if phase not in ('before-agent-loss', 'after-agent-loss-failure'):
+    raise SystemExit(1)
+try:
+    with open(sys.argv[1], 'rb') as source:
+        payload = source.read(65537)
+    if len(payload) > 65536:
+        raise ValueError()
+    report = json.loads(payload)
+    journal = report.get('journal')
+    complete = str(journal['checkpoint'] == 'complete').lower() if isinstance(journal, dict) else 'unavailable'
+    outcome = report['outcome']
+    status = outcome.get('status')
+    if status not in ('ready', 'operator-action-required', 'migration-required', 'recovering'):
+        status = 'other'
+    code = outcome.get('code')
+    if code not in ('ready', 'dependency-unavailable', 'transition-required', 'recovery-pending', 'journal-invalid', 'activation-ambiguous'):
+        code = 'other'
+    blockers = report.get('blockers', [])
+    if not isinstance(blockers, list) or len(blockers) > 64:
+        raise ValueError()
+    runtime = sum(item.get('resource') in ('activation.openlit-runtime', 'activation.orca-runtime') for item in blockers)
+    materialized = sum(item.get('resource') == 'activation.materialized-config' for item in blockers)
+    other = len(blockers) - runtime - materialized
+except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    complete, status, code = 'unavailable', 'unavailable', 'unavailable'
+    runtime = materialized = other = -1
+print(f'amnezia_release_probe={phase} exit={int(sys.argv[3])} journal_complete={complete} status={status} code={code} runtime_blockers={runtime} materialized_blockers={materialized} other_blockers={other}')
+PY
+}
 wait_vpn_runtime_settled() {
   for _ in $(seq 1 45); do
     if guest python3 /usr/local/lib/subyard-amnezia/runtime.py observe \
@@ -189,6 +287,12 @@ capture_retry_down_state() {
   ' || true
 }
 case "$phase" in
+  platform)
+    [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
+    "$YARD_BIN" -Y default config status
+    "$YARD_BIN" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
+    printf 'amnezia_platform_operator_ready=true installed_migration_ready=true\n'
+    ;;
   bootstrap)
     [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
     python3 -B "$root/config/profiles/amnezia/tests/e2e/first-boot-observer.py" -- \
@@ -379,6 +483,7 @@ PYPRIORITY
     # owner-side guest call unavailable without changing the outer yard.
     guest systemctl is-active --quiet incus-agent.service \
       || die 'nested VPN guest agent service is not active before fault injection'
+    capture_release_readiness before-agent-loss
     agent_fragment="$(guest systemctl show incus-agent.service --property=FragmentPath --value)"
     case "$agent_fragment" in
       /run/systemd/system/*) agent_action=(/usr/bin/systemctl stop incus-agent.service) ;;
@@ -406,6 +511,7 @@ PYPRIORITY
       die 'VPN shutdown unexpectedly verified after nested guest agent loss'
     fi
     if ! grep -Fq 'guest shutdown is unverified' "$down_output"; then
+      capture_release_readiness after-agent-loss-failure || true
       tail -n 20 "$down_output" >&2
       die 'VPN shutdown failed before reporting unverified guest cleanup'
     fi

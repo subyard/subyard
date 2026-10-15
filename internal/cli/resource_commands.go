@@ -112,6 +112,10 @@ func (cli *CLI) runResourceCommand(
 		cli.errorf("%s: %v", definition.Command, err)
 		return 1
 	}
+	if err := cli.validateResourceShutdownRepair(definition, invocation.verb, loaded, native); err != nil {
+		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
+		return 1
+	}
 	assessment := native.Assessment
 	resourceConsequences := slices.Clone(assessment.Consequences)
 	assessment = bootstrap.augment(assessment)
@@ -180,6 +184,13 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
+	unlockShutdown, err := cli.lockResourceShutdownRepair(ctx)
+	if err != nil {
+		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
+		return 1
+	}
+	defer unlockShutdown()
+	runner.shutdownLocked = true
 	if ingress != nil && assessment.Changed {
 		unlock, lockErr := lockIntegrationYard(ctx, loaded)
 		if lockErr != nil {
@@ -468,20 +479,21 @@ func localResourceAction(definition resource.Definition, action domain.ActionID)
 }
 
 type resourceApplyRunner struct {
-	cli           *CLI
-	loaded        config.Loaded
-	definition    resource.Definition
-	verb          string
-	localAction   string
-	effect        domain.ActionEffect
-	arguments     []string
-	bootstrap     *profileBootstrap
-	consequences  []string
-	ingress       *resourceIngress
-	startupIntent *resourceStartupIntent
-	exact         *resourceExecution
-	verify        *resourceExecution
-	skipHandler   bool
+	cli            *CLI
+	loaded         config.Loaded
+	definition     resource.Definition
+	verb           string
+	localAction    string
+	effect         domain.ActionEffect
+	arguments      []string
+	bootstrap      *profileBootstrap
+	consequences   []string
+	ingress        *resourceIngress
+	startupIntent  *resourceStartupIntent
+	exact          *resourceExecution
+	verify         *resourceExecution
+	skipHandler    bool
+	shutdownLocked bool
 }
 
 type resourceSessionExitError struct{ code int }
@@ -494,8 +506,8 @@ func (runner *resourceApplyRunner) Run(
 	ctx context.Context,
 	request domain.AdapterRequest,
 	protectedInput io.Reader,
-) (domain.AdapterResult, string, error) {
-	result := domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "error"}
+) (result domain.AdapterResult, diagnostics string, err error) {
+	result = domain.AdapterResult{Schema: 1, OperationID: request.OperationID, Status: "error"}
 	if protectedInput != nil {
 		return result, "", errors.New("resource apply does not accept protected input")
 	}
@@ -505,6 +517,27 @@ func (runner *resourceApplyRunner) Run(
 	}
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
+	}
+	if !runner.shutdownLocked {
+		unlock, err := runner.cli.lockResourceShutdownRepair(ctx)
+		if err != nil {
+			return result, "", err
+		}
+		defer unlock()
+		runner.shutdownLocked = true
+		defer func() { runner.shutdownLocked = false }()
+	}
+	if runner.cli.resourceShutdownRepair != nil {
+		defer func() {
+			if checkErr := runner.cli.finishResourceShutdownRepair(ctx); checkErr != nil {
+				result.Status = "error"
+				if err == nil {
+					err = checkErr
+				} else {
+					err = fmt.Errorf("%w; shutdown release binding changed: %v", err, checkErr)
+				}
+			}
+		}()
 	}
 	if runner.exact != nil {
 		return runner.runExactResource(ctx, request)

@@ -119,6 +119,9 @@ func (prepared *preparedCommand) prepareResourceInvocation(ctx context.Context, 
 }
 
 func (prepared *preparedCommand) attachResourceExecution(runner *resourceApplyRunner, baseline config.Loaded, native resource.PrepareResult) error {
+	if err := prepared.CLI.validateResourceShutdownRepair(runner.definition, runner.verb, baseline, native); err != nil {
+		return err
+	}
 	handler, err := os.ReadFile(runner.definition.HandlerPath())
 	if err != nil {
 		return err

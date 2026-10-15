@@ -340,6 +340,70 @@ def visible_text(tsv, names, frame, scale=1):
                                         width=right - left, height=bottom - top))]
 
 
+def installation_evidence(nodes):
+    # 5.0.3.0: main2.qml opens PopupType for PageController.showErrorMessage;
+    # pageController.cpp renders the public ErrorCode prefix in that modal popup.
+    # Read bounded text in memory, but return only numeric codes and fixed UI flags.
+    controls = ('Installing', 'Cancel installation', 'Connection', 'Users', 'Share')
+    visible = set()
+    errors = set()
+    for node in nodes:
+        try:
+            label = node.name
+            if isinstance(label, str) and label.strip() in controls:
+                visible.add(label.strip())
+            parent = node
+            for _ in range(32):
+                if parent is None:
+                    break
+                if parent.getRoleName() == 'dialog':
+                    break
+                parent = parent.parent
+            else:
+                continue
+            if parent is None or parent.getRoleName() != 'dialog':
+                continue
+            texts = [label] if isinstance(label, str) and len(label) <= 4096 else []
+            if node.getRoleName() in ('text', 'label'):
+                try:
+                    text = node.queryText()
+                    count = text.characterCount
+                    if type(count) is int and 0 < count <= 4096:
+                        texts.append(text.getText(0, count))
+                except Exception:
+                    pass
+            for text in texts:
+                if not isinstance(text, str) or len(text) > 4096:
+                    continue
+                match = re.match(r'^ErrorCode: ([1-9][0-9]{2,3})\.\s', text.strip())
+                if match:
+                    errors.add(int(match[1]))
+        except Exception:
+            continue
+    return {'error_codes': sorted(errors)[:8], 'visible_controls': sorted(visible)}
+
+
+def wait_native_installation(gui, ready):
+    def outcome():
+        errors = gui.installation_evidence()['error_codes']
+        if errors:
+            return 'error', errors
+        return ('ready', []) if ready() else False
+
+    def started():
+        state = outcome()
+        if state:
+            return state
+        return ('started', []) if gui.matching('Installing') else False
+
+    def verify(state):
+        require(state[0] != 'error', 'native installation failed ErrorCode='
+                + ','.join(str(code) for code in state[1]))
+
+    verify(gui.wait(started, 'native installer startup'))
+    verify(gui.wait(outcome, 'native installation completion', 360))
+
+
 class GUI:
     def __init__(self):
         import pyatspi
@@ -406,6 +470,21 @@ class GUI:
         return visible_text(tsv.decode(), names, frame, scale=2)
 
     def click_node(self, node):
+        evidence = getattr(self, 'share_evidence', None)
+        receipt = None
+        if isinstance(evidence, dict):
+            role = 'unknown'
+            try:
+                candidate = node.getRoleName()
+                if candidate in ('button', 'page tab', 'text', 'label'):
+                    role = candidate
+            except Exception:
+                pass
+            receipt = {'role': role, 'method': 'pointer', 'dispatch_error': 'none',
+                       'stage': evidence['stage'], 'candidate_count': evidence.get('candidate_count', 1)}
+            evidence['action'] = receipt
+            if getattr(self, 'discover_evidence', None) is evidence and evidence['stage'] == 'management-control':
+                evidence['management_target'] = discovery_snapshot(self, node)['target']
         selected = None
         try:
             actions = node.queryAction()
@@ -416,20 +495,34 @@ class GUI:
         except Exception:
             pass
         if selected is not None:
+            if receipt is not None:
+                receipt['method'] = 'atspi'
             # Qt can replace the target before replying. Dispatch once; the
             # caller's next-screen or output postcondition verifies delivery.
             try:
-                selected[0].doAction(selected[1])
-            except Exception:
+                accepted = selected[0].doAction(selected[1])
+                if receipt is not None and accepted is False:
+                    receipt['dispatch_error'] = 'not-accepted'
+            except Exception as error:
+                if receipt is not None:
+                    receipt['dispatch_error'] = 'timeout' if isinstance(error, TimeoutError) else 'action-exception'
                 pass
             return
-        rectangle = node.queryComponent().getExtents(self.api.DESKTOP_COORDS)
-        require(rectangle.width > 0 and rectangle.height > 0, 'GUI target has no visible geometry')
-        run(['xdotool', 'mousemove', '--sync', str(rectangle.x + rectangle.width // 2),
-             str(rectangle.y + rectangle.height // 2), 'click', '1'], operation='pointer-click')
+        try:
+            rectangle = node.queryComponent().getExtents(self.api.DESKTOP_COORDS)
+            require(rectangle.width > 0 and rectangle.height > 0, 'GUI target has no visible geometry')
+            run(['xdotool', 'mousemove', '--sync', str(rectangle.x + rectangle.width // 2),
+                 str(rectangle.y + rectangle.height // 2), 'click', '1'], operation='pointer-click')
+        except Exception:
+            if receipt is not None:
+                receipt['dispatch_error'] = 'pointer-exception'
+            raise
 
     def click(self, names, seconds=30, description='a named control'):
         nodes = self.wait(lambda: self.matching(names), description, seconds)
+        evidence = getattr(self, 'share_evidence', None)
+        if isinstance(evidence, dict):
+            evidence['candidate_count'] = min(len(nodes), 3000)
         # Qt labels inside custom clickable rows also work through their geometry.
         self.click_node(nodes[0])
         time.sleep(0.35)
@@ -614,6 +707,19 @@ class GUI:
         # Never dump accessible names/values: they can contain credentials/configs.
         return dict(collections.Counter(node.getRoleName() for node in self.nodes()))
 
+    def installation_evidence(self):
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        require(process_identity(app['pid']) == app['start'], 'owned application session is unavailable')
+        nodes = []
+        for node in self.nodes():
+            try:
+                if node.getApplication().get_process_id() == app['pid']:
+                    nodes.append(node)
+            except Exception:
+                pass
+        return installation_evidence(nodes)
+
 
 def setup(gui, args):
     key = private_file(args.key_file).decode()
@@ -642,12 +748,15 @@ def setup(gui, args):
             return False
         gui.tab(1)
         return controls()
-    # Cancel is shown only while the server is busy, not during an ordinary install.
-    gui.wait(lambda: gui.matching('Installing') or ready(), 'native installer startup')
-    gui.wait(ready, 'native installation completion', 360)
+    wait_native_installation(gui, ready)
 
 
-def export_controls(gui, location=False, accepting=False):
+def export_controls(gui, location=False, accepting=False, evidence=None):
+    def rejected(reason):
+        if evidence is not None:
+            evidence['predicate'] = reason
+        return None
+
     def frame(node):
         for _ in range(100):
             if node is None:
@@ -666,11 +775,11 @@ def export_controls(gui, location=False, accepting=False):
     buttons = [node for node in gui.nodes() if node.getRole() == gui.api.ROLE_PUSH_BUTTON
                and node.name.strip() in ('Save', 'Save AmneziaWG config') and usable(node, accepting)]
     if len(buttons) != 1:
-        return None
+        return rejected('save-candidate-count')
     button = buttons[0]
     dialog = frame(button)
     if dialog is None:
-        return None
+        return rejected('frame-unavailable')
     state = json.loads(private_file(SESSION))
     app = state['app']
     require(process_identity(app['pid']) == app['start']
@@ -681,7 +790,7 @@ def export_controls(gui, location=False, accepting=False):
               and usable(node) and frame(node) == dialog
               and (not location or node.getState().contains(gui.api.STATE_FOCUSED))]
     if len(fields) != 1:
-        return None
+        return rejected('editable-candidate-count')
     field = fields[0]
     field.queryText()
     bounds = dialog.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
@@ -691,35 +800,133 @@ def export_controls(gui, location=False, accepting=False):
         if (rectangle.width <= 0 or rectangle.height <= 0 or not 0 <= x < 1024 or not 0 <= y < 900
                 or not bounds.x <= x < bounds.x + bounds.width
                 or not bounds.y <= y < bounds.y + bounds.height):
-            return None
+            return rejected('geometry-outside-bounds')
+    if evidence is not None:
+        evidence['predicate'] = 'ready'
     return button, field
 
 
+def click_export_share(gui):
+    def target():
+        evidence = {'raw_candidates': 0, 'eligible_candidates': 0, 'current_page': False}
+        gui.share_evidence['export_target'] = evidence
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        require(process_identity(app['pid']) == app['start']
+                and os.environ.get('DISPLAY') == state['environment']['DISPLAY'],
+                'client export requires the owned application session')
+        nodes = []
+        for node in gui.nodes()[:3000]:
+            try:
+                if node.getApplication().get_process_id() == app['pid']:
+                    nodes.append(node)
+            except Exception:
+                pass
+        frames = [node for node in nodes if node.getRole() in (gui.api.ROLE_FRAME, gui.api.ROLE_WINDOW)
+                  and node.getState().contains(gui.api.STATE_SHOWING)
+                  and not node.getState().contains(gui.api.STATE_DEFUNCT)]
+        if len(frames) != 1:
+            return None
+        frame = frames[0]
+        bounds = frame.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+        if (bounds.x < 0 or bounds.y < 0 or bounds.width <= 0 or bounds.height <= 0
+                or bounds.x + bounds.width > 1024 or bounds.y + bounds.height > 900):
+            return None
+
+        def eligible(node):
+            state = node.getState()
+            if (not all(state.contains(value) for value in (gui.api.STATE_SHOWING, gui.api.STATE_ENABLED))
+                    or state.contains(gui.api.STATE_DEFUNCT)):
+                return False
+            parent = node
+            for _ in range(100):
+                if parent is None or parent == frame:
+                    break
+                parent = parent.get_parent()
+            if parent != frame:
+                return False
+            rectangle = node.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+            return (rectangle.width > 0 and rectangle.height > 0
+                    and bounds.x <= rectangle.x and bounds.y <= rectangle.y
+                    and rectangle.x + rectangle.width <= bounds.x + bounds.width
+                    and rectangle.y + rectangle.height <= bounds.y + bounds.height)
+
+        buttons = [node for node in nodes if node.getRole() == gui.api.ROLE_PUSH_BUTTON]
+        shares = [node for node in buttons if node.name.strip() == 'Share']
+        candidates = [node for node in shares if eligible(node)]
+        landmarks = [node for node in buttons if node.name.strip() == 'Show connection settings' and eligible(node)]
+        evidence.update(raw_candidates=len(shares), eligible_candidates=len(candidates), current_page=len(landmarks) == 1)
+        if len(candidates) != 1 or len(landmarks) != 1:
+            return None
+        gui.share_evidence['candidate_count'] = 1
+        return candidates[0]
+
+    # PageStart pushes PageShareConnection with a transition; outgoing Share
+    # nodes can remain accessible. Dispatch only the unique in-frame export control.
+    gui.click_node(gui.wait(target, 'native export sharing control', 30))
+    time.sleep(0.35)
+
+
+def share_diagnostics(gui):
+    # Keep only fixture-authored flags/counts; never expose node names or text.
+    result = dict(getattr(gui, 'share_evidence', {}))
+    result.update(owned_frames=0, owned_modals=0, owned_save_candidates=0,
+                  owned_editable_candidates=0, error_codes=[], predicate='unavailable')
+    try:
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        require(process_identity(app['pid']) == app['start'], 'owned application session is unavailable')
+        for node in gui.nodes()[:3000]:
+            try:
+                if node.getApplication().get_process_id() != app['pid']:
+                    continue
+                role = node.getRoleName()
+                result['owned_frames'] += int(role in ('frame', 'window'))
+                result['owned_modals'] += int(role == 'dialog')
+                result['owned_editable_candidates'] += int(node.getState().contains(gui.api.STATE_EDITABLE))
+                result['owned_save_candidates'] += int(node.getRole() == gui.api.ROLE_PUSH_BUTTON
+                    and node.name.strip() in ('Save', 'Save AmneziaWG config'))
+            except Exception:
+                continue
+        result['error_codes'] = gui.installation_evidence()['error_codes']
+        export_controls(gui, evidence=result)
+    except Exception:
+        result['predicate'] = 'ownership-or-access-unavailable'
+    return result
+
+
 def share(gui, args):
+    gui.share_evidence = {'stage': 'prepare'}
     output = args.output_file.absolute()
     private_dir(output.parent)
     require(not output.exists() and not output.is_symlink(), 'refusing to overwrite a client export')
     require(output.suffix == '.conf', 'native AWG export needs a .conf filename')
+    gui.share_evidence['stage'] = 'connection'
     gui.tab(1)
     gui.click('Connection', description='native share connection control')
     gui.fill([args.name])
     # PageShare retains the selected native format after an export. Avoid reopening
     # its drawer, which would display both the current value and the same choice.
     if not gui.matching('AmneziaWG native format'):
+        gui.share_evidence['stage'] = 'format'
         gui.click(('For the AmneziaVPN app', 'AmneziaWG native format'), description='native export format selector')
         gui.click('AmneziaWG native format', description='native AWG export format')
+    gui.share_evidence['stage'] = 'generation'
     gui.click('Share', description='native client generation control')
     gui.wait(lambda: gui.matching('Show connection settings'), 'native client generation', 90)
-    gui.click('Share', description='native export sharing control')
+    gui.share_evidence['stage'] = 'export-dialog'
+    click_export_share(gui)
     # The native dialog's default basename is platform-dependent. Select its
     # editable filename field beside the actual accept button, not the title.
     gui.wait(lambda: export_controls(gui), 'native export dialog')
+    gui.share_evidence['stage'] = 'directory'
     # Qt resolves filename text relative to currentFolder. Navigate with its
     # absolute-path breadcrumb before entering a basename in the filename field.
     gui.key('ctrl+l')
     _, directory = gui.wait(lambda: export_controls(gui, location=True), 'native export directory input')
     gui.fill_node(directory, str(output.parent))
     gui.key('Return')
+    gui.share_evidence['stage'] = 'filename'
     button, field = gui.wait(lambda: export_controls(gui), 'native export filename input')
     gui.fill_node(field, output.name)
     # Accessible Press does not move focus; Qt commits selectedFile only when
@@ -727,7 +934,9 @@ def share(gui, args):
     gui.key('Tab')
     gui.wait(lambda: not field.getState().contains(gui.api.STATE_FOCUSED), 'native export filename commit')
     button, _ = gui.wait(lambda: export_controls(gui, accepting=True), 'native export save control')
+    gui.share_evidence.update(stage='save', candidate_count=1)
     gui.click_node(button)
+    gui.share_evidence['stage'] = 'file'
     gui.wait(lambda: output.is_file() and output.stat().st_size > 0, 'native client export', 30)
     require(not output.is_symlink(), 'native export unexpectedly became a symlink')
     output.chmod(0o600)
@@ -754,21 +963,131 @@ def revoke(gui, args):
     gui.wait(removed, 'native revocation completion', 90)
 
 
+def discovery_snapshot(gui, target=None):
+    # Observe fixed flags only. Geometry, UI labels and private state never leave
+    # this function, and observation failure never changes action delivery.
+    flags = dict(owned=None, showing=None, enabled=None, in_frame=None, defunct=None, checked=None, selected=None)
+    result = dict(session_owned=False, owned_frames=0, frame_eligible=False,
+                  management_tabs=0, management_checked=None, management_selected=None,
+                  data_rows={key: 0 for key in ('scan_title', 'scan_description', 'reboot', 'remove', 'clear', 'reset')},
+                  error_codes=[], classification='ownership-or-access-unavailable', target=flags)
+    try:
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        if process_identity(app['pid']) != app['start'] or os.environ.get('DISPLAY') != state['environment']['DISPLAY']:
+            return result
+        result['session_owned'] = True
+        nodes = []
+        for node in gui.nodes()[:3000]:
+            try:
+                if node.getApplication().get_process_id() == app['pid']:
+                    nodes.append(node)
+            except Exception:
+                pass
+        frames = [node for node in nodes if node.getRole() in (gui.api.ROLE_FRAME, gui.api.ROLE_WINDOW)
+                  and node.getState().contains(gui.api.STATE_SHOWING)
+                  and not node.getState().contains(gui.api.STATE_DEFUNCT)]
+        result['owned_frames'] = len(frames)
+        if len(frames) != 1:
+            return result
+        frame = frames[0]
+        bounds = frame.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+        if (bounds.x < 0 or bounds.y < 0 or bounds.width <= 0 or bounds.height <= 0
+                or bounds.x + bounds.width > 1024 or bounds.y + bounds.height > 900):
+            return result
+        result['frame_eligible'] = True
+
+        def control_flags(node):
+            value = dict(flags)
+            try:
+                value['owned'] = node.getApplication().get_process_id() == app['pid']
+                for key, attribute in (('showing', 'STATE_SHOWING'), ('enabled', 'STATE_ENABLED'),
+                                       ('checked', 'STATE_CHECKED'), ('selected', 'STATE_SELECTED'), ('defunct', 'STATE_DEFUNCT')):
+                    constant = getattr(gui.api, attribute, None)
+                    value[key] = bool(node.getState().contains(constant)) if constant is not None else None
+                parent = node
+                for _ in range(100):
+                    if parent is None or parent == frame:
+                        break
+                    parent = parent.get_parent()
+                rectangle = node.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+                value['in_frame'] = bool(parent == frame and rectangle.width > 0 and rectangle.height > 0
+                                         and bounds.x <= rectangle.x and bounds.y <= rectangle.y
+                                         and rectangle.x + rectangle.width <= bounds.x + bounds.width
+                                         and rectangle.y + rectangle.height <= bounds.y + bounds.height)
+            except Exception:
+                pass
+            return value
+
+        if target is not None:
+            result['target'] = control_flags(target)
+            return result
+        tabs = []
+        labels = {'Check the server for previously installed Amnezia services': 'scan_title',
+                  'Add them to the application if they were not displayed': 'scan_description',
+                  'Reboot server': 'reboot', 'Remove server from application': 'remove',
+                  'Clear server from Amnezia software': 'clear', 'Reset API config': 'reset'}
+        for node in nodes:
+            try:
+                value = control_flags(node)
+                if value['defunct'] is not False or not all(value[key] is True for key in ('owned', 'showing', 'enabled', 'in_frame')):
+                    continue
+                label = node.name.strip()
+                if label == 'Management' and node.getRoleName() == 'page tab':
+                    tabs.append(value)
+                if label in labels:
+                    result['data_rows'][labels[label]] += 1
+            except Exception:
+                pass
+        result['management_tabs'] = len(tabs)
+        if len(tabs) == 1:
+            result['management_checked'], result['management_selected'] = tabs[0]['checked'], tabs[0]['selected']
+        result['error_codes'] = installation_evidence(nodes)['error_codes']
+        selected = result['management_checked'] is True or result['management_selected'] is True
+        result['classification'] = ('selected-management-scan-visible' if selected and
+                                    (result['data_rows']['scan_title'] or result['data_rows']['scan_description']) else
+                                    'selected-management-scan-missing' if selected else 'management-page-unconfirmed')
+    except Exception:
+        pass
+    return result
+
+
+def discovery_match(gui, label, key):
+    # Record only calls already required by discovery, with the same short circuit.
+    try:
+        nodes = gui.matching(label)
+    except Exception as error:
+        gui.discover_evidence['matches'][key] = dict(count=None, failure='matching-failure' if isinstance(error, Failure)
+                                                   else 'matching-exception')
+        raise
+    gui.discover_evidence['matches'][key] = dict(count=min(len(nodes), 3000), failure='none')
+    return nodes
+
+
 def discover(gui, args):
+    gui.discover_evidence = dict(stage='servers-control', matches={})
+    gui.share_evidence = gui.discover_evidence  # Existing bounded action receipt, emitted only on failure.
     gui.tab(2)
     gui.click('Servers', description='native servers control')
     # The fixture owns exactly one admin server. No client import adds another.
+    gui.discover_evidence['stage'] = 'saved-server'
     gui.click_saved_server()
+    gui.discover_evidence['stage'] = 'management-control'
     gui.click('Management', description='native server management control')
     # The row title is capped at two elided lines; its complete description
     # belongs to the same stock MouseArea and invokes the same scan handler.
-    scan = gui.wait(lambda: gui.matching('Check the server for previously installed Amnezia services')
-                    or gui.matching('Add them to the application if they were not displayed'),
+    gui.discover_evidence['stage'] = 'scan-control'
+    scan = gui.wait(lambda: discovery_match(gui, 'Check the server for previously installed Amnezia services', 'title')
+                    or discovery_match(gui, 'Add them to the application if they were not displayed', 'description'),
                     'native service discovery control')
+    gui.discover_evidence['stage'] = 'scan-dispatch'
     gui.click_node(scan[0])
+    gui.discover_evidence['stage'] = 'scan-completion'
     gui.wait(lambda: gui.matching(('All installed containers have been added to the application',
                                  'No new installed containers found')), 'native server scan', 120)
+    gui.discover_evidence['stage'] = 'scan-close'
     gui.click('Close', description='native server scan close control')
+    gui.discover_evidence['stage'] = 'retained-user'
     gui.tab(1)
     gui.click('Users', description='discovered native users control')
     gui.wait(lambda: gui.matching(args.name), 'retained native user after discovery', 90)
@@ -787,14 +1106,193 @@ def name(value):
     return value
 
 
+def discovery_self_check():
+    from unittest import mock
+    api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3, ROLE_TEXT=8,
+                          STATE_ENABLED=5, STATE_CHECKED=6, STATE_SHOWING=9,
+                          STATE_DEFUNCT=12, STATE_SELECTED=13, DESKTOP_COORDS=0)
+    session_bytes = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
+    for scenario in ('ready', 'not-accepted', 'action-exception', 'read-only', 'unknown-match'):
+        state = dict(page='info', clock=0.0, dispatches=0)
+        def node(label, role, action=lambda: True, parent=None):
+            item = SimpleNamespace(name=label, parent=parent)
+            item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
+            item.getRole = lambda: role
+            item.getRoleName = lambda: {1: 'frame', 3: 'button', 8: 'text', 14: 'page tab'}[role]
+            item.get_parent = lambda: parent
+            item.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9) or
+                flag in (6, 13) and label == 'Management' and state['page'] in ('data', 'scan-complete'))
+            item.queryComponent = lambda: SimpleNamespace(getExtents=lambda coordinates: SimpleNamespace(
+                x=0 if role == 1 else 16, y=0 if role == 1 else 100,
+                width=380 if role == 1 else 300, height=800 if role == 1 else 40))
+            item.queryAction = lambda: SimpleNamespace(nActions=1, getName=lambda index: 'press',
+                                                      doAction=lambda index: action())
+            item.queryText = mock.Mock(side_effect=RuntimeError('synthetic-private-body'))
+            return item
+        frame = node('', 1)
+        def management():
+            state['dispatches'] += 1
+            if scenario == 'not-accepted':
+                return False
+            if scenario == 'action-exception':
+                raise RuntimeError('synthetic-private-action')
+            state['page'] = 'data'
+            return True
+        def scan():
+            state['page'] = 'scan-complete'
+            return True
+        controls = [node('Management', 14, management, frame),
+                    node('Check the server for previously installed Amnezia services', 8, scan, frame),
+                    node('All installed containers have been added to the application', 8, parent=frame),
+                    node('Close', 3, parent=frame), node('Servers', 14, parent=frame),
+                    node('Users', 14, parent=frame), node('retained-test-user', 8, parent=frame),
+                    node('Remove server from application', 8, parent=frame)]
+        def current_nodes():
+            valid = {'Management', 'Servers'}
+            if state['page'] == 'data':
+                valid.add('Remove server from application')
+                if scenario != 'read-only':
+                    valid.add(controls[1].name)
+            if state['page'] == 'scan-complete':
+                valid.update((controls[2].name, 'Close'))
+            if state['page'] == 'users':
+                valid.update(('Users', 'retained-test-user'))
+            return [frame] + [item for item in controls if item.name in valid]
+        def matching(labels):
+            if labels == controls[1].name and scenario == 'unknown-match':
+                raise RuntimeError('synthetic-private-matching')
+            labels = (labels,) if isinstance(labels, str) else labels
+            return [item for item in current_nodes() if item.name in labels]
+        gui = GUI.__new__(GUI)
+        gui.api, gui.nodes, gui.matching = api, current_nodes, matching
+        gui.click_saved_server = lambda: None  # Isolate the next native boundary.
+        gui.tab = lambda index: state.update(page='users') if index == 1 else None
+        waits = []
+        def wait(action, description, seconds=30):
+            waits.append((description, seconds))
+            return GUI.wait(gui, action, description, seconds)
+        gui.wait = wait
+        with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session_bytes), \
+                mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
+                mock.patch.dict(os.environ, DISPLAY=':synthetic'), \
+                mock.patch.object(time, 'monotonic', side_effect=lambda: state['clock']), \
+                mock.patch.object(time, 'sleep', side_effect=lambda seconds: state.update(clock=state['clock'] + seconds)):
+            try:
+                discover(gui, SimpleNamespace(name='retained-test-user'))
+            except Failure as error:
+                require(scenario != 'ready' and str(error) == 'GUI timed out waiting for native service discovery control',
+                        'discovery observation changed the original failure')
+            else:
+                require(scenario == 'ready', 'unready discovery was accepted')
+                require(('native server scan', 120) in waits and ('retained native user after discovery', 90) in waits,
+                        'discovery observation changed existing completion waits')
+            snapshot = discovery_snapshot(gui)
+            require(('native service discovery control', 30) in waits, 'discovery observation changed the control wait')
+            require(state['dispatches'] == 1, 'discovery observation retried the Management action')
+            if scenario == 'read-only':
+                require(snapshot['classification'] == 'selected-management-scan-missing'
+                        and snapshot['data_rows']['remove'] == 1, 'selected page without scan was not distinguished')
+            elif scenario in ('not-accepted', 'action-exception'):
+                require(snapshot['classification'] == 'management-page-unconfirmed'
+                        and gui.discover_evidence['action']['dispatch_error'] == scenario,
+                        'failed Management dispatch was not distinguished')
+            elif scenario == 'unknown-match':
+                require(gui.discover_evidence['matches']['title'] == dict(count=None, failure='matching-exception')
+                        and snapshot['classification'] == 'selected-management-scan-visible',
+                        'matching failure was mistaken for a missing scan row')
+            else:
+                state['page'] = 'data'
+                require(discovery_snapshot(gui)['classification'] == 'selected-management-scan-visible',
+                        'ready selected Management page was not distinguished')
+            foreign = node('Management', 14, parent=frame)
+            foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
+            gui.nodes = lambda: current_nodes() + [foreign, node('synthetic-private-label', 8, parent=frame)]
+            require(discovery_snapshot(gui)['management_tabs'] == 1, 'foreign Management node entered diagnostics')
+            defunct = node('Management', 14, parent=frame)
+            defunct.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9, 12))
+            with mock.patch.object(gui, 'nodes', return_value=[frame, defunct]):
+                stale = discovery_snapshot(gui, defunct)
+                require(stale['target']['defunct'] is True and discovery_snapshot(gui)['management_tabs'] == 0,
+                        'defunct target was confused with eligible Management state')
+            with mock.patch.object(sys.modules[__name__], 'process_identity', return_value='foreign'):
+                unavailable = discovery_snapshot(gui)
+            require(unavailable['classification'] == 'ownership-or-access-unavailable'
+                    and unavailable['management_tabs'] == 0, 'unknown ownership was treated as selected native state')
+            evidence = json.dumps(dict(gui.discover_evidence, snapshot=snapshot, unavailable=unavailable))
+            require('synthetic-private' not in evidence and 'Management' not in evidence,
+                    'discovery diagnostics exposed native labels, body or exception text')
+            for item in controls:
+                item.queryText.assert_not_called()
+
+
 def self_check():
+    discovery_self_check()
     from unittest import mock
     from types import SimpleNamespace
+    dialog = SimpleNamespace(name='', getRoleName=lambda: 'dialog', parent=None)
+    frame = SimpleNamespace(name='', getRoleName=lambda: 'frame', parent=None)
+    def message(value, parent=dialog):
+        return SimpleNamespace(name=value, getRoleName=lambda: 'text', parent=parent,
+                               queryText=lambda: SimpleNamespace(characterCount=len(value),
+                                   getText=lambda start, end: value[start:end]))
+    secret = 'synthetic-private-key-value'
+    evidence = installation_evidence([message('ErrorCode: 305. ' + secret), message('Installing'),
+                                      message('Connection', frame), message(secret)])
+    require(evidence == {'error_codes': [305], 'visible_controls': ['Connection', 'Installing']},
+            'native terminal error or progress evidence was lost')
+    require(secret not in json.dumps(evidence), 'installation evidence exposed private text')
+    owned = message('ErrorCode: 305. ' + secret)
+    owned.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 7)
+    foreign = message('ErrorCode: 203. ' + secret)
+    foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 8)
+    session_gui = GUI.__new__(GUI)
+    session_gui.nodes = lambda: [owned, foreign]
+    with mock.patch.object(sys.modules[__name__], 'private_file',
+                           return_value=b'{"app":{"pid":7,"start":19}}'), \
+            mock.patch.object(sys.modules[__name__], 'process_identity', return_value=19):
+        require(session_gui.installation_evidence()['error_codes'] == [305],
+                'foreign application text entered installation diagnostics')
+    for value, parent in (('ErrorCode: 305. ' + secret, frame), ('ErrorCode: 0. No error', dialog),
+                          ('ErrorCode: 305', dialog), ('prefix ErrorCode: 305. ' + secret, dialog),
+                          ('ErrorCode: 99999. ' + secret, dialog), ('ErrorCode: 305. ' + 'x' * 4096, dialog)):
+        require(not installation_evidence([message(value, parent)])['error_codes'],
+                'unconfirmed or malformed error text became a terminal failure')
+    waits = []
+    observed = SimpleNamespace(installation_evidence=lambda: {'error_codes': []},
+                               matching=lambda label: label == 'Installing')
+    def wait(action, description, seconds=30):
+        waits.append((description, seconds))
+        return action() or require(False, 'synthetic installer made no progress')
+    observed.wait = wait
+    checks = iter((False, True))
+    wait_native_installation(observed, lambda: next(checks))
+    require(waits == [('native installer startup', 30), ('native installation completion', 360)],
+            'installer observation changed the completion deadline')
+    observed.installation_evidence = lambda: {'error_codes': [305]}
+    with mock.patch.object(observed, 'matching') as matching:
+        try:
+            wait_native_installation(observed, lambda: True)
+        except Failure as error:
+            require(str(error) == 'native installation failed ErrorCode=305',
+                    'terminal error lost its safe numeric diagnostic')
+        else:
+            raise Failure('terminal error was mistaken for installation success')
+        require(not matching.called, 'terminal installation error kept driving the GUI')
+    observed.matching = lambda label: label == 'Installing'
+    states = iter(({'error_codes': []}, {'error_codes': [203]}))
+    observed.installation_evidence = lambda: next(states)
+    try:
+        wait_native_installation(observed, lambda: False)
+    except Failure as error:
+        require(str(error) == 'native installation failed ErrorCode=203',
+                'error after installer progress was replaced by a timeout')
+    else:
+        raise Failure('installer progress hid a subsequent terminal error')
     gui = GUI.__new__(GUI)
     gui.api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3,
                               ROLE_RADIO_BUTTON=4, STATE_ENABLED=5, STATE_CHECKED=6,
                               STATE_EDITABLE=7, ROLE_TEXT=8, STATE_SHOWING=9,
-                              STATE_FOCUSABLE=10, STATE_FOCUSED=11, DESKTOP_COORDS=0)
+                              STATE_FOCUSABLE=10, STATE_FOCUSED=11, STATE_DEFUNCT=12, DESKTOP_COORDS=0)
     def fixture_node(role, x, y, width, height, checked=False):
         node = mock.Mock(name='synthetic-private-node')
         node.name = ''
@@ -912,6 +1410,7 @@ def self_check():
                 'scaled OCR accepted an unsafe or ambiguous phrase')
     for already_ready in (False, True):
         wizard = mock.Mock()
+        wizard.installation_evidence.return_value = {'error_codes': [], 'visible_controls': []}
         stage = ['credentials']
         wizard.matching.side_effect = lambda label: [object()] if (
             label == "Let's get started" or (stage[0] == 'installed' and already_ready
@@ -951,10 +1450,13 @@ def self_check():
         require(all(call.args[0] != 'Config revoked' for call in revocation.matching.call_args_list),
                 'native revocation still depends on a transient notification')
     button = fixture_node(3, 16, 648, 348, 56)
+    button.getRoleName.return_value = 'button'
+    gui.share_evidence = {'stage': 'export-dialog'}
     action = button.queryAction.return_value
     action.nActions = 1
     for action_name, accepted in (('Press', True), ('Press', False),
-                                  ('Press', RuntimeError('synthetic-private-value')), ('SetFocus', True)):
+                                  ('Press', RuntimeError('synthetic-private-value')),
+                                  ('Press', TimeoutError('synthetic-private-value')), ('SetFocus', True)):
         action.getName.return_value = action_name
         action.doAction.return_value = accepted if isinstance(accepted, bool) else None
         action.doAction.side_effect = accepted if isinstance(accepted, Exception) else None
@@ -965,10 +1467,34 @@ def self_check():
                 'native action selection or geometry fallback changed')
         require(action.doAction.call_count == (1 if action_name == 'Press' else 0),
                 'native action was repeated or accepted an unrelated action')
+        receipt = gui.share_evidence['action']
+        expected = ('timeout' if isinstance(accepted, TimeoutError) else 'action-exception'
+                    if isinstance(accepted, Exception) else 'not-accepted' if accepted is False else 'none')
+        require(receipt['method'] == ('atspi' if action_name == 'Press' else 'pointer')
+                and receipt['dispatch_error'] == expected and receipt['role'] == 'button',
+                'share action diagnostics lost delivery evidence')
+        require('synthetic-private' not in json.dumps(receipt), 'share action diagnostics exposed an exception')
+    click_gui = GUI.__new__(GUI)
+    click_gui.share_evidence = {'stage': 'export-dialog'}
+    click_gui.wait = gui.wait
+    click_gui.matching = lambda names: [button, dialog]
+    click_gui.click_node = mock.Mock()
+    with mock.patch.object(time, 'sleep'):
+        GUI.click(click_gui, 'Share')
+    require(click_gui.share_evidence['candidate_count'] == 2, 'share candidate ambiguity was not recorded')
+    click_gui.click_node.assert_called_once_with(button)
     button.queryAction.side_effect = RuntimeError('synthetic-private-value')
     with mock.patch.object(sys.modules[__name__], 'run') as geometry:
         GUI.click_node(gui, button)
     require(geometry.call_count == 1, 'unavailable native action lost the geometry fallback')
+    with mock.patch.object(sys.modules[__name__], 'run', side_effect=Failure('synthetic-private-value')):
+        try:
+            GUI.click_node(gui, button)
+        except Failure:
+            require(gui.share_evidence['action']['dispatch_error'] == 'pointer-exception',
+                    'share pointer failure lost its safe category')
+        else:
+            raise Failure('share diagnostics swallowed a pointer failure')
     dialog = fixture_node(1, -30, 120, 440, 550)
     dialog.name = 'Save AmneziaWG config'
     dialog.getApplication.return_value.get_process_id.return_value = 42
@@ -980,15 +1506,98 @@ def self_check():
         node.get_parent.return_value = dialog
         node.getState.return_value.contains.side_effect = lambda value: value in (5, 7, 9, 10)
     filetype.getState.return_value.contains.side_effect = lambda value: value in (7, 9, 10)
+    for node, role in ((dialog, 'frame'), (save, 'button'), (filename, 'text'), (filetype, 'text')):
+        node.getRoleName.return_value = role
+        node.getApplication.return_value.get_process_id.return_value = 42
+    filename.name = 'synthetic-private-key-value'
     session = json.dumps({'app': {'pid': 42, 'start': 'synthetic-start'},
                           'environment': {'DISPLAY': ':synthetic'}}).encode()
     with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session), \
             mock.patch.object(sys.modules[__name__], 'process_identity', return_value='synthetic-start'), \
             mock.patch.dict(os.environ, {'DISPLAY': ':synthetic'}):
+        export_frame = fixture_node(1, 0, 0, 380, 680)
+        outgoing = fixture_node(3, -364, 180, 348, 56)
+        current = fixture_node(3, 16, 180, 348, 56)
+        landmark = fixture_node(3, 16, 300, 348, 56)
+        outgoing.name = current.name = 'Share'
+        landmark.name = 'Show connection settings'
+        for node in (export_frame, outgoing, current, landmark):
+            node.getApplication.return_value.get_process_id.return_value = 42
+            node.getState.return_value.contains.side_effect = lambda value: value in (5, 9)
+            node.get_parent.return_value = export_frame
+        export_gui = GUI.__new__(GUI)
+        export_gui.api = gui.api
+        export_gui.share_evidence = {'stage': 'export-dialog'}
+        export_gui.nodes = lambda: [export_frame, outgoing, current, landmark]
+        export_gui.matching = lambda names: [outgoing, current]
+        export_gui.wait = mock.Mock(side_effect=lambda action, description, seconds: action()
+                                   or require(False, 'synthetic export target rejected'))
+        export_gui.click_node = mock.Mock()
+        with mock.patch.object(time, 'sleep'):
+            click_export_share(export_gui)
+        require(export_gui.click_node.call_args.args[0] is current,
+                'native export clicked the outgoing first Share candidate')
+        export_gui.click_node.assert_called_once_with(current)
+        require(export_gui.wait.call_args.args[2] == 30, 'native export control budget changed')
+        require(export_gui.share_evidence['export_target'] == {
+            'raw_candidates': 2, 'eligible_candidates': 1, 'current_page': True},
+            'native export target evidence lost the outgoing candidate')
+        for scenario in ('duplicate', 'missing-landmark', 'stale-landmark', 'foreign', 'defunct'):
+            nodes = [export_frame, outgoing, current, landmark]
+            if scenario == 'duplicate':
+                nodes.append(current)
+            elif scenario == 'missing-landmark':
+                nodes.remove(landmark)
+            elif scenario == 'stale-landmark':
+                landmark.queryComponent.return_value.getExtents.return_value.x = 380
+            elif scenario == 'foreign':
+                current.getApplication.return_value.get_process_id.return_value = 99
+            else:
+                current.getState.return_value.contains.side_effect = lambda value: value in (5, 9, 12)
+            export_gui.nodes = lambda: nodes
+            export_gui.click_node.reset_mock()
+            try:
+                click_export_share(export_gui)
+            except Failure:
+                pass
+            else:
+                raise Failure('ambiguous or unavailable native export target was accepted')
+            export_gui.click_node.assert_not_called()
+            require('synthetic-private' not in json.dumps(export_gui.share_evidence),
+                    'native export target evidence exposed UI data')
+            landmark.queryComponent.return_value.getExtents.return_value.x = 16
+            current.getApplication.return_value.get_process_id.return_value = 42
+            current.getState.return_value.contains.side_effect = lambda value: value in (5, 9)
         gui.nodes = lambda: [dialog, save, filename, filetype]
         gui.fields = lambda: [filename, filetype]
         require(export_controls(gui) == (save, filename),
                 'native export selected its title or disabled filter instead of filename and accept button')
+        for nodes, fields, reason in (([dialog, save, filename, filetype], [filename, filetype], 'ready'),
+                                      ([dialog, filename], [filename], 'save-candidate-count'),
+                                      ([dialog, save, filename], [], 'editable-candidate-count'),
+                                      ([dialog, save, save, filename], [filename], 'save-candidate-count')):
+            gui.nodes = lambda: nodes
+            gui.fields = lambda: fields
+            diagnostic = share_diagnostics(gui)
+            require(diagnostic['predicate'] == reason and diagnostic['owned_frames'] == 1,
+                    'share diagnostics lost distinct export predicate states')
+            require('synthetic-private' not in json.dumps(diagnostic), 'share diagnostics exposed UI text')
+        gui.nodes = lambda: [dialog, save, filename, filetype]
+        gui.fields = lambda: [filename, filetype]
+        error_node = message('ErrorCode: 305. synthetic-private-key-value')
+        error_node.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
+        error_node.getRole = lambda: gui.api.ROLE_TEXT
+        error_node.getState = lambda: SimpleNamespace(contains=lambda state: False)
+        gui.nodes = lambda: [dialog, save, filename, error_node]
+        diagnostic = share_diagnostics(gui)
+        require(diagnostic['error_codes'] == [305] and 'synthetic-private' not in json.dumps(diagnostic),
+                'share diagnostics lost or exposed the native terminal error')
+        with mock.patch.object(sys.modules[__name__], 'process_identity', return_value='foreign-start'):
+            diagnostic = share_diagnostics(gui)
+        require(diagnostic['predicate'] == 'ownership-or-access-unavailable'
+                and diagnostic['error_codes'] == [] and diagnostic['owned_frames'] == 0,
+                'share diagnostics inspected a stale application session')
+        gui.nodes = lambda: [dialog, save, filename, filetype]
         filename.queryText.return_value.getText.assert_not_called()
         gui.nodes = lambda: [dialog, save, save, filename, filetype]
         require(export_controls(gui) is None, 'ambiguous native export buttons were accepted')
@@ -1165,8 +1774,18 @@ def main():
         if gui:
             try:
                 print('native_app_visible_role_counts=' + json.dumps(gui.diagnostics(), sort_keys=True), file=sys.stderr)
+                if args.mode == 'setup':
+                    print('native_app_installation_evidence=' + json.dumps(gui.installation_evidence(), sort_keys=True),
+                          file=sys.stderr)
+                if args.mode == 'share':
+                    print('native_app_share_evidence=' + json.dumps(share_diagnostics(gui), sort_keys=True),
+                          file=sys.stderr)
             except Exception:
                 pass
+            if args.mode == 'discover':
+                print('native_app_discover_evidence=' + json.dumps(dict(
+                    getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui)), sort_keys=True),
+                      file=sys.stderr)
         return 1
 
 

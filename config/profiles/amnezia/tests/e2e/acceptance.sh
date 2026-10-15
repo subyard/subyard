@@ -9,7 +9,7 @@ VM_COUNT_REQUESTED=2
 VM_COUNT=2
 
 lane=full
-usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|resources|reboot|recovery|startup|disabled|reconnect]\n'; }
+usage() { printf 'Usage: config/profiles/amnezia/tests/e2e/acceptance.sh --slot N [--lane full|setup|share|resources|reboot|recovery|startup|disabled|reconnect]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -18,8 +18,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --lane)
-      [ "$#" -ge 2 ] || die '--lane requires full, resources, reboot, recovery, startup, disabled or reconnect'
-      case "$2" in full|resources|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, resources, reboot, recovery, startup, disabled or reconnect' ;; esac
+      [ "$#" -ge 2 ] || die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect'
+      case "$2" in full|setup|share|resources|reboot|recovery|startup|disabled|reconnect) lane="$2" ;; *) die '--lane requires full, setup, share, resources, reboot, recovery, startup, disabled or reconnect' ;; esac
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -42,6 +42,22 @@ diagnose_failure() {
         timeout 20 "$@" >/dev/null 2>&1 || rc=$?
         printf "startup_probe=%s duration_seconds=%s exit=%s\n" "$label" "$((SECONDS - started))" "$rc"
       }
+      # Retain only the exact owned native containers state before lease teardown.
+      if [ "$(timeout 10 incus config get yard-vpn-e2e user.subyard.managed --project subyard-vpn-e2e)" = true ]; then
+        rc=0
+        state="$(timeout 10 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+          docker inspect --format "{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.State.ExitCode}}" \
+          amnezia-awg2 2>/dev/null)" || rc=$?
+        IFS="|" read -r status running restarting code <<<"$state"
+        case "$status:$running:$restarting" in
+          created:false:false|running:true:false|paused:true:false|restarting:true:true|exited:false:false|dead:false:false)
+            if [[ "$code" =~ ^[0-9]{1,3}$ ]] && [ "$code" -le 255 ]; then
+              printf "native_server_container_status=%s running=%s restarting=%s exit=%s probe_exit=%s\n" \
+                "$status" "$running" "$restarting" "$code" "$rc"
+            fi ;;
+          *) printf "native_server_container_state=unavailable probe_exit=%s\n" "$rc" ;;
+        esac
+      fi
       probe guest-observe incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
         python3 /usr/local/lib/subyard-amnezia/runtime.py observe
       probe guest-docker-enumerate incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
@@ -134,7 +150,7 @@ native_app() {
   guest 2 env SUBYARD_E2E_VM=2 bash "${GUEST_DIRS[2]}/src/config/profiles/amnezia/tests/e2e/native-app.sh" "$@" </dev/null
 }
 
-prepare_native_clients() {
+prepare_native_server() {
   printf 'amnezia_acceptance_stage=protected-admin-transfer\n'
   guest 2 bash -ceu '
     directory=/var/tmp/subyard-amnezia-client
@@ -155,6 +171,10 @@ prepare_native_clients() {
   native_app install
   native_app setup --host "${VM_IP[1]}" --ssh-port 2226 --user amnezia \
     --key-file /var/tmp/subyard-amnezia-client/admin.key --udp-port 51820
+}
+
+prepare_native_exports() {
+  prepare_native_server
   native_app share --name acceptance-one --output-file /var/tmp/subyard-amnezia-client/client-one.conf
   native_app share --name acceptance-two --output-file /var/tmp/subyard-amnezia-client/client-two.conf
   guest 2 python3 - <<'PYCLIENTS'
@@ -168,6 +188,10 @@ one, two = identity('one'), identity('two')
 assert all(left != right for left, right in zip(one, two)), 'native clients do not have independent identities'
 print('ok: two native clients have independent keys and addresses')
 PYCLIENTS
+}
+
+prepare_native_clients() {
+  prepare_native_exports
   # Transfer the exact native image by a temporary tag: image IDs depend on the
   # source daemon's image store and need not resolve in the destination daemon.
   guest 1 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- sh -ceu '
@@ -246,13 +270,24 @@ verify_boot_result() {
     || die 'boot power reconciliation did not succeed in the current boot'
 }
 
-# First init grants Incus access through the product's normal bootstrap. A new
-# dev session then receives that group membership for the remaining commands.
+# A fresh dev session receives product platform enrollment for the remaining commands.
 owner_phase bootstrap
 if [ "$lane" = disabled ] || [ "$lane" = reconnect ]; then
   owner_phase init-isolated
 else
   owner_phase init
+fi
+if [ "$lane" = setup ]; then
+  prepare_native_server
+  native_app close
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
+fi
+if [ "$lane" = share ]; then
+  prepare_native_exports
+  native_app close
+  printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
+  exit 0
 fi
 prepare_native_clients
 if [ "$lane" = resources ] || [ "$lane" = full ]; then

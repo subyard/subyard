@@ -123,6 +123,7 @@ type CLI struct {
 	profileInitRepair            *configApplyRepairPermit
 	integrationCleanupRepair     *configApplyRepairPermit
 	teardownRepair               *configApplyRepairPermit
+	resourceShutdownRepair       *resourceShutdownPermit
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -135,6 +136,7 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
 	operation.teardownRepair = nil
+	operation.resourceShutdownRepair = nil
 	return &operation
 }
 
@@ -177,6 +179,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 	operation.configApplyRepair = nil
 	operation.profileInitRepair = nil
 	operation.integrationCleanupRepair = nil
+	operation.resourceShutdownRepair = nil
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -412,6 +415,7 @@ func New(options Options) (*CLI, error) {
 }
 
 func (cli *CLI) Run(ctx context.Context) int {
+	cli.resourceShutdownRepair = nil
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
@@ -579,6 +583,17 @@ func (cli *CLI) Run(ctx context.Context) int {
 				return 1
 			}
 			cli.teardownRepair = permit
+			if permit != nil {
+				outcome = nil
+			}
+		}
+		if outcome != nil && profileResource {
+			permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, commandArguments, *outcome)
+			if err != nil {
+				cli.errorf("resource shutdown recovery: %v", err)
+				return 1
+			}
+			cli.resourceShutdownRepair = permit
 			if permit != nil {
 				outcome = nil
 			}

@@ -1318,6 +1318,13 @@ cannot silently reopen the service. Guest data is preserved. Stop the resource b
 files manually; invalid configuration or ambiguous ownership fails closed and requires correction
 before reconciliation.
 
+When completed release history is blocked by unavailable runtime observation, the local owner can
+still assess and confirm the exact declared public-ingress shutdown. Its private admission permit
+binds the installed source, completed journal, ledger, links, configuration and native cleanup plan;
+these are rechecked under the release lock after consent. Bring-up, unfinished history, unrelated
+blockers and changed bindings remain gated. This authorizes only resource cleanup and preserves
+unverified guest cleanup; it never resumes or applies release activation.
+
 ## Test topology
 
 `./tests/run.sh` verifies gofmt, vet, race tests, a fuzz smoke and a static build; syntax-checks every

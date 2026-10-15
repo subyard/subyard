@@ -1693,5 +1693,85 @@ sys.exit(status)
                 self.assertNotIn('203.0.113.11', probe.stdout)
 
 
+class RecoveryReleaseDiagnosticsTests(unittest.TestCase):
+    def test_release_probe_dispatches_pinned_candidate_without_yard_selector(self):
+        owner = (PROFILE / 'tests/e2e/owner.sh').read_text()
+        function = 'capture_release_readiness() {' + owner.split(
+            'capture_release_readiness() {', 1)[1].split('\nwait_vpn_runtime_settled()', 1)[0]
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            bin_directory = root / 'bin'
+            bin_directory.mkdir(mode=0o700)
+            poison = bin_directory / 'yard'
+            poison.write_text('#!/bin/sh\nprintf poisoned >"$fixture/path-used"\nexit 91\n')
+            poison.chmod(0o700)
+            pinned = root / 'pinned-cli'
+            pinned.write_text("""#!/bin/sh
+set -eu
+: >"$fixture/pinned-args"
+chmod 0600 "$fixture/pinned-args"
+printf '%s\n' "$@" >"$fixture/pinned-args"
+# Host migration rejects explicit yard selection before rendering its report.
+[ "$#" -eq 3 ] && [ "$1" = migrate ] && [ "$2" = --check ] && [ "$3" = --json ] || exit 2
+printf '%s\n' '{"journal":{"checkpoint":"complete"},"outcome":{"status":"ready","code":"ready"}}'
+""")
+            pinned.chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(fixture=str(root), YARD_BIN=str(pinned),
+                               PATH=str(bin_directory) + os.pathsep + environment['PATH'])
+            result = subprocess.run(['bash', '-c', function +
+                                     '\ncapture_release_readiness before-agent-loss'],
+                                    cwd=root, env=environment, capture_output=True,
+                                    text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, '')
+            self.assertFalse((root / 'path-used').exists())
+            self.assertIn('exit=0 journal_complete=true status=ready code=ready', result.stdout)
+            self.assertEqual((root / 'pinned-args').read_text().splitlines(),
+                             ['migrate', '--check', '--json'])
+            self.assertEqual(stat.S_IMODE((root / 'recovery-release.json').stat().st_mode), 0o600)
+
+    def probe(self, payload):
+        owner = (PROFILE / 'tests/e2e/owner.sh').read_text()
+        section = owner.split('capture_release_readiness() {', 1)[1]
+        parser = section.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'release.json'
+            path.write_bytes(payload)
+            path.chmod(0o600)
+            result = subprocess.run([sys.executable, '-c', parser, str(path),
+                                     'after-agent-loss-failure', '1'],
+                                    capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        self.assertNotIn('synthetic-private', result.stdout)
+        self.assertNotIn('/private', result.stdout)
+        self.assertNotIn('transaction', result.stdout)
+        return result.stdout
+
+    def test_counts_and_enums_exclude_native_labels_and_identity(self):
+        result = self.probe(json.dumps(dict(
+            journal=dict(checkpoint='complete', transaction='synthetic-private'),
+            outcome=dict(status='operator-action-required', code='dependency-unavailable',
+                         message='synthetic-private', active='/private/source'),
+            blockers=[dict(resource='activation.openlit-runtime', message='synthetic-private'),
+                      dict(resource='activation.materialized-config'),
+                      dict(resource='/private/synthetic-private')])).encode())
+        self.assertEqual(result, 'amnezia_release_probe=after-agent-loss-failure exit=1 '
+                         'journal_complete=true status=operator-action-required '
+                         'code=dependency-unavailable runtime_blockers=1 '
+                         'materialized_blockers=1 other_blockers=1\n')
+
+    def test_malformed_and_oversized_reports_are_unavailable(self):
+        for payload in (b'synthetic-private', b'x' * 65537,
+                        b'{"journal":{},"outcome":[]}',
+                        b'{"outcome":{},"blockers":["synthetic-private"]}'):
+            with self.subTest(size=len(payload)):
+                result = self.probe(payload)
+                self.assertIn('journal_complete=unavailable status=unavailable code=unavailable', result)
+                self.assertIn('runtime_blockers=-1 materialized_blockers=-1 other_blockers=-1', result)
+
+
 if __name__ == '__main__':
     unittest.main()
