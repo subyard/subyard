@@ -142,10 +142,10 @@ class FetchTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertIsNone(fetch.command(['python3', str(program)], self.base, 1, True))
         self.assertLess(time.monotonic()-started, 3)
-        self.assertEqual(output.getvalue(), '')
         child = Path('/proc')/child_pid.read_text()/'stat'
-        if child.exists():
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError):
             self.assertIn(child.read_text().rsplit(')', 1)[1].split()[0], ('Z', 'X'))
+        self.assertEqual(output.getvalue(), '')
 
 
 if __name__ == '__main__':
