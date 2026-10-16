@@ -17,10 +17,11 @@ func StartAddressReadiness(
 	instance ports.InstanceInfo,
 	localAddresses func() ([]netip.Addr, error),
 ) (domain.StartState, []string, error) {
+	metadata := parsePowerMetadata(instance)
 	if !strings.EqualFold(instance.Status, "stopped") ||
-		instance.Config["user.subyard.managed"] != "true" ||
-		instance.Config["user.subyard.initialized"] != "true" ||
-		instance.Config["user.subyard.desired_power"] != PowerRunning {
+		metadata.Managed.State != fieldValid || !metadata.Managed.Value ||
+		metadata.Initialized.State != fieldValid || !metadata.Initialized.Value ||
+		metadata.Desired.State != fieldValid || metadata.Desired.Value != domain.PowerRunning {
 		return "", nil, nil
 	}
 	required := make(map[netip.Addr]struct{})

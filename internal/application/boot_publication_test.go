@@ -5,13 +5,14 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func TestBootOptionalPublicationDoesNotDelayOrRestartYard(t *testing.T) {
-	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": managedPowerInstance("p", "yard", "Stopped", PowerRunning)}}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": managedPowerInstance("p", "yard", "Stopped", domain.PowerRunning)}}
 	pending := true
 	reconciler := BootPowerReconciler{Inventory: fake, Instances: fake, Power: fake, Network: networkGuardFunc(func(context.Context, []string) error { return nil }), NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy), EnsureNetworkLock: ensureBootNetworkLock,
 		ReconcilePublications: func(context.Context, yardnetwork.Yard) ([]string, error) {
@@ -44,9 +45,9 @@ func TestBootPublicationFailureIsolatedAcrossYards(t *testing.T) {
 	for _, status := range []string{"Running", "Stopped"} {
 		t.Run(status, func(t *testing.T) {
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-				"p/a": managedPowerInstance("p", "a", status, PowerRunning),
-				"p/m": managedPowerInstance("p", "m", "Stopped", PowerRunning),
-				"p/z": managedPowerInstance("p", "z", "Stopped", PowerRunning),
+				"p/a": managedPowerInstance("p", "a", status, domain.PowerRunning),
+				"p/m": managedPowerInstance("p", "m", "Stopped", domain.PowerRunning),
+				"p/z": managedPowerInstance("p", "z", "Stopped", domain.PowerRunning),
 			}}
 			conflict := errors.New("invalid publication ownership")
 			var runningChecks []string
@@ -82,7 +83,7 @@ func TestBootPublicationFailureIsolatedAcrossYards(t *testing.T) {
 }
 
 func TestBootPublicationConflictStillStopsUnsafeRunningYard(t *testing.T) {
-	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/a": managedPowerInstance("p", "a", "Running", PowerRunning)}}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/a": managedPowerInstance("p", "a", "Running", domain.PowerRunning)}}
 	runtimeErr := errors.New("unsafe runtime")
 	r := BootPowerReconciler{Inventory: fake, Instances: fake, Power: fake,
 		Network:       networkGuardFunc(func(context.Context, []string) error { return nil }),

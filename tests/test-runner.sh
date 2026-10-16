@@ -294,6 +294,7 @@ cp "$ROOT/config/profiles/github/tests/run.sh" "$fixture/config/profiles/github/
 for check in cleanup teardown-identity composition; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/config/profiles/github/tests/$check.sh"
 done
+printf 'raise SystemExit(0)\n' > "$fixture/config/profiles/github/tests/runtime-test.py"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
   bash "$fixture/config/profiles/github/tests/run.sh" > "$tmp/github-go.out" 2>&1
 awk '!/-count=1/ { exit 1 }

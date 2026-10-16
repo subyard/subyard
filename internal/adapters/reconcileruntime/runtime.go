@@ -127,7 +127,7 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		drift, routeErr := runtime.previewRouteDrift(ctx, runtime.previewHost(ctx))
 		return err == nil && !drift, routeErr
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
-		return runtime.powerConverged(ctx, true)
+		return runtime.powerReadyForFinalize(ctx)
 	case ports.ReconcileStageTestVMs:
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
@@ -306,9 +306,9 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 	case ports.ReconcileStageProvision:
 		return runtime.provisionConverged(ctx)
 	case ports.ReconcileStagePower:
-		return runtime.powerConverged(ctx, false)
+		return runtime.verifyPowerReconciler(ctx)
 	case ports.ReconcileStageFinalize:
-		return runtime.powerConverged(ctx, true)
+		return runtime.powerReadyForFinalize(ctx)
 	default:
 		return runtime.CheckStage(ctx, stage)
 	}
@@ -1098,7 +1098,7 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	}
 	if err := runtime.withNetworkStart(ctx, func() error {
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-			"SUBYARD_POWER_DESIRED":           desired,
+			"SUBYARD_POWER_DESIRED":           string(desired),
 			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
 			"VM_CPU_WEIGHT":                   vmWeight,
 		}, "03-create-subyard.sh", "--yes")
@@ -1230,7 +1230,7 @@ func (runtime Runtime) testVMHostSinkFailure(ctx context.Context) error {
 	return nil
 }
 
-func (runtime Runtime) testVMBackend(desired string) (*testvmsruntime.Backend, error) {
+func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsruntime.Backend, error) {
 	environment := runtimeEnvironment(runtime.Environment)
 	extras, err := runtime.extrasContext()
 	if err != nil {
@@ -1375,7 +1375,7 @@ func (runtime Runtime) runObservedPowerScript(
 		return err
 	}
 	return runtime.runScriptEnvironment(ctx, output, map[string]string{
-		"SUBYARD_POWER_DESIRED": intent.Desired,
+		"SUBYARD_POWER_DESIRED": string(intent.Desired),
 	}, name, arguments...)
 }
 
@@ -1396,7 +1396,7 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 		return err
 	}
 	action := "stop"
-	if intent.Desired == application.PowerRunning {
+	if intent.Desired == domain.PowerRunning {
 		action = "start"
 	}
 	run := func() error {
@@ -1416,7 +1416,7 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 	if err := runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired); err != nil {
 		return err
 	}
-	if intent.Desired == application.PowerRunning {
+	if intent.Desired == domain.PowerRunning {
 		instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 		if err != nil {
 			return err
@@ -1995,17 +1995,14 @@ func safeCommand(command string) bool {
 }
 
 func instanceIntentionallyStopped(instance ports.InstanceInfo) bool {
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	return strings.EqualFold(instance.Status, "stopped") &&
-		managed == "true" && initialized == "true" && desired == "stopped"
+	return application.InstanceIntentionallyStopped(instance)
 }
 
-func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool) (bool, error) {
-	if !requireMetadata {
-		return runtime.powerReconcilerConverged(ctx), nil
-	}
+func (runtime Runtime) verifyPowerReconciler(ctx context.Context) (bool, error) {
+	return runtime.powerReconcilerConverged(ctx), nil
+}
+
+func (runtime Runtime) powerReadyForFinalize(ctx context.Context) (bool, error) {
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
@@ -2014,17 +2011,9 @@ func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool)
 	if err != nil || !state.InstanceFound {
 		return false, err
 	}
-	instance := state.Instance
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	instanceBridge, _ := instance.EffectiveConfig("user.subyard.bridge")
-	autostart, _ := instance.EffectiveConfig("boot.autostart")
 	bridge := runtime.environmentDefault("INCUS_BRIDGE",
 		runtime.environmentDefault("INCUS_NETWORK", "incusbr0"))
-	if managed != "true" || initialized != "true" ||
-		(desired != "running" && desired != "stopped") ||
-		instanceBridge != bridge || autostart != "false" {
+	if !application.PowerMetadataReadyForFinalize(state.Instance, bridge) {
 		return false, nil
 	}
 	return runtime.powerReconcilerConverged(ctx), nil

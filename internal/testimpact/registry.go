@@ -89,7 +89,7 @@ func BuiltInRegistry() (Registry, error) {
 		"ccusage-provision", "cli-contract", "codex-agent-defaults", "codex-agent-provision", "codex-legacy-config",
 		"command-registry", "create-subyard-docker-apparmor", "create-subyard-limits", "docker-forwarding-convergence",
 		"engine-release", "full-uninstall", "init-extras-convergence", "init-network-convergence", "init-project-convergence",
-		"install-incus-data-home", "install-runtime-release-rollback", "key-tools-install", "lib-power-network",
+		"install-incus-data-home", "install-runtime-release-rollback", "installed-runtime-refresh", "key-tools-install", "lib-power-network",
 		"lifecycle-guard", "opencode-agent-defaults", "opencode-agent-provision",
 		"p0-capacity", "paseo-agent-contract", "paseo-project-sync",
 		"power-reconciler-systemd-255-launch", "power-reconciler-systemd", "preview", "preview-proxy",

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
@@ -69,8 +70,8 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 	}
 	bridges := managedBridges(instances)
 	for _, instance := range instances {
-		desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-		if desired != PowerStopped {
+		desired := parsePowerMetadata(instance).Desired.Value
+		if desired != domain.PowerStopped {
 			continue
 		}
 		reference := instanceReference(instance)
@@ -96,8 +97,8 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 		if err := validateManagedPower(instance); err != nil {
 			return result, err
 		}
-		desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-		if desired != PowerRunning {
+		desired := parsePowerMetadata(instance).Desired.Value
+		if desired != domain.PowerRunning {
 			continue
 		}
 		reference := instanceReference(instance)
@@ -196,8 +197,8 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 }
 
 func bootNetworkYard(instance ports.InstanceInfo) yardnetwork.Yard {
-	name, _ := instance.EffectiveConfig("user.subyard.name")
-	network, _ := instance.EffectiveConfig("user.subyard.bridge")
+	name, _ := instance.EffectiveConfig(powerYardNameKey)
+	network, _ := instance.EffectiveConfig(powerBridgeKey)
 	return yardnetwork.Yard{
 		Name: name, Project: instance.Project, Instance: instance.Name, Network: network,
 	}
@@ -283,12 +284,12 @@ func (bootWallClock) After(delay time.Duration) <-chan time.Time { return time.A
 func filterManagedInstances(instances []ports.InstanceInfo, validate bool) ([]ports.InstanceInfo, error) {
 	managed := make([]ports.InstanceInfo, 0, len(instances))
 	for _, instance := range instances {
-		managedValue, _ := instance.EffectiveConfig("user.subyard.managed")
-		switch managedValue {
-		case "", "false":
+		metadata := parsePowerMetadata(instance)
+		if metadata.Managed.State == fieldAbsent || metadata.Managed.State == fieldEmpty ||
+			metadata.Managed.State == fieldValid && !metadata.Managed.Value {
 			continue
-		case "true":
-		default:
+		}
+		if metadata.Managed.State != fieldValid {
 			return nil, fmt.Errorf("%s has invalid managed power metadata", instanceReference(instance))
 		}
 		if validate {
@@ -336,20 +337,17 @@ func validateManagedPower(instance ports.InstanceInfo) error {
 	if instance.Project == "" || instance.Name == "" {
 		return errors.New("managed instance has incomplete identity")
 	}
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	if initialized != "true" {
+	metadata := parsePowerMetadata(instance)
+	if metadata.Initialized.State != fieldValid || !metadata.Initialized.Value {
 		return fmt.Errorf("%s is not fully initialized", reference)
 	}
-	autostart, _ := instance.EffectiveConfig("boot.autostart")
-	if autostart != "false" {
+	if metadata.Autostart.State != fieldValid || metadata.Autostart.Value {
 		return fmt.Errorf("%s must set boot.autostart=false", reference)
 	}
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	if desired != PowerRunning && desired != PowerStopped {
-		return fmt.Errorf("%s has invalid desired power %q", reference, desired)
+	if metadata.Desired.State != fieldValid {
+		return fmt.Errorf("%s has invalid desired power %q", reference, metadata.Desired.Raw)
 	}
-	bridge, _ := instance.EffectiveConfig("user.subyard.bridge")
-	if bridge == "" {
+	if metadata.Bridge.State != fieldValid {
 		return fmt.Errorf("%s has no managed bridge", reference)
 	}
 	return nil
@@ -358,7 +356,7 @@ func validateManagedPower(instance ports.InstanceInfo) error {
 func managedBridges(instances []ports.InstanceInfo) []string {
 	seen := make(map[string]struct{}, len(instances))
 	for _, instance := range instances {
-		bridge, _ := instance.EffectiveConfig("user.subyard.bridge")
+		bridge, _ := instance.EffectiveConfig(powerBridgeKey)
 		seen[bridge] = struct{}{}
 	}
 	bridges := make([]string, 0, len(seen))

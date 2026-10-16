@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -23,7 +24,7 @@ type Backend struct {
 	Project        string
 	Instance       string
 	YardName       string
-	DesiredPower   string
+	DesiredPower   domain.DesiredPower
 	HostMemory     bool
 	Environment    map[string]string
 	Runner         CommandRunner
@@ -150,7 +151,7 @@ func (backend *Backend) observeReadiness(ctx context.Context, diagnostic bool) (
 		return notReady("published controller route is not converged", err, err)
 	}
 	if outer != "RUNNING" {
-		if outer == "STOPPED" && backend.DesiredPower == "stopped" {
+		if outer == "STOPPED" && backend.DesiredPower == domain.PowerStopped {
 			return true, nil
 		}
 		return notReady("outer yard power state differs", nil, nil)
@@ -199,7 +200,7 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 	if backend.Output == nil {
 		backend.Output = io.Discard
 	}
-	if backend.DesiredPower != "running" && backend.DesiredPower != "stopped" {
+	if backend.DesiredPower != domain.PowerRunning && backend.DesiredPower != domain.PowerStopped {
 		return errors.New("prepared desired power is required")
 	}
 	outer, err := backend.outerState(ctx)
@@ -217,7 +218,7 @@ func (backend *Backend) Apply(ctx context.Context) (err error) {
 		if err := backend.Start(ctx); err != nil {
 			return err
 		}
-		temporaryStart = backend.DesiredPower == "stopped"
+		temporaryStart = backend.DesiredPower == domain.PowerStopped
 	}
 	defer func() {
 		if !temporaryStart {

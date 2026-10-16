@@ -124,6 +124,19 @@ func TestProductionShellIsReachableAndLeafOnly(t *testing.T) {
 					}
 				}
 			}
+			if leaf.kind == "installed-runtime" {
+				for _, marker := range []string{
+					"func (runtime Runtime) ObserveInstalledRuntime",
+					"func (runtime Runtime) ApplyInstalledRuntime",
+					"verified, err := runtime.ObserveInstalledRuntime(ctx, id)",
+					leaf.name,
+				} {
+					if !strings.Contains(string(owner), marker) {
+						t.Errorf("%s lacks installed-runtime observe/apply/verify ownership in %s through %q",
+							path, contract.owner, marker)
+					}
+				}
+			}
 		}
 	}
 	for path := range contracts {
@@ -359,6 +372,9 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/04-provision-subyard.sh":     {"leaf", goReconcile, `"04-provision-subyard.sh"`},
 		"scripts/prepare-preview-route.sh":    {"leaf", goReconcile, `preparePreviewRoute`},
 		"scripts/reconcile-integrations.sh":   {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
+		"scripts/refresh-installed-guest-runtime.sh": {
+			"leaf", "internal/adapters/reconcileruntime/installed_runtime.go", `"refresh-installed-guest-runtime.sh"`,
+		},
 		"scripts/05-mount-host-paths.sh":      {"leaf", goReconcile, `"05-mount-host-paths.sh"`},
 		"scripts/06-network.sh":               {"leaf", goReconcile, `"06-network.sh"`},
 		"scripts/07-ssh-access.sh":            {"leaf", goReconcile, `"07-ssh-access.sh"`},
@@ -501,6 +517,9 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/install-power-reconciler.sh": {"reconcile", "ports.ReconcileStagePower"},
 		"scripts/install-test-vms-host-sink.sh": {
 			"reconcile", "ports.ReconcileStageTestVMs",
+		},
+		"scripts/refresh-installed-guest-runtime.sh": {
+			"installed-runtime", "core-guest-runtime",
 		},
 		"scripts/e2e-lab/invoke.sh":         {"command", "test-vms"},
 		"scripts/reconcile-integrations.sh": {"command", "integration"},

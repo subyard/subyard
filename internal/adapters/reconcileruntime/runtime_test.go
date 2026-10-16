@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -239,7 +238,7 @@ func TestTestVMBackendStartUsesNetworkPolicy(t *testing.T) {
 			YardInstanceName: "yard", IncusBridge: "incusbr0",
 		},
 	}
-	backend, err := runtime.testVMBackend(application.PowerRunning)
+	backend, err := runtime.testVMBackend(domain.PowerRunning)
 	if err != nil {
 		t.Fatal(err)
 	}

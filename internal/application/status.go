@@ -50,9 +50,9 @@ func (service StatusService) Read(ctx context.Context, yard domain.Context) (dom
 		Context: yard, State: strings.ToUpper(instance.Status),
 		StartState: startState, WaitingForAddresses: waiting, DeferredPublications: ownerpublication.Deferred(instance),
 		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
-		Desired:           valueOr(instance.Config["user.subyard.desired_power"], "unmanaged"),
-		Initialized:       valueOr(instance.Config["user.subyard.initialized"], "no"),
-		IncusAutostart:    instance.Config["boot.autostart"],
+		Desired:           valueOr(instance.Config[powerDesiredKey], "unmanaged"),
+		Initialized:       valueOr(instance.Config[powerInitializedKey], "no"),
+		IncusAutostart:    instance.Config[powerAutostartKey],
 		ProjectCount:      len(records), Facts: facts,
 	}
 	status.SSHConfigured = localSSHConfigured(ctx, yard, instance)

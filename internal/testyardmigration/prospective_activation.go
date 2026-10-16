@@ -5,14 +5,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"github.com/Subyard/Subyard/internal/application"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // ActivationProjection describes only the registration and override publication
@@ -115,7 +116,7 @@ func PrepareProjectedActivationApplicability(ctx context.Context, options Option
 	_, adopt, migrates := preparedLegacyState(before.State)
 	if migrates && !adopt {
 		broker := BrokerRuntimeInactive
-		if loaded.Context.NestedE2EVMs && application.InitialPower(loaded.Context) == application.PowerRunning {
+		if loaded.Context.NestedE2EVMs && application.InitialPower(loaded.Context) == domain.PowerRunning {
 			broker = BrokerRuntimeActive
 		}
 		return broker, StateCurrent, nil

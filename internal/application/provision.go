@@ -114,7 +114,7 @@ func (runner ProvisionRunner) Run(
 	}
 
 	restore := func() error {
-		if !started || intent.Desired != PowerStopped {
+		if !started || intent.Desired != domain.PowerStopped {
 			return nil
 		}
 		physical := request
@@ -188,7 +188,7 @@ func (runner ProvisionRunner) Run(
 	}
 	return domain.AdapterResult{
 		Schema: request.Schema, OperationID: request.OperationID, Status: "ok",
-		Output: map[string]any{"profiles": len(runner.Profiles), "desiredPower": intent.Desired},
+		Output: map[string]any{"profiles": len(runner.Profiles), "desiredPower": string(intent.Desired)},
 	}, output.String(), nil
 }
 

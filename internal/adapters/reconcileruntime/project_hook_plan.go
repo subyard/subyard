@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -159,9 +160,7 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 		return err
 	}
 	if plan.stopped {
-		managed, _ := state.Instance.EffectiveConfig("user.subyard.managed")
-		desired, _ := state.Instance.EffectiveConfig("user.subyard.desired_power")
-		if !state.InstanceFound || managed != "true" || desired != "stopped" ||
+		if !state.InstanceFound || !application.ProjectHookStoppedIntentPreserved(state.Instance) ||
 			beforeWrites && !instanceIntentionallyStopped(state.Instance) {
 			return fmt.Errorf("%w: captured stopped project hook power intent changed", domain.ErrPlanStale)
 		}
