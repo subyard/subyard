@@ -16,18 +16,19 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-func (runtime Runtime) preparedBinding(prepared domain.RemotePrepared) (string, error) {
-	type file struct {
-		Path          string
-		Exists        bool
-		Mode          os.FileMode
-		Size          int64
-		Modified      int64
-		Device, Inode uint64
-		UID, GID      uint32
-		Changed       syscall.Timespec
-		Content       []byte
-	}
+type preparedFile struct {
+	Path          string
+	Exists        bool
+	Mode          os.FileMode
+	Size          int64
+	Modified      int64
+	Device, Inode uint64
+	UID, GID      uint32
+	Changed       syscall.Timespec
+	Content       []byte
+}
+
+func (runtime Runtime) preparedFiles(prepared domain.RemotePrepared) ([]preparedFile, error) {
 	paths := []string{runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)}
 	contextPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
@@ -36,7 +37,7 @@ func (runtime Runtime) preparedBinding(prepared domain.RemotePrepared) (string, 
 	paths = append(paths, contextPath)
 	identityPaths := make(map[string]bool)
 	if runtime.PublicKey != "" && !strings.HasSuffix(runtime.PublicKey, ".pub") {
-		return "", errors.New("controller public key path must end in .pub")
+		return nil, errors.New("controller public key path must end in .pub")
 	}
 	for _, public := range []string{runtime.PublicKey, filepath.Join(runtime.Home, ".ssh", "id_ed25519.pub"), filepath.Join(runtime.Home, ".ssh", "id_ecdsa.pub"), filepath.Join(runtime.Home, ".ssh", "id_rsa.pub"), filepath.Join(runtime.DataHome, "ssh", "id_ed25519.pub")} {
 		if public == "" {
@@ -50,19 +51,19 @@ func (runtime Runtime) preparedBinding(prepared domain.RemotePrepared) (string, 
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
-	files := make([]file, 0, len(paths))
+	files := make([]preparedFile, 0, len(paths))
 	for _, path := range paths {
-		fact := file{Path: path}
+		fact := preparedFile{Path: path}
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			files = append(files, fact)
 			continue
 		}
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if !info.Mode().IsRegular() || (!identityPaths[path] && info.Mode().Perm()&0o077 != 0) || (identityPaths[path] && !strings.HasSuffix(path, ".pub") && info.Mode().Perm()&0o077 != 0) {
-			return "", errors.New("unsafe remote configuration target")
+			return nil, errors.New("unsafe remote configuration target")
 		}
 		fact.Exists, fact.Mode = true, info.Mode()
 		fact.Size, fact.Modified = info.Size(), info.ModTime().UnixNano()
@@ -72,16 +73,28 @@ func (runtime Runtime) preparedBinding(prepared domain.RemotePrepared) (string, 
 		if !identityPaths[path] || strings.HasSuffix(path, ".pub") {
 			fact.Content, err = os.ReadFile(path)
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 		}
 		files = append(files, fact)
 	}
+	return files, nil
+}
+
+func preparedFilesBinding(files []preparedFile) (string, error) {
 	payload, err := json.Marshal(files)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
+}
+
+func (runtime Runtime) preparedBinding(prepared domain.RemotePrepared) (string, error) {
+	files, err := runtime.preparedFiles(prepared)
+	if err != nil {
+		return "", err
+	}
+	return preparedFilesBinding(files)
 }
 
 func verifyRemoteFiles(expected map[string][]byte) error {

@@ -29,7 +29,9 @@ type Runtime struct {
 	SSH, Home, ConfigHome, ConfigDir, DataHome, PublicKey string
 	Environment                                           []string
 	Timeout                                               time.Duration
-	processCall                                           func(context.Context, string, []string, []byte) ([]byte, error)
+	// AdmitMutation retains the caller's original owner authority across authorization.
+	AdmitMutation func(context.Context) (func(), error)
+	processCall   func(context.Context, string, []string, []byte) ([]byte, error)
 }
 
 func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteRecord, bool, error) {
@@ -115,7 +117,7 @@ func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (
 }
 
 func (runtime Runtime) ScanYardKeys(ctx context.Context, spec domain.RemoteSpec, port int) ([]domain.RemoteKey, error) {
-	payload, err := runtime.hostCall(ctx, spec.OwnerEndpoint, nil, "ssh-keyscan",
+	payload, err := runtime.hostCall(ctx, spec.OwnerEndpoint, runtime.timeout(), nil, "ssh-keyscan",
 		"-T", strconv.Itoa(runtime.timeoutSeconds()), "-p", strconv.Itoa(port), "127.0.0.1")
 	if err != nil {
 		return nil, err
@@ -138,6 +140,12 @@ func (runtime Runtime) Apply(ctx context.Context, prepared domain.RemotePrepared
 	case domain.RemoteAdd, domain.RemoteRepairKey, domain.RemoteRemove:
 	default:
 		return domain.RemoteResult{}, errors.New("unknown prepared remote action")
+	}
+	if prepared.Action == domain.RemoteAdd && runtime.AdmitMutation != nil {
+		if prepared.Binding == "" {
+			return domain.RemoteResult{}, domain.ErrPlanStale
+		}
+		return runtime.applyAdmittedAdd(ctx, prepared)
 	}
 	unlock, err := runtime.lockMutation(ctx)
 	if err != nil {
@@ -220,12 +228,16 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	if _, err := runtime.ownerCall(ctx, prepared.Spec, publicKey, "_authorize"); err != nil {
 		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
 	}
+	return runtime.commitAdd(ctx, prepared, identity)
+}
+
+func (runtime Runtime) commitAdd(ctx context.Context, prepared domain.RemotePrepared, identity string) (domain.RemoteResult, error) {
 	envPath := filepath.Join(runtime.ConfigHome, "yards", prepared.Spec.LegacyAlias, "config.env")
 	if prepared.Existing != nil {
 		envPath = prepared.Existing.Path
 	}
 	snippet, sshConfig, known, cache := runtime.snippetPath(prepared.Spec.LegacyAlias), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath(prepared.Spec.LegacyAlias)
-	err = transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
+	err := transactional([]string{envPath, snippet, sshConfig, known, cache}, func() error {
 		current, err := readOptional(envPath)
 		if err != nil {
 			return err
@@ -270,6 +282,100 @@ func (runtime Runtime) applyAdd(ctx context.Context, prepared domain.RemotePrepa
 	}
 	return domain.RemoteResult{Message: fmt.Sprintf(
 		"remote yard %q is ready\nUse: yard -Y %s sync <project-dir>\nSecurity: the remote host can read everything explicitly synced into this yard", prepared.Spec.LegacyAlias, prepared.Spec.LegacyAlias)}, nil
+}
+
+// Only the network authorization crosses the gap. Every local publication is
+// admitted against the caller's original owner generation and exact file facts.
+func (runtime Runtime) applyAdmittedAdd(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
+	var identity string
+	var public []byte
+	var command []string
+	phase := func(prepare bool) (result domain.RemoteResult, err error) {
+		releaseOwner, err := runtime.AdmitMutation(ctx)
+		if err != nil {
+			return result, err
+		}
+		defer releaseOwner()
+		releaseRemote, err := runtime.lockMutation(ctx)
+		if err != nil {
+			return result, err
+		}
+		defer releaseRemote()
+		if err = runtime.checkPreparedBinding(prepared); err != nil {
+			return result, err
+		}
+		if err = runtime.verifyCurrent(ctx, prepared); err != nil {
+			return result, err
+		}
+		if prepare {
+			// Trust preparation may publish using its own known-host lock.
+			command, err = runtime.hostCommand(ctx, prepared.Spec.OwnerEndpoint, runtime.ownerArguments(prepared.Spec, "_authorize")...)
+			if err != nil {
+				return result, err
+			}
+		}
+		releaseKnown, err := sshtrust.LockKnownHosts(ctx, runtime.knownHostsPath())
+		if err != nil {
+			return result, err
+		}
+		defer releaseKnown()
+		if err = runtime.checkPreparedBinding(prepared); err != nil {
+			return result, err
+		}
+		if err = ctx.Err(); err != nil {
+			return result, err
+		}
+		if !prepare {
+			return runtime.commitAdd(ctx, prepared, identity)
+		}
+		before, err := runtime.preparedFiles(prepared)
+		if err != nil {
+			return result, err
+		}
+		originalBinding, err := preparedFilesBinding(before)
+		if err != nil {
+			return result, err
+		}
+		if originalBinding != prepared.Binding {
+			return result, domain.ErrPlanStale
+		}
+		public, identity, err = runtime.ensureIdentity(ctx)
+		if err != nil {
+			return result, err
+		}
+		after, err := runtime.preparedFiles(prepared)
+		if err != nil {
+			return result, err
+		}
+		for i, previous := range before {
+			current := after[i]
+			if reflect.DeepEqual(previous, current) {
+				continue
+			}
+			// Only this operation's newly generated identity pair may refine the plan.
+			if previous.Exists || !current.Exists || (current.Path != identity && current.Path != identity+".pub") {
+				return result, domain.ErrPlanStale
+			}
+			if current.Path == identity+".pub" {
+				key, _, _, rest, parseErr := ssh.ParseAuthorizedKey(current.Content)
+				if parseErr != nil || len(bytes.TrimSpace(rest)) != 0 || !bytes.Equal(ssh.MarshalAuthorizedKey(key), public) {
+					return result, domain.ErrPlanStale
+				}
+			}
+		}
+		prepared.Binding, err = preparedFilesBinding(after)
+		return result, err
+	}
+	if _, err := phase(true); err != nil {
+		return domain.RemoteResult{}, err
+	}
+	if _, err := runtime.call(ctx, command, public, runtime.ownerExecutionTimeout()); err != nil {
+		return domain.RemoteResult{}, fmt.Errorf("authorize controller key: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return domain.RemoteResult{}, err
+	}
+	return phase(false)
 }
 
 func (runtime Runtime) applyRepair(ctx context.Context, prepared domain.RemotePrepared) (domain.RemoteResult, error) {
@@ -386,17 +492,27 @@ func (runtime Runtime) verifyCurrent(ctx context.Context, prepared domain.Remote
 	return nil
 }
 
-func (runtime Runtime) ownerCall(ctx context.Context, spec domain.RemoteSpec, stdin []byte, arguments ...string) ([]byte, error) {
+func (runtime Runtime) ownerArguments(spec domain.RemoteSpec, arguments ...string) []string {
 	owner := []string{"yard"}
 	if spec.OwnerYardName != "" {
 		owner = append(owner, "-Y", spec.OwnerYardName)
 	}
 	owner = append(owner, arguments...)
-	command := shellquote.Command(owner)
-	return runtime.hostCall(ctx, spec.OwnerEndpoint, stdin, "bash", "-lc", shellquote.Word(command))
+	return []string{"bash", "-lc", shellquote.Word(shellquote.Command(owner))}
 }
 
-func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin []byte, arguments ...string) ([]byte, error) {
+// Authorization includes installed readiness and native owner work; connection
+// and ordinary probe budgets remain independent.
+func (runtime Runtime) ownerExecutionTimeout() time.Duration {
+	if runtime.Timeout > 0 {
+		return runtime.Timeout
+	}
+	return 10 * time.Minute
+}
+func (runtime Runtime) ownerCall(ctx context.Context, spec domain.RemoteSpec, stdin []byte, arguments ...string) ([]byte, error) {
+	return runtime.hostCall(ctx, spec.OwnerEndpoint, runtime.ownerExecutionTimeout(), stdin, runtime.ownerArguments(spec, arguments...)...)
+}
+func (runtime Runtime) hostCommand(ctx context.Context, destination string, arguments ...string) ([]string, error) {
 	if !domain.SafeSSHTarget(destination) {
 		return nil, fmt.Errorf("invalid SSH target %q", destination)
 	}
@@ -406,23 +522,32 @@ func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin [
 		return nil, err
 	}
 	command = append(options, command...)
-	return runtime.call(ctx, append(command, arguments...), stdin)
+	return append(command, arguments...), nil
+}
+func (runtime Runtime) hostCall(ctx context.Context, destination string, executionTimeout time.Duration, stdin []byte, arguments ...string) ([]byte, error) {
+	command, err := runtime.hostCommand(ctx, destination, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.call(ctx, command, stdin, executionTimeout)
 }
 
 func (runtime Runtime) probeData(ctx context.Context, name string) error {
-	_, err := runtime.call(ctx, []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), "-o", "ControlMaster=no", "-o", "ControlPath=none", "yard-" + name, "--", "true"}, nil)
+	_, err := runtime.call(ctx, []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), "-o", "ControlMaster=no", "-o", "ControlPath=none", "yard-" + name, "--", "true"}, nil, runtime.timeout())
 	return err
 }
 
-func (runtime Runtime) call(ctx context.Context, arguments []string, stdin []byte) ([]byte, error) {
+func (runtime Runtime) call(ctx context.Context, arguments []string, stdin []byte, executionTimeout time.Duration) ([]byte, error) {
 	program := runtime.SSH
 	if program == "" {
 		program = "ssh"
 	}
+	ctx, cancel := context.WithTimeout(ctx, executionTimeout)
+	defer cancel()
 	if runtime.processCall != nil {
 		return runtime.processCall(ctx, program, arguments, stdin)
 	}
-	return (transport.Process{Program: program, Arguments: arguments, Env: runtime.Environment, Timeout: runtime.timeout()}).Call(ctx, "", stdin)
+	return (transport.Process{Program: program, Arguments: arguments, Env: runtime.Environment, Timeout: executionTimeout}).Call(ctx, "", stdin)
 }
 
 func (runtime Runtime) ensureIdentity(ctx context.Context) ([]byte, string, error) {

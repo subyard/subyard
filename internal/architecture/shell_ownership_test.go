@@ -357,6 +357,9 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/02-create-project.sh":        {"leaf", goReconcile, `"02-create-project.sh"`},
 		"scripts/03-create-subyard.sh":        {"leaf", goReconcile, `"03-create-subyard.sh"`},
 		"scripts/04-provision-subyard.sh":     {"leaf", goReconcile, `"04-provision-subyard.sh"`},
+		"scripts/refresh-installed-guest-runtime.sh": {
+			"leaf", "internal/adapters/reconcileruntime/installed_runtime.go", `"refresh-installed-guest-runtime.sh"`,
+		},
 		"scripts/prepare-preview-route.sh":    {"leaf", goReconcile, `preparePreviewRoute`},
 		"scripts/reconcile-integrations.sh":   {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
 		"scripts/05-mount-host-paths.sh":      {"leaf", goReconcile, `"05-mount-host-paths.sh"`},
@@ -502,10 +505,11 @@ func productionLeafContracts() map[string]leafContract {
 		"scripts/install-test-vms-host-sink.sh": {
 			"reconcile", "ports.ReconcileStageTestVMs",
 		},
-		"scripts/e2e-lab/invoke.sh":         {"command", "test-vms"},
-		"scripts/reconcile-integrations.sh": {"command", "integration"},
-		"scripts/lifecycle-guard.sh":        {"command", "lifecycle"},
-		"scripts/teardown-physical.sh":      {"command", "teardown"},
+		"scripts/e2e-lab/invoke.sh":                  {"command", "test-vms"},
+		"scripts/reconcile-integrations.sh":          {"command", "integration"},
+		"scripts/refresh-installed-guest-runtime.sh": {"command", "core-guest-runtime"},
+		"scripts/lifecycle-guard.sh":                 {"command", "lifecycle"},
+		"scripts/teardown-physical.sh":               {"command", "teardown"},
 	}
 }
 

@@ -255,46 +255,113 @@ func (ingress *resourceIngress) clearStaleUDP(ctx context.Context) error {
 	return nil
 }
 
+// Keep the native cause available to errors.Is/As without rendering handler
+// output as retry history. All diagnostic text below consists of closed classes.
+type resourceShutdownProbeFailure struct {
+	message string
+	cause   error
+}
+
+func (failure *resourceShutdownProbeFailure) Error() string { return failure.message }
+func (failure *resourceShutdownProbeFailure) Unwrap() error { return failure.cause }
+
+func resourceShutdownProbeOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "converged"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, resource.ErrResourceUsageInvalid):
+		return "usage_invalid"
+	case errors.Is(err, resource.ErrResourcePlanInvalid):
+		// prepareResourceModeTimeout retains its context in a closed diagnostic,
+		// rather than wrapping it. Match only that complete engine-owned form;
+		// arbitrary handler stderr remains classified as plan_invalid.
+		prefix := resource.ErrResourcePlanInvalid.Error() + ": prepare timed out or was cancelled: "
+		switch err.Error() {
+		case prefix + context.DeadlineExceeded.Error():
+			return "prepare_timeout"
+		case prefix + context.Canceled.Error():
+			return "prepare_cancelled"
+		}
+		return "plan_invalid"
+	case errors.Is(err, domain.ErrPlanStale):
+		return "plan_stale"
+	default:
+		return "other_error"
+	}
+}
+
 // Removing an ingress ACL can restart a running VM. Wait for its agent and
 // verify the resource's own read-only shutdown assessment before recording a
 // disabled startup intent. Retrying preparation never retries the mutation.
 func (ingress *resourceIngress) probeShutdown(ctx context.Context, runner *resourceApplyRunner) error {
-	bounded, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	const budget = 5 * time.Minute
+	started := time.Now()
+	bounded, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	var lastErr error
+	var attempts int
+	var firstAttempt, lastAttempt time.Duration
+	firstFailure, lastOutcome := "none", "none"
+	failure := func(reason, stop string, cause error) error {
+		if firstFailure == "none" {
+			firstFailure = lastOutcome
+		}
+		return &resourceShutdownProbeFailure{cause: cause, message: fmt.Sprintf(
+			"%s: attempts=%d budget_ms=%d elapsed_ms=%d first_attempt_ms=%d last_attempt_ms=%d first_failure=%s last_outcome=%s stop=%s",
+			reason, attempts, budget.Milliseconds(), time.Since(started).Milliseconds(), firstAttempt.Milliseconds(),
+			lastAttempt.Milliseconds(), firstFailure, lastOutcome, stop)}
+	}
 	for {
+		attempts++
+		attemptStarted := time.Now()
 		output, err := runner.cli.prepareResource(bounded, runner.loaded, runner.definition, []string{runner.definition.Shutdown})
+		lastAttempt = time.Since(attemptStarted)
+		if attempts == 1 {
+			firstAttempt = lastAttempt
+		}
+		lastOutcome = resourceShutdownProbeOutcome(err)
+		if err != nil && firstFailure == "none" {
+			firstFailure = lastOutcome
+		}
 		if err == nil {
 			assessment, assessErr := runner.cli.resources.AssessPrepareResult(
 				runner.cli.coreActions, runner.definition.Command, runner.definition.Shutdown, output)
 			if assessErr != nil {
-				return assessErr
+				lastOutcome = "assessment_invalid"
+				return failure("resource shutdown assessment failed", "refused", assessErr)
 			}
 			local, ok := localResourceAction(runner.definition, assessment.Action)
 			if !ok || local != runner.localAction {
-				return domain.ErrPlanStale
+				lastOutcome = "action_changed"
+				return failure("resource shutdown assessment changed action", "refused", domain.ErrPlanStale)
 			}
 			if assessment.Changed {
-				return errors.New("resource shutdown did not converge after ingress reconciliation")
+				lastOutcome = "runtime_remaining"
+				return failure("resource shutdown did not converge after ingress reconciliation", "refused",
+					errors.New("resource shutdown did not converge after ingress reconciliation"))
 			}
 			return nil
 		}
 		if errors.Is(err, resource.ErrResourceUsageInvalid) {
-			return err
+			return failure("resource shutdown assessment rejected request", "refused", err)
 		}
 		lastErr = err
 		if bounded.Err() != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return failure("resource shutdown remains unverified after network restart", "parent_"+resourceShutdownProbeOutcome(ctx.Err()), ctx.Err())
 			}
-			return fmt.Errorf("resource shutdown remains unverified after network restart: %w", lastErr)
+			return failure("resource shutdown remains unverified after network restart", "verification_deadline", lastErr)
 		}
 		select {
 		case <-bounded.Done():
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return failure("resource shutdown remains unverified after network restart", "parent_"+resourceShutdownProbeOutcome(ctx.Err()), ctx.Err())
 			}
-			return fmt.Errorf("resource shutdown remains unverified after network restart: %w", lastErr)
+			return failure("resource shutdown remains unverified after network restart", "verification_deadline", lastErr)
 		case <-time.After(2 * time.Second):
 		}
 	}

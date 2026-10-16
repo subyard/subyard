@@ -1057,6 +1057,22 @@ if [ "$CODEX_PERMISSIONS" = 1 ]; then
     || die 'focused candidate release did not commit the publication reader boundary'
   stage 'focused native installer and publication reader prerequisite passed'
 fi
+if [ "$SSH_AGENT" = 1 ] && [ -z "$RESUME_STATE" ]; then
+  # ensure_owner_incus established the native session before claiming STATE.
+  # Install before registering the yard so init has the committed reader epoch.
+  printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$SUBYARD_CONFIG_HOME/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+  export YARD_RUNTIME_ROOT="$STATE/runtime"
+  unset YARD_ENGINE_PATH
+  # shellcheck source=tests/helpers/release-candidate.sh
+  . "$ROOT/tests/helpers/release-candidate.sh"
+  YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+elif [ "$SSH_AGENT" = 1 ]; then
+  export YARD_RUNTIME_ROOT="$STATE/runtime"
+  unset YARD_ENGINE_PATH
+  YARD_BIN="$STATE/bin/yard"
+  [ -x "$YARD_BIN" ] || die 'retained fixture runtime is unavailable'
+fi
 coding_integrations=''
 yard_profiles=subyard-dev
 [ "$SSH_AGENT" = 0 ] || yard_profiles=orca
@@ -1074,6 +1090,7 @@ if [ -z "$RESUME_STATE" ]; then
   SSH_PORT="$(free_port)"
   cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
 SSH_PORT=$SSH_PORT
+STORAGE_PATH=$STORAGE_PATH
 INCUS_PROJECT=$PROJECT
 YARD_INSTANCE_NAME=$INSTANCE
 CODING_TOOL_INTEGRATIONS="$coding_integrations"
@@ -1120,7 +1137,9 @@ if [ "$SSH_AGENT" = 1 ]; then
   stage 'initializing the candidate and stock Orca for focused SSH agent acceptance'
   yard init --yes
   prepare_cached_orca_guest
+  focused_release_ready after-cache || die 'focused activation did not become ready after cached Orca installation'
   yard orca up --yes
+  focused_release_ready after-up || die 'focused activation did not become ready after Orca startup'
   stock_orca_probe
   ORCA_PORT="$(setting_value ORCA_HOST_PORT)"
   assert_orca_readiness

@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/transport"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/sshtrust"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 const fixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
@@ -216,7 +219,16 @@ func TestApplyAddWritesIsolatedContextAndVerifiesPinnedKey(t *testing.T) {
 }
 
 func TestApplyAddRollsBackEveryLocalFileOnProbeFailure(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "admitted"}[admitted], func(t *testing.T) { testApplyAddRollback(t, admitted) })
+	}
+}
+func testApplyAddRollback(t *testing.T, admitted bool) {
 	runtime := remoteFixture(t)
+	if admitted {
+		runtime.AdmitMutation = func(context.Context) (func(), error) { return func() {}, nil }
+	}
+
 	spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
 	envPath := filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env")
 	existing := domain.RemoteRecord{Spec: spec, Remote: true, Path: envPath, SSHPort: 2222}
@@ -245,11 +257,19 @@ func TestApplyAddRollsBackEveryLocalFileOnProbeFailure(t *testing.T) {
 		return nil, nil
 	}
 	projects := 1
-	_, err := runtime.Apply(context.Background(), domain.RemotePrepared{
+	prepared := domain.RemotePrepared{
 		Action: domain.RemoteAdd, Spec: spec, Existing: &existing,
 		Owner:   domain.RemoteInfo{State: "RUNNING", SSHPort: 2222, DevUser: "dev", Projects: &projects},
 		Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")},
-	})
+	}
+	if admitted {
+		var err error
+		prepared, err = runtime.CapturePrepared(context.Background(), prepared)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := runtime.Apply(context.Background(), prepared)
 	if err == nil || !strings.Contains(err.Error(), "rejected the controller key") {
 		t.Fatalf("probe failure was not classified: %v", err)
 	}
@@ -562,5 +582,336 @@ func assertRemoteFileNotContains(t *testing.T, path, expected string) {
 	payload, err := os.ReadFile(path)
 	if err != nil || strings.Contains(string(payload), expected) {
 		t.Fatalf("%s unexpectedly contains %q: %q err=%v", path, expected, payload, err)
+	}
+}
+
+func slowOwnerSSHFixture(t *testing.T) string {
+	t.Helper()
+	program := filepath.Join(testkit.TempDir(t), "ssh")
+	writeRemoteFile(t, program, `#!/bin/sh
+case " $* " in *' ConnectTimeout=10 '*'_authorize'*) ;; *) exit 99 ;; esac
+IFS= read -r key || exit 98
+[ "$key" = "$FIXTURE_CONTROLLER_KEY" ] || exit 97
+[ -z "$(cat)" ] || exit 96
+sleep 11
+printf 'authorized\n'
+`, 0o700)
+	return program
+}
+
+func TestOwnerAuthorizationAllowsReadyAdmissionBeyondConnectTimeout(t *testing.T) {
+	runtime := remoteFixture(t)
+	runtime.Timeout = 0
+	runtime.SSH = slowOwnerSSHFixture(t)
+	key := strings.TrimSuffix(fixturePublicKey, " fixture")
+	runtime.Environment = []string{"PATH=/usr/bin:/bin", "FIXTURE_CONTROLLER_KEY=" + key}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	output, err := runtime.ownerCall(ctx, domain.RemoteSpec{OwnerEndpoint: "owner.example", OwnerYardName: "inner"}, []byte(key+"\n"), "_authorize")
+	if err != nil || string(output) != "authorized\n" {
+		t.Fatalf("ready owner admission was limited by connection timeout: output=%q err=%v", output, err)
+	}
+}
+
+func TestOwnerAuthorizationCancellationPreservesLocalRegistration(t *testing.T) {
+	for _, kind := range []string{"parent deadline", "explicit timeout"} {
+		t.Run(kind, func(t *testing.T) {
+			runtime := remoteFixture(t)
+			runtime.Timeout = 0
+			runtime.SSH = slowOwnerSSHFixture(t)
+			// Explicit overrides also control ConnectTimeout, rounded up to a second.
+			if kind == "explicit timeout" {
+				runtime.Timeout = 200 * time.Millisecond
+				program, err := os.ReadFile(runtime.SSH)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeRemoteFile(t, runtime.SSH, strings.Replace(string(program), "ConnectTimeout=10", "ConnectTimeout=1", 1), 0o700)
+			}
+			key := strings.TrimSuffix(fixturePublicKey, " fixture")
+			runtime.Environment = []string{"PATH=/usr/bin:/bin", "FIXTURE_CONTROLLER_KEY=" + key}
+			spec := domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}
+			paths := []string{filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"), runtime.snippetPath("demo"), runtime.sshConfigPath(), runtime.knownHostsPath(), runtime.cachePath("demo")}
+			ctx := context.Background()
+			cancel := func() {}
+			if kind == "parent deadline" {
+				ctx, cancel = context.WithTimeout(ctx, 200*time.Millisecond)
+			}
+			defer cancel()
+			started := time.Now()
+			_, err := runtime.Apply(ctx, domain.RemotePrepared{Action: domain.RemoteAdd, Spec: spec, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"}, Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")}})
+			if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 3*time.Second {
+				t.Fatalf("owner cancellation did not stop promptly: %v", err)
+			}
+			for _, path := range paths {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("canceled authorization published local registration, trust or cache")
+				}
+			}
+		})
+	}
+}
+
+func TestOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T) {
+	for _, kind := range []string{"owner default", "owner override", "owner parent", "scan", "probe"} {
+		t.Run(kind, func(t *testing.T) {
+			runtime := remoteFixture(t)
+			runtime.Timeout = 0
+			want := 10 * time.Second
+			connect := "ConnectTimeout=10"
+			if kind == "owner default" {
+				want = 10 * time.Minute
+			}
+			if kind == "owner override" {
+				runtime.Timeout = 750 * time.Millisecond
+				want = runtime.Timeout
+				connect = "ConnectTimeout=1"
+			}
+			ctx := context.Background()
+			cancel := func() {}
+			if kind == "owner parent" {
+				want = 75 * time.Millisecond
+				ctx, cancel = context.WithTimeout(ctx, want)
+			}
+			defer cancel()
+			trustCalls := 0
+			ctx = transport.WithSSHTrust(ctx, func(ctx context.Context, _, _ string) ([]string, error) {
+				trustCalls++
+				if kind != "owner parent" {
+					if _, ok := ctx.Deadline(); ok {
+						t.Fatal("execution deadline started before SSH trust preparation")
+					}
+				}
+				return nil, nil
+			})
+			calls := 0
+			runtime.processCall = func(callCtx context.Context, _ string, args []string, _ []byte) ([]byte, error) {
+				calls++
+				deadline, ok := callCtx.Deadline()
+				if !ok {
+					t.Fatal("process seam lost execution deadline")
+				}
+				remaining := time.Until(deadline)
+				if remaining <= 0 || remaining > want || want-remaining > time.Second {
+					t.Fatalf("execution budget=%s, want at most%s", remaining, want)
+				}
+				if !strings.Contains(strings.Join(args, " "), connect) {
+					t.Fatalf("connection budget changed: %v", args)
+				}
+				return []byte("[127.0.0.1]:2222 " + fixturePublicKey + "\n"), nil
+			}
+			var err error
+			switch kind {
+			case "scan":
+				_, err = runtime.ScanYardKeys(ctx, domain.RemoteSpec{OwnerEndpoint: "owner.example"}, 2222)
+			case "probe":
+				err = runtime.probeData(ctx, "demo")
+			default:
+				_, err = runtime.ownerCall(ctx, domain.RemoteSpec{OwnerEndpoint: "owner.example"}, []byte("fixture\n"), "_authorize")
+			}
+			if err != nil || calls != 1 {
+				t.Fatalf("budget call failed: calls=%d err=%v", calls, err)
+			}
+			expectedTrust := 1
+			if kind == "probe" {
+				expectedTrust = 0
+			}
+			if trustCalls != expectedTrust {
+				t.Fatalf("trust preparation calls=%d", trustCalls)
+			}
+		})
+	}
+}
+
+func TestAdmittedAddRevalidatesGapAndKeepsStrictTrust(t *testing.T) {
+	for _, scenario := range []string{"ready", "generated-identity", "trust-publication-drift", "mapping-drift", "identity-drift", "other-identity-drift", "known-host-drift", "cache-drift", "authorization-refused", "cancelled", "second-admission-refused", "detached-binding"} {
+		t.Run(scenario, func(t *testing.T) {
+			runtime := remoteFixture(t)
+			if scenario == "generated-identity" {
+				runtime.PublicKey = ""
+			}
+			prepared, err := runtime.CapturePrepared(context.Background(), domain.RemotePrepared{Action: domain.RemoteAdd, Spec: domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example", OwnerYardName: "inner"}, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"}, Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "detached-binding" {
+				prepared.Binding = ""
+			}
+			admissions, gateCalls, authorizations, probes := 0, 0, 0, 0
+			held := false
+			refused := errors.New("original owner retired")
+			runtime.AdmitMutation = func(ctx context.Context) (func(), error) {
+				admissions++
+				if admissions == 2 && scenario == "second-admission-refused" {
+					return nil, refused
+				}
+				_, unlock, err := uninstall.OwnerLock(ctx, runtime.DataHome, nil)
+				if err != nil {
+					return nil, err
+				}
+				held = true
+				return func() { held = false; unlock() }, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			ctx = transport.WithSSHTrust(ctx, func(ctx context.Context, _, _ string) ([]string, error) {
+				gateCalls++
+				if !held {
+					t.Fatal("trust publication escaped original owner admission")
+				}
+				// A real nested acquisition would deadlock if the explicit lock came first.
+				unlock, err := sshtrust.LockKnownHosts(ctx, runtime.knownHostsPath())
+				if err != nil {
+					return nil, err
+				}
+				unlock()
+				if scenario == "trust-publication-drift" {
+					writeRemoteFile(t, runtime.sshConfigPath(), "Host drift\n", 0600)
+				}
+				return []string{"-o", "StrictHostKeyChecking=yes"}, nil
+			})
+			runtime.processCall = func(ctx context.Context, _ string, args []string, input []byte) ([]byte, error) {
+				if strings.Contains(strings.Join(args, " "), "_authorize") {
+					authorizations++
+					if held {
+						t.Fatal("authorization retained owner barrier")
+					}
+					lockCtx, done := context.WithTimeout(ctx, 100*time.Millisecond)
+					defer done()
+					_, release, err := uninstall.OwnerLock(lockCtx, runtime.DataHome, nil)
+					if err != nil {
+						t.Fatal("native owner barrier retained across authorization", err)
+					}
+					release()
+					release, err = runtime.lockMutation(lockCtx)
+					if err != nil {
+						t.Fatal("remote lock retained across authorization", err)
+					}
+					release()
+					release, err = sshtrust.LockKnownHosts(lockCtx, runtime.knownHostsPath())
+					if err != nil {
+						t.Fatal("known-host lock retained across authorization", err)
+					}
+					release()
+					if !strings.Contains(strings.Join(args, " "), "StrictHostKeyChecking=yes") {
+						t.Fatal("strict owner trust lost")
+					}
+					switch scenario {
+					case "mapping-drift":
+						writeRemoteFile(t, filepath.Join(runtime.ConfigHome, "yards", "demo", "config.env"), "ACCESS_KIND=remote\nOWNER_ENDPOINT=changed.example\n", 0600)
+					case "identity-drift":
+						writeRemoteFile(t, runtime.PublicKey, fixturePublicKey+" changed\n", 0600)
+					case "other-identity-drift":
+						writeRemoteFile(t, filepath.Join(runtime.Home, ".ssh", "id_rsa.pub"), fixturePublicKey+"\n", 0600)
+					case "known-host-drift":
+						writeRemoteFile(t, runtime.knownHostsPath(), "changed\n", 0600)
+					case "cache-drift":
+						writeRemoteFile(t, runtime.cachePath("demo"), "changed\n", 0600)
+					case "authorization-refused":
+						return nil, refused
+					case "cancelled":
+						cancel()
+					}
+					return nil, nil
+				}
+				probes++
+				if !held {
+					t.Fatal("registration/probe escaped original owner admission")
+				}
+				writeRemoteFile(t, runtime.knownHostsPath(), "subyard-remote-demo "+fixturePublicKey+"\n", 0600)
+				return nil, nil
+			}
+			result, err := runtime.Apply(ctx, prepared)
+			success := scenario == "ready" || scenario == "generated-identity"
+			if success {
+				if err != nil || !strings.Contains(result.Message, "ready") {
+					t.Fatal("valid admitted add failed", err)
+				}
+				if admissions != 2 || gateCalls != 1 || authorizations != 1 || probes != 1 {
+					t.Fatalf("wrong phases %d/%d/%d/%d", admissions, gateCalls, authorizations, probes)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("changed authority unexpectedly committed")
+				}
+				if probes != 0 {
+					t.Fatal("refused add entered local registration probe")
+				}
+				if _, err := os.Stat(runtime.snippetPath("demo")); !os.IsNotExist(err) {
+					t.Fatal("refused add published snippet", err)
+				}
+				if authorizations > 1 || gateCalls > 1 {
+					t.Fatal("refused add repeated trust or authorization")
+				}
+			}
+		})
+	}
+}
+
+func TestAdmittedOwnerExecutionBudgetKeepsConnectionAndProbeBudgets(t *testing.T) {
+	for _, kind := range []string{"default", "override", "parent"} {
+		t.Run(kind, func(t *testing.T) {
+			runtime := remoteFixture(t)
+			runtime.Timeout = 0
+			ownerWant, probeWant := 10*time.Minute, 10*time.Second
+			connect := "ConnectTimeout=10"
+			ctx := context.Background()
+			cancel := func() {}
+			if kind == "override" {
+				runtime.Timeout = 750 * time.Millisecond
+				ownerWant = runtime.Timeout
+				probeWant = runtime.Timeout
+				connect = "ConnectTimeout=1"
+			}
+			if kind == "parent" {
+				ownerWant = 75 * time.Millisecond
+				probeWant = ownerWant
+				ctx, cancel = context.WithTimeout(ctx, ownerWant)
+			}
+			defer cancel()
+			runtime.AdmitMutation = func(context.Context) (func(), error) { return func() {}, nil }
+			trustCalls := 0
+			ctx = transport.WithSSHTrust(ctx, func(ctx context.Context, _, _ string) ([]string, error) {
+				trustCalls++
+				if kind != "parent" {
+					if _, ok := ctx.Deadline(); ok {
+						t.Fatal("execution deadline preceded trust preparation")
+					}
+				}
+				return nil, nil
+			})
+			calls := 0
+			runtime.processCall = func(callCtx context.Context, _ string, args []string, _ []byte) ([]byte, error) {
+				calls++
+				deadline, ok := callCtx.Deadline()
+				if !ok {
+					t.Fatal("prepared dispatch lost its execution deadline")
+				}
+				want := probeWant
+				if strings.Contains(strings.Join(args, " "), "_authorize") {
+					want = ownerWant
+				} else {
+					writeRemoteFile(t, runtime.knownHostsPath(), "subyard-remote-demo "+fixturePublicKey+"\n", 0600)
+				}
+				remaining := time.Until(deadline)
+				if remaining <= 0 || remaining > want || want-remaining > time.Second {
+					t.Fatalf("prepared execution budget=%s want at most%s", remaining, want)
+				}
+				if !strings.Contains(strings.Join(args, " "), connect) {
+					t.Fatal("prepared dispatch changed connection budget")
+				}
+				return nil, nil
+			}
+			prepared, err := runtime.CapturePrepared(ctx, domain.RemotePrepared{Action: domain.RemoteAdd, Spec: domain.RemoteSpec{LegacyAlias: "demo", OwnerEndpoint: "owner.example"}, Owner: domain.RemoteInfo{SSHPort: 2222, DevUser: "dev"}, Scanned: []domain.RemoteKey{remoteFixtureKey(t, "subyard-remote-demo")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.Apply(ctx, prepared); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || trustCalls != 1 {
+				t.Fatalf("unexpected prepared dispatch/probe/trust count %d/%d", calls, trustCalls)
+			}
+		})
 	}
 }

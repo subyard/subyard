@@ -286,6 +286,16 @@ capture_retry_down_state() {
     fi
   ' || true
 }
+recovery_step() {
+  local label="$1" limit="$2" started=$SECONDS rc=0
+  shift 2
+  printf 'amnezia_recovery_mount_step=%s state=start limit_seconds=%s\n' "$label" "$limit" \
+    | tee -a "$fixture/recovery.steps" >&2
+  timeout --signal=TERM --kill-after=5 "$limit" "$@" || rc=$?
+  printf 'amnezia_recovery_mount_step=%s state=end duration_seconds=%s exit=%s\n' \
+    "$label" "$((SECONDS - started))" "$rc" | tee -a "$fixture/recovery.steps" >&2
+  return "$rc"
+}
 case "$phase" in
   platform)
     [ ! -f "$SUBYARD_CONFIG_HOME/yards/vpn-e2e/config.env" ] || die 'expected a fresh VPN yard'
@@ -542,37 +552,40 @@ PYPRIORITY
     verify_enabled
     ;;
   recovery-state-mount)
-    printf 'amnezia_recovery_mount_step=initial-down\n'
+    install -m 0600 /dev/null "$fixture/recovery.steps"
     mount_down_output="$fixture/recovery-state-mount.down"
     install -m 0600 /dev/null "$mount_down_output"
-    mount_down_started=$SECONDS
-    if ! yard vpn down --yes >"$mount_down_output" 2>&1; then
-      printf 'amnezia_recovery_mount_down_seconds=%s\n' "$((SECONDS - mount_down_started))" >&2
-      tail -n 20 "$mount_down_output" >&2
-      capture_retry_down_state >&2
-      die 'VPN shutdown failed before state-mount recovery'
-    fi
-    printf 'amnezia_recovery_mount_down_seconds=%s\n' "$((SECONDS - mount_down_started))"
-    verify_disabled
-    guest systemctl stop subyard-amnezia.service docker.service docker.socket containerd.service >/dev/null
-    guest sh -ceu '
+    # The observed initial shutdown took 246 seconds; retain a 600-second ceiling.
+    recovery_step initial-down 600 bash -c 'output=$1; shift; exec "$@" >"$output" 2>&1' _ \
+      "$mount_down_output" "$YARD_BIN" -Y vpn-e2e vpn down --yes
+    recovery_step disabled-verify 600 bash "$root/config/profiles/amnezia/tests/e2e/owner.sh" verify-disabled
+    recovery_step services-stop 120 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+      systemctl stop subyard-amnezia.service docker.service docker.socket containerd.service >/dev/null
+    recovery_step state-unmount 30 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- sh -ceu '
       findmnt -n /srv >/dev/null
       umount /srv
       test ! -e /srv/amnezia
     '
     for operation in provision start; do
-      if guest python3 /usr/local/lib/subyard-amnezia/runtime.py "$operation" >/dev/null 2>&1; then
-        die 'runtime accepted an unmounted state volume'
-      fi
+      rc=0
+      recovery_step "unmounted-$operation" 30 bash -c 'exec "$@" >/dev/null 2>&1' _ \
+        incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+        python3 /usr/local/lib/subyard-amnezia/runtime.py "$operation" || rc=$?
+      [ "$rc" = 1 ] \
+        || die 'runtime did not reject an unmounted state volume'
     done
-    if yard vpn up --yes >/dev/null 2>&1; then
-      die 'VPN up accepted an unmounted state volume'
-    fi
-    guest test ! -e /srv/amnezia || die 'runtime wrote VPN state into the root filesystem'
-    guest systemctl start containerd.service docker.service subyard-amnezia.service
-    guest findmnt -n /srv >/dev/null || die 'container service mount dependency did not restore /srv'
-    yard vpn up --yes
-    verify_enabled
+    rc=0
+    recovery_step unmounted-up 60 bash -c 'exec "$@" >/dev/null 2>&1' _ \
+      "$YARD_BIN" -Y vpn-e2e vpn up --yes || rc=$?
+    [ "$rc" = 1 ] \
+      || die 'VPN up did not reject an unmounted state volume'
+    recovery_step root-state-absent 30 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+      test ! -e /srv/amnezia
+    recovery_step services-start 120 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
+      systemctl start containerd.service docker.service subyard-amnezia.service
+    recovery_step state-mounted 30 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- findmnt -n /srv >/dev/null
+    recovery_step final-up 600 "$YARD_BIN" -Y vpn-e2e vpn up --yes
+    recovery_step enabled-verify 600 bash "$root/config/profiles/amnezia/tests/e2e/owner.sh" verify-enabled
     ;;
   restart-enabled)
     yard stop --yes

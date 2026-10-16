@@ -210,6 +210,14 @@ func MarshalRecoveryProcessRequest(request RecoveryProcessRequest) ([]byte, erro
 	if err := request.Validate(); err != nil {
 		return nil, err
 	}
+	if request.Mode == RecoveryProcessRuntimeCapabilities {
+		// Frozen V1 decoders must reject this input-free probe before execution
+		// (exit 2), rather than treating its schema/mode as an operation (exit 1).
+		return json.Marshal(struct {
+			RecoveryProcessRequest
+			Contract string `json:"contract"`
+		}{RecoveryProcessRequest: request})
+	}
 	return json.Marshal(request)
 }
 

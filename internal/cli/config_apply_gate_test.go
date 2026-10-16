@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -30,6 +33,103 @@ func (fixture *sampleRepairPlatformFixture) ObserveProfileRuntimes(context.Conte
 		observation.State, observation.Actual = "stale", strings.Repeat("a", 64)
 	}
 	return map[string]ports.RuntimeObservation{"sample-runtime": observation}, nil
+}
+
+type initIntegrationRepairFixture struct {
+	*integrationRuntimeFixture
+	err error
+}
+
+func (fixture *initIntegrationRepairFixture) IntegrationPlan(context.Context) (reconcileruntime.IntegrationPlan, error) {
+	return fixture.plan, fixture.err
+}
+
+func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
+	for _, scenario := range []string{"missing dispatcher", "ownership conflict", "unselected drift", "changed plan", "remaining drift"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, scenario == "unselected drift")
+			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture()}
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			fixture.cli.options.InitPlatform = platform
+			runtime := &initIntegrationRepairFixture{integrationRuntimeFixture: &integrationRuntimeFixture{
+				plan: reconcileruntime.IntegrationPlan{Changed: true, Fingerprint: strings.Repeat("a", 64), Scope: strings.Repeat("b", 64)},
+			}}
+			if scenario == "ownership conflict" {
+				runtime.err = errors.New("owned artifact drift")
+			}
+			fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return runtime }
+			fake := fixture.cli.options.Executor.(*testkit.Incus)
+			fake.ExecSteps = nil
+			loaded, err := fixture.cli.resolveReleaseTransitionContext("default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, err := fixture.cli.localConfigTargets(loaded, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 4 {
+				for _, target := range targets {
+					appendHashSteps(t, fake, target.Loaded)
+				}
+			}
+			journalBefore, err := os.ReadFile(fixture.journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledgerPath := filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json")
+			ledgerBefore, err := os.ReadFile(ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				journalAfter, journalErr := os.ReadFile(fixture.journalPath)
+				ledgerAfter, ledgerErr := os.ReadFile(ledgerPath)
+				if journalErr != nil || ledgerErr != nil || !bytes.Equal(journalBefore, journalAfter) || !bytes.Equal(ledgerBefore, ledgerAfter) {
+					t.Fatal("integration repair changed completed protected history")
+				}
+			}()
+			permit, err := fixture.cli.prepareProfileInitRepair(context.Background(), "default", nil, fixture.outcome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "ownership conflict" || scenario == "unselected drift" {
+				if permit != nil {
+					t.Fatal("integration conflict or unselected drift admitted init")
+				}
+				return
+			}
+			if permit == nil {
+				t.Fatal("missing shared owned artifact did not admit explicit init repair")
+			}
+			if scenario == "changed plan" {
+				// Scope changes remain stale even if an adapter repeats its fingerprint.
+				runtime.plan.Scope = strings.Repeat("c", 64)
+			}
+			unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit)
+			if scenario == "changed plan" {
+				if err == nil {
+					unlock()
+					t.Fatal("replacement integration plan reused repair consent")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			if scenario != "remaining drift" {
+				runtime.plan.Changed = false
+				writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
+			}
+			err = fixture.cli.finishConfigApplyRepair(context.Background(), permit)
+			if (err != nil) != (scenario == "remaining drift") {
+				t.Fatalf("post-init readiness: %v", err)
+			}
+		})
+	}
 }
 
 func TestProfileRuntimeInitRepairUsesCompletedGateWithoutAdmittingOtherDrift(t *testing.T) {

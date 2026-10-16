@@ -82,34 +82,47 @@ controller_main() {
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-github-e2e.XXXXXX")"
   controller_cleanup() {
     rc=$?
-    local existing_directory
+    local original_rc="$rc" existing_directory cleanup_started=$SECONDS fixture_rc release_rc=0
     trap - EXIT INT TERM
     set +e
+    phase_end "$original_rc"
+    E2E_ACTIVE_PHASE=''
+    phase_marker cleanup/release start 0 0
     if [ "$prepared" = 1 ] && [ -n "${bundle:-}" ] && [ -n "${bundle_hash:-}" ]; then
       existing_directory="${GUEST_DIRS[1]:-}"
       if [ -n "$existing_directory" ]; then
-        cleanup_guest 1 >/dev/null 2>&1 || cleanup_failed=1
+        cleanup_guest 1 quiet || cleanup_failed=1
       fi
       if [ "$cleanup_failed" = 0 ]; then
+        : > "$LOCAL_TEMP/fixture-cleanup.log"
+        chmod 0600 "$LOCAL_TEMP/fixture-cleanup.log"
+        fixture_rc=0
         run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --cleanup \
-          >/dev/null 2>&1 || cleanup_failed=1
-        cleanup_guest 1 >/dev/null 2>&1 || cleanup_failed=1
+          > "$LOCAL_TEMP/fixture-cleanup.log" 2>&1 || fixture_rc=$?
+        printf 'github_e2e_fixture_cleanup exit_code=%s\n' "$fixture_rc" >&2
+        [ "$fixture_rc" = 0 ] || cleanup_failed=1
+        cleanup_guest 1 quiet || cleanup_failed=1
       fi
     fi
     for cleanup_vm in "${!GUEST_DIRS[@]}"; do
-      cleanup_guest "$cleanup_vm" >/dev/null 2>&1 || cleanup_failed=1
+      cleanup_guest "$cleanup_vm" quiet || cleanup_failed=1
     done
     if [ -n "${LEASE_KEEPER_PID:-}" ]; then
       kill "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
       wait "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
       LEASE_KEEPER_PID=''
     fi
-    release_lease >/dev/null 2>&1 || cleanup_failed=1
+    release_lease || release_rc=$?
+    printf 'github_e2e_release exit_code=%s\n' "$release_rc" >&2
+    [ "$release_rc" = 0 ] || cleanup_failed=1
     case "${LOCAL_TEMP:-}" in
       /tmp/subyard-github-e2e.*|"${TMPDIR:-/tmp}"/subyard-github-e2e.*)
         find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1 ;;
     esac
     [ "$cleanup_failed" = 0 ] || rc=3
+    phase_marker cleanup/release end "$((SECONDS - cleanup_started))" "$((cleanup_failed * 3))"
+    printf 'github_e2e_controller_result original_exit_code=%s cleanup_exit_code=%s final_exit_code=%s\n' \
+      "$original_rc" "$((cleanup_failed * 3))" "$rc" >&2
     exit "$rc"
   }
   trap controller_cleanup EXIT INT TERM
@@ -207,7 +220,7 @@ esac
 if [ "$MODE" = --cleanup ] && [ ! -e "$CHECKPOINT" ] && [ ! -L "$CHECKPOINT" ]; then
   exit 0
 fi
-for command in grep jq openssl sha256sum sed ss sudo systemctl timeout; do
+for command in grep jq openssl sha256sum sed sg ss sudo systemctl timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -347,6 +360,8 @@ write_config() {
     printf 'HOST_BASE=%s/host\nHOST_MOUNTS=\nHOST_LINKS=\n' "$STATE"
     printf 'RESTRICTED_DISK_PATHS=%s/host\nFORWARD_SSH_AGENT=0\n' "$STATE"
     printf 'HOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n'
+    printf 'STORAGE_PATH=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
+      "$STORAGE_PATH" "$SUBYARD_KEYS_CONSUMER_ROOT"
   } > "$SUBYARD_CONFIG_HOME/config.env.tmp"
   chmod 0600 "$SUBYARD_CONFIG_HOME/config.env.tmp"
   mv -f -- "$SUBYARD_CONFIG_HOME/config.env.tmp" "$SUBYARD_CONFIG_HOME/config.env"
@@ -424,8 +439,10 @@ cleanup_hermes() {
 }
 cleanup() {
   local rc=$? state_cleaned=0
+  local original_rc="$rc"
   trap - EXIT INT TERM
   set +e
+  printf 'github_e2e_guest_exit mode=%s original_exit_code=%s\n' "$MODE" "$original_rc" >&2
   if [ "$rc" -ne 0 ] && [ -n "$UNIT_FILE" ] && [ -f "$UNIT_FILE" ]; then
     systemctl_user show "$UNIT" -p ActiveState -p Result -p ExecMainStatus >&2
     journalctl --user -u "$UNIT" --no-pager -n 8 >&2
@@ -463,6 +480,7 @@ cleanup() {
     && [ "$(jq -r '.STATE' "$CHECKPOINT" 2>/dev/null || true)" = "$STATE" ]; then
     rm -f -- "$CHECKPOINT"
   fi
+  printf 'github_e2e_guest_result mode=%s original_exit_code=%s final_exit_code=%s\n' "$MODE" "$original_rc" "$rc" >&2
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
@@ -473,7 +491,44 @@ if [ "$MODE" = --prepare-reboot ] \
 fi
 if [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; then
   load_checkpoint
-else
+fi
+# Release migration observes Incus as the operator, without the sudo wrapper.
+# Establish that supported platform context before allocating reboot state.
+if [ "$MODE" != --verify-reboot ] && [ "$MODE" != --cleanup ] \
+  && { ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
+    || ! /usr/bin/incus storage show default --project default >/dev/null 2>&1; }; then
+  (
+    platform_root="$HOME/.cache/subyard-github-e2e-platform"
+    # shellcheck source=tests/helpers/test-context.sh
+    . "$ROOT/tests/helpers/test-context.sh"
+    setup_test_context "$platform_root/bootstrap"
+    export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME"
+    SUBYARD_USER="$(id -un)"
+    export SUBYARD_CONFIG_DIR="$ROOT/config"
+    export SUBYARD_CONFIG_HOME="$platform_root/config" SUBYARD_HOME="$platform_root/data"
+    export STORAGE_PATH="$platform_root/storage"
+    export HOST_BASE="$platform_root/host-data" RESTRICTED_DISK_PATHS="$platform_root/host-data"
+    set -a
+    # shellcheck source=config/host.env
+    . "$ROOT/config/host.env"
+    set +a
+    bash "$ROOT/scripts/01-install-incus.sh" --yes
+  )
+fi
+if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ] \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin \
+  && ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf -v reexec 'exec env SUBYARD_E2E_VM=%q bash %q %q' \
+    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/github/tests/e2e/acceptance.sh" "$MODE"
+  exec sg incus-admin -c "$reexec"
+fi
+/usr/bin/incus query '/1.0/instances?project=default' >/dev/null \
+  || die 'owner Incus API is unavailable in the actual execution session'
+/usr/bin/incus storage show default --project default >/dev/null \
+  || die 'owner default storage is unavailable after platform preparation'
+printf 'github owner native-Incus-preflight=PASS\n'
+
+if [ "$MODE" != --verify-reboot ] && [ "$MODE" != --cleanup ]; then
   STATE="$(mktemp -d /var/tmp/subyard-github-broker.XXXXXX)"
   chmod 0711 "$STATE"
   MARKER="subyard-github-broker-e2e-v1-$(basename "$STATE")"
@@ -483,7 +538,6 @@ fi
 export STATE MARKER
 [ -x "$YARD_BIN" ] || { command -v go >/dev/null 2>&1 || die 'Go is required'; "$ROOT/dev/build-engine.sh" --force; YARD_BIN="$ROOT/.build/yard"; }
 [ "$YARD_BIN" != "$ROOT/.build/yard" ] || "$ROOT/dev/build-profiles.sh"
-incus info >/dev/null 2>&1 || die 'Incus owner API is unavailable on the disposable VM'
 if [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; then
   if incus project show "$PROJECT" >/dev/null 2>&1 || [ "$MODE" = --verify-reboot ]; then
     [ "$(incus project get "$PROJECT" user.subyard.e2e 2>/dev/null || true)" = "$MARKER" ] \
@@ -491,13 +545,6 @@ if [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; then
     [ "$(incus config get "$INSTANCE" user.subyard.e2e --project "$PROJECT" 2>/dev/null || true)" = "$MARKER" ] \
       || die 'checkpoint instance marker does not match this fixture'
   fi
-fi
-if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ] \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin \
-  && ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin; then
-  printf -v reexec 'exec env SUBYARD_E2E_VM=%q bash %q %q' \
-    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/github/tests/e2e/acceptance.sh" "$MODE"
-  exec sg incus-admin -c "$reexec"
 fi
 
 export SUBYARD_OPERATOR_HOME="$HOME"
@@ -511,13 +558,29 @@ export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 export HOST_CLAUDE_MD='' HOST_CODEX_AGENTS_MD='' HOST_OPENCODE_AGENTS_MD=''
 unset ENVIRONMENT_PROFILES
 install -d -m 0700 "$SUBYARD_CONFIG_HOME"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
 if [ "$MODE" != --verify-reboot ] && [ "$MODE" != --cleanup ]; then
+  # Persist credential transport paths before committing release activation.
+  printf 'STORAGE_PATH=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
+      "$STORAGE_PATH" "$SUBYARD_KEYS_CONSUMER_ROOT" > "$SUBYARD_CONFIG_HOME/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+  YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+  printf 'github candidate release-preflight=PASS\n'
   SSH_PORT="$(next_port "$((36000 + ($$ % 12000)))")"
   PROJECT="github-e2e-$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
   INSTANCE="github-e2e"
   if incus project show "$PROJECT" >/dev/null 2>&1; then die 'fixture project already exists'; fi
   PROJECT_CLAIMED=1
   write_config
+else
+  # Reboot verification and cleanup continue the already authorized installation.
+  YARD_BIN="$STATE/bin/yard"
+  # Retired cleanup checkpoints can retain only an old storage pool, with no yard.
+  if [ "$MODE" = --verify-reboot ] || incus project show "$PROJECT" >/dev/null 2>&1; then
+    [ -x "$YARD_BIN" ] && [ -d "$YARD_RUNTIME_ROOT" ] && [ ! -L "$YARD_RUNTIME_ROOT" ] \
+      || die 'retained fixture runtime is unavailable'
+  fi
 fi
 UNIT_FILE="$SUBYARD_OPERATOR_HOME/.config/systemd/user/$UNIT"
 [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ] || {

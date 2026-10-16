@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
+# shellcheck source=config/profiles/hermes/tests/e2e/failure-capture.sh
+. "$ROOT/config/profiles/hermes/tests/e2e/failure-capture.sh"
 YARD_BIN=''
 STATE=""
 YARD=""
@@ -133,24 +135,32 @@ cleanup_fixture_pool() {
 }
 
 cleanup() {
-  local rc=$?
+  local original=$? capture_rc=0 cleanup_rc=0
   trap - EXIT INT TERM
   set +e
+  if [ "$original" -ne 0 ] && [ -n "$YARD" ]; then
+    hermes_capture_failure "$ROOT/.build/hermes-failure" "$original" || capture_rc=$?
+  fi
   if [ -n "$YARD" ] && [ -f "$SUBYARD_CONFIG_HOME/yards/$YARD/config.env" ]; then
-    yard "$YARD" teardown --yes >/dev/null 2>&1 || rc=3
+    yard "$YARD" teardown --yes >/dev/null 2>&1 || cleanup_rc=3
   fi
   if [ -n "$TAILSCALE_IP" ]; then
     sudo -n ip address del "$TAILSCALE_IP/32" dev lo >/dev/null 2>&1 || true
   fi
-  cleanup_fixture_pool || rc=3
+  cleanup_fixture_pool || cleanup_rc=3
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-hermes-profile.* ]] \
     && [ -f "$STATE/.marker" ] \
     && [ "$(<"$STATE/.marker")" = subyard-hermes-profile-e2e-v3 ]; then
-    sudo -n find "$STATE" -depth -delete || rc=3
+    sudo -n find "$STATE" -depth -delete || cleanup_rc=3
   fi
-  exit "$rc"
+  printf 'HERMES_GUEST_RESULT original_exit_code=%s capture_exit_code=%s cleanup_exit_code=%s\n' \
+    "$original" "$capture_rc" "$cleanup_rc"
+  [ "$original" -eq 0 ] || exit "$original"
+  exit "$cleanup_rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ensure_owner_incus
 recover_stale_fixture_pool
@@ -192,6 +202,23 @@ replacement_dashboard_port="$(next_port "$((dashboard_port + 1))")"
 [ "$replacement_dashboard_port" != "$dashboard_port" ] \
   || die "dashboard replacement port allocation collided"
 
+# Keep the synthetic owner endpoint stable from initial release readiness onward.
+octet=$((20 + ($$ % 200)))
+candidate_tailscale_ip="100.127.254.$octet"
+if ip -4 address show | grep -Fq "$candidate_tailscale_ip/"; then
+  die "selected test Tailscale address already exists"
+fi
+sudo -n ip address add "$candidate_tailscale_ip/32" dev lo
+TAILSCALE_IP="$candidate_tailscale_ip"
+install -d -m 0700 "$STATE/fakebin" "$STATE/faultbin"
+{
+  printf '#!/usr/bin/env sh\n'
+  printf '[ "$1" = ip ] && [ "$2" = -4 ] || exit 2\n'
+  printf 'printf "%%s\\n" %s\n' "$TAILSCALE_IP"
+} >"$STATE/fakebin/tailscale"
+chmod 0700 "$STATE/fakebin/tailscale"
+export PATH="$STATE/fakebin:$PATH"
+
 printf '  [ .. ] creating a fresh isolated yard from the Hermes preset\n'
 definition="$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
 if ss -Hln 'sport = :2224' 2>/dev/null | grep -q .; then
@@ -205,7 +232,6 @@ else
     || die "profile bootstrap did not persist the shipped preset"
 fi
 [ "$(stat -c %a "$definition")" = 600 ] || die "yard definition is not mode 0600"
-yard "$YARD" config set SSH_PORT "$ssh_port" --scope yard --yes
 yard "$YARD" start --yes
 yard "$YARD" init --yes
 
@@ -332,36 +358,19 @@ if curl --noproxy '*' -fsS --connect-timeout 2 "http://$guest_ip:9119/" >/dev/nu
   die "guest loopback fixture is reachable through the L1 address"
 fi
 
-octet=$((20 + ($$ % 200)))
-TAILSCALE_IP="100.127.254.$octet"
-if ip -4 address show | grep -Fq "$TAILSCALE_IP/"; then
-  die "selected test Tailscale address already exists"
-fi
-sudo -n ip address add "$TAILSCALE_IP/32" dev lo
-install -d -m 0700 "$STATE/fakebin"
-{
-  printf '#!/usr/bin/env sh\n'
-  printf '[ "$1" = ip ] && [ "$2" = -4 ] || exit 2\n'
-  printf 'printf "%%s\\n" %s\n' "$TAILSCALE_IP"
-} >"$STATE/fakebin/tailscale"
-chmod 0700 "$STATE/fakebin/tailscale"
-
-# Reconcile the existing preview route after changing the owner address.
-PATH="$STATE/fakebin:$PATH" yard "$YARD" init --yes
-
 yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes
 yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes
 
-cat >"$STATE/fakebin/timeout" <<'TIMEOUT'
+cat >"$STATE/faultbin/timeout" <<'TIMEOUT'
 #!/usr/bin/env sh
 exit 1
 TIMEOUT
-cat >"$STATE/fakebin/sleep" <<'SLEEP'
+cat >"$STATE/faultbin/sleep" <<'SLEEP'
 #!/usr/bin/env sh
 exit 0
 SLEEP
-chmod 0700 "$STATE/fakebin/timeout" "$STATE/fakebin/sleep"
-if PATH="$STATE/fakebin:$PATH" yard "$YARD" dashboard up --yes \
+chmod 0700 "$STATE/faultbin/timeout" "$STATE/faultbin/sleep"
+if PATH="$STATE/faultbin:$PATH" yard "$YARD" dashboard up --yes \
   >"$STATE/readiness-failure.out" 2>&1; then
   die "injected owner-endpoint readiness failure was accepted"
 fi
@@ -372,7 +381,7 @@ if [ -n "$(incus config get "$instance" user.subyard.resource.hermes-dashboard \
   --project "$project")" ]; then
   die "readiness failure left owner-side route metadata"
 fi
-rm -f -- "$STATE/fakebin/timeout" "$STATE/fakebin/sleep"
+rm -f -- "$STATE/faultbin/timeout" "$STATE/faultbin/sleep"
 
 PATH="$STATE/fakebin:$PATH" yard "$YARD" dashboard up --yes
 

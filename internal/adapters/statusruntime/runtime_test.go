@@ -817,38 +817,41 @@ func TestProfileDashboardFullCheckMayExceedFormerFiveSeconds(t *testing.T) {
 	}
 }
 
+type dashboardBudgetDeadline struct {
+	ports.Incus
+	deadlines []time.Time
+}
+
+func (fake *dashboardBudgetDeadline) Instance(ctx context.Context, _, _ string) (ports.InstanceInfo, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ports.InstanceInfo{}, errors.New("profile check has no deadline")
+	}
+	fake.deadlines = append(fake.deadlines, deadline)
+	return ports.InstanceInfo{Config: map[string]string{"fixture.route": "v2:100.64.1.2:22222"}, Devices: map[string]map[string]string{"fixture-dashboard": {"type": "proxy", "bind": "host", "listen": "tcp:100.64.1.2:22222", "connect": "tcp:127.0.0.1:3000"}}}, nil
+}
 func TestProfileDashboardBudgetIsSharedAcrossSelectedProfiles(t *testing.T) {
-	t.Parallel()
-	root := testkit.TempDir(t)
-	marker := filepath.Join(root, "third-started")
-	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "first second third", "PORT": "22222", "MARKER": marker}}
+	incus := &dashboardBudgetDeadline{}
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "first second third", "PORT": "22222"}, Incus: incus, ProbeTimeout: 2 * profile.ReadinessTimeout}
 	for _, name := range []string{"first", "second", "third"} {
-		directory := filepath.Join(root, name)
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Fatal(err)
+		runtime.Profiles = append(runtime.Profiles, profile.Definition{Name: name, Root: "/bin", OwnerService: "true", Dashboard: &profile.IntegrationDashboard{Scheme: "http", PortSetting: "PORT", GuestPort: 3000, ContainerRoute: &profile.IntegrationRoute{MarkerKey: "fixture.route", DeviceName: "fixture-dashboard"}}})
+	}
+	before := time.Now()
+	got := runtime.profileDashboardStatus(context.Background(), domain.Context{YardKind: domain.YardContainer}, true)
+	after := time.Now()
+	if len(got) != 3 || len(incus.deadlines) != 3 {
+		t.Fatal("selected profile checks or URL probes missing")
+	}
+	for i, row := range got {
+		if row.State != "up" || row.URL != "http://100.64.1.2:22222" {
+			t.Fatalf("profile owner check failed: %+v", row)
 		}
-		body := "#!/bin/sh\nexec sleep 16\n"
-		if name == "third" {
-			body = "#!/bin/sh\nprintf started > \"$MARKER\"\n"
-		}
-		testkit.WriteFile(t, filepath.Join(directory, "owner.sh"), []byte(body), 0o700)
-		runtime.Profiles = append(runtime.Profiles, profile.Definition{Name: name, Root: directory, OwnerService: "owner.sh", Dashboard: &profile.IntegrationDashboard{Scheme: "http", PortSetting: "PORT"}})
-	}
-	started := time.Now()
-	got := runtime.profileDashboardStatus(context.Background(), domain.Context{YardKind: domain.YardVM}, true)
-	if elapsed := time.Since(started); elapsed > 35*time.Second {
-		t.Fatalf("aggregate profile phase took %s", elapsed)
-	}
-	if len(got) != 3 || got[0].State != "up" {
-		t.Fatalf("first full check failed: %+v", got)
-	}
-	for _, row := range got[1:] {
-		if row.State != "down" || row.URL != "" || !strings.Contains(row.Hint, "reason=deadline ") {
-			t.Fatalf("exhausted phase claimed readiness: %+v", row)
+		if !incus.deadlines[i].Equal(incus.deadlines[0]) {
+			t.Fatal("selected profiles received separate readiness budgets")
 		}
 	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("launched a later owner after aggregate deadline")
+	if incus.deadlines[0].Before(before.Add(profile.ReadinessTimeout)) || incus.deadlines[0].After(after.Add(profile.ReadinessTimeout)) {
+		t.Fatal("shared phase used the wrong readiness duration")
 	}
 }
 

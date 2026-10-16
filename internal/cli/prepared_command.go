@@ -14,6 +14,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/remotecontrol"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -182,6 +183,7 @@ type preparedCommand struct {
 	closeOnce        sync.Once
 	closeErr         error
 	ownerAdmission   ownerWriteAdmission
+	remotePhased     bool
 }
 
 // Both prepared commands and early source recovery capture these read-only
@@ -462,7 +464,7 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	if !prepared.Plan.Confirmed {
 		return domain.AdapterResult{}, domain.ErrConfirmationRequired
 	}
-	if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
+	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
 		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)
 		if lockErr != nil {
@@ -934,9 +936,22 @@ func (prepared *preparedCommand) prepareRemote(ctx context.Context, _ *initBoots
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return application.RemoteActionPlan(*execution)
 	}
+	control := prepared.CLI.remoteService(prepared.Loaded).Control
+	if native, ok := control.(remotecontrol.Runtime); ok && execution.Action == domain.RemoteAdd && execution.Binding != "" && prepared.Loaded.Context.AccessKind == domain.AccessLocal {
+		prepared.remotePhased = true
+		native.AdmitMutation = func(ctx context.Context) (func(), error) {
+			// Retrieve only the cached first admission, including our own home publication.
+			original, err := prepared.CLI.originalOwnerWrite(prepared.Loaded)
+			if err != nil {
+				return nil, err
+			}
+			return prepared.CLI.acquireOwnerMutation(ctx, original, false, false)
+		}
+		control = native
+	}
 	prepared.printResult = prepared.CLI.printRemoteResult
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, _ io.Writer) (domain.AdapterResult, error) {
-		orchestrator.Runner = application.RemoteRunner{Control: prepared.CLI.remoteService(prepared.Loaded).Control, Prepared: *execution}
+		orchestrator.Runner = application.RemoteRunner{Control: control, Prepared: *execution}
 		result, _, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "remote", Action: string(execution.Action),
 		}, nil)

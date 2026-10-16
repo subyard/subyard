@@ -11,6 +11,9 @@ import types
 import unittest
 from unittest.mock import patch
 
+NODE = shutil.which('node')
+NODE = str(Path(NODE).absolute()) if NODE else None
+
 spec = importlib.util.spec_from_file_location('facts', Path(__file__).parent/'e2e/failure-facts.py')
 facts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(facts)
@@ -70,7 +73,7 @@ class FailureFactsTest(unittest.TestCase):
         self.assertNotIn('endpoints', result)
         self.assertEqual(len(calls), 2)
 
-    @unittest.skipUnless(shutil.which('node'), 'Node is needed to exercise the native endpoint probe')
+    @unittest.skipUnless(NODE, 'Node is needed to exercise the native endpoint probe')
     def test_endpoint_program_emits_statuses_without_bodies_or_error_messages(self):
         _, calls = self.health(cost=4)
         script = calls[-1][-1]
@@ -79,7 +82,7 @@ if(options.redirect!=='manual')throw Error('PRIVATE_SENTINEL');
 const codes={'http://localhost:3000':200,'http://localhost:4318/v1/metrics':405,'http://localhost:4318/v1/traces':405};
 if(!(url in codes))throw Error('PRIVATE_SENTINEL');
 return {status:codes[url],body:{cancel:async()=>{}}};};"""
-        result = subprocess.run(['node', '-e', fake+script], capture_output=True, timeout=3,
+        result = subprocess.run([NODE, '-e', fake+script], capture_output=True, timeout=3,
                                 text=True, env={'PATH': '/usr/bin:/bin'})
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout), {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405})

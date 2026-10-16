@@ -115,8 +115,16 @@ reject_before_broker --slot 7 --unknown
 reject_before_broker --slot 7 --lane invalid
 reject_before_broker --slot 7 --lane
 # Environment flags cannot authorize local fixture creation without a matching lease.
+# Reach the lease check independently of the host-free runner's username.
+mkdir "$tmp/bin"
+cat > "$tmp/bin/id" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = -un ] || exit 2
+printf 'dev\n'
+SH
+chmod 0755 "$tmp/bin/id"
 rc=0
-env SUBYARD_E2E_ORCA_PROJECTS=1 SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC=1 \
+env PATH="$tmp/bin:$PATH" SUBYARD_E2E_ORCA_PROJECTS=1 SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC=1 \
   SUBYARD_E2E_VM=1 SUBYARD_E2E_RUN_ID=invalid SUBYARD_E2E_SLOT=invalid \
   bash "$ROOT/config/profiles/orca/tests/e2e/orca-projects.sh" > "$tmp/local-guard" 2>&1 || rc=$?
 [ "$rc" -eq 1 ]

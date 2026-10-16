@@ -10,10 +10,15 @@ CANDIDATE_ENGINE=''
 die() { printf 'subyard-dev-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
 [ "$(id -un)" = dev ] || die 'run as the allocated dev user'
-for command in go incus jq sudo; do
+for command in go incus jq sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
+if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf -v reexec 'exec bash %q' "$ROOT/config/profiles/subyard-dev/tests/e2e/owner.sh"
+  exec sg incus-admin -c "$reexec"
+fi
 
 incus() {
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
@@ -62,7 +67,7 @@ export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
-install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME"
 
 # A release run must exercise the frozen packaged runtime. Ordinary development
 # acceptance has no metadata and builds the current development engine instead.
@@ -77,6 +82,29 @@ case "$candidate_status" in
   1) "$ROOT/dev/build-engine.sh" --force ;;
   *) die 'frozen release candidate is invalid' ;;
 esac
+# Activation requires the native owner API and an installed release before init.
+(
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_context "$STATE/incus-foundation"
+  export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+  export SUBYARD_DISPATCHER_PATH="${CANDIDATE_ENGINE:-$ROOT/.build/yard}"
+  export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
+  set -a
+  # shellcheck source=config/host.env
+  . "$ROOT/config/host.env"
+  set +a
+  bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
+)
+timeout 10 /usr/bin/incus query /1.0 >/dev/null
+timeout 10 /usr/bin/incus storage show default --project default >/dev/null
+timeout 10 /usr/bin/incus network show incusbr0 --project default >/dev/null
+printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$SUBYARD_CONFIG_HOME/config.env"
+chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
+CANDIDATE_ENGINE="$(release_candidate_install "$ROOT" "$STATE")"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 port=$((35000 + ($$ % 15000)))
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 YARD_KIND=container

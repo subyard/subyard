@@ -6,6 +6,8 @@ import pathlib
 import tempfile
 import subprocess
 import sys
+import signal
+import time
 import unittest
 from unittest import mock
 
@@ -170,6 +172,73 @@ class SinkOwnershipTests(unittest.TestCase):
         self.service.unlink()
         with self.assertRaises(ValueError):
             owner.assess(self.environment, system_uid=os.getuid(), inventory=[])
+
+
+class AcceptanceRunnerTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="subyard-sink-acceptance-", dir="/tmp")
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.root.chmod(0o700)
+        for directory in ("config", "config/profiles", "config/profiles/test-vms",
+                          "config/profiles/test-vms/tests", "config/profiles/test-vms/tests/e2e",
+                          "dev", "dev/e2e"):
+            (self.root / directory).mkdir(mode=0o700)
+        self.runner = self.root / "config/profiles/test-vms/tests/e2e/acceptance.sh"
+        self.runner.write_bytes((PROFILE / "tests/e2e/acceptance.sh").read_bytes())
+        self.runner.chmod(0o755)
+        controller = self.root / "dev/e2e/p0-acceptance.sh"
+        controller.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" > "$CONTROLLER_STATE/argv"
+printf '%s\\n' "$$" > "$CONTROLLER_STATE/pid"
+printf 'controller output\\n'
+printf 'controller error\\n' >&2
+if [ "${CONTROLLER_SIGNAL:-0}" = 1 ]; then exec sleep 30; fi
+exit "${CONTROLLER_EXIT:-0}"
+""")
+        controller.chmod(0o755)
+        self.environment = dict(os.environ, CONTROLLER_STATE=str(self.root))
+
+    def test_full_uninstall_lane_slot_and_native_exit_are_preserved(self):
+        for code in (0, 23):
+            with self.subTest(code=code):
+                result = subprocess.run(["bash", str(self.runner), "--slot", "2"],
+                                        env=dict(self.environment, CONTROLLER_EXIT=str(code)),
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, code)
+                self.assertEqual((self.root / "argv").read_text().splitlines(),
+                                 ["--slot", "2", "--lane", "full-uninstall"])
+                self.assertEqual(result.stdout, "controller output\n")
+                self.assertEqual(result.stderr, "controller error\n")
+
+    def test_invalid_arguments_never_enter_controller(self):
+        for arguments in ([], ["--slot"], ["--slot", "0"], ["--slot", "-1"],
+                          ["--slot", "01"], ["--slot", "x"], ["--slot", "1", "extra"],
+                          ["--slot", "1", "--slot", "2"], ["--slot", "1", "--lane", "smoke"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["bash", str(self.runner), *arguments],
+                                        env=self.environment, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse((self.root / "argv").exists())
+
+    def test_controller_replaces_adapter_and_receives_signal(self):
+        process = subprocess.Popen(["bash", str(self.runner), "--slot", "1"],
+                                   env=dict(self.environment, CONTROLLER_SIGNAL="1"),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not (self.root / "pid").exists() and time.monotonic() < deadline:
+                self.assertIsNone(process.poll())
+                time.sleep(0.01)
+            self.assertEqual(int((self.root / "pid").read_text()), process.pid)
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), -signal.SIGTERM)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
 
 
 if __name__ == "__main__":

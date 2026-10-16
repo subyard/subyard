@@ -5,8 +5,10 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,5 +110,48 @@ esac
 	}
 	if _, err := os.Lstat(filepath.Join(root, "config")); !os.IsNotExist(err) {
 		t.Fatal("capability negotiation created protected configuration")
+	}
+}
+
+func TestVerifiedRuntimeCapabilityProbePreservesProcessOutcomes(t *testing.T) {
+	for _, exitCode := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("exit-%d", exitCode), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			response := `{"schemaVersion":2,"activationReconciliationOwned":false,"activationOwners":["synthetic-runtime"]}`
+			engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    cat >/dev/null
+    printf '%%s\n' '%s'
+    exit %d ;;
+  *) exit 98 ;;
+esac
+`, response, exitCode)
+			candidate := writeDelegateRuntimeFixture(t, root, "1.2.3-owner", "owner", []byte("{}\n"), engine)
+			runtime := New(Config{Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			owner, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer owner.Close()
+			probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
+				Mode: releasetransition.RecoveryProcessRuntimeCapabilities}
+			result, err := runtime.invokeVerifiedRecoveryTransition(context.Background(), owner, root, probe, "")
+			if exitCode == 0 {
+				if err != nil || len(result.ActivationOwners) != 1 || result.ActivationOwners[0] != "synthetic-runtime" {
+					t.Fatalf("valid runtime capability response = %#v, %v", result, err)
+				}
+			} else {
+				var rejected *exec.ExitError
+				if !errors.As(err, &rejected) || rejected.ExitCode() != exitCode || len(result.ActivationOwners) != 0 {
+					t.Fatalf("failed probe lost native exit %d: %#v, %v", exitCode, result, err)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(root, "config")); !os.IsNotExist(err) {
+				t.Fatal("runtime capability probe created protected configuration")
+			}
+		})
 	}
 }

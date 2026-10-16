@@ -318,6 +318,8 @@ mkdir -p "$STATE/bin"
 printf '#!/bin/sh\nprintf "100.101.102.103\\n"\n' > "$STATE/bin/tailscale"
 chmod 0755 "$STATE/bin/tailscale"
 export PATH="$STATE/bin:$PATH"
+# Owner-address drift changes core preview activation and needs fresh release consent.
+candidate migrate --yes
 yard init --yes
 private_origin="http://$synthetic_address:$dashboard_port"
 yard status > "$STATE/private-dashboard-status"

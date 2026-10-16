@@ -188,7 +188,7 @@ EOF
     chmod 0755 "$fake_bin/runuser"
     export SUBYARD_USER
     SUBYARD_USER="$(/usr/bin/id -un)"
-    [ "$SUBYARD_USER" != root ] || SUBYARD_USER=fixture-operator
+    [ "$SUBYARD_USER" != root ] || SUBYARD_USER='fixture-operator'
     if ! bash "$ROOT/scripts/install-power-reconciler.sh" --yes > "$temporary/install/stdout" 2> "$temporary/install/stderr"; then
       cat "$temporary/install/stderr" >&2
       fail 'publication reader lost its pinned engine or source after a primary-group change'
