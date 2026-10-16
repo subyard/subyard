@@ -805,11 +805,18 @@ Retired shipped integrations are normalized only by their compatibility declarat
 rewriting their source files; other choices and explicit empty selections retain their authority.
 OpenLIT is not selected as a replacement automatically. See [retirement](openlit.md#predecessor-retirement).
 
+## Full uninstall
+
 `yard teardown` and its `uninstall` alias offer a scope menu in an interactive terminal.
 The default removes only the selected yard. The second option removes this installation and
 all its local yards on the owner host. Scope selection precedes the read-only inventory and
 one final `Proceed? [y/N]` confirmation. `--full` selects the full scope explicitly;
 `--yes` and `ASSUME_YES=1` never select it. Remote selectors cannot perform full removal.
+
+Full uninstall is available without running or completing migrations, for every source version.
+Pending or invalid V1/V2 migration metadata does not gate full removal. Its own ownership,
+cleanup inventory, session, stale-plan and confirmation checks still apply. Selected-yard
+teardown retains its ordinary release admission.
 
 ```sh
 yard teardown --full
@@ -827,6 +834,14 @@ inside custom roots, other installations, shared packages, account lingering and
 SSH and user-service state remain preserved. PATH entries serving other commands remain usable.
 Unknown ownership or changed native identities cause a nonzero refusal; a captured directory
 name alone does not establish ownership of all its contents.
+
+Legacy installations may lack creation receipts for host directories. Exact native association
+can establish a registered legacy yard's bounded project/instance/volume scope; unrelated native
+resources or conflicting ownership refuse that scope. Unrecorded legacy host namespaces, including
+backups, sessions and host mounts, and shared infrastructure without installation ownership remain
+preserved and are listed in the plan and final result. Full removal does not claim those paths
+were deleted. Modern receipt-owned namespaces retain their existing deletion and stale-plan guards.
+
 
 After consent, full removal saves the exact plan and a private recovery runtime beside the data
 root at `<data-root>.uninstall`. Producers stop synchronously before their data; yard resources

@@ -369,10 +369,20 @@ construction projects known legacy aliases. Child clears inherited config-loaded
 explicitly selected yard context, preventing default overrides from replacing identity;
 internal-child marker prevents recursion.
 
-The upgrade floor is expressed in domain epochs, separately from rollback eligibility of intact,
-compatible retained current/previous runtimes. An unfinished transaction pins its exact sealed
-owner, artifacts and protected evidence until terminal completion, regardless of age or release
-count. Released acceptance keeps an actual published baseline per distinct supported caller,
+The approved minimum source version is v0.11.0, inclusive. Earlier installations will use the
+existing full uninstall, removing their owned data, then a clean installation performed by the
+user. Runtime enforcement and uninstall acceptance are pending. This replaces the V1 upgrade-bridge
+and six-month notice plan. Full uninstall never requires running or completing migrations, for any
+source version, including pending or invalid V1/V2 journals. It retains ownership guards, explicit
+destructive consent and cleanup recovery. Selected-yard teardown keeps its ordinary release admission.
+Already accepted V2 history with legacy provenance remains readable. Process V1, Ledger V2,
+supported V2 recovery and checkpoint-reader contracts remain independent; see the
+[support policy](legacy-migration-support.md).
+
+The domain upgrade floor is expressed in epochs, separately from the source-version boundary and
+rollback eligibility of intact, compatible retained current/previous runtimes. A supported unfinished
+transaction pins its exact sealed owner, artifacts and protected evidence until terminal completion,
+regardless of age or release count. Released acceptance keeps an actual published baseline per distinct supported caller,
 producer or compatibility-bridge contract, rather than testing every version pair. Support and
 coverage retire only by explicit decision; no arbitrary time or release-count horizon removes them.
 
@@ -390,8 +400,8 @@ future target alone cannot satisfy that prerequisite. A frozen projection is not
 permission after authoritative epochs advance. The checkpoint-aware runtime boundary validates
 unaware retained targets against their sealed registry and matching checkpoint/projection epochs,
 then rechecks pinned records at execution while preserving frozen transition-owner/catalog bindings.
-The main registry keeps both migrations. Future prefix/handler retirement needs proved history,
-an explicit new floor and released compatibility pins, with the documented bridge.
+The main registry keeps its live migration definitions. Future V2 prefix/handler retirement needs
+proved history, an explicit new floor and released compatibility pins, with the documented bridge.
 See [Supported compatibility and recovery](resumable-release-transition-design.md#supported-compatibility-and-recovery).
 
 Current systemd convergence requires observed loaded/no pending daemon reload plus exact

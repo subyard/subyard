@@ -267,12 +267,20 @@ if [ "$CHECK_ONLY" = 0 ]; then
   # These verified inputs belong to this cache only when the owning installer
   # actually publishes from it. Record native file identity, never infer ownership
   # later from a release-like filename or approve the surrounding directory.
-  python3 - "$installation_inventory" "$BUNDLE" "$CHECKSUM" "$MANIFEST" "$PROVENANCE" <<'PY_CACHE'
-import json,os,pathlib,stat,sys,tempfile
+  python3 - "$installation_inventory" "$BUNDLE" "$CHECKSUM" "$MANIFEST" "$PROVENANCE" "$0" "${0}.sha256" <<'PY_CACHE'
+import hashlib,json,os,pathlib,stat,sys,tempfile
 metadata=pathlib.Path(sys.argv[1]);value=json.loads(metadata.read_bytes())
 root=pathlib.Path(value["cacheRoot"])
 records={entry["Path"]:entry for entry in value.get("cacheFiles",[])}
-for argument in sys.argv[2:]:
+arguments=sys.argv[2:6]
+helper=pathlib.Path(sys.argv[6]).absolute();checksum=pathlib.Path(sys.argv[7]).absolute()
+if helper.is_relative_to(root) and checksum.is_relative_to(root):
+ for path in (helper,checksum):
+  info=path.lstat()
+  if not stat.S_ISREG(info.st_mode) or info.st_uid!=value["operatorUid"]:raise SystemExit("install-runtime-release: unsafe cached installer helper")
+ if hashlib.sha256(helper.read_bytes()).hexdigest()!=checksum.read_text().split()[0].lower():raise SystemExit("install-runtime-release: cached installer helper checksum changed")
+ arguments += [str(helper),str(checksum)]
+for argument in arguments:
  path=pathlib.Path(argument).absolute()
  try:relative=path.relative_to(root).as_posix()
  except ValueError:continue

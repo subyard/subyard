@@ -30,6 +30,24 @@ LEGACY_BASELINE_SHA256 = {
     "arm64": "4c349fe6316f90242c09398261e7f76f9bf07c94fa50862e8e707989cd76eea5",
 }
 LEGACY_INSTALLER_SHA256 = "7932034b1c4f42c7fd66975ff1291bec5ea83b687988d634d67d46ff93ce6d06"
+MINIMUM_BASELINE = "0.11.0"
+MINIMUM_BASELINE_SHA256 = {
+    "amd64": "30ff2437219dcaaa568599a9df68a62d3f9203d66579d7ee6c802e527ca92163",
+    "arm64": "cf89b7319ad9fdb31872ba5272921b84d585c3baf20ecff52056d843448d53a3",
+}
+RETIRED_BASELINES = {
+    "0.4.1": {"amd64": "fc5b030785089039177292b8127a793defdb54644d00fdcf0d8067106e9c3700", "arm64": "04bfe62cc5964ae841a2827e260dcba6afb4d511f41f62b54c45d9c74930048f"},
+    "0.4.2": {"amd64": "17608894ab0959d3eed5e1467da2174eb934683af10d8a774329f338cd82eda2", "arm64": "cac9f6791c03610ea35869875f6c1b5c013d30c0077b5530e1d6d182086b1654"},
+    LEGACY_BASELINE: LEGACY_BASELINE_SHA256,
+    "0.10.0": {"amd64": "e61405d6539ccc3b953be1dd24b9d7101476a4380225b866fe8bd9896ae7c659", "arm64": "ab11255d001025f9a099294b71a06c20d8c99d8b70adee536d128f85174e84f0"},
+}
+RETIRED_INSTALLER_SHA256 = {
+    "0.4.1": "28c45b916d8eaedc5a607bf0895fb0f3caad620f475a3744beb75c9c5528724e",
+    "0.4.2": "28c45b916d8eaedc5a607bf0895fb0f3caad620f475a3744beb75c9c5528724e",
+    LEGACY_BASELINE: LEGACY_INSTALLER_SHA256,
+    "0.10.0": LEGACY_INSTALLER_SHA256,
+}
+
 ACTIVATION_BASELINE = "0.17.3"
 ACTIVATION_BASELINE_SHA256 = {
     "amd64": "3ea73ca51dae023600997a07bbfaa5df8be1f4c1c4f5c9ead1b261b5aec4363b",
@@ -59,14 +77,26 @@ def digest(path):
 def write_observation_incus(shims, control, unexpected):
     source = Path(__file__).resolve().parent.parent
     probes = {}
+    host_probes = {}
     fixtures = [fixture for owner in ("agents", "profiles", "retired-integrations")
                 for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
     for fixture in sorted(fixtures):
-        commands = runpy.run_path(str(fixture))["read_only_commands"](fixture.parent.parent)
-        for arguments, response in commands:
+        package = runpy.run_path(str(fixture))
+        commands = package["read_only_commands"](fixture.parent.parent)
+        for entry in commands:
+            arguments, response, *status = entry
+            code = status[0] if status else 0
+            require(len(status) <= 1 and type(code) is int and 0 <= code <= 255,
+                    "package observation fixture has invalid exit status")
             key = tuple(arguments)
             require(key not in probes, "package observation fixture has duplicate commands")
-            probes[key] = response
+            probes[key] = (response, code)
+        for program, arguments, response, code in package.get("read_only_host_commands", lambda _: [])(fixture.parent.parent):
+            require(program in ("sudo", "systemctl") and type(code) is int and 0 <= code <= 255,
+                    "package host observation fixture is invalid")
+            key = (program, tuple(arguments))
+            require(key not in host_probes, "package host observation fixture has duplicate commands")
+            host_probes[key] = (response, code)
     incus = shims / "incus"
     # Exact canned observations only; no command or guest script is executed.
     incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
@@ -78,8 +108,9 @@ def write_observation_incus(shims, control, unexpected):
                      "    sys.exit(0)\n"
                      "if tuple(arguments) in probes:\n"
                      "    sys.stdin.buffer.read()\n"
-                     "    sys.stdout.write(probes[tuple(arguments)])\n"
-                     "    sys.exit(0)\n"
+                     "    response, code = probes[tuple(arguments)]\n"
+                     "    sys.stdout.write(response)\n"
+                     "    sys.exit(code)\n"
                      "if arguments == ['list', 'yard', '--project', 'subyard', '-f', 'csv', '-c', 's']:\n"
                      f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
                      "    print(observation['instances'][0]['info']['status'].upper())\n"
@@ -94,6 +125,35 @@ def write_observation_incus(shims, control, unexpected):
                      f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
                      "sys.exit(99)\n")
     incus.chmod(0o700)
+    for name in ("sudo", "systemctl"):
+        commands = {arguments: result for (program, arguments), result in host_probes.items() if program == name}
+        shim = shims / name
+        shim.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                        "arguments = sys.argv[1:]\n"
+                        "if sys.argv[0].endswith('/sudo') and arguments == ['-n', 'true']:\n"
+                        "    sys.exit(0)\n"
+                        f"probes = {commands!r}\n"
+                        "if tuple(arguments) in probes:\n"
+                        "    response, code = probes[tuple(arguments)]\n"
+                        "    sys.stdout.write(response)\n"
+                        "    sys.exit(code)\n"
+                        f"pathlib.Path({str(unexpected)!r}).write_text('host mutation rejected')\n"
+                        "sys.exit(99)\n")
+        shim.chmod(0o700)
+
+
+
+def set_fixture_observation(control, value):
+    payload = json.dumps(value)
+    control.write_text(payload)
+    control.chmod(0o600)
+    deadline = time.monotonic() + 10
+    applied = Path(str(control) + ".applied")
+    while time.monotonic() < deadline:
+        if applied.exists() and applied.read_text() == payload:
+            return
+        time.sleep(0.02)
+    require(False, "fixture Incus observation was not applied")
 
 
 def sealed_checkpoint_reader(release_root):
@@ -202,6 +262,11 @@ class Fixture:
         self.version = version
         self.baseline_version = baseline_version
         self.config.mkdir(parents=True)
+        # Each independent installation starts with its own absent native state.
+        # A previous recovery fixture may have left a stopped synthetic yard.
+        observation = root.parent / "incus-observation.json"
+        if observation.is_file():
+            set_fixture_observation(observation, {})
         self.env = {
             "PATH": "/usr/bin:/bin", "HOME": str(self.home), "SHELL": "/bin/bash",
             "SUBYARD_OPERATOR_HOME": str(self.home), "SUBYARD_HOME": str(self.data),
@@ -213,7 +278,7 @@ class Fixture:
             "SUBYARD_POWER_UNIT_PATH": str(root / "missing-power-unit"),
         }
         bundle = baseline / f"subyard-{baseline_version}-linux-{arch}.tar.gz"
-        installer_root = baseline if baseline_version == LEGACY_BASELINE else release
+        installer_root = baseline if baseline_version in RETIRED_BASELINES else release
         self.run([
             "bash", str(installer_root / "subyard-install-runtime-release.sh"),
             "--runtime-root", str(self.runtime), "--bundle", str(bundle),
@@ -480,74 +545,69 @@ def verify_checkpoint_source(release, version, baseline, arch, root, baseline_ve
           "epoch 3; both callers refuse rollback to epoch 2 and preserve the pinned projection", flush=True)
 
 
-def verify_legacy(release, version, baseline, arch, root):
-    fixture = Fixture(root / "legacy", release, version, baseline, arch, LEGACY_BASELINE)
-
+def verify_legacy(release, version, baseline, arch, root, baseline_version=LEGACY_BASELINE):
+    fixture = Fixture(root / f"legacy-{baseline_version}", release, version, baseline, arch, baseline_version)
+    owned_marker = fixture.data / "projects/retained-project-data"
+    owned_marker.parent.mkdir()
+    fixture.project_marker.rename(owned_marker)
+    fixture.project_marker = owned_marker
     def links():
         return tuple(os.readlink(path) if path.is_symlink() else None
                      for path in (fixture.runtime / "current", fixture.runtime / "previous"))
-
-    def assert_unstarted(before):
-        require(snapshot(fixture.config) == before, "blocked legacy upgrade changed protected config")
-        require(links() == initial_links, "blocked legacy upgrade changed runtime links")
-
     initial_links = links()
     before = snapshot(fixture.config)
-    result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
-                         fixture.env, timeout=180)
-    require(result.returncode != 0, "legacy updater unexpectedly activated the candidate")
-    assert_unstarted(before)
-    instruction = ("curl -fsSL https://github.com/Subyard/Subyard/releases/download/"
-                   f"v{version}/subyard-install.sh | bash -s -- --version {version} --yes")
-    require(instruction in result.stdout + result.stderr,
-            f"legacy updater omitted the exact pinned bridge instruction: {result.stdout}{result.stderr}")
-
     installer = (release / "subyard-install.sh").read_text()
-
-    def bridge(*arguments):
+    def bootstrap(*arguments):
         return run_process(["bash", "-s", "--", "--version", version, *arguments],
                            fixture.env, timeout=180, input_text=installer)
-
-    result = bridge()
-    require(result.returncode != 0 and "confirmation" in (result.stdout + result.stderr).lower(),
-            f"piped legacy bridge did not refuse missing consent: {result.stdout}{result.stderr}")
-    assert_unstarted(before)
-
-    nested = fixture.config / "yards/named/config.env"
-    flat = fixture.config / "yards/named.env"
-    nested.parent.mkdir(parents=True)
-    nested.write_text("# Retained nested registration.\n")
-    flat.write_text("# Shadowed operator registration.\n")
-    nested_hash, flat_hash = digest(nested), digest(flat)
-    before = snapshot(fixture.config)
-    result = bridge("--yes")
-    require(result.returncode != 0, "legacy bridge silently selected a duplicate registration")
-    assert_unstarted(before)
-    diagnostic = result.stdout + result.stderr
-    require(all(fragment in diagnostic for fragment in ("named", "yards/named.env", "yards/named/config.env")),
-            f"duplicate diagnostic omitted the exact repair scope: {diagnostic}")
-
+    # The original released updater and the current standalone entrypoint both
+    # refuse before changing the active pair or protected settings.
+    for result in (run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
+                               fixture.env, timeout=180), bootstrap("--yes")):
+        require(result.returncode != 0, "unsupported source activated the candidate")
+        require("v0.11.0" in result.stdout + result.stderr
+                and "uninstall --full" in result.stdout + result.stderr,
+                f"unsupported source lacks actionable removal guidance: {result.stdout}{result.stderr}")
+        require(snapshot(fixture.config) == before and links() == initial_links,
+                "unsupported upgrade changed protected config or active links")
+    result = bootstrap("--publish-only")
+    require(result.returncode == 0 and links() == initial_links and snapshot(fixture.config) == before,
+            f"cleanup tooling staging required migration/activation: {result.stdout}{result.stderr}")
     candidates = list((fixture.runtime / "releases").glob(f"{version}-*"))
-    require(len(candidates) == 1, "legacy bridge did not publish one exact verified candidate")
+    require(len(candidates) == 1, "staging did not produce one exact candidate")
     candidate = candidates[0] / "bin/yard"
-    require(fixture.run([str(candidate), "--version"]).strip() == f"yard {version}",
-            "repair launcher is not the published candidate")
-    fixture.run([str(candidate), "config", "repair-registration", "named", "--yes"])
-    archive = fixture.config / "recovery/yard-registrations/named.env"
-    require(not flat.exists() and archive.is_file() and digest(archive) == flat_hash,
-            "registration repair did not preserve the shadowed config")
-    require(digest(nested) == nested_hash, "registration repair changed the retained config")
-    require(links() == initial_links and not fixture.journal.exists(),
-            "registration repair started the release transition")
+    # No yard workload is created here; physical inventory and interrupted
+    # deletion belong to the owning full-uninstall lane.
+    foreign = fixture.home / "foreign.control"
+    foreign.write_text("foreign content\n")
+    tools = fixture.root / "cold-tools"
+    tools.mkdir()
+    for command in ("bash", "dirname", "readlink", "python3", "env"):
+        (tools / command).symlink_to(shutil.which(command))
+    removal_env = dict(fixture.env, PATH=str(tools), INCUS_DIR=str(fixture.root / "absent-incus"))
+    removal_env.pop("SUBYARD_INCUS_SOCKET", None)
+    result = run_process([str(candidate), "uninstall", "--full", "--yes"], removal_env, timeout=180)
+    require(result.returncode == 0, f"staged full uninstall failed: {result.stdout}{result.stderr}")
+    require(not fixture.runtime.exists() and not fixture.config.exists() and not fixture.data.exists(),
+            f"full uninstall retained owned old state: {[str(path.relative_to(fixture.home)) for path in fixture.data.rglob('*')]}")
+    require(foreign.read_text() == "foreign content\n", "uninstall removed foreign content")
+    require(not Path(str(fixture.data) + ".uninstall").exists(), "uninstall did not verify closure")
+    # A separate invocation models the user's later clean installation.
+    result = bootstrap("--yes")
+    require(result.returncode == 0, f"separate clean install failed: {result.stdout}{result.stderr}")
+    require(not fixture.retained.exists() and not fixture.project_marker.exists(),
+            "clean installation reused retired settings or data")
+    print(f"PASS: actual released {baseline_version} refuses upgrade, stages cleanup without activation, "
+          "fully uninstalls and permits a separate clean install", flush=True)
 
-    result = bridge("--yes")
-    require(result.returncode == 0,
-            f"explicitly authorized piped bridge failed: {result.stdout}{result.stderr}")
-    fixture.complete(old=False)
-    require(digest(archive) == flat_hash and digest(nested) == nested_hash,
-            "completed bridge changed the preserved registration configs")
-    print(f"PASS: released {LEGACY_BASELINE} refusal, pinned piped bridge, consent and duplicate repair -> {version}",
-          flush=True)
+
+def verify_minimum_source(release, version, baseline, arch, root):
+    fixture = Fixture(root / "minimum-source", release, version, baseline, arch, MINIMUM_BASELINE)
+    require(fixture.check()["outcome"]["status"] == "migration-required",
+            "actual v0.11.0 lower-bound caller cannot inspect the update")
+    fixture.update("--version", version, "--yes")
+    fixture.complete()
+    print(f"PASS: actual released v0.11.0 inclusive lower-bound update -> {version}", flush=True)
 
 
 def verify_completed_activation_drift(fixture):
@@ -989,7 +1049,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     fixture = Fixture(root / ("fresh-activation-compatible" if compatible else "fresh-activation"),
                       release, version, baseline, arch)
     host_settings = fixture.config / "config.env"
-    host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    host_settings.write_text("ENVIRONMENT_PROFILES=''\nCODING_TOOL_INTEGRATIONS=codex\n")
     host_settings.chmod(0o600)
     fixture.update("--version", version, "--yes")
     fixture.complete()
@@ -1002,33 +1062,16 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     control = root / "incus-observation.json"
 
     def observe(status, hold):
-        payload = json.dumps({"instances": [{"project": "subyard", "name": "yard",
-                                             "info": {"name": "yard", "status": status,
-                                                      "type": "container", "config": {}, "devices": {}}}],
-                              "holdJournal": str(fixture.journal) if hold else ""})
-        control.write_text(payload)
-        control.chmod(0o600)
-        deadline = time.monotonic() + 10
-        applied = Path(str(control) + ".applied")
-        while time.monotonic() < deadline:
-            if applied.exists() and applied.read_text() == payload:
-                return
-            time.sleep(0.02)
-        require(False, "fresh recovery Incus observation was not applied")
+        set_fixture_observation(control, {"instances": [{"project": "subyard", "name": "yard",
+                                              "info": {"name": "yard", "status": status,
+                                                       "type": "container", "config": {}, "devices": {}}}],
+                                         "holdJournal": str(fixture.journal) if hold else ""})
 
     # Native observations are synthetic; any privileged or mutating host command
     # is rejected. This exercises the actual candidate engine and wire contract.
     shims = fixture.root / "commands"
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
-    for name in ("sudo", "systemctl"):
-        shim = shims / name
-        shim.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
-                        "if sys.argv[0].endswith('/sudo') and sys.argv[1:] == ['-n', 'true']:\n"
-                        "    sys.exit(0)\n"
-                        f"pathlib.Path({str(unexpected)!r}).write_text('host mutation rejected')\n"
-                        "sys.exit(99)\n")
-        shim.chmod(0o700)
     write_observation_incus(shims, control, unexpected)
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     interrupted = Path(str(control) + ".held")
@@ -1049,7 +1092,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     unchanged = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
     require(unchanged["outcome"]["status"] == "recovering" and not unchanged.get("blockers"),
             "unchanged activation inputs did not retain ordinary resume")
-    host_settings.write_text("CODING_TOOL_INTEGRATIONS=claude\n")
+    host_settings.write_text("ENVIRONMENT_PROFILES=''\nCODING_TOOL_INTEGRATIONS=claude\n")
     host_settings.chmod(0o600)
     changed_bytes = host_settings.read_bytes()
     before = snapshot(fixture.config)
@@ -1102,7 +1145,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     require(refused["code"] == "confirmation-required" and after_refusal == before,
             "fresh recovery missing-grant guard disagreed: code=" + refused["code"]
             + "; changed_paths=" + ",".join(changed_paths))
-    host_settings.write_text("CODING_TOOL_INTEGRATIONS=\n")
+    host_settings.write_text("ENVIRONMENT_PROFILES=''\nCODING_TOOL_INTEGRATIONS=\n")
     host_settings.chmod(0o600)
     stale_before = snapshot(fixture.config)
     refused = protocol(apply)["outcome"]
@@ -1140,9 +1183,15 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
             and not unexpected.exists(),
             "released-caller resume changed recovery evidence, selections, ledger or runtime links")
     if compatible:
-        fixture.update("--rollback", "--yes", old=False)
-        require(os.readlink(fixture.runtime / "current") == fixture.initial,
-                "matching-epoch fresh recovery made the retained runtime unavailable for rollback")
+        # Equal epochs do not prove a stopped yard's deferred profile/helper
+        # consumers absent. The released owner cannot activate those contracts.
+        before_rollback = snapshot(fixture.config)
+        refused = run_process([str(launcher), "update", "--rollback", "--yes"], fixture.env, timeout=60)
+        require(refused.returncode != 0 and "code=rollback-incompatible" in refused.stderr
+                and "cannot verify installed runtime activation" in refused.stderr
+                and snapshot(fixture.config) == before_rollback
+                and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == links_before,
+                "component-incompatible stopped-yard rollback changed protected recovery state")
     else:
         verify_power_rollback_refusal(fixture)
         require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
@@ -1157,7 +1206,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
             and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
             "rollback/refusal and forward update changed protected recovery history")
     print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "
-          f"caller inspects and resumes V2 successor, {'matching-epoch rollback' if compatible else 'power rollback refusal'} and forward", flush=True)
+          f"caller inspects and resumes V2 successor, {'component-owner rollback refusal' if compatible else 'power rollback refusal'} and forward", flush=True)
     if not compatible:
         bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
         verify_fresh_activation_recovery(bridge_release, bridge_version, baseline, arch, root, compatible=True)
@@ -1271,6 +1320,8 @@ def main():
                         help="optional directory containing the pinned published-caller baseline assets")
     parser.add_argument("--source-baseline-dir", type=Path,
                         help="optional directory containing the pinned source-repair baseline assets")
+    parser.add_argument("--only-legacy-retirement", action="store_true",
+                        help="run retired-source refusal/full-uninstall and actual v0.11.0 admission")
     parser.add_argument("--only-source-repair", action="store_true",
                         help="run actual released completed and interrupted source-repair contracts")
     parser.add_argument("--only-activation-recovery", action="store_true",
@@ -1284,7 +1335,7 @@ def main():
     parser.add_argument("--only-power-transition-regression", action="store_true",
                         help="run affected rollback, checkpoint-reader bridge and fresh recovery contracts")
     args = parser.parse_args()
-    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression)) <= 1,
+    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression, args.only_legacy_retirement)) <= 1,
             "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
@@ -1312,6 +1363,15 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
+                if args.only_legacy_retirement or not any((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression)):
+                    for baseline_version, hashes in RETIRED_BASELINES.items():
+                        directory = args.legacy_baseline_dir if baseline_version == LEGACY_BASELINE else None
+                        baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
+                        verify_legacy(release, args.version, baseline, arch, root, baseline_version)
+                    baseline = baseline_assets(root, None, MINIMUM_BASELINE, MINIMUM_BASELINE_SHA256, arch)
+                    verify_minimum_source(release, args.version, baseline, arch, root)
+                    if args.only_legacy_retirement:
+                        return
                 if args.only_power_transition_regression:
                     for baseline_version, hashes, directory in (
                             (BASELINE, BASELINE_SHA256, args.baseline_dir),
@@ -1362,10 +1422,6 @@ def main():
                     verify_activation_only_recovery(release, args.version, source_baseline, arch, root,
                                                    SOURCE_BASELINE, source_repair=True)
                     return
-                if not args.only_activation_recovery and not args.only_checkpoint_source:
-                    legacy = baseline_assets(root, args.legacy_baseline_dir, LEGACY_BASELINE,
-                                             LEGACY_BASELINE_SHA256, arch)
-                    verify_legacy(release, args.version, legacy, arch, root)
                 if not args.only_activation_recovery:
                     for baseline_version, hashes, directory in (
                             (BASELINE, BASELINE_SHA256, args.baseline_dir),
@@ -1403,7 +1459,7 @@ def baseline_assets(root, directory, version, hashes, arch):
         baseline.mkdir()
         print(f"Downloading pinned official {version} baseline for linux/{arch}", flush=True)
         names = [bundle_name + suffix for suffix in ("", ".sha256", ".manifest.json", ".provenance.json")]
-        if version == LEGACY_BASELINE:
+        if version in RETIRED_BASELINES:
             names.append("subyard-install-runtime-release.sh")
         for name in names:
             url = f"https://github.com/Subyard/Subyard/releases/download/v{version}/{name}"
@@ -1411,8 +1467,8 @@ def baseline_assets(root, directory, version, hashes, arch):
                 (baseline / name).write_bytes(response.read())
     require(digest(baseline / bundle_name) == hashes[arch],
             "official baseline checksum does not match the pinned release")
-    if version == LEGACY_BASELINE:
-        require(digest(baseline / "subyard-install-runtime-release.sh") == LEGACY_INSTALLER_SHA256,
+    if version in RETIRED_BASELINES:
+        require(digest(baseline / "subyard-install-runtime-release.sh") == RETIRED_INSTALLER_SHA256[version],
                 "official legacy installer does not match the pinned release")
     return baseline
 

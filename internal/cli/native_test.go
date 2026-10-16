@@ -2738,11 +2738,10 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil {
 		t.Fatalf("mutation gate output is not structured JSON: %q: %v", stderr.String(), err)
 	}
-	if outcome.Status != "recovering" || outcome.Code != "recovery-pending" ||
+	if outcome.Status != "operator-action-required" || outcome.Code != "journal-invalid" ||
 		outcome.Active != "0.0.9" || outcome.Previous == nil || *outcome.Previous != "0.0.8" ||
-		outcome.Target != Version || outcome.Transaction == nil ||
-		!strings.HasPrefix(*outcome.Transaction, "v1-") ||
-		outcome.Action != "run yard update" {
+		outcome.Target != Version || outcome.Transaction != nil ||
+		outcome.Action != "run yard update --check" {
 		t.Fatalf("mutation gate outcome=%#v", outcome)
 	}
 	got, err := os.ReadFile(ownerJournalPath)
@@ -3428,7 +3427,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			Params: json.RawMessage(`{"command":"code","arguments":["Demo"]}`),
 		}, nil)
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "recovery-pending" {
+		if !ok || fault.Code != "journal-invalid" {
 			t.Fatalf("gated plan error=%#v", err)
 		}
 		got, readErr := os.ReadFile(projectJournalPath)
@@ -3470,7 +3469,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			Params: json.RawMessage(`{"confirmed":true}`),
 		}, func(string, any) (uint64, error) { return 1, nil })
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "recovery-pending" || len(runner.Requests) != 0 {
+		if !ok || fault.Code != "journal-invalid" || len(runner.Requests) != 0 {
 			t.Fatalf("execute gate error=%#v requests=%#v", err, runner.Requests)
 		}
 	})
@@ -3501,13 +3500,11 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 				t.Fatal(err)
 			}
 			if code := program.runMigration(context.Background(), "default", []string{verb}); code != 2 ||
-				!strings.Contains(stderr.String(), "superseded") {
+				!strings.Contains(stderr.String(), "before v0.11.0") {
 				t.Fatalf("_migrate %s result: code=%d stderr=%q", verb, code, stderr.String())
 			}
-			instruction := "curl -fsSL https://github.com/Subyard/Subyard/releases/download/v" + Version +
-				"/subyard-install.sh | bash -s -- --version " + Version + " --yes"
-			if !strings.Contains(stderr.String(), instruction) {
-				t.Fatalf("legacy updater lacks pinned standalone instruction: %s", stderr.String())
+			if !strings.Contains(stderr.String(), "uninstall --full") || !strings.Contains(stderr.String(), "owned data") {
+				t.Fatalf("legacy updater lacks full-uninstall guidance: %s", stderr.String())
 			}
 		})
 	}
@@ -3588,7 +3585,7 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
-		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering {
+		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusOperatorActionRequired {
 			t.Fatalf("caller-controlled child marker bypassed mutation gate: outcome=%#v err=%v",
 				outcome, err)
 		}

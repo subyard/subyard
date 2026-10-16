@@ -9,6 +9,8 @@ release="$fixture/release"
 bash "$ROOT/dev/package-engine.sh" --output-dir "$release" --version "$version" --arch amd64 >/dev/null
 bundle="$release/subyard-$version-linux-amd64.tar.gz"
 export HOME="$fixture/home" SUBYARD_OPERATOR_HOME="$fixture/home"
+# A sibling runtime/cache must not rely on audit logging to create DataHome.
+export SUBYARD_NO_AUDIT=1
 export SUBYARD_HOME="$fixture/data" SUBYARD_CONFIG_HOME="$fixture/config"
 export YARD_RELEASE_CACHE="$fixture/cache"
 export SUBYARD_POWER_UNIT_PATH="$fixture/units/subyard-power-reconcile.service"
@@ -49,9 +51,20 @@ export SUBYARD_HOME="$fixture/bootstrap-data" SUBYARD_CONFIG_HOME="$fixture/boot
 export YARD_RUNTIME_ROOT="$fixture/bootstrap-runtime" YARD_RELEASE_CACHE="$fixture/bootstrap-cache"
 export YARD_BIN_DIR="$fixture/bootstrap-bin" YARD_SHELL_RC="$fixture/bootstrap.rc" YARD_LOGIN_RC="$fixture/bootstrap.login"
 export YARD_RELEASE_BASE_URL="file://$release"
+# Existing unsafe targets must refuse before activating or creating inventory.
+mkdir -m 0700 "$fixture/foreign-data-target"
+ln -s "$fixture/foreign-data-target" "$SUBYARD_HOME"
+if bash "$ROOT/dev/bootstrap-runtime.sh" --version "$version" --yes > "$fixture/unsafe-data.log" 2>&1; then exit 1; fi
+grep -Fq 'unsafe installation data directory' "$fixture/unsafe-data.log"
+/bin/unlink "$SUBYARD_HOME"
+mkdir -m 0777 "$SUBYARD_HOME"
+if bash "$ROOT/dev/bootstrap-runtime.sh" --version "$version" --yes > "$fixture/unsafe-data.log" 2>&1; then exit 1; fi
+grep -Fq 'unsafe installation data directory' "$fixture/unsafe-data.log"
+/bin/rmdir "$SUBYARD_HOME"
 if ! bash "$ROOT/dev/bootstrap-runtime.sh" --version "$version" --yes > "$fixture/bootstrap.log" 2>&1; then
   /bin/cat "$fixture/bootstrap.log" >&2; exit 1
 fi
+[ "$(stat -c '%a' "$SUBYARD_HOME")" = 700 ]
 printf 'foreign cache control\n' > "$YARD_RELEASE_CACHE/$version/foreign.control"
 if ! "$YARD_BIN_DIR/yard" teardown --full --yes > "$fixture/bootstrap-full.log" 2>&1; then
   /bin/cat "$fixture/bootstrap-full.log" >&2; exit 1

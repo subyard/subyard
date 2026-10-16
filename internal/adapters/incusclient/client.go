@@ -200,6 +200,7 @@ func (client *Client) ReconcileState(
 	} else {
 		state.ProfileFound = true
 		state.ProfileDevices = cloneDevices(profile.Devices)
+		state.ProfileConfig = cloneMap(profile.Config)
 	}
 	instance, _, err := projectServer.GetInstance(instanceName)
 	if err != nil {

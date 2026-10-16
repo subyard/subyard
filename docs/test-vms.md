@@ -619,7 +619,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.11.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime; historical unlabelled init retains its pre-existing refusal with native state unchanged, then installed boot reconciliation repeats | targeted transport/recovery diagnostic; see the [historical init limitation](reference/legacy-migration-support.md#approved-support-boundary) |
 | `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -1258,6 +1258,13 @@ a delayed sink tick longer than one minute, guest reboot and repeated verificati
 ```sh
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane full-uninstall
 ```
+
+Its released-source case installs checksum-pinned actual v0.10.0, lets that runtime create a yard,
+refuses upgrade without changing protected config or links, stages current cleanup tooling without
+activation, refuses an unrelated project profile, and interrupts full removal at config deletion.
+A fresh retained recovery process finishes the same plan; a separate clean installation does not
+reuse old configuration. Unproven legacy host namespaces and shared infrastructure remain explicitly
+preserved. The same lane retains its modern ownership, foreign-control and reboot checks.
 
 Its marker-owned fixture runs lifecycle commands as an ordinary isolated owner, with root helpers
 confined to the leased VM. It includes direct/custom installer-only and bootstrap-only cases,

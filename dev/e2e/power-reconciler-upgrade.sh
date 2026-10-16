@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exact published v0.8.0 -> local candidate migration acceptance on an allocated P0 worker VM.
+# Exact published v0.11.0 -> local candidate migration acceptance on an allocated P0 worker VM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -7,17 +7,20 @@ MODE="${1:-run}"
 TOKEN="${2:-}"
 # shellcheck source=dev/e2e/lib-p0-capacity.sh
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
-OLD_VERSION=0.8.0
-OLD_INSTALLER_SHA256=5bd3c61e3dd39cb2d258be5cd75237383f00eff0512c77a3a5ca75d96e6b992b
-OLD_UNIT_FIXTURE="$ROOT/tests/fixtures/systemd/subyard-power-reconcile-v0.8.0.service.in"
-CANDIDATE_VERSION="p0-power-systemd-$TOKEN"
+OLD_VERSION=0.11.0
+OLD_INSTALLER_SHA256=41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d
+OLD_UNIT_FIXTURE=''
+CANDIDATE_VERSION="0.19.1-power-systemd.$TOKEN"
+if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+fi
 STATE_ROOT="/var/tmp/subyard-p0-power-systemd-$TOKEN"
 MARKER="subyard-p0-power-systemd-$TOKEN"
 OPERATOR="subyardpower$TOKEN"
 OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-power-systemd-home"
 RELEASE_ROOT="$STATE_ROOT/candidate"
-INSTALLER="$STATE_ROOT/subyard-install-v0.8.0.sh"
+INSTALLER="$STATE_ROOT/subyard-install-v0.11.0.sh"
 SUDOERS="/etc/sudoers.d/$MARKER"
 SUDOERS_TEMP=''
 PROJECT=subyard
@@ -33,7 +36,6 @@ BOOT_ID_STATE="$STATE_ROOT/boot-id"
 DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
 OLD_RELEASE_TARGET_STATE="$STATE_ROOT/old-release-target"
 CANDIDATE_RELEASE_TARGET_STATE="$STATE_ROOT/candidate-release-target"
-LEGACY_STATE_SHA_STATE="$STATE_ROOT/legacy-state.sha256"
 ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
 ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
 ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/.subyard-p0-activation-reconcile-interrupted"
@@ -399,7 +401,7 @@ materialize_unit() {
 }
 
 assert_unit_matches() {
-  local template="$1" expected_load="$2" layout="$3"
+  local template="$1" expected_load="$2" contract="$3"
   local expected="$STATE_ROOT/expected.service" manager_state
   materialize_unit "$template" "$expected"
   sudo -n cmp "$expected" "$UNIT" || die "installed unit does not match $template"
@@ -414,33 +416,34 @@ assert_unit_matches() {
     && grep -Fxq 'RestartForceExitStatus=75' <<<"$manager_state" \
     && grep -Fxq 'TimeoutStartUSec=2min' <<<"$manager_state" \
     || die 'installed power reconciler manager state is stale or incomplete'
-  case "$layout" in
-    4)
-      grep -Fxq 'Type=oneshot' <<<"$manager_state" \
-        && grep -Fxq 'RuntimeMaxUSec=infinity' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
-        && grep -Fxq 'StartLimitBurst=5' <<<"$manager_state" \
-        || die "published v0.8.0 manager properties changed: ${manager_state//$'\n'/, }"
+  case "$contract" in
+    released)
+      grep -Fxq 'Type=exec' <<<"$manager_state" \
+        && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
+        && grep -Fxq 'StartLimitIntervalUSec=15min' <<<"$manager_state" \
+        && grep -Fxq 'StartLimitBurst=6' <<<"$manager_state" \
+        && grep -Fxq 'RestartUSec=10s' <<<"$manager_state" \
+        || die "released power reconciler manager properties differ: ${manager_state//$'\n'/, }"
       ;;
-    5)
+    candidate)
       grep -Fxq 'Type=exec' <<<"$manager_state" \
         && grep -Fxq 'RuntimeMaxUSec=2min' <<<"$manager_state" \
         && grep -Fxq 'StartLimitIntervalUSec=0' <<<"$manager_state" \
         && grep -Fxq 'RestartUSec=30s' <<<"$manager_state" \
         || die "candidate power reconciler manager properties did not converge: ${manager_state//$'\n'/, }"
       ;;
-    *) die "unsupported power reconciler layout assertion: $layout" ;;
+    *) die "unsupported power reconciler manager contract: $contract" ;;
   esac
   sudo -n systemctl is-enabled --quiet subyard-power-reconcile.service \
     || die 'installed power reconciler unit is not enabled'
 }
 
 assert_runtime_state() {
-  local version="$1" unit_template="$2" expected_load="$3" manager_layout="$4"
+  local version="$1" unit_template="$2" expected_load="$3" manager_contract="$4"
   local reconciler_target="$5"
   [ "$(operator_yard --version)" = "yard $version" ] \
     || die "active runtime is not yard $version"
-  assert_unit_matches "$unit_template" "$expected_load" "$manager_layout"
+  assert_unit_matches "$unit_template" "$expected_load" "$manager_contract"
   operator_env cmp \
     "$OPERATOR_HOME/.subyard/runtime/$reconciler_target/bin/yard-engine" "$RECONCILER" \
     || die 'installed power reconciler executable is stale'
@@ -449,32 +452,6 @@ assert_runtime_state() {
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = \
     running ] || die 'update changed desired=running'
   operator_yard check
-}
-
-assert_published_v1_history() {
-  operator_env jq -e '
-    .layout == 4 and
-    .applied == ["migrate-test-yard-owner", "refresh-test-vm-broker", "refresh-power-reconciler"]
-  ' "$OPERATOR_HOME/.config/subyard/migrations/state.json" >/dev/null \
-    || die 'published v0.8.0 migration history is not the exact layout-4 fixed point'
-}
-
-record_published_v1_history() {
-  local digest
-  assert_published_v1_history
-  digest="$(operator_env sha256sum \
-    "$OPERATOR_HOME/.config/subyard/migrations/state.json" | awk '{print $1}')"
-  write_fixture_value "$LEGACY_STATE_SHA_STATE" "$digest"
-}
-
-assert_published_v1_history_unchanged() {
-  local expected actual
-  assert_published_v1_history
-  expected="$(read_fixture_value "$LEGACY_STATE_SHA_STATE")"
-  actual="$(operator_env sha256sum \
-    "$OPERATOR_HOME/.config/subyard/migrations/state.json" | awk '{print $1}')"
-  [ "$actual" = "$expected" ] \
-    || die 'candidate-owned v2 transition rewrote the superseded v1 migration history'
 }
 
 assert_v2_transition() {
@@ -492,7 +469,7 @@ assert_v2_transition() {
     .domains["power-metadata"] == {"epoch": 2, "applied": ["introduce-owner-publication-state-v1"]} and
     .domains["project-state"] == {"epoch": 1, "applied": []} and
     .domains.settings == {
-      "epoch": 2, "applied": ["canonicalize-test-vms-settings-v2"]
+      "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]
     }
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
     || die 'candidate v2 migration ledger is not at its exact per-domain fixed point'
@@ -521,9 +498,8 @@ assert_runtime_links() {
 
 assert_candidate_state() {
   assert_runtime_state "$CANDIDATE_VERSION" \
-    "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
+    "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
     "$CANDIDATE_RELEASE_TARGET"
-  assert_published_v1_history_unchanged
   assert_v2_transition activate-target "$CANDIDATE_RELEASE_TARGET"
 }
 
@@ -549,7 +525,6 @@ assert_activation_only_journal() {
 assert_activation_ledger_unchanged() {
   sudo -n cmp "$ACTIVATION_LEDGER_BASELINE" "$V2_LEDGER" \
     || die 'activation-only repair changed the exact v2 ledger bytes'
-  assert_published_v1_history_unchanged
 }
 
 install_activation_reconcile_fault() {
@@ -670,15 +645,28 @@ exercise_activation_only_repair() {
   ok 'same-version activation-only repair resumed without replaying migration history'
 }
 
+bridge_read_only_snapshot() {
+  operator_env bash -c '
+    set -euo pipefail
+    for path in "$1" "$2"; do
+      if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        printf "absent %s\n" "$path"
+      elif [ -f "$path" ] && [ ! -L "$path" ]; then
+        sha256sum "$path"
+      else
+        exit 2
+      fi
+    done
+    sha256sum "$3"
+    readlink "$4"
+    if [ -L "$5" ]; then readlink "$5"; else printf "absent\n"; fi
+  ' _ "$V2_LEDGER" "$V2_JOURNAL" "$UNIT" \
+    "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous"
+}
+
 verify_bridge_plan_is_read_only() {
   local before after output rc
-  before="$(operator_env bash -c '
-    set -euo pipefail
-    sha256sum "$1" "$2"
-    readlink "$3"
-    if [ -L "$4" ]; then readlink "$4"; else printf "absent\n"; fi
-  ' _ "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$UNIT" \
-    "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
+  before="$(bridge_read_only_snapshot)"
   set +e
   output="$(operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" \
@@ -687,15 +675,56 @@ verify_bridge_plan_is_read_only() {
   set -e
   [ "$rc" = 1 ] && grep -Fq 'confirmation required: interactive terminal required' <<<"$output" \
     || die "unconfirmed standalone bridge did not stop at its candidate-owned plan: $output"
-  after="$(operator_env bash -c '
-    set -euo pipefail
-    sha256sum "$1" "$2"
-    readlink "$3"
-    if [ -L "$4" ]; then readlink "$4"; else printf "absent\n"; fi
-  ' _ "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$UNIT" \
-    "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
+  after="$(bridge_read_only_snapshot)"
   [ "$before" = "$after" ] \
     || die 'unconfirmed standalone bridge mutated stable links, migration state or unit'
+}
+
+historical_init_snapshot() {
+  local endpoint instance pool instances pools
+  bridge_read_only_snapshot
+  operator_env sha256sum "$RECONCILER"
+  ip -4 route show default
+  for endpoint in "/1.0/projects/$PROJECT" \
+    "/1.0/instances?project=$PROJECT&recursion=1" \
+    "/1.0/profiles?project=$PROJECT&recursion=1" \
+    "/1.0/images?project=$PROJECT&recursion=1" \
+    '/1.0/storage-pools?recursion=1'; do
+    incus query "$endpoint" | jq -Sc '
+      if type == "array" then sort_by(.name // .fingerprint) else . end
+    ' | sha256sum
+  done
+  instances="$(incus query "/1.0/instances?project=$PROJECT&recursion=1" | jq -r '.[].name')"
+  for instance in $instances; do
+    [[ "$instance" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'unsafe native instance name'
+    incus query "/1.0/instances/$instance/snapshots?project=$PROJECT&recursion=1" \
+      | jq -Sc 'sort_by(.name)' | sha256sum
+  done
+  pools="$(incus query '/1.0/storage-pools?recursion=1' | jq -r '.[].name')"
+  for pool in $pools; do
+    [[ "$pool" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'unsafe native storage pool name'
+    incus query "/1.0/storage-pools/$pool/volumes?project=$PROJECT&recursion=1" \
+      | jq -Sc 'sort_by(.type, .name)' | sha256sum
+  done
+}
+
+verify_historical_init_boundary() {
+  local before after status=0
+  before="$(historical_init_snapshot)"
+  operator_yard init --yes > "$STATE_ROOT/historical-init.log" 2>&1 || status=$?
+  [ "$status" = 1 ] \
+    && grep -Fq 'existing project has no proven installation ownership; preserve its workloads and restore its original ownership record' \
+      "$STATE_ROOT/historical-init.log" \
+    && grep -Fxq 'yard: init: apply init stage "project": reconcile adapter --yes: exit status 1' \
+      "$STATE_ROOT/historical-init.log" \
+    || die 'historical init did not retain its exact pre-existing ownership refusal'
+  after="$(historical_init_snapshot)"
+  [ "$before" = "$after" ] \
+    || die 'refused historical init changed native resources, V2 history, runtime links or producers'
+  ok 'historical init preserved its existing ownership refusal and exact native state'
+  sudo -n systemctl start subyard-power-reconcile.service
+  assert_post_reboot_candidate
+  ok 'installed candidate boot reconciliation is repeatable without adopting historical ownership'
 }
 
 write_fixture_value() {
@@ -731,6 +760,7 @@ assert_fixture_phase() {
 load_release_targets() {
   OLD_RELEASE_TARGET="$(read_fixture_value "$OLD_RELEASE_TARGET_STATE")"
   CANDIDATE_RELEASE_TARGET="$(read_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE")"
+  OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
 }
 
 record_reboot_baseline() {
@@ -804,21 +834,25 @@ prepare_fixture() {
 }
 
 prepare_candidate() {
-  local systemd_version old_load
+  local old_load
   prepare_fixture
 
   p0_capacity_reset_build_cache
-  info "packaging local layout-5 candidate $CANDIDATE_VERSION"
-  "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
-    --version "$CANDIDATE_VERSION" >/dev/null
+  info "packaging local candidate $CANDIDATE_VERSION"
+  if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+    install -d "$RELEASE_ROOT"
+    cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
+  else
+    "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" --version "$CANDIDATE_VERSION" >/dev/null
+  fi
   chmod -R a+rX "$RELEASE_ROOT"
 
-  info 'installing exact published v0.8.0 runtime'
+  info 'installing exact published v0.11.0 runtime'
   curl -fsSL --proto '=https' --tlsv1.2 \
     "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
     -o "$INSTALLER"
   [ "$(sha256sum "$INSTALLER" | awk '{print $1}')" = "$OLD_INSTALLER_SHA256" ] \
-    || die 'published v0.8.0 installer checksum changed'
+    || die 'published v0.11.0 installer checksum changed'
   chmod 0755 "$INSTALLER"
   operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" \
     "$INSTALLER" --version "$OLD_VERSION" --yes
@@ -828,16 +862,15 @@ prepare_candidate() {
     -c features.images=false -c user.subyard.p0-power-systemd="$MARKER" >/dev/null
   operator_yard init --yes
   operator_yard start --yes
-  systemd_version="$(systemd-analyze --version | awk 'NR == 1 {print $2}')"
-  if [ "$systemd_version" -lt 256 ]; then old_load=bad-setting; else old_load=loaded; fi
+  old_load=loaded
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
   write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
-  assert_runtime_state "$OLD_VERSION" "$OLD_UNIT_FIXTURE" "$old_load" 4 \
+  OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
+  assert_runtime_state "$OLD_VERSION" "$OLD_UNIT_FIXTURE" "$old_load" released \
     "$OLD_RELEASE_TARGET"
-  record_published_v1_history
-  ok 'published v0.8.0 layout and installed incompatible unit reproduced'
+  ok 'actual supported v0.11.0 runtime and live power unit verified'
 
-  info 'running the candidate-owned standalone bridge from the published predecessor'
+  info 'running the candidate-owned supported update from the published predecessor'
   verify_bridge_plan_is_read_only
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
@@ -845,29 +878,23 @@ prepare_candidate() {
   write_fixture_value "$CANDIDATE_RELEASE_TARGET_STATE" "$CANDIDATE_RELEASE_TARGET"
   assert_candidate_state
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  ok 'candidate-owned bridge reached the v2 fixed point without rewriting v1 history'
+  ok 'supported update reached the V2 power fixed point'
 }
 
 finish_candidate_flow() {
-  local rollback_catalog rollback_ledger
+  local rollback_ledger
   load_release_targets
-  rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")" \
-    || die 'candidate transition catalog binding is unavailable before rollback'
   rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" \
     || die 'candidate migration ledger is unavailable before rollback'
-  info 'rolling back to the exact published v0.8.0 runtime under the active v2 owner'
-  operator_yard update --rollback --yes
-  assert_runtime_state "$OLD_VERSION" \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" loaded 5 \
-    "$CANDIDATE_RELEASE_TARGET"
-  assert_published_v1_history_unchanged
-  assert_v2_transition activate-previous "$OLD_RELEASE_TARGET" "$rollback_catalog"
-  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] \
-    || die 'rollback changed the exact v2 migration ledger bytes'
-  assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-  ok 'rollback activated v0.8.0 while retaining the compatible v2-owned power runtime'
+  info 'checking refusal of the epoch-1 predecessor after power epoch advancement'
+  if operator_yard update --rollback --yes > "$STATE_ROOT/rollback-refusal.log" 2>&1; then
+    die 'incompatible predecessor rollback was accepted'
+  fi
+  grep -Fq 'rollback-incompatible' "$STATE_ROOT/rollback-refusal.log" || die 'rollback refusal lacks its compatibility diagnostic'
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] || die 'blocked rollback changed the V2 ledger'
 
-  info 'rolling forward to the local candidate again'
+  info 'checking repeat update of the active candidate'
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
   assert_candidate_state
@@ -899,7 +926,7 @@ case "$MODE" in
         [ "$project_presence_rc" = 1 ] \
           || die 'cannot verify power reconciler project absence'
       fi
-      printf 'ok: exact v0.8.0 power reconciler fixture is clean\n'
+      printf 'ok: exact v0.11.0 power reconciler fixture is clean\n'
       exit 0
     fi
     assert_state_root
@@ -913,10 +940,6 @@ for command in cmp curl diff go incus ip jq sed sha256sum systemd-analyze; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 incus info >/dev/null || die 'initialized Incus is required'
-[ "$(sha256sum "$OLD_UNIT_FIXTURE" | awk '{print $1}')" = \
-  36692bddc0de036c9ec7393b86a6883e7cde59f33a25e352ec2ee7b694890aaf ] \
-  || die 'the exact v0.8.0 unit fixture changed'
-
 case "$MODE" in
   run|prepare)
     incus image info subyard-e2e-debian-13-cloud-container --project default >/dev/null \
@@ -927,24 +950,24 @@ case "$MODE" in
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready
       PRESERVE_FIXTURE=1
-      printf 'ok: exact published v0.8.0 update is ready for reboot verification\n'
+      printf 'ok: exact published v0.11.0 update is ready for reboot verification\n'
       exit 0
     fi
     finish_candidate_flow
-    printf 'ok: exact published v0.8.0 power reconciler update, rollback and roll-forward passed\n'
+    printf 'ok: exact published v0.11.0 power reconciler update, rollback and roll-forward passed\n'
     ;;
   resume)
     assert_state_root
     CLEANUP_ARMED=1
     assert_fixture_phase candidate-ready
     assert_post_reboot_candidate
-    info 're-running yard init to prove idempotent boot reconciliation convergence'
-    operator_yard init --yes
+    info 'checking the historical init ownership boundary and repeatable boot reconciliation'
+    verify_historical_init_boundary
     assert_candidate_state
     record_reboot_baseline
     write_fixture_value "$PHASE_STATE" candidate-reconciled
     PRESERVE_FIXTURE=1
-    printf 'ok: candidate survived reboot and idempotent init; ready for second reboot\n'
+    printf 'ok: candidate survived reboot, preserved historical init ownership and repeated boot reconciliation; ready for second reboot\n'
     ;;
   finish)
     assert_state_root
@@ -952,6 +975,6 @@ case "$MODE" in
     assert_fixture_phase candidate-reconciled
     assert_post_reboot_candidate
     finish_candidate_flow
-    printf 'ok: exact published v0.8.0 update survived two reboots, rollback and roll-forward\n'
+    printf 'ok: exact published v0.11.0 update survived two reboots, rollback and roll-forward\n'
     ;;
 esac

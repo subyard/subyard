@@ -646,10 +646,12 @@ HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
   YARD_RUNTIME_ROOT="$legacy_bridge_runtime" YARD_BIN_DIR="$legacy_bridge_bin" \
   YARD_SHELL_RC="$legacy_bridge_home/.bashrc" YARD_LOGIN_RC="$legacy_bridge_home/.profile" \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test \
-  "$release/subyard-install.sh" --yes >/dev/null
-[ "$("$legacy_bridge_runtime/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  && [ "$(readlink "$legacy_bridge_runtime/previous")" = "$legacy_bridge_initial" ] \
-  || fail 'standalone bootstrap did not bridge a pre-transition runtime through ReleaseTransition'
+  "$release/subyard-install.sh" --yes > "$TMP/legacy-refusal.log" 2>&1 \
+  && fail 'standalone bootstrap admitted a pre-v0.11.0 source'
+grep -Fq 'v0.11.0' "$TMP/legacy-refusal.log" \
+  && grep -Fq 'uninstall --full' "$TMP/legacy-refusal.log" \
+  && [ "$(readlink "$legacy_bridge_runtime/current")" = "$legacy_bridge_initial" ] \
+  || fail 'legacy refusal changed active state or omitted removal guidance'
 
 # Publication is intentionally separate from activation. The transition module
 # must be able to inspect an immutable verified candidate while the old runtime

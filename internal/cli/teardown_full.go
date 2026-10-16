@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/sshagentruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
@@ -128,7 +129,8 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		return nil
 	}
 	execution.Installation = installation
-	execution.Services, err = cli.captureCoreServices(current, uninstall.RecoveryPlan{Installation: installation}, []string{"power", "keys"}, 0)
+	original, _ := releaseruntime.HistoricalUninstallProducerEvidence(ctx, installation.RuntimeRoot)
+	execution.Services, err = cli.captureCoreServices(current, uninstall.RecoveryPlan{Installation: installation}, []string{"power", "keys"}, 0, original)
 	if err != nil {
 		return err
 	}
@@ -209,6 +211,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	foreignProjects := map[string]bool{}
 	installationYards := []ports.InstallationYard{}
 	admittedProjects := map[string]bool{}
+	legacyProjects := map[string]bool{}
 	if reader, ok := incusPort.(ports.InstallationYardReader); ok {
 		installationYards, err = reader.InstallationYards(ctx)
 		if err != nil {
@@ -244,18 +247,29 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			protected = append(protected, loaded.Context.Paths.HostBase)
 			return nil
 		}
+		legacy := false
 		if !admittedProjects[loaded.Context.IncusProject] && !cold {
-			state, err := incusPort.ReconcileState(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName, loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"], loaded.Context.IncusBridge)
+			native, err := incusPort.ReconcileState(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName, loaded.Environment["SRV_POOL"], loaded.Environment["SRV_VOLUME"], loaded.Context.IncusBridge)
 			if err != nil {
 				return err
 			}
-			if state.ProjectFound {
-				return fmt.Errorf("project %s has no exact installation ownership; preserve its resources and restore proven ownership before full removal", loaded.Context.IncusProject)
+			if native.ProjectFound {
+				if err := cli.inspectLegacyFullYardProvenance(ctx, loaded, installation); err != nil {
+					return fmt.Errorf("project %s has no exact installation ownership: %w; preserve its resources and restore proven ownership before full removal", loaded.Context.IncusProject, err)
+				}
+				legacy = true
 			}
 		}
 		ownedSources = append(ownedSources, loaded.Context.YardName, firstNonempty(loaded.Environment["E2E_BROKER_SOURCE"], loaded.Context.YardName))
 		if err := cli.observeTeardownExecution(ctx, loaded, execution); err != nil {
 			return err
+		}
+		if legacy {
+			if err := validateLegacyFullYard(loaded, installation, execution.snapshot()); err != nil {
+				return fmt.Errorf("project %s has no exact installation ownership: %w; preserve its resources and restore proven ownership before full removal", loaded.Context.IncusProject, err)
+			}
+			legacyProjects[loaded.Context.IncusProject] = true
+			execution.ManagedRoots = append(execution.ManagedRoots, filepath.Join(installation.DataHome, "e2e", "routes"))
 		}
 		if execution.snapshot().State.ProjectFound || execution.snapshot().State.InstanceFound {
 			knownProjects[loaded.Context.IncusProject] = true
@@ -423,7 +437,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		}
 		execution.Services = kept
 	}
-	relays, err := cli.captureCoreServices(current, execution.RecoveryPlan, []string{"relay"}, 0)
+	relays, err := cli.captureCoreServices(current, execution.RecoveryPlan, []string{"relay"}, 0, uninstall.ProducerEvidence{})
 	if err != nil {
 		return err
 	}
@@ -450,7 +464,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	for _, root := range execution.MutableRoots {
 		roots = append(roots, root)
 	}
-	storageTrees, err := cli.captureFullShared(ctx, execution, knownProjects)
+	storageTrees, err := cli.captureFullShared(ctx, execution, knownProjects, legacyProjects)
 	if err != nil {
 		return err
 	}
@@ -463,6 +477,14 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 	for _, yard := range execution.Yards {
 		root := yard.Context.Paths.HostBase
+		if legacyProjects[yard.Context.IncusProject] && !hostRecorded[root] {
+			// Association proves the yard, not who created old host directories.
+			// Retain the entire unrecorded host namespace, including backups.
+			protected = append(protected, root)
+			execution.PreservedRoots = append(execution.PreservedRoots, root)
+			execution.Preserved = append(execution.Preserved, "legacy host namespace "+root+" has no installation-created ownership record; its contents are preserved")
+			continue
+		}
 		if !hostRecorded[root] {
 			for name, device := range yard.Snapshot.State.Instance.Devices {
 				source := device["source"]

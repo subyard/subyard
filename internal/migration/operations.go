@@ -2,7 +2,6 @@ package migration
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +11,6 @@ import (
 )
 
 const (
-	operationPrepared    = "prepared"
-	operationCommitting  = "committing"
 	operationCommitted   = "committed"
 	operationRollingBack = "rolling-back"
 	operationRolledBack  = "rolled-back"
@@ -34,9 +31,6 @@ func verifyTypedOperation(
 		return testyardmigration.VerifyBrokerRuntime(
 			ctx, testYardOptions(options), testyardmigration.BrokerRuntimeState(before),
 		)
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		return verifyPowerReconciler(ctx, options, before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
 	}
@@ -65,20 +59,6 @@ func verifyTypedOperationRollback(
 		return testyardmigration.VerifyBrokerRuntime(
 			ctx, testYardOptions(previous), testyardmigration.BrokerRuntimeState(before),
 		)
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		if before == powerReconcilerAbsent {
-			return verifyPowerReconciler(ctx, options, before)
-		}
-		previous, err := previousRuntimeOptions(options)
-		if err != nil {
-			return err
-		}
-		previous.Environment = powerReconcilerEnvironment(previous, previous.RepositoryRoot)
-		if operation.Kind == OperationKindPowerReconcilerSystemdCompatV1 && fromLayout == 4 {
-			return verifyRestoredPowerReconciler(ctx, previous, before)
-		}
-		return verifyPowerReconciler(ctx, previous, before)
 	default:
 		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
 	}
@@ -113,51 +93,5 @@ func testYardOptions(options ReleaseOptions) testyardmigration.Options {
 		Incus:      options.Incus,
 		ConfigHome: options.ConfigHome, DataHome: options.DataHome,
 		Environment: environment, Stdout: diagnostics, Stderr: stderr,
-	}
-}
-
-func validateOperationState(operation transactionOperation) error {
-	if operation.Before == "" {
-		return errors.New("typed migration operation has no prepared state")
-	}
-	switch operation.Kind {
-	case OperationKindTestYardOwnerV1:
-		switch testyardmigration.State(operation.Before) {
-		case testyardmigration.StateAbsent,
-			testyardmigration.StateLegacyDirectory,
-			testyardmigration.StateLegacyDirectoryProjects,
-			testyardmigration.StateLegacyDirectoryOverrides,
-			testyardmigration.StateLegacyDirectoryState,
-			testyardmigration.StateLegacyFlat,
-			testyardmigration.StateLegacyDirectoryAdoptCurrent,
-			testyardmigration.StateLegacyFlatAdoptCurrent,
-			testyardmigration.StateCurrent:
-		default:
-			return fmt.Errorf("typed migration operation has invalid prepared state %q", operation.Before)
-		}
-	case OperationKindTestYardRouteConsumersV1:
-		if err := testyardmigration.ValidateRouteConsumersState(operation.Before); err != nil {
-			return fmt.Errorf("typed migration operation has invalid prepared state: %w", err)
-		}
-	case OperationKindTestVMBrokerRuntimeV1:
-		switch testyardmigration.BrokerRuntimeState(operation.Before) {
-		case testyardmigration.BrokerRuntimeAbsent,
-			testyardmigration.BrokerRuntimeInactive,
-			testyardmigration.BrokerRuntimeActive:
-		default:
-			return fmt.Errorf("typed migration operation has invalid prepared state %q", operation.Before)
-		}
-	case OperationKindPowerReconcilerRuntimeV1,
-		OperationKindPowerReconcilerSystemdCompatV1:
-		return validatePowerReconcilerState(operation.Before)
-	default:
-		return fmt.Errorf("unsupported migration operation kind %q", operation.Kind)
-	}
-	switch operation.Phase {
-	case "", operationPrepared, operationCommitting, operationCommitted,
-		operationRollingBack, operationRolledBack:
-		return nil
-	default:
-		return fmt.Errorf("typed migration operation has invalid phase %q", operation.Phase)
 	}
 }

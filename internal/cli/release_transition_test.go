@@ -804,12 +804,12 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		filepath.Join(repositoryRoot, "config", "release-transition.json"), registry, 0o600,
 	)
 	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
-	for _, release := range []string{"0.8.0-aaaaaaaaaaaa", "release-b"} {
+	for _, release := range []string{"0.11.0-aaaaaaaaaaaa", "release-b"} {
 		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink("releases/0.8.0-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
+	if err := os.Symlink("releases/0.11.0-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
 	configHome := filepath.Join(t.TempDir(), "config")
@@ -859,7 +859,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	}
 	observed, err := links.Observe()
 	if err != nil || observed.Active != "release-b" || observed.Previous == nil ||
-		*observed.Previous != "0.8.0-aaaaaaaaaaaa" {
+		*observed.Previous != "0.11.0-aaaaaaaaaaaa" {
 		t.Fatalf("links = %#v, err=%v", observed, err)
 	}
 	request.Mode = releasetransition.ProcessInspect
@@ -892,9 +892,9 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 	}
 
 	request.Mode = releasetransition.ProcessInspect
-	request.Target = "0.8.0-aaaaaaaaaaaa"
+	request.Target = "0.11.0-aaaaaaaaaaaa"
 	request.Direction = releasetransition.DirectionActivatePrevious
-	request.ArtifactDigest = writeSealedRollbackTarget(t, runtimeRoot, string(request.Target), "0.8.0", registry)
+	request.ArtifactDigest = writeSealedRollbackTarget(t, runtimeRoot, string(request.Target), "0.11.0", registry)
 	request.Yard = "default"
 	wire, err := json.Marshal(request)
 	if err != nil || bytes.Contains(wire, []byte("rollbackTarget")) {
@@ -992,7 +992,7 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		t.Fatalf("rollback outcome = %#v, err=%v", converged, err)
 	}
 	observed, err = links.Observe()
-	if err != nil || observed.Active != "0.8.0-aaaaaaaaaaaa" || observed.Previous == nil ||
+	if err != nil || observed.Active != "0.11.0-aaaaaaaaaaaa" || observed.Previous == nil ||
 		*observed.Previous != "release-b" {
 		t.Fatalf("rollback links = %#v, err=%v", observed, err)
 	}
@@ -1110,7 +1110,7 @@ func TestCandidateProcessCannotRollbackWithoutSealedTarget(t *testing.T) {
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 		Mode:          releasetransition.ProcessInspect, Direction: releasetransition.DirectionActivatePrevious,
 		RuntimeRoot: t.TempDir(), ConfigHome: t.TempDir(),
-		Target: "0.8.0-aaaaaaaaaaaa", ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+		Target: "0.11.0-aaaaaaaaaaaa", ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
 	}
 	if _, err := executeReleaseTransitionRequest(context.Background(), t.TempDir(), request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool {

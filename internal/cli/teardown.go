@@ -324,7 +324,7 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 			owners = append(owners, "power")
 		}
 		installation := uninstall.Installation{DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: firstNonempty(loaded.Environment["YARD_RUNTIME_ROOT"], filepath.Join(loaded.Context.Paths.DataHome, "runtime")), OperatorUID: uint32(os.Getuid())}
-		snapshot.Services, err = cli.captureCoreServices(loaded, uninstall.RecoveryPlan{Installation: installation, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Snapshot: snapshot}}}, owners, loaded.Context.SSHPort)
+		snapshot.Services, err = cli.captureCoreServices(loaded, uninstall.RecoveryPlan{Installation: installation, Yards: []uninstall.RecoveryYard{{Context: loaded.Context, Snapshot: snapshot}}}, owners, loaded.Context.SSHPort, uninstall.ProducerEvidence{})
 		if err != nil {
 			return err
 		}

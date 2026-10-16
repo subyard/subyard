@@ -1307,7 +1307,7 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		journal:                 journal, journalSnapshot: journalSnapshot,
 	}
 	if rollbackBlocker == nil {
-		rollbackBlocker = transition.rollbackCompatibilityBlocker()
+		rollbackBlocker = transition.rollbackCompatibilityBlocker(journal == nil || journal.Goal != goal)
 	}
 	if rollbackBlocker != nil {
 		observation.blockers = []Blocker{*rollbackBlocker}
@@ -1609,7 +1609,7 @@ func evidenceRecordsEqual(left, right EvidenceRecord) bool {
 		left.Checkpoint == right.Checkpoint
 }
 
-func (transition *V2Transition) rollbackCompatibilityBlocker() *Blocker {
+func (transition *V2Transition) rollbackCompatibilityBlocker(fresh bool) *Blocker {
 	if transition.options.Direction != DirectionActivatePrevious {
 		return nil
 	}
@@ -1617,10 +1617,14 @@ func (transition *V2Transition) rollbackCompatibilityBlocker() *Blocker {
 	if target == nil {
 		return rollbackIncompatibleBlocker()
 	}
+	version, err := semver.Parse(target.Version)
+	if fresh && err == nil && version.LT(semver.MustParse("0.11.0")) {
+		return rollbackIncompatibleBlocker()
+	}
 	if target.RegistryDigest != "" {
 		return nil
 	}
-	version, err := semver.Parse(target.Version)
+	version, err = semver.Parse(target.Version)
 	if err != nil {
 		return rollbackIncompatibleBlocker()
 	}

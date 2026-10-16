@@ -641,8 +641,8 @@ run_a="$(new_run_id)"
 run_b="$(new_run_id)"
 [[ "$run_a" =~ ^[0-9a-f]{8}$ && "$run_b" =~ ^[0-9a-f]{8}$ && "$run_a" != "$run_b" ]] \
   || fail "per-acquire run identities are invalid or reused"
-[ "$(derive_purpose run '' bash dev/e2e/release-migration-catch-up.sh auto)" = \
-    release-migration-catch-up ] \
+[ "$(derive_purpose run '' bash dev/e2e/full-uninstall.sh preflight 123)" = \
+    full-uninstall ] \
   || fail "runner did not derive a bounded script purpose"
 [ "$(derive_purpose ssh 'manual diagnostic')" = manual-diagnostic ] \
   || fail "explicit purpose was not normalized"
@@ -4044,6 +4044,7 @@ for dispatcher_mode in prepare resume finish; do
       assert_state_root() { log assert_state_root; }
       assert_fixture_phase() { log "assert_fixture_phase $*"; }
       assert_post_reboot_candidate() { log assert_post_reboot_candidate; }
+      verify_historical_init_boundary() { log verify_historical_init_boundary; }
       operator_yard() { log "operator_yard $*"; }
       assert_candidate_state() { log assert_candidate_state; }
       trap '\''log "exit preserve=$PRESERVE_FIXTURE cleanup=$CLEANUP_ARMED"'\'' EXIT
@@ -4058,7 +4059,7 @@ for dispatcher_mode in prepare resume finish; do
       dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     resume)
-      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\noperator_yard init --yes\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
       ;;
     finish)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-reconciled\nassert_post_reboot_candidate\nfinish_candidate_flow\nexit preserve=0 cleanup=1'
@@ -4088,7 +4089,7 @@ run_activation_repair_contract() (
   RELEASE_ROOT="$fixture/release"
   RECONCILER="$fixture/yard-boot-reconcile"
   UNIT="$fixture/subyard-power-reconcile.service"
-  OLD_UNIT_FIXTURE="$fixture/v0.8.service.in"
+  OLD_UNIT_FIXTURE="$fixture/v0.11.service.in"
   ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
   ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
   ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/activation-faults"
@@ -4099,12 +4100,11 @@ run_activation_repair_contract() (
   V2_JOURNAL="$V2_STATE_ROOT/journal.json"
   CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
   local candidate_runtime="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET"
-  OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
+  OLD_RELEASE_TARGET=releases/0.11.0-bbbbbbbbbbbb
   CANDIDATE_VERSION=candidate
   OPERATOR='fixture-operator'
   FAKE_YARD_CALLS="$fixture/yard-calls"
   DELEGATE_LOG="$fixture/systemctl-delegate"
-  V1_HISTORY_LOG="$fixture/v1-history"
   CANDIDATE_UNIT="$STATE_ROOT/candidate-activation.service"
   ACTIVATION_SCENARIO="$scenario"
   export ACTIVATION_FAULT_PROBE ACTIVATION_SCENARIO ACTIVATION_SYSTEMCTL_DELEGATE
@@ -4129,14 +4129,13 @@ printf 'eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n'
 EOF
   chmod 0755 "$candidate_runtime/bin/yard-engine"
   export OPERATOR_HOME
-  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.8\n' > "$OLD_UNIT_FIXTURE"
+  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.11\n' > "$OLD_UNIT_FIXTURE"
   printf '{"ledger":"stable"}\n' > "$V2_LEDGER"
   printf '%s\n' \
     '{"schemaVersion":2,"transaction":"completed-transaction","authorizationDigest":"completed-authorization","goal":{"target":"candidate-aaaaaaaaaaaa","direction":"activate-target"},"releases":{"from":"candidate-aaaaaaaaaaaa","target":"candidate-aaaaaaaaaaaa"},"checkpoint":"complete","steps":[]}' \
     > "$V2_JOURNAL"
   : > "$FAKE_YARD_CALLS"
   : > "$DELEGATE_LOG"
-  : > "$V1_HISTORY_LOG"
   printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
@@ -4217,7 +4216,6 @@ EOF
     fi
     command "$@"
   }
-  assert_published_v1_history_unchanged() { printf 'checked\n' >> "$V1_HISTORY_LOG"; }
   assert_candidate_state() { cmp "$CANDIDATE_UNIT" "$UNIT"; }
   assert_runtime_links() {
     [ "$1" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$2" = "$OLD_RELEASE_TARGET" ]
@@ -4240,7 +4238,6 @@ EOF
   [ "$(wc -l < "$ACTIVATION_FAULT_PROBE")" = 1 ] || exit 76
   grep -Fxq 'show subyard-power-reconcile.service --property=LoadState' "$DELEGATE_LOG" \
     || exit 77
-  [ "$(wc -l < "$V1_HISTORY_LOG")" = 3 ] || exit 78
   jq -e '.transaction == "repair-transaction" and
     .authorizationDigest == "repair-authorization" and
     .checkpoint == "complete" and (.steps | length) == 0' \
@@ -4285,10 +4282,10 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
   "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
 (
   set -euo pipefail
-  export OLD_VERSION=0.8.0
+  export OLD_VERSION=0.11.0
   OPERATOR_HOME="$TMP/power-rollback/operator"
   rollback_state="$OPERATOR_HOME/.config/subyard/release-transition/v2"
-  rollback_target=0.8.0-bbbbbbbbbbbb
+  rollback_target=0.11.0-bbbbbbbbbbbb
   CANDIDATE_RELEASE_TARGET=releases/0.11.3-aaaaaaaaaaaa
   runtime="$OPERATOR_HOME/.subyard/runtime"
   mkdir -p "$rollback_state" "$runtime/releases/$rollback_target" \
@@ -4304,7 +4301,7 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
       "owner-registration": {epoch: 2, applied: ["canonicalize-test-yard-owner-v2"]},
       "power-metadata": {epoch: 2, applied: ["introduce-owner-publication-state-v1"]},
       "project-state": {epoch: 1, applied: []},
-      settings: {epoch: 2, applied: ["canonicalize-test-vms-settings-v2"]}
+      settings: {epoch: 3, applied: ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]}
     }
   }' > "$rollback_state/ledger.json"
   # Published V2 shape: authorization/intent tokens use the frozen complete
@@ -4342,7 +4339,7 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
       missing-catalog) filter='del(.catalogDigest)' ;;
       missing-steps) filter='del(.steps)' ;;
       unverified-step) filter='.steps = [{checkpoint: "intent"}]' ;;
-      new-field) filter='.rollbackTarget = {version: "0.8.0"}' ;;
+      new-field) filter='.rollbackTarget = {version: "0.11.0"}' ;;
     esac
     jq "$filter" "$rollback_state/journal.valid" > "$rollback_state/journal.json"
     set +e

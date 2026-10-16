@@ -233,3 +233,13 @@ func writeMigrationFixture(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+// Only test fixture construction needs a general file loader. Production reads
+// the exact protected retained registry through the bound history reader.
+func LoadRegistry(path string) (Registry, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return Registry{}, err
+	}
+	return parseV1ImportRegistry(payload)
+}

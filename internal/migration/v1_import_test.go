@@ -48,20 +48,17 @@ func TestV1ImportReaderSelectsPublished041WithoutMutatingLegacyInput(t *testing.
 		t.Fatal(err)
 	}
 
-	result, found, err := reader.InspectFresh(context.Background(), V1ImportRuntimePair{
+	result, err := reader.InspectBound(context.Background(), V1ImportRuntimePair{
 		Current:  testPublishedV1041Runtime,
 		Previous: testPublishedV1PreviousRuntime,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("InspectFresh() did not select the published 0.4.1 journal")
-	}
 	if result.Release != V1ImportRelease041 ||
 		result.StaticDigest == "" || result.FactDigest == "" ||
 		result.StaticDigest == result.FactDigest {
-		t.Fatalf("InspectFresh() = %#v", result)
+		t.Fatalf("InspectBound() = %#v", result)
 	}
 	if observed.Release != V1ImportRelease041 ||
 		observed.Checkpoint != V1ImportCheckpoint041OwnerRollingBack ||
@@ -79,7 +76,7 @@ func TestV1ImportReaderSelectsPublished041WithoutMutatingLegacyInput(t *testing.
 	}
 	if !bytes.Equal(after, before) || afterInfo.Mode() != beforeInfo.Mode() ||
 		!os.SameFile(beforeInfo, afterInfo) {
-		t.Fatal("InspectFresh() mutated the legacy journal")
+		t.Fatal("InspectBound() mutated the legacy journal")
 	}
 	stateAfter, err := os.ReadFile(statePath)
 	if err != nil {
@@ -91,7 +88,7 @@ func TestV1ImportReaderSelectsPublished041WithoutMutatingLegacyInput(t *testing.
 	}
 	if !bytes.Equal(stateAfter, stateBefore) || stateAfterInfo.Mode() != stateBeforeInfo.Mode() ||
 		!os.SameFile(stateBeforeInfo, stateAfterInfo) {
-		t.Fatal("InspectFresh() mutated legacy global state")
+		t.Fatal("InspectBound() mutated legacy global state")
 	}
 }
 
@@ -107,11 +104,11 @@ func TestV1ImportProductionFactObserverAcceptsPublishedFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, found, err := reader.InspectFresh(context.Background(), V1ImportRuntimePair{
+	result, err := reader.InspectBound(context.Background(), V1ImportRuntimePair{
 		Current: testPublishedV1042Runtime, Previous: testPublishedV1PreviousRuntime,
 	})
-	if err != nil || !found || !validV1ImportFingerprint(result.FactDigest) {
-		t.Fatalf("production fact observation = %#v, found=%v, err=%v", result, found, err)
+	if err != nil || !validV1ImportFingerprint(result.FactDigest) {
+		t.Fatalf("production fact observation = %#v, err=%v", result, err)
 	}
 }
 
@@ -136,11 +133,11 @@ func TestV1ImportReaderRejectsExpandedRetainedPublishedRegistry(t *testing.T) {
 	writeRegistryFixture(t, registryPath, registry)
 
 	reader := newV1ImportReaderFixture(t, options)
-	_, _, err = reader.InspectFresh(context.Background(), V1ImportRuntimePair{
+	_, err = reader.InspectBound(context.Background(), V1ImportRuntimePair{
 		Current: testPublishedV1041Runtime, Previous: testPublishedV1PreviousRuntime,
 	})
 	if err == nil {
-		t.Fatal("InspectFresh() accepted an expanded retained 0.4.1 registry")
+		t.Fatal("InspectBound() accepted an expanded retained 0.4.1 registry")
 	}
 }
 
@@ -234,12 +231,12 @@ func TestV1ImportReaderAcceptsOnlyPublishedCheckpointVectors(t *testing.T) {
 			}
 			writeV1CompatibilityTransaction(t, journalPath, tx)
 
-			result, found, err := newV1ImportReaderFixture(t, options).InspectFresh(
+			result, err := newV1ImportReaderFixture(t, options).InspectBound(
 				context.Background(),
 				V1ImportRuntimePair{Current: tx.ToRuntime, Previous: tx.FromRuntime},
 			)
-			if err != nil || !found {
-				t.Fatalf("InspectFresh() found=%t err=%v", found, err)
+			if err != nil {
+				t.Fatalf("InspectBound() err=%v", err)
 			}
 			if result.Checkpoint != test.checkpoint {
 				t.Fatalf("checkpoint = %q, want %q", result.Checkpoint, test.checkpoint)
@@ -254,20 +251,14 @@ func TestV1ImportReaderBoundResumeUsesJournaledPairAfterActivation(t *testing.T)
 	pair := V1ImportRuntimePair{
 		Current: testPublishedV1042Runtime, Previous: testPublishedV1PreviousRuntime,
 	}
-	fresh, found, err := reader.InspectFresh(context.Background(), pair)
-	if err != nil || !found {
-		t.Fatalf("InspectFresh() found=%t err=%v", found, err)
+	fresh, err := reader.InspectBound(context.Background(), pair)
+	if err != nil {
+		t.Fatalf("InspectBound() err=%v", err)
 	}
 
 	activatedCurrent := "releases/0.5.0-test-release"
 	replaceV1CompatibilityRuntimeLink(t, options.RuntimeRoot, "current", activatedCurrent)
 	replaceV1CompatibilityRuntimeLink(t, options.RuntimeRoot, "previous", testPublishedV1042Runtime)
-	if result, found, err := reader.InspectFresh(context.Background(), V1ImportRuntimePair{
-		Current: activatedCurrent, Previous: testPublishedV1042Runtime,
-	}); err != nil || found || result.Release != "" || result.Transaction != "" ||
-		result.StaticDigest != "" || result.FactDigest != "" {
-		t.Fatalf("candidate InspectFresh() result=%#v found=%t err=%v", result, found, err)
-	}
 
 	bound, err := reader.InspectBound(context.Background(), pair)
 	if err != nil {
@@ -284,9 +275,9 @@ func TestV1ImportReaderBoundStaticResumeDoesNotObserveMutableFacts(t *testing.T)
 		Current: testPublishedV1042Runtime, Previous: testPublishedV1PreviousRuntime,
 	}
 	full := newV1ImportReaderFixture(t, options)
-	before, found, err := full.InspectFresh(context.Background(), pair)
-	if err != nil || !found {
-		t.Fatalf("InspectFresh() found=%t err=%v", found, err)
+	before, err := full.InspectBound(context.Background(), pair)
+	if err != nil {
+		t.Fatalf("InspectBound() err=%v", err)
 	}
 
 	reader, err := NewV1ImportReader(V1ImportOptions{
@@ -350,9 +341,9 @@ func TestV1ImportReaderBoundStaticResumeReportsJournalAndRegistryDrift(t *testin
 			pair := V1ImportRuntimePair{
 				Current: testPublishedV1041Runtime, Previous: testPublishedV1PreviousRuntime,
 			}
-			original, found, err := reader.InspectFresh(context.Background(), pair)
-			if err != nil || !found {
-				t.Fatalf("InspectFresh() found=%t err=%v", found, err)
+			original, err := reader.InspectBound(context.Background(), pair)
+			if err != nil {
+				t.Fatalf("InspectBound() err=%v", err)
 			}
 			test.mutate(t, options, journalPath)
 			observed, err := reader.InspectBoundStatic(context.Background(), pair)
@@ -431,14 +422,14 @@ func TestV1ImportReaderRejectsMalformedReorderedMultipleAndUnsafeInputs(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			options, journalPath, _ := publishedV1CompatibilityFixture(t, "0.4.2")
 			test.prepare(t, options, journalPath)
-			_, _, err := newV1ImportReaderFixture(t, options).InspectFresh(
+			_, err := newV1ImportReaderFixture(t, options).InspectBound(
 				context.Background(),
 				V1ImportRuntimePair{
 					Current: testPublishedV1042Runtime, Previous: testPublishedV1PreviousRuntime,
 				},
 			)
 			if err == nil {
-				t.Fatal("InspectFresh() accepted unsafe or ambiguous legacy input")
+				t.Fatal("InspectBound() accepted unsafe or ambiguous legacy input")
 			}
 		})
 	}
@@ -453,13 +444,13 @@ func TestV1ImportReaderSeparatesStaticAndFactDigests(t *testing.T) {
 		"cc3eb4b78d8df266ad9aa0d4b1714f5f510466d22aa00653e3c54d8c1ee3a20e")
 	second := newV1ImportReaderWithFactsFixture(t, options,
 		"09b65312a9065eead61e23d6e62599a71f90a3e916903cf268bd7100e93c18a7")
-	left, found, err := first.InspectFresh(context.Background(), pair)
-	if err != nil || !found {
-		t.Fatalf("first InspectFresh() found=%t err=%v", found, err)
+	left, err := first.InspectBound(context.Background(), pair)
+	if err != nil {
+		t.Fatalf("first InspectBound() err=%v", err)
 	}
-	right, found, err := second.InspectFresh(context.Background(), pair)
-	if err != nil || !found {
-		t.Fatalf("second InspectFresh() found=%t err=%v", found, err)
+	right, err := second.InspectBound(context.Background(), pair)
+	if err != nil {
+		t.Fatalf("second InspectBound() err=%v", err)
 	}
 	if left.StaticDigest != right.StaticDigest || left.FactDigest == right.FactDigest {
 		t.Fatalf("left=%#v right=%#v", left, right)

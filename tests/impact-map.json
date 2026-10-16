@@ -297,7 +297,7 @@
     {
       "id": "source-upgrade-and-release-migration-e2e",
       "priority": 987,
-      "pattern": "^dev/e2e/(p0-source-upgrade|release-migration-catch-up|release-migration-consumer)\\.sh$",
+      "pattern": "^dev/e2e/(p0-source-upgrade|release-migration-consumer)\\.sh$",
       "check_sets": ["migration-release"],
       "risk_domains": ["durable-layout", "release-runner"]
     },

@@ -561,11 +561,7 @@ func TestPolicyRepresentativePathsSelectOwningEvidence(t *testing.T) {
 			checks:  []string{"go:migration", "p0:source-upgrade"},
 			domains: []string{"durable-layout", "release-runner"}, highRisk: []string{"durable-layout", "release-runner"},
 		},
-		{
-			name: "release catch-up fixture", path: "dev/e2e/release-migration-catch-up.sh",
-			checks:  []string{"go:migration", "p0:release", "p0:source-upgrade"},
-			domains: []string{"durable-layout", "release-runner"}, highRisk: []string{"durable-layout", "release-runner"},
-		},
+
 		{
 			name: "release consumer fixture", path: "dev/e2e/release-migration-consumer.sh",
 			checks:  []string{"go:migration", "p0:release", "p0:source-upgrade"},

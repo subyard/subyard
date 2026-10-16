@@ -22,15 +22,11 @@ func TestV2LegacyIngressUsesFactsUntilVerifiedThenOnlyStaticHistory(t *testing.T
 		t.Fatal(err)
 	}
 
-	fresh, err := ingress.Inspect(context.Background(), nil)
-	if err != nil || len(fresh.Operations) != 1 {
-		t.Fatalf("fresh legacy ingress = %#v, err=%v", fresh, err)
+	if _, err := ingress.Inspect(context.Background(), nil); err == nil {
+		t.Fatal("fresh pre-v0.11.0 journal import was accepted")
 	}
-	operation := fresh.Operations[0]
-	if operation.Kind != releasetransition.V2LegacyV1Import ||
-		operation.Expected != importDigestA || operation.Desired != importDigestA ||
-		operation.Static != importDigestB || reader.freshCalls != 1 {
-		t.Fatalf("fresh legacy operation = %#v reader=%#v", operation, reader)
+	if reader.boundCalls != 0 || reader.staticCalls != 0 {
+		t.Fatal("fresh refusal inspected historical facts")
 	}
 
 	releases := releasetransition.ReleasePair{
@@ -111,7 +107,7 @@ func TestV2CompatibilityIngressSkipsLegacyLeafWithoutJournaledLegacyStep(t *test
 	}
 	result, err := ingress.Inspect(context.Background(), &binding)
 	if err != nil || len(result.Operations) != 0 ||
-		reader.freshCalls != 0 || reader.boundCalls != 0 || reader.staticCalls != 0 {
+		reader.boundCalls != 0 || reader.staticCalls != 0 {
 		t.Fatalf("source-only bound inspection = %#v, reader=%#v, err=%v", result, reader, err)
 	}
 }
@@ -123,16 +119,8 @@ var (
 )
 
 type v1ImportReaderPortFixture struct {
-	full, static                        V1Import
-	freshCalls, boundCalls, staticCalls int
-}
-
-func (fixture *v1ImportReaderPortFixture) InspectFresh(
-	context.Context,
-	V1ImportRuntimePair,
-) (V1Import, bool, error) {
-	fixture.freshCalls++
-	return fixture.full, true, nil
+	full, static            V1Import
+	boundCalls, staticCalls int
 }
 
 func (fixture *v1ImportReaderPortFixture) InspectBound(

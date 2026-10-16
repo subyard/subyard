@@ -307,7 +307,13 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 }
 
 // CaptureProducers shares the native owner proof with ordinary lifecycle removal.
-func CaptureProducers(root string, plan RecoveryPlan, environment map[string]string, owners []string, port int) ([]RecoveryService, error) {
+type ProducerEvidence struct {
+	EngineSHA256          string
+	ExecutingEngineSHA256 string
+	Templates             map[string]string
+}
+
+func CaptureProducers(root string, plan RecoveryPlan, environment map[string]string, owners []string, port int, original ProducerEvidence) ([]RecoveryService, error) {
 	var services []RecoveryService
 	request := struct {
 		Root         string
@@ -316,7 +322,8 @@ func CaptureProducers(root string, plan RecoveryPlan, environment map[string]str
 		Owners       []string
 		Yards        []RecoveryYard
 		Port         int
-	}{root, plan.Installation, environment, owners, plan.Yards, port}
+		Original     ProducerEvidence
+	}{root, plan.Installation, environment, owners, plan.Yards, port, original}
 	err := nativeArtifact("capture-producers", request, &services)
 	return services, err
 }

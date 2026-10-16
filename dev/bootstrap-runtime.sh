@@ -31,6 +31,14 @@ ensure_directory() {
   mkdir -m "$mode" -- "$directory" || [ -d "$directory" ]
 }
 
+validate_data_directory() {
+  local mode
+  [ -d "$DATA_HOME" ] && [ ! -L "$DATA_HOME" ] \
+    && [ "$(stat -c '%u' "$DATA_HOME")" = "$(id -u)" ] || return 1
+  mode="$(stat -c '%a' "$DATA_HOME")"
+  (( (8#$mode & 0022) == 0 ))
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --channel needs stable\n' >&2; exit 2; }; CHANNEL="$2"; shift 2 ;;
@@ -48,6 +56,10 @@ done
 
 # Validate existing installation ownership without changing the target.
 installation_inventory="$DATA_HOME/installation.json"
+if [ -e "$DATA_HOME" ] || [ -L "$DATA_HOME" ]; then
+  validate_data_directory \
+    || { printf 'bootstrap-runtime: unsafe installation data directory\n' >&2; exit 1; }
+fi
 if [ -e "$installation_inventory" ] || [ -L "$installation_inventory" ]; then
   [ -f "$installation_inventory" ] && [ ! -L "$installation_inventory" ] \
     && [ "$(stat -c '%u' "$installation_inventory")" = "$(id -u)" ] \
@@ -371,6 +383,9 @@ else
 fi
 
 inventory_shell_files="$(printf '%s\n' "${login_rcs[@]}" "${shell_rcs[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')"
+ensure_directory "$DATA_HOME"
+validate_data_directory \
+  || { printf 'bootstrap-runtime: unsafe installation data directory\n' >&2; exit 1; }
 inventory_candidate="$(mktemp "$DATA_HOME/.installation.XXXXXX")"
 jq -n --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" --arg runtime "$RUNTIME_ROOT" \
   --arg cache "$CACHE_ROOT" --arg bin "$BIN_DIR" --argjson uid "$(id -u)" \

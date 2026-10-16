@@ -297,7 +297,7 @@ func TestRollbackFailuresHaveStructuredPublicOutcomes(t *testing.T) {
 	}
 }
 
-func TestRollbackToRetainedPreV2ReleaseUsesVerifiedActiveTransitionOwner(t *testing.T) {
+func TestRollbackToRetainedPreV011ReleaseRefusesBeforeDispatch(t *testing.T) {
 	root := t.TempDir()
 	runtimeRoot := filepath.Join(root, "runtime")
 	configHome := filepath.Join(root, "config")
@@ -358,37 +358,12 @@ esac
 		context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot},
 		configHome, "default",
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "before v0.11.0") || prepared.Changed {
+		t.Fatalf("unsupported rollback = %#v err=%v", prepared, err)
 	}
-	if prepared.Action != "update.rollback" || !prepared.Changed {
-		t.Fatalf("legacy rollback preparation = %#v", prepared)
-	}
-	if err := prepared.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(legacyUnexpected); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("retained pre-v2 engine owned the transition: %v", err)
-	}
-	payload, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
-	if len(lines) != 2 {
-		t.Fatalf("transition request count=%d payload=%q", len(lines), payload)
-	}
-	wantArtifact := sha256.Sum256([]byte(legacyManifest))
-	for index, line := range lines {
-		var request releasetransition.ProcessRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			t.Fatalf("request %d: %v", index, err)
-		}
-		if request.Target != "release-a" ||
-			request.Direction != releasetransition.DirectionActivatePrevious ||
-			request.ArtifactDigest != releasetransition.Fingerprint(fmt.Sprintf("%x", wantArtifact)) ||
-			request.RegistryDigest == "" || bytes.Contains(line, []byte("rollbackTarget")) {
-			t.Fatalf("request %d = %#v", index, request)
+	for _, path := range []string{legacyUnexpected, capture} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unsupported rollback dispatched a transition: %v", err)
 		}
 	}
 }

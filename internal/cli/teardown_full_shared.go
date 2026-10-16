@@ -22,7 +22,7 @@ func fullOwnedConsumer(raw string, projects map[string]bool) bool {
 	return projects[parsed.Query().Get("project")]
 }
 
-func (cli *CLI) captureFullShared(ctx context.Context, execution *fullTeardown, knownProjects map[string]bool) ([]uninstall.Tree, error) {
+func (cli *CLI) captureFullShared(ctx context.Context, execution *fullTeardown, knownProjects, legacyProjects map[string]bool) ([]uninstall.Tree, error) {
 	incus, _ := cli.statusPorts()
 	reader, ok := incus.(ports.InstallationSharedReader)
 	if !ok {
@@ -32,6 +32,7 @@ func (cli *CLI) captureFullShared(ctx context.Context, execution *fullTeardown, 
 		return nil, errors.New("full uninstall requires exact shared consumer and backing-path inventory")
 	}
 	all := map[string]ports.TeardownResource{}
+	legacyShared := map[string]bool{}
 	storagePaths := map[string]bool{}
 	extraRoots := []uninstall.Tree{}
 	owned, err := reader.InstallationSharedInventory(ctx, "", "")
@@ -65,6 +66,9 @@ func (cli *CLI) captureFullShared(ctx context.Context, execution *fullTeardown, 
 		}
 		for _, resource := range resources {
 			key := resource.Kind + "/" + resource.Name
+			if legacyProjects[yard.Context.IncusProject] {
+				legacyShared[key] = true
+			}
 			if existing, exists := all[key]; exists && existing.Binding != resource.Binding {
 				return nil, errors.New("shared teardown ownership changed during inventory")
 			}
@@ -88,6 +92,13 @@ func (cli *CLI) captureFullShared(ctx context.Context, execution *fullTeardown, 
 	sort.Strings(keys)
 	for _, key := range keys {
 		resource := all[key]
+		if legacyShared[key] {
+			execution.Preserved = append(execution.Preserved, "legacy shared "+resource.Kind+" "+resource.Name+" has no installation ownership record; preserved")
+			if resource.Kind == "pool" && filepath.IsAbs(resource.Path) {
+				trees = append(trees, uninstall.Tree{Path: resource.Path, Category: "preserved-storage"})
+			}
+			continue
+		}
 		if resource.Kind == "host-profile" {
 			execution.Shared = append(execution.Shared, resource)
 			continue

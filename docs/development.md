@@ -125,13 +125,18 @@ python3 dev/verify-release-upgrades.py --release-dir .build/release --version <c
 ```
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.9.1, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtimes for the local architecture
-and verifies the legacy standalone bridge, frozen and published updater contracts, and activation-only
-recovery. It confines all state to a temporary directory and interrupts only its own update process
+downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtimes for the local architecture
+and verifies retired-source refusal/full-uninstall, the inclusive v0.11.0 source boundary, frozen and
+published updater contracts, and activation-only recovery. It confines all state to a temporary directory and interrupts only its own update process
 group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-baseline-dir PATH`
 `--published-baseline-dir PATH` and `--source-baseline-dir PATH` to reuse downloaded official assets (including the legacy runtime
-installer). For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
+installer). For a focused legacy-retirement regression, use `--only-legacy-retirement`.
+For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
 the complete check after building the release assets.
+The fresh recovery fixture preserves stopped-yard deferred evidence: equal migration epochs do
+not make its installed component contracts compatible with v0.11.2, which has no preview owner
+payload or runtime-owner advertisement. That branch requires typed rollback refusal with unchanged
+history; a separate compatible fixture proves successful matching-epoch rollback and forward update.
 
 For producer/delivery changes, `--only-runtime-recovery` runs actual v0.18.6
 caller continuation and eligible rollback plus exact sealed v0.17.3
@@ -165,9 +170,12 @@ synthetic epoch-3 owner from the invoking bound source with an explicit test ver
 baseline pins. Add `--only-checkpoint-source` for this focused regression; it does not replace the
 complete release compatibility gate or publish the reader bridge.
 
-The [legacy migration support policy](reference/legacy-migration-support.md) separates supported
-source formats, frozen caller contracts and the future deprecation window. Bridge publication
-and the notice window remain pending; candidate preparation alone does not start that window.
+The [legacy migration support policy](reference/legacy-migration-support.md) sets the approved
+minimum source version to v0.11.0, inclusive. Earlier V1 sources are refused and use the existing
+full-uninstall route, followed by a separate clean installation. No V1 upgrade bridge or notice
+window is provided. Supported V2 caller,
+producer, recovery and checkpoint-reader contracts remain covered, including actual acceptance
+of the v0.11.0 lower bound.
 
 Choose local checks with [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 `./tests/run.sh` is the full unprivileged suite. It runs formatting, vet, race-enabled Go tests, a

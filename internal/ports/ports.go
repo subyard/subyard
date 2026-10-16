@@ -39,6 +39,7 @@ func (instance InstanceInfo) EffectiveConfig(name string) (string, bool) {
 
 type ReconcileState struct {
 	ProjectConfig    map[string]string
+	ProfileConfig    map[string]string
 	ProfileDevices   map[string]map[string]string
 	Instance         InstanceInfo
 	HostPoolFound    bool

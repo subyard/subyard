@@ -41,6 +41,7 @@ func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t 
 		ledgerState     string
 		privateVersion  string
 	}{
+		{name: "V2 provenance cannot bypass source floor", version: "0.10.0", registryPayload: v2RegistryPayload(t), registryDigest: fingerprintPayload(v2RegistryPayload(t))},
 		{name: "legacy target is older than compiled floor", version: "0.7.9", privateVersion: "0.7.9"},
 		{name: "applied capability has no compiled policy", version: "0.8.0", removePolicy: "test-vms-settings-v1-to-v2"},
 		{name: "absent ledger target below floor", version: "0.7.9", ledgerState: "absent"},
@@ -103,7 +104,7 @@ func TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation(t 
 
 func TestV2RollbackCompatibilityAllowsPendingMigrationsAtPublishedLegacyFloor(t *testing.T) {
 	for _, state := range []string{"absent", "baseline", "partial"} {
-		for _, version := range []string{"0.8.0", "0.8.1"} {
+		for _, version := range []string{"0.11.0", "0.11.1"} {
 			t.Run(state+"/"+version, func(t *testing.T) {
 				fixture := newV2RollbackBoundaryFixtureWithLedger(t, version, "", nil, state)
 				goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
@@ -132,7 +133,7 @@ func TestV2RollbackCompatibilityAllowsPendingMigrationsAtPublishedLegacyFloor(t 
 }
 
 func TestV2RollbackCompatibilityAllowsPublishedLegacyFloorAndBindsStaleTarget(t *testing.T) {
-	fixture := newV2RollbackBoundaryFixture(t, "0.8.0", "", nil)
+	fixture := newV2RollbackBoundaryFixture(t, "0.11.0", "", nil)
 	goal := Goal{Target: "release-a", Direction: DirectionActivatePrevious}
 	inspection, err := fixture.transition.Inspect(context.Background(), goal)
 	if err != nil || inspection.Outcome == nil ||
@@ -141,7 +142,7 @@ func TestV2RollbackCompatibilityAllowsPublishedLegacyFloorAndBindsStaleTarget(t 
 		!slices.Contains(inspection.Assessment.Consequences, v2RollbackNoOpConsequence) {
 		t.Fatalf("allowed legacy rollback inspection = %#v, err=%v", inspection, err)
 	}
-	fixture.transition.options.RollbackTarget.Version = "0.8.1"
+	fixture.transition.options.RollbackTarget.Version = "0.11.1"
 	outcome, err := fixture.transition.Converge(context.Background(), Execution{
 		Plan: inspection.Plan, Authorization: "must-not-be-checked",
 	})

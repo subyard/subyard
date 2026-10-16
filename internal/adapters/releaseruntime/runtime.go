@@ -1042,13 +1042,18 @@ func (runtime *Runtime) prepareRetainedTransition(
 		))
 	}
 	defer verified.Close()
+	if !supportedSourceVersion(verified.version) {
+		return Prepared{}, errors.New(LegacyReinstallGuidance)
+	}
 	verifiedPreparation := func(cause error) error {
 		return verifiedPreparationError{cause: cause, prepared: Prepared{
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
 		}}
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
-	var targetOwners map[string]bool
+	// Absence of the optional query advertises no profile owners. Identical
+	// public core payloads retain their existing historical compatibility path.
+	targetOwners := map[string]bool{}
 	applicable, err := retainedRuntimeApplicable(activeRoot)
 	if err != nil {
 		return Prepared{}, verifiedPreparation(err)
@@ -1056,19 +1061,17 @@ func (runtime *Runtime) prepareRetainedTransition(
 	if applicable && verified.registryDigest != "" {
 		capabilities, capabilityErr := runtime.invokeVerifiedRecoveryTransition(ctx, verified, parsed.root, releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessRuntimeCapabilities}, "")
 		if capabilityErr == nil {
-			targetOwners = map[string]bool{}
 			for _, id := range capabilities.ActivationOwners {
 				targetOwners[id] = true
 			}
-		} else {
-			var rejected *exec.ExitError
-			if !errors.As(capabilityErr, &rejected) || rejected.ExitCode() != 2 {
-				return Prepared{}, verifiedPreparation(errors.New("retained runtime activation capability probe failed"))
-			}
-			// Frozen owners reject this exact input-free mode as unsupported (exit 2).
-			// They may retain only the identical public core contract checked below.
+		} else if errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
+			return Prepared{}, verifiedPreparation(capabilityErr)
 		}
 	}
+	// A failed optional query grants no activation owners. The historical path
+	// still requires the independent runtime binding below AND a successful
+	// ordinary V1 inspection before returning a plan. Neither an exit status nor
+	// a version claim proves compatibility; execution rechecks both proofs.
 	runtimeBinding, err := runtime.retainedRuntimeBinding(ctx, activeRoot, candidate.root, configHome, targetOwners)
 	if err != nil {
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,

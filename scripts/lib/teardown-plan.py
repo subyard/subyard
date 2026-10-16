@@ -564,6 +564,11 @@ def retain_runtime():
                 raise ValueError("retained runtime destination appeared during publication")
 
 
+def producer_template_matches(content, expected, publication):
+    suffix = content[len(expected):] if content.startswith(expected) else b""
+    return content == expected or bool(publication and re.fullmatch(rb"\n\[Service\]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=[A-Za-z0-9+/=]+\n", suffix))
+
+
 def capture_service(scope, units, files, helpers, uid):
     artifacts = []
     for path, expected in dict(files, **helpers).items():
@@ -582,9 +587,7 @@ def capture_service(scope, units, files, helpers, uid):
                     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
                     with os.fdopen(fd, "rb") as source:
                         content = source.read(1024 * 1024 + 1)
-                    suffix = content[len(expected):] if content.startswith(expected) else b""
-                    publication = bool(helpers) and re.fullmatch(rb"\n\[Service\]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=[A-Za-z0-9+/=]+\n", suffix)
-                    if content != expected and not publication:
+                    if not producer_template_matches(content, expected, bool(helpers)):
                         raise ValueError("changed or foreign producer template")
                 artifacts.append(dict(Path=path, Entries=facts, Binding=artifact_digest(facts)))
         except FileNotFoundError:
@@ -610,6 +613,8 @@ def core_producers(request):
     root, installation, environment = request["Root"], request["Installation"], request["Environment"]
     owners = request["Owners"]
     result = []
+    original = request.get("Original") or {}
+    original_templates = original.get("Templates") or {}
     def add(scope, units, files, helpers, uid):
         service = capture_service(scope, units, files, helpers, uid)
         if service["Artifacts"]:
@@ -625,22 +630,37 @@ def core_producers(request):
             import glob
             candidates = [environment.get("SUBYARD_DISPATCHER_PATH", ""), environment.get("SUBYARD_POWER_ENGINE_SOURCE", "")] + glob.glob(runtime + "/releases/*/bin/yard-engine")
             owned = False
+            power_template = template("subyard-power-reconcile.service.in")
+            original_helper = False
+            candidate_helper = False
             if os.path.isfile(helper) and not os.path.islink(helper):
                 with open(helper, "rb") as source:
                     digest = hashlib.sha256(source.read()).digest()
+                original_helper = digest.hex() == original.get("EngineSHA256")
+                candidate_helper = digest.hex() == original.get("ExecutingEngineSHA256")
                 for candidate in candidates:
                     if os.path.isfile(candidate) and not os.path.islink(candidate):
                         with open(candidate, "rb") as source:
-                            owned |= hashlib.sha256(source.read()).digest() == digest
-            add("system", [os.path.basename(unit)], {unit: template("subyard-power-reconcile.service.in").replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode())}, {helper: owned}, 0)
+                            matches = hashlib.sha256(source.read()).digest() == digest
+                            owned |= matches
+            # Preserve the existing current-template proof first. A historical
+            # fallback also covers interrupted replacement of unit and helper,
+            # but only the sealed original or executing candidate helper.
+            content = open(unit, "rb").read(1024 * 1024 + 1) if os.path.isfile(unit) else b""
+            if (not producer_template_matches(content, power_template.replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode()), True)
+                    and (original_helper or candidate_helper) and original_templates):
+                power_template = original_templates["subyard-power-reconcile.service.in"].encode()
+            add("system", [os.path.basename(unit)], {unit: power_template.replace(b"@SUBYARD_POWER_RECONCILER@", helper.encode())}, {helper: owned}, 0)
     if "keys" in owners:
         directory = environment.get("SUBYARD_KEYS_SYSTEMD_DIR") or os.path.join(environment["SUBYARD_OPERATOR_HOME"], ".config/systemd/user")
         unit, timer = os.path.join(directory, "subyard-keys-sync.service"), os.path.join(directory, "subyard-keys-sync.timer")
         if os.path.lexists(unit) or os.path.lexists(timer):
             content = open(unit, "rb").read() if os.path.isfile(unit) else b""
             candidates = [os.path.join(root, ".build/yard"), os.path.join(root, "bin/yard"), os.path.join(runtime, "current/bin/yard")]
-            expected = [template("subyard-keys-sync.service.in").replace(b"@YARD_BIN@", path.encode()) for path in candidates]
-            add("user", ["subyard-keys-sync.timer", "subyard-keys-sync.service"], {unit: next((value for value in expected if content == value), expected[-1]), timer: template("subyard-keys-sync.timer.in")}, {}, installation["operatorUid"])
+            service_template = original_templates.get("subyard-keys-sync.service.in")
+            timer_template = original_templates.get("subyard-keys-sync.timer.in")
+            expected = [(service_template.encode() if service_template is not None else template("subyard-keys-sync.service.in")).replace(b"@YARD_BIN@", path.encode()) for path in candidates]
+            add("user", ["subyard-keys-sync.timer", "subyard-keys-sync.service"], {unit: next((value for value in expected if content == value), expected[-1]), timer: timer_template.encode() if timer_template is not None else template("subyard-keys-sync.timer.in")}, {}, installation["operatorUid"])
     if "relay" in owners:
         import glob
         paths = glob.glob("/etc/systemd/system/subyard-ssh-relay-*.service") + glob.glob("/etc/systemd/system/subyard-ssh-relay-*.socket")
