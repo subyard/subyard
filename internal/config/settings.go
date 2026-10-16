@@ -89,6 +89,7 @@ type settingTracker struct {
 	prospectiveFiles      *ProspectiveFiles
 	assetValidationInputs []string
 	integrations          IntegrationSelection
+	environmentProfiles   EnvironmentProfileSelection
 	layers                []settingLayer
 	assignments           map[string][]settingAssignment
 	order                 int

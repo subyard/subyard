@@ -1385,6 +1385,87 @@ incus() {
         assert result.stdout.count('build transport') == 1
         assert all(name not in result.stdout for name in ('phone-recovery', 'prepare-images', 'projects'))
 
+# The focused projects lane reaches its fixture only after readiness and both images.
+projects_start = runtime_source.index('if [ "$lane" = projects ]; then\n')
+projects_end = runtime_source.index('\nincus --project "$project" exec "$instance" --user', projects_start)
+projects_prelude = '''set -euo pipefail
+lane="$1"; root="$2"; state='/fixture state'; YARD_NAME=fixture; project=fixture-project; instance=fixture-instance
+android_phase_begin() { :; }; android_phase_end() { :; }
+incus() { printf 'readiness\\n'; [ "$FAIL_AT" != readiness ] || return 23; }
+yard() { printf '%s\\n' "$*"; [ "$FAIL_AT" != "${@: -1}" ] || return 23; }
+bash() {
+  printf 'fixture-argc=%s\\n' "$#"
+  printf 'fixture-arg=%s\\n' "$@"
+  [ "$FAIL_AT" != fixture ] || return 23
+}
+'''
+projects_expected = [
+    'readiness', 'emu cache prepare --api 35', 'emu cache prepare --api 36',
+    'fixture-argc=6', f'fixture-arg={ROOT}/config/profiles/android/tests/e2e/android-pool-projects.sh',
+    f'fixture-arg={ROOT}', 'fixture-arg=/fixture state', 'fixture-arg=fixture',
+    'fixture-arg=fixture-project', 'fixture-arg=fixture-instance', 'android_projects=passed',
+]
+for failure, count in (('', len(projects_expected)), ('readiness', 1), ('35', 2), ('36', 3), ('fixture', 10)):
+    result = subprocess.run(['bash', '-c', projects_prelude + runtime_source[projects_start:projects_end]
+                             + '\nprintf "reached-phone-viewer-setup\\n"\n', '_', 'projects', str(ROOT)],
+                            capture_output=True, text=True, env=dict(os.environ, FAIL_AT=failure))
+    assert result.returncode == (23 if failure else 0), result.stderr
+    assert result.stdout.splitlines() == projects_expected[:count], result.stdout
+for lane in ('full', 'diagnostics', 'recovery', 'viewer', 'viewer-native-debug', 'sdk-images', 'memory-lease'):
+    result = subprocess.run(['bash', '-c', projects_prelude + runtime_source[projects_start:projects_end]
+                             + '\nprintf "continue-existing-lane\\n"\n', '_', lane, str(ROOT)],
+                            capture_output=True, text=True, env=dict(os.environ, FAIL_AT=''))
+    assert result.returncode == 0 and result.stdout == 'continue-existing-lane\n', result.stderr
+
+# Reconstruct the legacy box with different Docker IDs and a stable canonical name.
+projects_source = (E2E / 'android-pool-projects.sh').read_text()
+find_start = projects_source.index('find_box() {')
+find_end = projects_source.index('\nbox_a=', find_start)
+legacy_start = projects_source.index('legacy_box="$(find_box "$name_legacy")"')
+legacy_end = projects_source.index('\ndiagnostic_logs=("$work/legacy-check.log")', legacy_start)
+with tempfile.TemporaryDirectory(prefix='subyard-android-legacy-', dir='/tmp') as directory:
+    fixture = Path(directory)
+    (fixture / 'bin').mkdir()
+    manifest = fixture / 'env-meta/fixture-project/profile.json'
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"devices":[]}\n')
+    (fixture / 'container').write_text('old-id subyard-box-fixture-project\n')
+    docker = fixture / 'bin/docker'
+    docker.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+read -r container_id container_name < "$TEST_ROOT/container" || true
+case "$1" in
+  ps) [ -z "$container_id" ] || printf '%s\\n' "$container_id" ;;
+  inspect)
+    target="${@: -1}"
+    [ "$target" = "$container_id" ] || [ "$target" = "$container_name" ] || exit 1
+    case "$3" in
+      '{{.Name}}') printf '/%s\\n' "$container_name" ;;
+      *subyard.project*) printf 'fixture-project\\n' ;;
+      *subyard.env*) printf '1\\n' ;;
+      *subyard.profile*) printf 'android\\n' ;;
+      *Mounts*) printf '/srv/workspaces/fixture-project/src\\n' ;;
+      *) exit 2 ;;
+    esac ;;
+  rm) [ "$3" = "$container_id" ]; : > "$TEST_ROOT/container" ;;
+  run) [ "$3" = --name ]; printf 'new-id %s\\n' "$4" > "$TEST_ROOT/container" ;;
+  *) exit 2 ;;
+esac
+''')
+    docker.chmod(0o755)
+    prelude = '''set -euo pipefail
+work="$TEST_ROOT"; name_legacy=fixture-project; legacy_sdk=/fixture-sdk; legacy_gradle=/fixture-gradle
+bounded_incus_exec() { shift; "$@"; }
+'''
+    reconstruction = projects_source[legacy_start:legacy_end].replace('/srv/env-meta/', str(fixture / 'env-meta') + '/')
+    result = subprocess.run(['bash', '-c', prelude + projects_source[find_start:find_end] + '\n' + reconstruction
+                             + '\n[ "$legacy_box" = new-id ]\n'
+                             + '[ "$(docker inspect -f "{{.Name}}" "$legacy_box")" = /subyard-box-fixture-project ]\n'],
+                            capture_output=True, text=True,
+                            env=dict(os.environ, TEST_ROOT=directory, PATH=str(fixture / 'bin') + ':' + os.environ['PATH']))
+    assert result.returncode == 0, result.stderr + (fixture / 'legacy-up.log').read_text()
+    assert json.loads(manifest.read_text())['devices'] == ['kvm']
+
 mode_block = recovery_source[recovery_source.index('viewer_only=0'):recovery_source.index('root="$1"')]
 for arguments, expected in ((['r', 's', 'y', 'p', 'i'], '0 0'),
                             (['r', 's', 'y', 'p', 'i', '--viewer-only'], '1 0'),

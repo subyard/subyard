@@ -247,7 +247,7 @@ gateway_running() {
 
 # --- bot-identity lease (flock + file; FIFO/TTL/epoch; single host) -----------
 # Runs in the yard as dev. mode=normal refuses a live foreign holder (PREEMPT if we may take
-# it: ephemeral over canonical); mode=force overwrites (after the caller stopped the holder).
+# it: ephemeral over canonical). Expired holders require confirmed stop before release.
 # Echoes "OK <epoch>" / "PREEMPT <holder>" / "BUSY <holder> <kind> <secs>".
 lease_exec() {
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --user "$DEV_UID" --group "$DEV_GID" -- "$@"
@@ -256,47 +256,75 @@ lease_acquire() {
   lease_exec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" acquire "$1" "$LEASE_TTL" "${2:-normal}" < "$RESOURCE_DIR/staging-lease.sh"
 }
 lease_release() {
-  lease_exec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" release "${lease_expected_epoch:-}" < "$RESOURCE_DIR/staging-lease.sh"
+  lease_owned || return 0
+  lease_exec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" release "${lease_expected_epoch:?}" < "$RESOURCE_DIR/staging-lease.sh"
 }
-lease_show() { yexec sh -c '[ -r "$1/$2.json" ] && cat "$1/$2.json" || echo "{}"' _ "$LEASE_DIR" "$BOT_LEASE_KEY" 2>/dev/null; }
-
-lease_owned() {
-  yexec sh -c \
-    '[ -r "$1/$2.json" ] && [ "$(jq -r ".holder // \"\"" "$1/$2.json")" = "$3" ]' \
-    _ "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" 2>/dev/null
+lease_show() { yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" status < "$RESOURCE_DIR/staging-lease.sh"; }
+lease_stop() {
+  ydocker exec "$cname" sh -c "$(cat "$RESOURCE_DIR/staging-lease.sh")" _ \
+    "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" stop "${lease_expected_epoch:?}" "$GW_PID"
 }
 
-# Read-only lease probe. It never opens the lock or creates the lease directory.
-lease_inspect() {
-  yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" <<'LEASE'
+lease_container_operation() {
+  # Root retains the shared lease lock while Docker and staged-data cleanup run.
+  yexec sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" fenced \
+    "${lease_expected_epoch:?}" "$lease_expected_holder" sh -c '
 set -eu
-st="$1/$2.json"; me="$3"
-[ -r "$st" ] || { echo MISSING; exit 0; }
-jq -e '
-  type == "object" and
-  (.holder | type == "string" and length > 0) and
-  (.kind | type == "string" and length > 0) and
-  (.expires | type == "number" and . >= 0)
-' "$st" >/dev/null 2>&1 || { echo INVALID; exit 0; }
-now=$(date +%s)
-holder=$(jq -r '.holder' "$st")
-kind=$(jq -r '.kind' "$st")
-expires=$(jq -r '.expires' "$st")
-if [ "$now" -ge "$expires" ]; then
-  echo "EXPIRED $holder $kind"
-elif [ "$holder" = "$me" ]; then
-  echo "OWNED $kind $((expires-now))"
+operation="$1"; container="$2"; secrets="$3"; data="$4"; purge="$5"
+if [ "$operation" = down ]; then
+  if running=$(docker inspect -f "{{.State.Running}}" "$container" 2>/dev/null); then
+    case "$running" in
+      true) docker stop "$container" >/dev/null ;;
+      false) ;;
+      *) echo "runner state unconfirmed" >&2; exit 1 ;;
+    esac
+    [ "$(docker inspect -f "{{.State.Running}}" "$container")" = false ] \
+      || { echo "runner stop unconfirmed" >&2; exit 1; }
+  else
+    remaining=$(docker ps -aq --filter "name=^/$container$")
+    [ -z "$remaining" ] || { echo "runner stop unconfirmed" >&2; exit 1; }
+  fi
 else
-  echo "FOREIGN $holder $kind $((expires-now))"
+  if ! docker rm -f "$container" >/dev/null 2>&1; then
+    remaining=$(docker ps -aq --filter "name=^/$container$")
+    [ -z "$remaining" ] || { echo "runner removal unconfirmed" >&2; exit 1; }
+  fi
+  remaining=$(docker ps -aq --filter "name=^/$container$")
+  [ -z "$remaining" ] || { echo "runner removal unconfirmed" >&2; exit 1; }
+  rm -rf -- "$secrets"
+  if [ "$purge" = 1 ]; then rm -rf -- "$data"; fi
 fi
-LEASE
+' _ "$1" "$cname" "$(dirname "$ysecret")" "$dataRoot" "$purge" < "$RESOURCE_DIR/staging-lease.sh"
+}
+
+lease_owned() { [ "$(lease_show | jq -r '.holder // empty')" = "$zone" ]; }
+
+# Project the shared read-only view into the existing host assessment protocol.
+lease_inspect() {
+  local observation state holder kind expires now
+  observation="$(lease_show)" || return 1
+  state="$(jq -r '.lease.state' <<< "$observation")"
+  holder="$(jq -r '.holder // empty' <<< "$observation")"
+  kind="$(jq -r '.kind // empty' <<< "$observation")"
+  case "$state" in
+    available) echo MISSING ;;
+    quarantined) echo INVALID ;;
+    draining) echo "EXPIRED $holder $kind" ;;
+    held)
+      expires="$(jq -r .expires <<< "$observation")"; now="$(date +%s)"
+      if [ "$holder" = "$zone" ]; then echo "OWNED $kind $((expires-now))"
+      else echo "FOREIGN $holder $kind $((expires-now))"; fi
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 validate_start_lease_available() {
   local lease_state
   lease_state="$(lease_inspect)"
   case "$lease_state" in
-    MISSING|EXPIRED\ *) ;;
+    MISSING) ;;
+    EXPIRED\ *) die "stale: expired bot lease requires confirmed staging stop before start" ;;
     OWNED\ canonical\ *) ;;
     OWNED\ *) die "zone '$zone' holds an incompatible bot lease: ${lease_state#OWNED }" ;;
     FOREIGN\ *) die "bot lease held: ${lease_state#FOREIGN } — another runner is polling; stop it or wait" ;;
@@ -517,8 +545,11 @@ case "${SUBYARD_RESOURCE_MODE:-}" in
       action="$sub"; [ "$sub" != destroy ] || action="$(destroy_action)"
       require_resource_apply "$action"
       openclaw_lock "staging-$zone"
+      # A later lease swap must fail either the exact assessment or this captured fence.
+      lease_before="$(lease_show)"
+      lease_expected_epoch="$(jq -r '.epoch // 0' <<< "$lease_before")"
+      lease_expected_holder="$(jq -r '.holder // empty' <<< "$lease_before")"
       openclaw_recheck_exact "$action"
-      lease_expected_epoch="$(lease_show | jq -r '.epoch // 0')"
       ;; esac
     case "$sub" in
       destroy) require_resource_apply "$(destroy_action)" ;;
@@ -684,14 +715,10 @@ MSG
     esac
 
     gw_cmd="${STAGING_GATEWAY_CMD:-$GATEWAY_CMD}"
-    ydocker exec -d "$cname" sh -c '
-      cd /workspace || exit 1
-      mkdir -p "$(dirname "$2")"
-      setsid sh -c "$1" >>"$2" 2>&1 &
-      echo $! >"$3"
-    ' _ "$gw_cmd" "$ylog" "$GW_PID"
+    ydocker exec "$cname" sh -c "$(cat "$RESOURCE_DIR/staging-lease.sh")" _ \
+      "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" launch "$lease_expected_epoch" "$GW_PID" "$ylog" "$gw_cmd" /workspace
     sleep 1
-    if ! gateway_running; then lease_release || true; die "gateway exited immediately — check: ${PROG:-yard} staging logs $zone"; fi
+    if ! gateway_running; then lease_stop || true; die "gateway exited immediately — check: ${PROG:-yard} staging logs $zone"; fi
     # heartbeat sidecar — runs INSIDE the box (tied to box lifetime, not this CLI process); it
     # renews the lease (flock on the bind-mounted lease file) while the gateway pid is alive,
     # then releases. The lease dir is mounted at the same path, so the same inode is locked.
@@ -702,30 +729,21 @@ MSG
     ;;
 
   stop)
-    if ! box_exists || ! gateway_running; then
-      if lease_owned; then
-        lease_release >/dev/null 2>&1 || true
-        ok "gateway not running for zone '$zone'; released its remaining bot lease"
-      else
-        ok "gateway not running for zone '$zone'"
-      fi
-      exit 0
+    if box_running; then
+      lease_stop || die "gateway stop unconfirmed or lease stale; lease retained"
+      ok "gateway stopped for zone '$zone'"
+    elif lease_owned; then
+      [ "$(ydocker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" = false ] \
+        || die "runner stop unconfirmed; lease retained"
+      lease_release
+      ok "gateway not running for zone '$zone'; released its remaining bot lease"
+    else
+      ok "gateway not running for zone '$zone'"
     fi
-    ydocker exec "$cname" sh -c '
-      pid="$(cat "$1" 2>/dev/null)"; [ -n "$pid" ] || exit 0
-      identity() { [ -r "/proc/$pid/stat" ] && sed "s/.*) //" "/proc/$pid/stat" | cut -d" " -f20; }
-      started="$(identity)"; [ -n "$started" ] || exit 0
-      kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5; do [ "$(identity)" = "$started" ] || break; sleep 1; done
-      if [ "$(identity)" = "$started" ]; then kill -9 "$pid" 2>/dev/null || true; fi
-      rm -f "$1"
-    ' _ "$GW_PID"
-    ok "gateway stopped for zone '$zone'"
-    lease_release >/dev/null 2>&1 || true
     ;;
 
   status)
-    if ! box_exists; then echo "zone '$zone': (no runner) — ${PROG:-yard} staging up $zone"; exit 0; fi
+    if ! box_exists; then echo "zone '$zone': (no runner) — ${PROG:-yard} staging up $zone"; echo "lease:   $(lease_show)"; exit 0; fi
     echo "zone:    $zone (profile $profile)"
     echo "box:     $cname ($(ydocker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null))"
     echo "data:    $dataRoot (VASILY_HOME=$vasilyHome)"
@@ -758,34 +776,13 @@ MSG
     ;;
 
   down)
-    if ! box_running; then
-      if lease_owned; then
-        lease_release >/dev/null 2>&1 || true
-        ok "staging-runner zone '$zone' was stopped; released its remaining bot lease"
-      else
-        ok "staging-runner zone '$zone' already stopped"
-      fi
-      exit 0
-    fi
-    gateway_running && warn "gateway still running — stopping the box stops it too"
-    lease_release >/dev/null 2>&1 || true
-    ydocker stop "$cname" >/dev/null && ok "staging-runner zone '$zone' stopped"
+    lease_container_operation down || die "runner stop unconfirmed or lease stale; lease retained"
+    ok "staging-runner zone '$zone' stopped"
     ;;
 
   destroy)
-    if ! destroy_target_exists; then
-      ok "no staging-runner state to destroy for zone '$zone'"
-      exit 0
-    fi
-    lease_release >/dev/null 2>&1 || true
-    ydocker rm -f "$cname" >/dev/null 2>&1 \
-      && ok "staging-runner zone '$zone' destroyed" \
-      || ok "no staging-runner box to remove for zone '$zone'"
-    yexec rm -rf "$(dirname "$ysecret")" 2>/dev/null || true
-    # `if`, not `[ … ] && …`: this is the destroy) arm's last command and the case is the script's
-    # final action, so under set -e a false guard (the default, no --purge) would exit 1 despite a
-    # successful destroy. Mirrors the sibling qa-bot-broker handler's cmd_destroy.
-    if [ "$purge" = 1 ]; then yexec rm -rf "$dataRoot" 2>/dev/null && ok "staging data root wiped"; fi
+    lease_container_operation destroy || die "runner removal unconfirmed or lease stale; lease retained"
+    ok "staging-runner zone '$zone' destroyed"
     ;;
 
   *)

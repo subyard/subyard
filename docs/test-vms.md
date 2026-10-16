@@ -349,6 +349,15 @@ verifies the SDK's owned `/srv` backing and volume, instance, project and state 
 preserving the reusable yard definition and an unrelated user file. It needs no Gradle download or emulator runtime.
 See [Android acceptance](android.md#release-acceptance).
 
+For L2 isolation and project lifecycle changes, use `--lane projects` with
+`config/profiles/android/tests/e2e/acceptance.sh --slot N`. This lane performs fresh yard setup,
+namespace preflight, broker readiness and public API 35/36 image preparation before running the
+existing two-project fixture. It checks parallel Gradle/APK builds, read-only SDK access,
+private project caches, absence of direct devices and display sockets, broker device/lease
+lifecycle, project rebuild and migration from the reconstructed legacy mount/device shape.
+It exits through normal project and yard cleanup before phone/viewer setup. Physical viewer
+and recovery coverage remains in the diagnostics lane.
+
 The optional `--lane diagnostics` retains the broader phone/API 36, native/remote viewers,
 recovery, APK installation, clean userdata, lease expiry and sequential API 35 phone/API 36
 tablet checks, including the two-project Gradle builds and legacy rebuild fixture. On the

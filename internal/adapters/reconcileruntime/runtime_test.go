@@ -1688,6 +1688,13 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	writeProfile("a", "YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_CAPS='fuse'\n")
 	writeProfile("b", "YARD_CAPS='rootless-docker fuse host-memory'\nYARD_DEVICES='gpu'\n")
+	for _, environment := range [][]string{nil, {"ENVIRONMENT_PROFILES="}} {
+		runtime := Runtime{RepositoryRoot: root, Environment: environment}
+		values, err := runtime.extrasContext()
+		if err != nil || values["SUBYARD_EXTRAS_MOUNTS"] != "" || values["SUBYARD_EXTRAS_CAPABILITIES"] != "" || values["SUBYARD_EXTRAS_DEVICES"] != "" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
+			t.Fatalf("unselected packages supplied extras: %#v %v", values, err)
+		}
+	}
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=a"}}
 	values, err := runtime.extrasContext()
 	if err != nil {

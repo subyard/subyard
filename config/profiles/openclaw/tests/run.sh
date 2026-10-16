@@ -5,6 +5,7 @@ export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$ROOT/tests/helpers/profile-go.sh" openclaw
 bash "$ROOT/config/profiles/openclaw/tests/openclaw-provision-check.sh"
+python3 -B "$ROOT/config/profiles/openclaw/tests/cache-coordination.py"
 bash "$ROOT/config/profiles/openclaw/tests/openclaw-resource-protocol.sh"
 bash "$ROOT/config/profiles/openclaw/tests/qa-lifecycle-exact.sh"
 bash "$ROOT/config/profiles/openclaw/tests/e2e-controller.sh"

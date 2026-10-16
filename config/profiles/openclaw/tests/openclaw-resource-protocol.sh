@@ -93,6 +93,13 @@ case "${command[0]:-}" in
         fi
         ;;
       exec)
+        case "${command[10]:-}" in
+          launch) touch "$state_root/gateway-running"; exit 0 ;;
+          stop)
+            rm -f "$state_root/gateway-running"
+            bash -s -- "$state_root/lease" "${command[8]}" "${command[9]}" release "${command[11]}" <<< "${command[5]}"
+            exit ;;
+        esac
         joined=" ${command[*]} "
         case "$joined" in
           *' SUBYARD_PROD_FPS='*)
@@ -458,6 +465,13 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       sh)
+        case "${8:-}" in
+          launch) printf '4242\n' >"$root/staging/diag/run/gateway.pid"; touch "$root/gateway-running"; exit 0 ;;
+          stop)
+            rm -f "$root/gateway-running" "$root/staging/diag/run/gateway.pid"
+            sh "$root/staging-lease.sh" "$5" "$6" "$7" release "$9"
+            exit ;;
+        esac
         script="${3:-}"
         case "$script" in
           *'kill "$pid"'*) rm -f "$root/gateway-running" "$root/staging/diag/run/gateway.pid" ;;

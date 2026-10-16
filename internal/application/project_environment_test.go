@@ -14,6 +14,9 @@ import (
 
 func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1007\n")}, nil
+		}
 		command := request.Command
 		if len(command) >= 2 && command[0] == "docker" && command[1] == "inspect" ||
 			slices.Equal(command, []string{"test", "-d", "/mnt/host/agent-sessions"}) {
@@ -36,10 +39,27 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 		t.Fatalf("project environment up failed: result=%#v diagnostics=%q err=%v", result, diagnostics, err)
 	}
 	var streams [][]byte
+	identityProbes := 0
 	for _, request := range data.requests {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			identityProbes++
+		}
+		if request.Command[0] == "install" && !slices.Equal(request.Command[2:9], []string{"-m", "0700", "-o", "1000", "-g", "1007", "--"}) {
+			t.Fatalf("staged directory has incorrect identity/mode: %#v", request.Command)
+		}
+		if request.Command[0] == "sh" && len(request.Command) > 5 && request.Command[4] == "subyard" &&
+			!slices.Equal(request.Command[5:], []string{"1000", "1007", "/srv/cache/npm"}) {
+			t.Fatalf("cache preparation has incorrect identity: %#v", request.Command)
+		}
 		if len(request.Stdin) != 0 {
+			if request.User != 1000 || request.Group != 1007 {
+				t.Fatalf("staged file has incorrect identity: UID=%d GID=%d", request.User, request.Group)
+			}
 			streams = append(streams, request.Stdin)
 		}
+	}
+	if identityProbes != 1 {
+		t.Fatalf("developer identity resolved %d times", identityProbes)
 	}
 	if len(streams) != 2 || string(streams[0]) != "SECRET_VALUE=hidden\n" {
 		t.Fatalf("protected input was not staged once: %#v", streams)
@@ -59,6 +79,7 @@ func TestProjectEnvironmentUpStagesProtectedInputAndNativeManifest(t *testing.T)
 	}
 	joined := strings.Join(dockerRun, " ")
 	if len(dockerRun) == 0 || !strings.Contains(joined, "PUBLIC_VALUE=visible") ||
+		!strings.Contains(joined, "--user 1000:1007") || !strings.Contains(joined, "no-new-privileges:true") ||
 		!slices.Contains(dockerRun, "SUBYARD_PROJECT_ID="+runner.Project.ProjectID) ||
 		!slices.Contains(dockerRun, "SUBYARD_YARD_NAME=test-yard") ||
 		!strings.Contains(joined, "/run/subyard/profile.env:ro") || strings.Contains(joined, "hidden") {
@@ -91,6 +112,43 @@ func TestProjectEnvironmentManifestIsCanonical(t *testing.T) {
 	}
 }
 
+func TestProjectEnvironmentRejectsUnavailableOrUnsafePrimaryGIDBeforeMutation(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		output string
+		exit   int
+		err    error
+	}{
+		{name: "lookup failure", err: errors.New("account missing")},
+		{name: "nonzero exit", output: "1007\n", exit: 1},
+		{name: "root group", output: "0\n"},
+		{name: "empty"},
+		{name: "name", output: "dev\n"},
+		{name: "multiple values", output: "1007\n1008\n"},
+		{name: "negative", output: "-1\n"},
+		{name: "overflow", output: "4294967296\n"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+					return ports.InstanceExecResult{Stdout: []byte(scenario.output), ExitCode: scenario.exit}, scenario.err
+				}
+				if !slices.Equal(request.Command, []string{"docker", "info"}) {
+					t.Fatalf("unsafe identity reached environment work: %#v", request.Command)
+				}
+				return ports.InstanceExecResult{}, nil
+			}}
+			runner := ProjectEnvironmentRunner{
+				Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), Rebuild: true, HasSecret: true,
+				Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04", Caches: []string{"/srv/cache/npm"}},
+			}
+			if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{Schema: 1, Adapter: "project-env", Action: "up"}, strings.NewReader("SECRET=synthetic\n")); err == nil {
+				t.Fatal("unsafe primary GID was accepted")
+			}
+		})
+	}
+}
+
 func TestProjectEnvironmentRejectsControlSocketMount(t *testing.T) {
 	data := &projectDataStub{}
 	runner := ProjectEnvironmentRunner{
@@ -111,9 +169,123 @@ func TestProjectEnvironmentRejectsControlSocketMount(t *testing.T) {
 	}
 }
 
+func TestProjectEnvironmentRejectsUnsafeSharingBeforeMutation(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		caches     []string
+		mounts     []string
+		resolve    string
+		unsafeType bool
+	}{
+		{name: "cache socket", caches: []string{"/var/run/docker.sock"}},
+		{name: "cache secret", caches: []string{"/srv/env-secrets/other"}},
+		{name: "cache project install", caches: []string{"/srv/cache/node_modules"}},
+		{name: "writable asset", mounts: []string{"/srv/cache/sdk:/opt/sdk:rw"}},
+		{name: "sibling workspace", mounts: []string{"/srv/workspaces/other/src:/opt/other:ro"}},
+		{name: "secret symlink", mounts: []string{"/opt/tool:/opt/tool:ro"}, resolve: "/srv/env-secrets/other"},
+		{name: "aliased socket", mounts: []string{"/opt/shared:/opt/shared:ro"}, resolve: "/opt/shared", unsafeType: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+					return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+				}
+				if request.Command[0] == "readlink" {
+					return ports.InstanceExecResult{Stdout: []byte(scenario.resolve + "\n")}, nil
+				}
+				if scenario.unsafeType && request.Command[0] == "test" &&
+					(request.Command[1] == "-f" || request.Command[1] == "-d") {
+					return ports.InstanceExecResult{ExitCode: 1}, nil
+				}
+				if slices.Equal(request.Command, []string{"docker", "inspect", "subyard-box-demo-12345678"}) {
+					return ports.InstanceExecResult{}, errors.New("missing")
+				}
+				return ports.InstanceExecResult{}, nil
+			}}
+			runner := ProjectEnvironmentRunner{
+				Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), HasSecret: true,
+				Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04", Caches: scenario.caches, Mounts: scenario.mounts},
+			}
+			if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{
+				Schema: 1, Adapter: "project-env", Action: "up",
+			}, strings.NewReader("SYNTHETIC_SECRET=private\n")); err == nil {
+				t.Fatal("unsafe profile was accepted")
+			}
+			for _, request := range data.requests {
+				if len(request.Stdin) != 0 || len(request.Command) > 1 && request.Command[0] == "docker" &&
+					(request.Command[1] == "run" || request.Command[1] == "start" || request.Command[1] == "rm") {
+					t.Fatalf("unsafe profile reached mutation: %#v", request.Command)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectEnvironmentRejectsCacheOwnershipFailureBeforeRebuild(t *testing.T) {
+	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+		}
+		if len(request.Command) > 3 && request.Command[0] == "docker" && request.Command[3] == projectEnvironmentOwnershipFormat {
+			return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\tsample-profile\n")}, nil
+		}
+		if request.Command[0] == "sh" {
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("foreign cache owner")
+		}
+		return ports.InstanceExecResult{}, nil
+	}}
+	runner := ProjectEnvironmentRunner{
+		Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), Rebuild: true,
+		Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04", Caches: []string{"/srv/cache/npm"}},
+	}
+	if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{Schema: 1, Adapter: "project-env", Action: "up"}, nil); err == nil {
+		t.Fatal("foreign cache ownership was accepted")
+	}
+	for _, request := range data.requests {
+		if len(request.Command) > 1 && request.Command[0] == "docker" && request.Command[1] == "rm" {
+			t.Fatal("rebuild removed its old container before validating cache ownership")
+		}
+	}
+}
+
+func TestProjectEnvironmentRequiresRebuildForLegacyPrivilegePolicy(t *testing.T) {
+	for _, policy := range []string{
+		`{"user":"0:0","privileged":false,"security_opt":["no-new-privileges:true"]}`,
+		`{"user":"1000:1007","privileged":false,"security_opt":["no-new-privileges:true"]}`,
+		`{"user":"1000:1000","privileged":true,"security_opt":["no-new-privileges:true"]}`,
+		`{"user":"1000:1000","privileged":false,"security_opt":[]}`,
+		`invalid`,
+	} {
+		data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+				return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+			}
+			if len(request.Command) > 3 && request.Command[3] == projectEnvironmentIsolationFormat {
+				return ports.InstanceExecResult{Stdout: []byte(policy)}, nil
+			}
+			if len(request.Command) > 3 && request.Command[3] == projectEnvironmentOwnershipFormat {
+				return ports.InstanceExecResult{Stdout: []byte("sha256:owned\t1\tdemo-12345678\tsample-profile\n")}, nil
+			}
+			return ports.InstanceExecResult{}, nil
+		}}
+		runner := ProjectEnvironmentRunner{Data: data, Yard: domain.Context{DevUID: 1000}, Project: cloneRecord(), Profile: ProjectEnvironmentProfile{BaseImage: "ubuntu:24.04"}}
+		if _, _, err := runner.Run(context.Background(), domain.AdapterRequest{Schema: 1, Adapter: "project-env", Action: "up"}, nil); err == nil || !strings.Contains(err.Error(), "rebuild") {
+			t.Fatalf("legacy policy accepted: %v", err)
+		}
+		for _, request := range data.requests {
+			if len(request.Command) > 1 && request.Command[0] == "docker" && request.Command[1] == "start" {
+				t.Fatal("legacy policy started before explicit rebuild")
+			}
+		}
+	}
+}
+
 func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 	manifestJSON := "{\"profile\":\"sample-profile\"}\n"
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if request.Command[0] == "id" {
+			t.Fatal("info/down must not resolve the developer account")
+		}
 		if len(request.Command) == 2 && request.Command[0] == "cat" {
 			return ports.InstanceExecResult{Stdout: []byte(manifestJSON)}, nil
 		}
@@ -144,7 +316,13 @@ func TestProjectEnvironmentInfoAndDownUseDataPlane(t *testing.T) {
 
 func TestProjectEnvironmentExistingBoxUsesImmutableIDForStartAndSessionLinks(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1007\n")}, nil
+		}
 		command := request.Command
+		if len(command) >= 4 && command[3] == projectEnvironmentIsolationFormat {
+			return ports.InstanceExecResult{Stdout: []byte(`{"user":"1000:1007","privileged":false,"security_opt":["no-new-privileges:true"]}`)}, nil
+		}
 		if len(command) >= 3 && command[0] == "docker" &&
 			command[1] == "inspect" && command[2] == "-f" {
 			return ports.InstanceExecResult{
@@ -173,6 +351,9 @@ func TestProjectEnvironmentExistingBoxUsesImmutableIDForStartAndSessionLinks(t *
 			if command[4] != "sha256:owned" {
 				t.Fatalf("session link used reusable container name: %#v", command)
 			}
+			if !slices.Equal(command[len(command)-2:], []string{"1000", "1007"}) {
+				t.Fatalf("session link has incorrect identity: %#v", command)
+			}
 			foundLink = true
 		}
 	}
@@ -183,6 +364,9 @@ func TestProjectEnvironmentExistingBoxUsesImmutableIDForStartAndSessionLinks(t *
 
 func TestProjectEnvironmentNewBoxUsesReturnedIDForSessionLinks(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+		}
 		command := request.Command
 		if slices.Equal(command, []string{"docker", "inspect", "subyard-box-demo-12345678"}) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("not found")
@@ -216,6 +400,9 @@ func TestProjectEnvironmentNewBoxUsesReturnedIDForSessionLinks(t *testing.T) {
 
 func TestProjectEnvironmentDownRejectsUnownedBox(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+		}
 		if len(request.Command) >= 3 && request.Command[0] == "docker" &&
 			request.Command[1] == "inspect" && request.Command[2] == "-f" {
 			return ports.InstanceExecResult{Stdout: []byte("sha256:foreign\t\t\t\n")}, nil
@@ -237,6 +424,9 @@ func TestProjectEnvironmentDownRejectsUnownedBox(t *testing.T) {
 
 func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+		}
 		command := request.Command
 		if slices.Equal(command, []string{"test", "-d", "/mnt/host/agent-sessions"}) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")
@@ -279,6 +469,9 @@ func TestProjectEnvironmentRebuildRecreatesOwnedBox(t *testing.T) {
 
 func TestProjectEnvironmentRebuildRejectsUnownedBox(t *testing.T) {
 	data := &projectDataStub{run: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"id", "-g", "1000"}) {
+			return ports.InstanceExecResult{Stdout: []byte("1000\n")}, nil
+		}
 		command := request.Command
 		if slices.Equal(command, []string{"test", "-d", "/mnt/host/agent-sessions"}) {
 			return ports.InstanceExecResult{ExitCode: 1}, errors.New("missing")

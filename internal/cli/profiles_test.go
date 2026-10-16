@@ -417,3 +417,38 @@ func TestScopedProfileSetupPromptDeclineAndCredentialOnlyApply(t *testing.T) {
 		})
 	}
 }
+
+func TestScopedProfileFirstEditPreservesDeclaredDefaultPeers(t *testing.T) {
+	cli, _, _, path, output := scopedProfileFixture(t, "SSH_PORT=2222\n")
+	peer := filepath.Join(cli.options.RepositoryRoot, "config/profiles/peer")
+	if err := os.MkdirAll(peer, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(peer, "profile.json"), []byte(`{"schema_version":1,"default_yards":["default"]}`), 0644)
+	// Refresh immutable descriptors for this synthetic fixture before loading.
+	var err error
+	cli.catalog, err = config.LoadCatalog(cli.options.RepositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareScopedProfile(t, cli, "disable", "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if code := cli.runPreparedCommand(context.Background(), prepared, true); code != 0 {
+		t.Fatalf("disable=%d %s", code, output)
+	}
+	cli.env = maps.Clone(cli.baseEnv)
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.EnvironmentProfiles.Requested, []string{"peer"}) || loaded.Environment["ENVIRONMENT_PROFILES"] != "peer" {
+		t.Fatalf("first edit lost default peer: %#v", loaded.EnvironmentProfiles)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(content, []byte("ENVIRONMENT_PROFILES='peer'")) {
+		t.Fatalf("authored selection=%q %v", content, err)
+	}
+}

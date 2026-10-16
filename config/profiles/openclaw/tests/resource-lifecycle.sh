@@ -28,20 +28,32 @@ case "${1:-}" in
   list) [ -e "$state_root/up" ] && printf 'RUNNING\n' ;;
   exec)
     [ -e "$state_root/up" ] || exit 1
+    shift
+    while [ "$1" != -- ]; do shift; done
+    shift
+    # The shared payload contains every action; dispatch by its arguments, not script text.
+    if [ "${1:-}" = sh ] && [ "${2:-}" = -s ] && [ "${4:-}" = /srv/staging/_lease ]; then
+      [ "${5:-}" = bot ] && [ "${6:-}" = canonical ] || exit 1
+      cat >/dev/null
+      [ "${7:-}" = status ] || exit 1
+      if [ -e "$state_root/lease-owned" ]; then
+        printf '%s\n' '{"holder":"canonical","kind":"canonical","epoch":1,"expires":4102444800,"lease":{"contract":"resource-lease/v1","resource_type":"staging-bot","resource_id":"bot","slot_id":null,"generation":1,"state":"held","owner":{"zone":"canonical","kind":"canonical"},"expires_at":"2100-01-01T00:00:00Z"}}'
+      else
+        printf '%s\n' '{"lease":{"contract":"resource-lease/v1","resource_type":"staging-bot","resource_id":"bot","slot_id":null,"generation":1,"state":"available","owner":null,"expires_at":null}}'
+      fi
+      exit 0
+    fi
+    if [ "${1:-}" = docker ] && [ "${2:-}" = exec ] && [ "${3:-}" = subyard-staging-canonical ] \
+      && [ "${8:-}" = /srv/staging/_lease ] && [ "${11:-}" = stop ]; then
+      [ "${9:-}" = bot ] && [ "${10:-}" = canonical ] && [ "${12:-}" = 1 ] \
+        && [ -e "$state_root/lease-owned" ] || exit 1
+      rm -f "$state_root/gateway-running" "$state_root/lease-owned"
+      exit 0
+    fi
     case " $* " in
       *' id -u '*) printf '1000\n' ;;
       *' id -g '*) printf '1001\n' ;;
-      *' sh -s -- /srv/staging/_lease bot canonical '*)
-        script="$(cat)"
-        case "$script" in
-          *'echo "OWNED $kind '*) [ -e "$state_root/lease-owned" ] && printf 'OWNED canonical 3600\n' || printf 'MISSING\n' ;;
-          *'rm -f "$st"'*) rm -f "$state_root/lease-owned" ;;
-        esac
-        ;;
-      *'.holder //'*) [ -e "$state_root/lease-owned" ] ;;
-      *' cat "$1/$2.json" '* ) [ ! -e "$state_root/lease-owned" ] || printf '{"holder":"canonical","kind":"canonical","epoch":1}\n' ;;
       *' docker exec '*' kill -0 '*) [ -e "$state_root/gateway-running" ] ;;
-      *' docker exec '*' kill "$pid" '*) rm -f "$state_root/gateway-running" ;;
       *' docker stop subyard-qa-broker '*) touch "$state_root/qa-stopped" ;;
       *' docker inspect -f {{.State.Running}} subyard-qa-broker '*) [ -e "$state_root/qa-stopped" ] && printf 'false\n' || printf 'true\n' ;;
       *' docker inspect -f {{.Id}} '*) printf '%064d\n' 1 ;;
@@ -138,6 +150,8 @@ jq -e '.action == "destroy-purge" and .changed == true' "$TMP/staging-purge-plan
 jq -e '.action == "list" and .changed == false' "$TMP/staging-list-plan.json" >/dev/null || fail 'staging list action is unreachable'
 [ ! -e "$TMP/qa-secret-sourced" ] || fail 'QA prepare sourced generated credentials'
 [ ! -e "$TMP/staging-secret-sourced" ] || fail 'staging prepare sourced generated credentials'
+[ -e "$TMP/lease-owned" ] && [ -e "$TMP/gateway-running" ] \
+  || fail 'read-only prepare changed the staging gateway or lease'
 if grep -Eq 'file push|docker (run|start|stop|rm|build)|systemctl (enable|start|restart|disable)|config device (add|remove)' \
   "$RESOURCE_TEST_LOG"; then
   fail 'read-only prepare mutated profile resource state'
@@ -193,6 +207,9 @@ check_resource_probe "$qa_handler"
 # Reverse lifecycle paths must execute through the real generic dispatcher.
 "$ROOT/bin/yard" staging stop --yes >/dev/null
 "$ROOT/bin/yard" qa-pool down --yes >/dev/null
+[ ! -e "$TMP/lease-owned" ] && [ ! -e "$TMP/gateway-running" ] \
+  || fail 'staging stop retained the gateway or owned lease'
+[ -e "$TMP/qa-stopped" ] || fail 'qa-pool down retained its running broker'
 grep -Fq 'docker exec subyard-staging-canonical' "$RESOURCE_TEST_LOG" \
   || fail 'staging stop did not reach its profile mechanic'
 grep -Fq 'docker stop subyard-qa-broker' "$RESOURCE_TEST_LOG" \

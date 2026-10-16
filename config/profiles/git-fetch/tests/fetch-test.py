@@ -144,8 +144,17 @@ class FetchTests(unittest.TestCase):
         self.assertLess(time.monotonic()-started, 3)
         self.assertEqual(output.getvalue(), '')
         child = Path('/proc')/child_pid.read_text()/'stat'
-        if child.exists():
-            self.assertIn(child.read_text().rsplit(')', 1)[1].split()[0], ('Z', 'X'))
+        deadline = time.monotonic()+1
+        while True:
+            try:
+                state = child.read_text().rsplit(')', 1)[1].split()[0]
+            except FileNotFoundError:
+                break
+            if state in ('Z', 'X'):
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f'descendant remained alive after timeout: {state}')
+            time.sleep(0.01)
 
 
 if __name__ == '__main__':

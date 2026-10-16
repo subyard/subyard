@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
 HOOK="$ROOT/config/profiles/openclaw/provision.sh"
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d /tmp/subyard-openclaw-provision.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 dev_home="$tmp/home"
 mkdir -p "$test_root/usr/local/bin" "$test_root/opt/venv/bin" \
-  "$test_root/srv/cache/pnpm" "$test_root/srv/cache/pip" "$test_root/srv/cache/npm" \
+  "$test_root/srv/cache/pnpm" "$test_root/srv/cache/pip" "$test_root/srv/cache/npm" "$test_root/srv/cache/playwright" \
   "$test_root/etc/profile.d" "$test_root/etc/subyard" "$dev_home/.config/pip"
 
 cat > "$test_root/usr/local/bin/node" <<'NODE'
@@ -23,6 +23,8 @@ case "${1:-}" in
   *) printf 'FAIL: unpinned or unexpected package manager\n' >&2; exit 1 ;;
 esac
 COREPACK
+# shellcheck disable=SC1090
+. <(awk '/^render_browser_policy\(\) \{/ { render=1 } render { print } render && /^\}$/ { exit }' "$HOOK")
 # Use the actual renderer without running the root-only provision entry point.
 awk '/^render_pnpm_wrapper\(\) \{/ { render=1 } render { print } render && /^\}$/ { exit }' \
   "$HOOK" > "$tmp/render.sh"
@@ -30,13 +32,22 @@ awk '/^render_pnpm_wrapper\(\) \{/ { render=1 } render { print } render && /^\}$
 . "$tmp/render.sh"
 CACHE_PNPM_STORE=/srv/cache/pnpm PNPM_VERSION=11.2.2 \
   render_pnpm_wrapper > "$test_root/usr/local/bin/pnpm"
-cat > "$test_root/usr/local/bin/sy-cache" <<'CACHE'
+cp "$ROOT/config/profiles/openclaw/cache/sy-cache.sh" "$test_root/usr/local/bin/sy-cache"
+: > "$test_root/srv/cache/.sy-cache.lock"
+chmod 0644 "$test_root/srv/cache/.sy-cache.lock"
+for entry in npm npx; do
+  # shellcheck disable=SC1090
+  . <(awk '/^render_npm_wrapper\(\) \{/ { render=1 } render { print } render && /^\}$/ { exit }' "$HOOK")
+  render_npm_wrapper "/usr/local/lib/node_modules/npm/bin/$entry-cli.js" > "$test_root/usr/local/bin/$entry"
+done
+site_dir="$test_root/opt/venv/lib/python/site-packages"
+mkdir -p "$site_dir"
+cp "$ROOT/config/profiles/openclaw/cache/subyard_cache.py" "$site_dir/"
+printf 'import subyard_cache\n' > "$site_dir/subyard_cache.pth"
+printf '%s\n' /srv/cache/pip > "$site_dir/subyard_cache_root"
+cat > "$test_root/opt/venv/bin/python" <<PYTHON
 #!/usr/bin/env bash
-exit 0
-CACHE
-cat > "$test_root/opt/venv/bin/python" <<'PYTHON'
-#!/usr/bin/env bash
-exit 0
+printf '%s\\n' '$site_dir'
 PYTHON
 cat > "$test_root/opt/venv/bin/pip" <<'PIP'
 #!/usr/bin/env bash
@@ -79,6 +90,19 @@ env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 after="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 [ "$before" = "$after" ] || { printf 'FAIL: OpenClaw check mutated state\n' >&2; exit 1; }
 
+# Captured non-default roots must converge with both the hook default and pip.conf.
+custom_pip="$tmp/custom pip cache"
+printf '%s\n' "$custom_pip" > "$site_dir/subyard_cache_root"
+printf '[global]\ncache-dir = %s\n' "$custom_pip" > "$dev_home/.config/pip/pip.conf"
+env "${common_env[@]}" PIP_CACHE_DIR="$custom_pip" bash "$HOOK" --check >/dev/null
+printf '%s\n' /srv/cache/pip > "$site_dir/subyard_cache_root"
+set +e
+env "${common_env[@]}" PIP_CACHE_DIR="$custom_pip" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || { printf 'FAIL: stale pip hook root status=%s, want 10\n' "$status" >&2; exit 1; }
+printf '[global]\ncache-dir = /srv/cache/pip\n' > "$dev_home/.config/pip/pip.conf"
+
 printf '\nStale onboarding instructions.\n' >> "$test_root/etc/subyard/openclaw-l1.md"
 set +e
 env "${common_env[@]}" bash "$HOOK" --check >/dev/null
@@ -102,5 +126,16 @@ env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 status=$?
 set -e
 [ "$status" -eq 10 ] || { printf 'FAIL: OpenClaw drift status=%s, want 10\n' "$status" >&2; exit 1; }
+
+sed -i 's/v0\.0\.0/v24.15.0/' "$test_root/usr/local/bin/node"
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+cp "$test_root/usr/local/bin/sy-cache" "$tmp/cache-current"
+printf '\n# stale helper\n' >> "$test_root/usr/local/bin/sy-cache"
+set +e
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+status=$?
+set -e
+[ "$status" -eq 10 ] || { printf 'FAIL: stale cache helper status=%s\n' "$status" >&2; exit 1; }
+cp "$tmp/cache-current" "$test_root/usr/local/bin/sy-cache"
 
 printf 'ok: OpenClaw provision check\n'

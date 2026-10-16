@@ -41,11 +41,11 @@ print_help() {
   cat <<'H'
 sy-stage — in-yard self-serve staging / live control for a coding agent (runs INSIDE the yard).
 
-Usage: sy-stage <command> [--zone Z] [PATH | -f | -- CMD...]
+Usage: sy-stage <command> [--zone Z] [--wait SECONDS] [PATH | -f | -- CMD...]
 
 Commands:
-  reserve            acquire the bot lease (ephemeral; preempts a canonical holder)
-  restart            prod-guard + lease + rebuild from your live tree + (re)launch the gateway
+  reserve [--wait N] acquire the bot lease (ephemeral; preempts a canonical holder)
+  restart [--wait N] prod-guard + lease + rebuild from your live tree + (re)launch the gateway
   rebind [PATH]      recreate the runner bound to PATH (default: current git worktree)
   stop               stop the gateway + release the lease
   release            release the lease only
@@ -63,7 +63,8 @@ Typical flows:
 
 Constraints you must understand:
   - The test-bot is SHARED: one poller at a time (lease). An ephemeral run preempts a canonical
-    holder; if another ephemeral run holds it you queue or must stop it.
+    holder after confirmed stop; another ephemeral holder returns busy. --wait N retries busy
+    for at most N seconds (0..3600, default 0); Ctrl-C cancels waiting.
   - The tree is LIVE-BOUND: restart/rebuild runs your CURRENT edits and writes into your workspace
     (NOT a snapshot).
   - The real test-bot has REAL side effects in the test chat; prod is refused by the prod-guard.
@@ -81,9 +82,10 @@ case "$sub" in ""|help|-h|--help) print_help; exit 0 ;; esac
 command -v docker >/dev/null 2>&1 \
   || die "no docker here — sy-stage runs INSIDE the yard, where the agent (dev) is in the docker group"
 
-zone="${SY_STAGE_ZONE:-canonical}"; follow=0; path_arg=""; cmd_args=()
+zone="${SY_STAGE_ZONE:-canonical}"; follow=0; wait_seconds=0; path_arg=""; cmd_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --wait)      wait_seconds="${2:?--wait needs seconds}"; shift ;;
     --zone)      zone="${2:?--zone needs a name}"; shift ;;
     -f|--follow) follow=1 ;;
     --)          shift; cmd_args=("$@"); break ;;
@@ -93,6 +95,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$zone" in *[!a-zA-Z0-9_-]*) die "zone name '$zone' must be [a-zA-Z0-9_-]" ;; esac
+
+case "$wait_seconds" in ''|*[!0-9]*) die "--wait must be between 0 and 3600 seconds" ;; esac
+[ "${#wait_seconds}" -le 4 ] && [ "$wait_seconds" -le 3600 ] || die "--wait must be between 0 and 3600 seconds"
+case "$sub" in reserve|restart) ;; *) [ "$wait_seconds" = 0 ] || die "--wait applies to reserve and restart" ;; esac
 
 zenv="$STAGING_ROOT/$zone/zone.env"
 [ -r "$zenv" ] || die "zone '$zone' not provisioned in this yard ($zenv missing) — operator must run 'yard staging up $zone --source <ws>' on the host first"
@@ -127,27 +133,43 @@ lease_acquire() {
   sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" acquire "$1" "$LEASE_TTL" "${2:-normal}" < "$LEASE_PAYLOAD"
 }
 lease_release() {
-  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" release "${lease_expected_epoch:-}" < "$LEASE_PAYLOAD"
+  sh -s -- "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" release "${lease_expected_epoch:?}" reserved-only < "$LEASE_PAYLOAD"
 }
-lease_show() { [ -r "$LEASE_DIR/$BOT_LEASE_KEY.json" ] && cat "$LEASE_DIR/$BOT_LEASE_KEY.json" || echo "{}"; }
+lease_show() { sh "$LEASE_PAYLOAD" "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" status; }
+lease_capture() { lease_expected_epoch="$(lease_show | jq -r '.epoch // 0')"; }
+lease_stop() {
+  docker exec "$1" sh -c "$(cat "$LEASE_PAYLOAD")" _ \
+    "$LEASE_DIR" "$BOT_LEASE_KEY" "$2" stop "$3" "$4"
+}
 
 # Acquire the lease for an agent (ephemeral). Preempts a canonical holder by stopping its gateway.
 reserve_lease() {
-  local la holder
-  la="$(lease_acquire ephemeral normal)"
-  case "$la" in
-    OK\ *)      lease_expected_epoch="${la#OK }"; ok "lease acquired (epoch ${la#OK })"; return 0 ;;
-    PREEMPT\ *) holder="${la#PREEMPT }"
-                info "preempting canonical holder '$holder' (fence-by-lifecycle: stopping its gateway)"
-                docker exec "subyard-staging-$holder" sh -c '
-                  p="$(cat "$1" 2>/dev/null)"; [ -n "$p" ] && kill "$p" 2>/dev/null || true; rm -f "$1"
-                ' _ "$STAGING_ROOT/$holder/run/gateway.pid" 2>/dev/null || true
-                la="$(lease_acquire ephemeral force)"
-                case "$la" in OK\ *) lease_expected_epoch="${la#OK }"; ok "lease acquired after preempt (epoch ${la#OK })"; return 0 ;; esac
-                die "could not acquire lease after preempt: $la" ;;
-    BUSY\ *)    die "bot lease held: ${la#BUSY } — another ephemeral run is polling; wait or 'sy-stage stop' it" ;;
-    *)          die "could not acquire bot lease: $la" ;;
-  esac
+  local la holder epoch preempted=0 deadline=$((SECONDS+wait_seconds))
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  while :; do
+    la="$(lease_acquire ephemeral normal)"
+    case "$la" in
+      OK\ *) lease_expected_epoch="${la#OK }"; ok "lease acquired (epoch $lease_expected_epoch)"; trap - INT TERM; return 0 ;;
+      PREEMPT\ *)
+        [ "$preempted" = 0 ] || die "busy: canonical lease changed during preemption"
+        preempted=1
+        read -r holder epoch <<< "${la#PREEMPT }"
+        info "preempting canonical holder '$holder' after confirmed gateway stop"
+        lease_stop "subyard-staging-$holder" "$holder" "$epoch" "$STAGING_ROOT/$holder/run/gateway.pid" \
+          || die "canonical gateway stop unconfirmed; lease retained"
+        # A successor may win the released resource; normal admission decides.
+        ;;
+      BUSY\ *)
+        [ "$wait_seconds" -gt 0 ] || die "busy: bot lease held: ${la#BUSY }"
+        [ "$SECONDS" -lt "$deadline" ] || die "timeout: waiting for staging bot lease"
+        sleep 1
+        [ "$SECONDS" -lt "$deadline" ] || die "timeout: waiting for staging bot lease"
+        ;;
+      STALE\ *) die "stale: expired staging lease requires confirmed stop: ${la#STALE }" ;;
+      *) die "could not acquire bot lease: $la" ;;
+    esac
+  done
 }
 
 # prod-guard (deny-by-default) + lease + (re)launch gateway. Mirrors the host 'staging start'.
@@ -185,6 +207,7 @@ GUARD
     FAIL\ *) die "prod-guard refused: ${guard_out#FAIL }" ;;
     *)       die "prod-guard produced no verdict — refusing (fail-closed): '${guard_out:-<empty>}'" ;;
   esac
+  if gateway_running; then stop_gateway; fi
   reserve_lease
 
   # rebuild from the live-bound tree so 'restart' picks up the agent's current edits (synchronous)
@@ -196,14 +219,10 @@ GUARD
   fi
 
   info "launching the gateway: $GATEWAY_CMD"
-  docker exec -d "$CNAME" sh -c '
-    cd /workspace || exit 1
-    mkdir -p "$(dirname "$2")"
-    setsid sh -c "$1" >>"$2" 2>&1 &
-    echo $! >"$3"
-  ' _ "$GATEWAY_CMD" "$YLOG" "$GW_PID"
+  docker exec "$CNAME" sh -c "$(cat "$LEASE_PAYLOAD")" _ \
+    "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" launch "$lease_expected_epoch" "$GW_PID" "$YLOG" "$GATEWAY_CMD" /workspace
   sleep 1
-  gateway_running || { lease_release || true; die "gateway exited immediately — sy-stage logs --zone $zone"; }
+  gateway_running || { lease_stop "$CNAME" "$zone" "$lease_expected_epoch" "$GW_PID" || true; die "gateway exited immediately — sy-stage logs --zone $zone"; }
   # heartbeat sidecar — renews the lease while the gateway pid lives, then releases (inside the box)
   docker exec -d "$CNAME" sh -c "$(cat "$LEASE_PAYLOAD")" _ \
       "$LEASE_DIR" "$BOT_LEASE_KEY" "$zone" heartbeat "$LEASE_TTL" "$GW_PID" "$HB_PID" "${lease_expected_epoch:?}"
@@ -212,18 +231,10 @@ GUARD
 
 stop_gateway() {
   require_box
-  if gateway_running; then
-    docker exec "$CNAME" sh -c '
-      pid="$(cat "$1" 2>/dev/null)"; [ -n "$pid" ] || exit 0
-      kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-      kill -9 "$pid" 2>/dev/null || true; rm -f "$1"
-    ' _ "$GW_PID"
-    ok "gateway stopped for zone '$zone'"
-  else
-    ok "gateway not running for zone '$zone'"
-  fi
-  lease_release >/dev/null 2>&1 || true
+  lease_capture
+  lease_stop "$CNAME" "$zone" "$lease_expected_epoch" "$GW_PID" \
+    || die "gateway stop unconfirmed or lease stale; lease retained"
+  ok "gateway stopped for zone '$zone'"
 }
 
 # Run a one-off test command in the runner with the host-config staging MODEL key injected for
@@ -267,10 +278,10 @@ case "$sub" in
   restart) launch_gateway ;;
   stop)    stop_gateway ;;
   test)    run_test ;;
-  release) lease_release && ok "lease released for zone '$zone'" ;;
+  release) lease_capture; gateway_running && die "gateway running; use sy-stage stop before release"; lease_release && ok "lease released for zone '$zone'" ;;
 
   status)
-    if ! box_exists; then echo "zone '$zone': (no runner) — operator: yard staging up $zone --source <ws>"; exit 0; fi
+    if ! box_exists; then echo "zone '$zone': (no runner) — operator: yard staging up $zone --source <ws>"; echo "lease:   $(lease_show)"; exit 0; fi
     echo "zone:    $zone"
     echo "box:     $CNAME ($(docker inspect -f '{{.State.Status}}' "$CNAME" 2>/dev/null))"
     echo "source:  ${SOURCE_BIND:-<zone src>} -> /workspace (live bind)"

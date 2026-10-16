@@ -148,11 +148,24 @@ check_guest_state() {
     [ "$(pnpm --version)" = 11.2.2 ]
     python3 -c "import sys; assert sys.version_info.major == 3"
     /opt/venv/bin/python -c "import sys; assert sys.prefix == \"/opt/venv\""
-    for path in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm; do
+    for path in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright; do
       [ -d "$path" ] && [ ! -L "$path" ]
       [ "$(stat -c %u:%g "$path")" = "$expected" ]
     done
     [ -x /usr/local/bin/sy-cache ]
+    [ -f /usr/local/bin/npm ] && [ ! -L /usr/local/bin/npm ]
+    [ -f /usr/local/bin/npx ] && [ ! -L /usr/local/bin/npx ]
+    site_dir="$(/opt/venv/bin/python -c "import sysconfig; print(sysconfig.get_path(\"purelib\"))")"
+    [ "$(stat -c %u:%g:%a "$site_dir/subyard_cache.py")" = 0:0:644 ]
+    [ "$(stat -c %u:%g:%a "$site_dir/subyard_cache.pth")" = 0:0:644 ]
+    pip_cache="$(/opt/venv/bin/python -m pip cache dir)"
+    case "$pip_cache" in /srv/cache/pip/linux-*/cpython-*) ;; *) exit 1 ;; esac
+    pnpm_store="$(pnpm store path)"
+    case "$pnpm_store" in /srv/cache/pnpm/pnpm/linux-*/11.2.2-node-*/*) ;; *) exit 1 ;; esac
+    # Separate file descriptions must observe the held lock, while two readers may overlap.
+    sy-cache shared -- sh -c "! flock -n -x /srv/cache/.sy-cache.lock true"
+    sy-cache exclusive -- sh -c "! flock -n -s /srv/cache/.sy-cache.lock true"
+    sy-cache shared -- flock -n -s /srv/cache/.sy-cache.lock true
     [ -f /srv/cache/.sy-cache.lock ] && [ ! -L /srv/cache/.sy-cache.lock ]
     [ "$(stat -c %u:%g /srv/cache/.sy-cache.lock)" = "$expected" ]
     [ -f /home/dev/.npmrc ] && grep -Fxq "cache=/srv/cache/npm" /home/dev/.npmrc
@@ -185,6 +198,11 @@ chmod 0700 "$STATE/project-yard"
 printf 'openclaw_e2e_stage=projects\n'
 PROJECT_CONTRACT_BIN="$STATE/project-yard" PROJECT_CONTRACT_YARD="$YARD_NAME" \
   PROJECT_CONTRACT_UID="$(id -u dev)" owner_project_contract openclaw
+
+# shellcheck source=config/profiles/openclaw/tests/e2e/project-isolation.sh
+. "$ROOT/config/profiles/openclaw/tests/e2e/project-isolation.sh"
+printf 'openclaw_e2e_stage=parallel-isolation\n'
+openclaw_project_isolation "$instance" "$project"
 
 # Exercise staging container bring-up and teardown with a synthetic denylist fingerprint.
 # Up leaves the gateway stopped; it does not need source code, bot credentials, or exclusive-key consent.
@@ -282,6 +300,22 @@ lease_inode="$(incus exec "$instance" --project "$project" -- stat -c '%d:%i' /s
 yard staging up --yes > "$STATE/staging-up-existing.out"
 [ "$(incus exec "$instance" --project "$project" -- stat -c '%d:%i' /srv/staging/_lease/bot.lock)" = "$lease_inode" ] \
   || die 'staging up replaced the retained lease lock inode'
+# An expired allocation is draining until its old container has been stopped.
+incus exec "$instance" --project "$project" -- sh -eu -c '
+  printf "%s\n" "{\"holder\":\"canonical\",\"kind\":\"ephemeral\",\"epoch\":500,\"expires\":0}" > /srv/staging/_lease/bot.json
+  chown dev:dev /srv/staging/_lease/bot.json
+  chmod 0644 /srv/staging/_lease/bot.json
+'
+if incus exec "$instance" --project "$project" -- su - dev -c 'sy-stage reserve --zone canonical' \
+  > "$STATE/staging-expired-reserve.out" 2>&1; then
+  die 'staging reserve replaced expired authority without a confirmed stop'
+fi
+grep -Fq 'stale: expired staging lease requires confirmed stop:' "$STATE/staging-expired-reserve.out" \
+  || die 'expired staging authority was not reported stale'
+incus exec "$instance" --project "$project" -- jq -e '.epoch == 500' /srv/staging/_lease/bot.json >/dev/null
+yard staging down --yes > "$STATE/staging-expired-down.out"
+assert_no_staging_lease
+yard staging up --yes > "$STATE/staging-expired-up.out"
 # Exercise the delivered guest entrypoint and its sibling payload as the yard user.
 incus exec "$instance" --project "$project" -- su - dev -c 'sy-stage reserve --zone canonical' > "$STATE/staging-guest-reserve.out"
 incus exec "$instance" --project "$project" -- jq -e \
@@ -306,14 +340,14 @@ grep -Fq "(no broker)" "$qa_status" || die 'refused QA bring-up left a broker be
 
 # A converged public provision must perform no profile apply or cache/config rewrite.
 before="$(incus exec "$instance" --project "$project" -- sh -eu -c \
-  'stat -c "%u:%g:%Y:%s" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/.sy-cache.lock /home/dev/.npmrc /home/dev/.config/pip/pip.conf')"
+  'stat -c "%u:%g:%i:%Y:%s" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright /srv/cache/.sy-cache.lock /home/dev/.npmrc /home/dev/.config/pip/pip.conf')"
 provision_repeat="$STATE/provision-repeat.out"
 yard provision openclaw --yes > "$provision_repeat"
 if grep -Fq 'provisioning openclaw' "$provision_repeat"; then
   die 'converged public provision ran the OpenClaw apply hook again'
 fi
 after="$(incus exec "$instance" --project "$project" -- sh -eu -c \
-  'stat -c "%u:%g:%Y:%s" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/.sy-cache.lock /home/dev/.npmrc /home/dev/.config/pip/pip.conf')"
+  'stat -c "%u:%g:%i:%Y:%s" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright /srv/cache/.sy-cache.lock /home/dev/.npmrc /home/dev/.config/pip/pip.conf')"
 [ "$before" = "$after" ] || die 'converged provision changed cache/config metadata'
 check_guest_state
 

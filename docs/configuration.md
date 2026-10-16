@@ -316,10 +316,14 @@ winning and overridden sources. Component health is inspected only for selected 
 the top-level `observed` field describes yard convergence (`observed_scope: "yard"`). A ready
 yard does not establish that an unselected component is running. `profile list [--json]` lists
 all shipped environment profiles, including provision hooks, resources and role-forbidden
-profiles. Its selection reasons distinguish implicit provision defaults, explicit empty lists
-and inherited Git selection from local overrides. An explicit empty profile list
-still uses the established provision fallback for eligible hooks without a profile
-descriptor; these inventory entries report `legacy-provision-fallback`.
+profiles. Its selection reasons distinguish declared defaults, explicit empty lists
+and inherited Git selection from local overrides. When `ENVIRONMENT_PROFILES` is absent,
+only eligible profiles declaring this yard in `default_yards` are selected. An explicit
+empty list selects no profile, provision hook, resource or extras. A profile without a
+descriptor must be selected explicitly. The same resolved effective set governs provision,
+extras, resources and project target admission; project settings cannot silently expand it.
+Activate a profile before importing or starting a project that targets it. Existing projects
+can still be stopped or removed after their profile is deselected.
 
 The shipped `test-vms` role has `ALLOWS_CODING_TOOLS=false`. Its inherited tools are
 suppressed, explicit nonempty selections fail, and agent-only utilities such as

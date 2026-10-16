@@ -33,45 +33,172 @@ PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEV_HOME="${OPENCLAW_DEV_HOME:-$(getent passwd "$DEV_USER" | cut -d: -f6)}"
 : "${DEV_HOME:=/home/$DEV_USER}"
 
+render_browser_policy() {
+  cat <<'SH'
+# A bounded global-option scan locates the native command without flattening argv.
+command_args=("$@")
+browser_project="$PWD"
+ambiguous_browser=0
+while [ "${#command_args[@]}" -gt 0 ]; do
+  option="${command_args[0]}"
+  case "$option" in
+    --) command_args=("${command_args[@]:1}"); break ;;
+    --dir|-C|--prefix)
+      [ "${#command_args[@]}" -ge 2 ] || { echo 'cache: missing global option value' >&2; exit 1; }
+      browser_project="${command_args[1]}"; command_args=("${command_args[@]:2}") ;;
+    --dir=*|--prefix=*) browser_project="${option#*=}"; command_args=("${command_args[@]:1}") ;;
+    -C?*) browser_project="${option:2}"; command_args=("${command_args[@]:1}") ;;
+    --filter|--filter-prod|-F|--workspace)
+      ambiguous_browser=1; command_args=("${command_args[@]:2}") ;;
+    -w)
+      ambiguous_browser=1
+      if [ "$manager" = pnpm ]; then command_args=("${command_args[@]:1}"); else command_args=("${command_args[@]:2}"); fi ;;
+    --filter=*|--filter-prod=*|--workspace=*|--workspace-root|--workspaces|--ws|-r|--recursive|-F?*|-w?*)
+      ambiguous_browser=1; command_args=("${command_args[@]:1}") ;;
+    --package|-p) ambiguous_browser=1; command_args=("${command_args[@]:2}") ;;
+    --package=*|-p?*|--global|-g|--global=*) ambiguous_browser=1; command_args=("${command_args[@]:1}") ;;
+    --registry|--cache|--store-dir|--userconfig|--globalconfig|--location)
+      command_args=("${command_args[@]:2}") ;;
+    --*=*|-y|--yes|--no|--offline|--prefer-offline|--silent|--quiet)
+      command_args=("${command_args[@]:1}") ;;
+    -*) ambiguous_browser=1; command_args=("${command_args[@]:1}") ;;
+    *) break ;;
+  esac
+done
+# npm consumes selector options anywhere before its explicit command delimiter, including
+# after the executable and arguments. npx leaves options after its first positional to the tool.
+if [ "$manager" = npm ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      --) break ;;
+      --package|-p|--package=*|-p?*|--global|-g|--global=*|-g?*|--workspace|-w|--workspace=*|--workspaces|--ws|-w?*) ambiguous_browser=1 ;;
+    esac
+  done
+fi
+browser_args=()
+if [ "$manager" = npx ]; then
+  browser_args=("${command_args[@]}")
+else
+  case "${command_args[0]:-}" in
+    exec) browser_args=("${command_args[@]:1}") ;;
+    x) [ "$manager" != npm ] || browser_args=("${command_args[@]:1}") ;;
+    dlx) ambiguous_browser=1; browser_args=("${command_args[@]:1}") ;;
+  esac
+fi
+while [ "${#browser_args[@]}" -gt 0 ]; do
+  case "${browser_args[0]}" in
+    --) browser_args=("${browser_args[@]:1}"); break ;;
+    --dir|-C|--prefix) browser_project="${browser_args[1]:-}"; browser_args=("${browser_args[@]:2}") ;;
+    --dir=*|--prefix=*) browser_project="${browser_args[0]#*=}"; browser_args=("${browser_args[@]:1}") ;;
+    --workspace|--filter|--filter-prod|-F|-w) ambiguous_browser=1; browser_args=("${browser_args[@]:2}") ;;
+    --workspace=*|--filter=*|--filter-prod=*|--workspaces|--ws|--workspace-root|-w?*|-F?*) ambiguous_browser=1; browser_args=("${browser_args[@]:1}") ;;
+    --package|-p) ambiguous_browser=1; browser_args=("${browser_args[@]:2}") ;;
+    --package=*|-p?*|--global|-g|--global=*) ambiguous_browser=1; browser_args=("${browser_args[@]:1}") ;;
+    --registry|--cache|--store-dir|--userconfig|--globalconfig|--location)
+      browser_args=("${browser_args[@]:2}") ;;
+    --*=*|-y|--yes|--no|--offline|--prefer-offline|--silent|--quiet)
+      browser_args=("${browser_args[@]:1}") ;;
+    -*) ambiguous_browser=1; browser_args=("${browser_args[@]:1}") ;;
+    *) break ;;
+  esac
+done
+# Package selectors, global/dlx execution and workspace/unknown options cannot prove the
+# executed CLI version from the local package; require an explicit versioned helper.
+# Reject potential browser maintenance unless an explicit browser helper already chose the key.
+if [ "$ambiguous_browser" -eq 1 ] && [ "${_SY_CACHE_MODE:-}" != exclusive ]; then
+  possible_exec=0; possible_browser=0; possible_mutation=0
+  [ "$manager" != npx ] || possible_exec=1
+  for argument in "$@"; do
+    case "$argument" in exec|x|dlx) possible_exec=1 ;; playwright|playwright@*|@playwright/test|@playwright/test@*) possible_browser=1 ;; install|uninstall) possible_mutation=1 ;; esac
+  done
+  if [ "$possible_exec$possible_browser$possible_mutation" = 111 ]; then
+    echo 'use sy-cache browser VERSION -- CMD when browser CLI version is selected by options, dlx, or workspaces' >&2; exit 1
+  fi
+fi
+browser_package="${browser_args[0]:-}"
+if { [[ "$browser_package" = playwright || "$browser_package" = playwright@* || "$browser_package" = @playwright/test || "$browser_package" = @playwright/test@* ]]; } \
+  && { [ "${browser_args[1]:-}" = install ] || [ "${browser_args[1]:-}" = uninstall ]; }; then
+  mode=exclusive
+  if [ "${_SY_CACHE_MODE:-}" != exclusive ]; then
+    [ "$ambiguous_browser" -eq 0 ] || { echo 'use sy-cache browser VERSION -- CMD for workspace browser maintenance' >&2; exit 1; }
+    [[ "$browser_package" = playwright ]] || { echo 'use sy-cache browser VERSION -- CMD for package-qualified browser installs' >&2; exit 1; }
+    version="$(node -p 'require(require.resolve("playwright/package.json", {paths: [process.argv[1]]})).version' "$browser_project")"
+    PLAYWRIGHT_BROWSERS_PATH="${SY_CACHE_BROWSER_ROOT:-/srv/cache/playwright}/$("$cache_tool" key browser "$version")"
+    export PLAYWRIGHT_BROWSERS_PATH PLAYWRIGHT_SKIP_BROWSER_GC=1
+  fi
+fi
+SH
+}
+
 render_pnpm_wrapper() {
   cat <<'SH'
 #!/usr/bin/env bash
-# arch-scoped so ad-hoc installs don't pull win/mac/musl native variants. pnpm honors fetch-timeout
-# only as a CLI flag (not .npmrc / npm_config_* env), and the yard's egress is slow on OpenClaw's huge
-# native/ML tarballs → inject a generous one for install-type commands. store-dir (baked below) points
-# pnpm at the shared store; it is a pnpm-only flag, so npm/npx never see it (no "Unknown config" warn).
-# confirmModulesPurge: pointing pnpm at the shared store invalidates a node_modules built against any
-# other one, and pnpm's purge prompt ABORTS with no TTY — which is every agent shell.
-ft=; case "${1:-}" in install|add|update|up|i|fetch) ft="--fetch-timeout=1800000 --config.confirmModulesPurge=false" ;; esac
+set -euo pipefail
 SH
   printf 'sd=%q\n' "$CACHE_PNPM_STORE"
   printf 'pnpm_version=%q\n' "$PNPM_VERSION"
   cat <<'SH'
-LOCK=/srv/cache/.sy-cache.lock
-runpnpm() { exec corepack "pnpm@$pnpm_version" \
+cache_tool="${SY_CACHE_TOOL:-/usr/local/bin/sy-cache}"
+manager=pnpm
+case "${1:-}" in --version|-v|--help|-h) exec corepack "pnpm@$pnpm_version" "$@" ;; esac
+# One namespace per native ABI and pnpm release; pnpm owns the store's internal format version.
+if [ -n "$sd" ]; then
+  sd="$sd/$("$cache_tool" key pnpm "$pnpm_version" "node-$(node -p process.versions.modules)")"
+fi
+mode=shared
+# Options may precede the verb. Conservatively lock every store command exclusively.
+for argument in "$@"; do [ "$argument" != store ] || mode=exclusive; done
+SH
+  render_browser_policy
+  cat <<'SH'
+
+ft=()
+case "${1:-}" in install|add|update|up|i|fetch) ft=(--fetch-timeout=1800000 --config.confirmModulesPurge=false) ;; esac
+exec "$cache_tool" "$mode" -- corepack "pnpm@$pnpm_version" \
   --config.supportedArchitectures.os=linux \
   --config.supportedArchitectures.cpu=current \
   --config.supportedArchitectures.libc=glibc \
-  ${sd:+--config.store-dir="$sd"} "$@"; }
-# Cache locking, DECOUPLED from the fetch-timeout above:
-#   `store prune|clean` MUTATE the store -> EXCLUSIVE lock; re-exec ourself marked so a raw
-#   `pnpm store prune` self-serializes (no reliance on sy-cache) without duplicating flags.
-#   Store-WRITING verbs -> SHARED lock, BEST-EFFORT (a lock hiccup must NEVER block a build), held on
-#   fd 8 across the exec so it spans the install. `flock -o` (exclusive) keeps the lock fd out of the
-#   child tree; the SY_CACHE_* markers stop nested pnpm/sy-cache from re-locking or self-deadlocking.
-if [ -z "${SY_CACHE_LOCKED:-}" ] && [ -e "$LOCK" ]; then
-  if [ "${1:-}" = store ] && { [ "${2:-}" = prune ] || [ "${2:-}" = clean ]; }; then
-    exec flock -o -w 3600 -x "$LOCK" env SY_CACHE_LOCKED=1 "$0" "$@"
-  fi
-  case "${1:-}" in
-    install|add|update|up|i|fetch|dlx|exec|patch|patch-commit|rebuild|import|deploy)
-      if [ -r "$LOCK" ]; then
-        exec 8<"$LOCK" && flock -s -w 600 8 2>/dev/null && export SY_CACHE_SHARED_HELD=1 || true
-      fi ;;
-  esac
-fi
-runpnpm "$@" $ft
+  ${sd:+--config.store-dir="$sd"} "$@" "${ft[@]}"
 SH
+}
+
+render_npm_wrapper() {
+  local entry="$1"
+  cat <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+SH
+  printf 'entry=%q\n' "$entry"
+  cat <<'SH'
+case "${1:-}" in --version|-v|--help|-h) exec node "$entry" "$@" ;; esac
+mode=shared
+# npm cache verify also removes entries; cache maintenance always takes the exclusive lock.
+for argument in "$@"; do [ "$argument" != cache ] || mode=exclusive; done
+cache_tool="${SY_CACHE_TOOL:-/usr/local/bin/sy-cache}"
+manager=npm
+case "$entry" in */npx-cli.js) manager=npx ;; esac
+SH
+  render_browser_policy
+  cat <<'SH'
+
+exec "${SY_CACHE_TOOL:-/usr/local/bin/sy-cache}" "$mode" -- node "$entry" "$@"
+SH
+}
+
+repair_cache_lock() {
+  local lock="$1" owner="$2"
+  [ ! -L "$lock" ] || { echo 'openclaw provision: unsafe cache lock' >&2; return 1; }
+  if [ ! -e "$lock" ]; then
+    (set -o noclobber; : > "$lock") || return 1
+  fi
+  [ -f "$lock" ] || return 1
+  # Keep the inode: existing installs can hold this lock during a provision repair.
+  local repair_fd
+  exec {repair_fd}<"$lock"
+  flock -x -w 600 "$repair_fd"
+  chown "$owner" "$lock"
+  chmod 0644 "$lock"
+  exec {repair_fd}<&-
 }
 
 if [ "$check_only" -eq 1 ]; then
@@ -89,9 +216,25 @@ if [ "$check_only" -eq 1 ]; then
   [ -x "$pnpm" ] && [ ! -L "$pnpm" ] \
     && cmp -s <(render_pnpm_wrapper) "$pnpm" \
     && [ "$($pnpm --version 2>/dev/null)" = "$PNPM_VERSION" ] || changed=1
-  [ -x "$sy_cache" ] && [ -x "$python" ] && [ -x "$pip" ] || changed=1
+  [ -x "$sy_cache" ] && cmp -s "$PROFILE_DIR/cache/sy-cache.sh" "$sy_cache" || changed=1
+  for entry in npm npx; do
+    wrapper="$(rooted /usr/local/bin/"$entry")"
+    [ -x "$wrapper" ] && [ ! -L "$wrapper" ] \
+      && cmp -s <(render_npm_wrapper "/usr/local/lib/node_modules/npm/bin/$entry-cli.js") "$wrapper" || changed=1
+  done
+  [ -x "$python" ] && [ -x "$pip" ] || changed=1
+  site_dir="$("$python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null)" || { site_dir=; changed=1; }
+  [ -f "$site_dir/subyard_cache.py" ] && [ ! -L "$site_dir/subyard_cache.py" ] \
+    && cmp -s "$PROFILE_DIR/cache/subyard_cache.py" "$site_dir/subyard_cache.py" || changed=1
+  [ -f "$site_dir/subyard_cache.pth" ] && [ ! -L "$site_dir/subyard_cache.pth" ] \
+    && [ "$(cat "$site_dir/subyard_cache.pth")" = 'import subyard_cache' ] || changed=1
+  [ -f "$site_dir/subyard_cache_root" ] && [ ! -L "$site_dir/subyard_cache_root" ] \
+    && [ "$(cat "$site_dir/subyard_cache_root")" = "${CACHE_PIP:-/srv/cache/pip}" ] || changed=1
   expected_owner="$(id -u "$DEV_USER"):$(id -g "$DEV_USER")"
-  for cache in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm; do
+  lock="$(rooted /srv/cache/.sy-cache.lock)"
+  [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(stat -c '%u:%g:%a' "$lock" 2>/dev/null)" = "$expected_owner:644" ] || changed=1
+  for cache in /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright; do
     directory="$(rooted "$cache")"
     [ -d "$directory" ] && [ ! -L "$directory" ] \
       && [ "$(stat -c '%u:%g' "$directory" 2>/dev/null)" = "$expected_owner" ] || changed=1
@@ -158,7 +301,7 @@ fi
 # 2. corepack + pnpm; arch-scoped shim. The shim also pins pnpm's STORE to the shared /srv/cache as a
 #    pnpm-only CLI flag (baked from profile.conf), so `npm`/`npx` never see the (to them invalid)
 #    store-dir key and never warn — and nothing is forced via global env onto unrelated yard tools.
-/usr/local/bin/npm install -g "corepack@${COREPACK_VERSION}" >/dev/null
+/usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g "corepack@${COREPACK_VERSION}" >/dev/null
 # The profile supplies its own pnpm entry point. `corepack enable` rejects that regular file
 # on a later apply; dispatching through `corepack pnpm@VERSION` needs no Corepack shim.
 /usr/local/bin/corepack prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null
@@ -171,74 +314,35 @@ mv -Tf "$pnpm_wrapper" /usr/local/bin/pnpm
 
 # 3. Python dev venv.
 [ -x /opt/venv/bin/python ] || python3 -m venv /opt/venv
-/opt/venv/bin/pip install -q --upgrade pip setuptools wheel
+/opt/venv/bin/python -m pip --no-cache-dir install -q --upgrade pip setuptools wheel
 
-# 4. Shared caches: heal ownership left by older provision runs.
-install -d -o "$DEV_USER" -g "$DEV_USER" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm
-chown -R "$DEV_USER:$DEV_USER" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm
-
-# 4d. Single-writer guard for cache-MUTATING ops. The pnpm store corrupts if a prune/clean runs while
-#     an install writes it. The pnpm shim (step 2) auto-locks `pnpm store prune|clean` EXCLUSIVELY and
-#     holds a SHARED lock during installs/fetches, so a mutation waits for in-flight installs and blocks
-#     new ones. `sy-cache` adds the same exclusive guard for npm/pip and an explicit `all`. dev-owned lock.
-[ -e /srv/cache/.sy-cache.lock ] || : > /srv/cache/.sy-cache.lock
-chown "$DEV_USER:$DEV_USER" /srv/cache/.sy-cache.lock 2>/dev/null || true
-cat > /usr/local/bin/sy-cache <<'SC'
-#!/usr/bin/env bash
-# sy-cache — serialize cache-MUTATING ops on the shared /srv/cache store under an EXCLUSIVE lock.
-# pnpm installs/fetches hold a SHARED lock, so a mutation here waits for in-flight pnpm installs and
-# blocks new ones — never corrupting the pnpm store mid-fetch. (npm/pip installs are NOT shared-locked,
-# so don't run `clean`/`purge` while an npm/pip install is in flight.) A raw `pnpm store prune` is
-# already auto-locked by the pnpm wrapper; this also covers npm/pip and an explicit `all`.
-set -euo pipefail
-LOCK="${SY_CACHE_LOCK:-/srv/cache/.sy-cache.lock}"
-die() { printf 'sy-cache: %s\n' "$*" >&2; exit 1; }
-usage() { cat <<'H'
-sy-cache <prune|clean|purge|all|lock -- CMD...> — single-writer guard for /srv/cache mutations.
-  prune  pnpm store prune     clean  npm cache clean --force     purge  pip cache purge
-  all    all three in order   lock -- CMD...  run CMD under the exclusive lock
-  --force  prune/all only: proceed even if the store has no hardlinked references (see below)
-pnpm installs/fetches hold a shared lock, so these wait for in-flight pnpm installs. npm/pip installs
-are NOT shared-locked — don't run clean/purge while an npm/pip install is running.
-H
-}
-# prune removes packages nothing REFERENCES — and a reference is a hardlink out of the store. Across a
-# mount boundary (bind-mounted workspace, store on the yard volume) pnpm cannot hardlink and copies
-# instead, so nothing ever references the store and a prune empties all of it.
-store_prune_is_a_wipe() {
-  local store
-  store=$(pnpm store path 2>/dev/null) || return 1
-  [ -d "$store" ] || return 1
-  [ -n "$(find "$store" -type f -print -quit 2>/dev/null)" ] || return 1   # empty store: nothing to lose
-  [ -z "$(find "$store" -type f -links +1 -print -quit 2>/dev/null)" ]     # no file hardlinked out
-}
-guard_prune() {
-  [ "${SY_CACHE_FORCE:-}" = 1 ] && return 0
-  store_prune_is_a_wipe || return 0
-  die "refusing: nothing hardlinks this store, so a prune would delete the WHOLE shared cache, not
-     just orphans, and every agent would re-download it. --force to override."
-}
-run_locked() {
-  [ -n "${SY_CACHE_SHARED_HELD:-}" ] && die "refusing to mutate the cache from inside a build holding the shared lock — run sy-cache outside the build"
-  [ -n "${SY_CACHE_LOCKED:-}" ] && exec "$@"   # already inside an exclusive section — don't re-lock
-  [ -e "$LOCK" ] || die "lock $LOCK missing — run 'yard provision openclaw'"
-  exec flock -o -w 3600 -x "$LOCK" env SY_CACHE_LOCKED=1 "$@"
-}
-sub="${1:-}"; shift || true
-# `case`, not `[ ] && …`: under set -e a loop ending in a false test returns 1 and kills the script.
-for a in "$@"; do case "$a" in --force) export SY_CACHE_FORCE=1 ;; esac; done
-case "$sub" in
-  prune) guard_prune; run_locked pnpm store prune ;;
-  clean) run_locked npm cache clean --force ;;
-  purge) run_locked sh -c 'if command -v pip >/dev/null 2>&1; then exec pip cache purge; else exec /opt/venv/bin/pip cache purge; fi' ;;
-  all)   guard_prune; run_locked sh -c 'set -e; pnpm store prune; npm cache clean --force; if command -v pip >/dev/null 2>&1; then pip cache purge; else /opt/venv/bin/pip cache purge; fi' ;;
-  lock)  [ "${1:-}" = -- ] && shift; [ "$#" -gt 0 ] || die "usage: sy-cache lock -- CMD..."; run_locked "$@" ;;
-  -h|--help|help) usage; exit 0 ;;
-  "")    usage >&2; exit 2 ;;
-  *)     usage >&2; die "unknown subcommand '$sub'" ;;
-esac
-SC
-chmod +x /usr/local/bin/sy-cache
+# 4. Repair the existing lock before publishing helpers. Never replace its inode.
+install -d -m 0755 /srv/cache
+repair_cache_lock /srv/cache/.sy-cache.lock "$DEV_USER:$DEV_USER"
+# Ownership repair is also a destructive shared-cache operation.
+(
+  flock -x -w 600 8
+  install -d -o "$DEV_USER" -g "$DEV_USER" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright
+  chown -R "$DEV_USER:$DEV_USER" /srv/cache/pnpm /srv/cache/pip /srv/cache/npm /srv/cache/playwright
+) 8</srv/cache/.sy-cache.lock
+wrapper="$(mktemp /usr/local/bin/.subyard-cache.XXXXXX)"
+install -m 0755 "$PROFILE_DIR/cache/sy-cache.sh" "$wrapper"
+mv -Tf "$wrapper" /usr/local/bin/sy-cache
+for entry in npm npx; do
+  wrapper="$(mktemp /usr/local/bin/.subyard-npm.XXXXXX)"
+  render_npm_wrapper "/usr/local/lib/node_modules/npm/bin/$entry-cli.js" > "$wrapper"
+  chmod 0755 "$wrapper"
+  mv -Tf "$wrapper" "/usr/local/bin/$entry"
+done
+# A .pth hook covers both pip launchers and python -m pip in this venv; sys.prefix stays intact.
+site_dir="$(/opt/venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+install -o root -g root -m 0644 "$PROFILE_DIR/cache/subyard_cache.py" "$site_dir/subyard_cache.py"
+printf '%s\n' "${CACHE_PIP:-/srv/cache/pip}" > "$site_dir/subyard_cache_root"
+chown root:root "$site_dir/subyard_cache_root"
+chmod 0644 "$site_dir/subyard_cache_root"
+printf 'import subyard_cache\n' > "$site_dir/subyard_cache.pth"
+chown root:root "$site_dir/subyard_cache.pth"
+chmod 0644 "$site_dir/subyard_cache.pth"
 
 # 4b. Apply shared paths through dev tool configs so every shell agrees:
 #     pnpm → shim; npm → ~/.npmrc; pip → ~/.config/pip/pip.conf.

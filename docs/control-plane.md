@@ -1187,8 +1187,8 @@ invoked. Owner intent is separate from ingress ownership and pending ingress cle
 ### Dedicated profiles and VM capabilities
 
 Core code consumes profile declarations; it must not branch on a profile name or service port.
-A profile's `profile.conf` can declare `PROVISION_SCOPE=dedicated`. Such a hook is excluded from
-implicit all-profile provisioning and requires a named yard whose shipped role declares
+A profile's `profile.conf` can declare `PROVISION_SCOPE=dedicated`. Such a hook requires
+explicit selection and a named yard whose shipped role declares
 `EXCLUSIVE_ENVIRONMENT_PROFILE=<profile>`. An empty `ENVIRONMENT_PROFILES` excludes dedicated
 profile provisioning and selected-resource probing; discovering a descriptor never enables its service.
 
@@ -1385,6 +1385,21 @@ Choose validation for these changes using the skill's risk-based test-selection 
 
 ## Profile extensions
 
+Environment-profile selection resolves once during configuration loading. The authored request,
+presence and provenance remain available for authoring and inventory; the normalized effective
+`ENVIRONMENT_PROFILES` is the common input to extras, provisioning, resources and project admission.
+An absent setting uses eligible descriptor-declared defaults, and an explicitly empty setting
+selects nothing. Project-owned requests cannot expand the yard set. Import and `up` recheck
+membership before mutation; `down` and removal remain available after deselection.
+
+L2 profiles declare writable dependency directories in `CACHES` and read-only toolchain assets
+as `source:destination:ro` in `ENV_MOUNTS`. The runner and static security audit share the same
+path policy. Native startup also checks resolved asset sources, cache symlinks and UID/GID;
+existing containers must have the non-root/no-new-privileges policy or require `up --rebuild`.
+Profile images own their compatible tools and writable home. See the
+[project environment boundary](security.md#project-environments) and
+[stateful resource lease contract](reference/resource-leases.md).
+
 `yard profile enable|disable|setup|status <id>` operates on one shipped profile declaring
 `owner_service`. Enable and disable require a running, existing yard, preserve neighboring profile
 selections and invoke only the selected hook. They do not enter the general init reconciler. Setup
@@ -1410,7 +1425,10 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
 
 - `default_yards` supplies selection when `ENVIRONMENT_PROFILES` is absent. An explicit list,
   including an empty list, wins; matching `disabled_when` conditions disable selection.
-  `selected_provision_only` applies this selection to implicit provisioning.
+  Config resolves one effective set for all consumers, with requested values and presence kept
+  separately for authoring and diagnostics. Provision hooks without a descriptor are never
+  selected implicitly. `selected_provision_only` remains readable compatibility metadata;
+  every provision hook now uses the effective set.
 - `native` lists Go package directories and artifact paths relative to the profile. Development
   and release builds discover these declarations; installed profiles contain the native artifacts.
 - `consumers` declares credential ID, zone, relative materialization path and format (`file`,

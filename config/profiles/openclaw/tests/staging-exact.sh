@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 HANDLER="$ROOT/config/profiles/openclaw/resources/staging-gateway/handler.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf -- "$TMP"' EXIT
+cleanup() {
+  if [ -r "$TMP/successor.pid" ]; then kill -KILL -- "-$(cat "$TMP/successor.pid")" 2>/dev/null || true; fi
+  rm -rf -- "$TMP"
+}
+trap cleanup EXIT
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
 # The simulated guest account must not depend on a matching controller account.
@@ -14,6 +18,7 @@ if [ "${1:-}" = --prepare-parser-fixture ]; then
   export YARD_INSTANCE_NAME=yard-openclaw-bootstrap-5b9fe2b7ea30
 fi
 export SUBYARD_CONFIG_HOST_DIR="$TMP/config/host" SUBYARD_CONFIG_GENERATED_DIR="$TMP/config/generated"
+export STAGING_LEASE_PAYLOAD="$ROOT/config/profiles/openclaw/resources/staging-gateway/staging-lease.sh"
 export STAGING_EXACT_FIXTURE="$TMP" PATH="$TMP/bin:$PATH"
 mkdir -p "$TMP/bin" "$TMP/config/host" "$TMP/guest/srv/staging/canonical" "$TMP/guest/srv/env-secrets/staging-canonical"
 printf '%064d\n' 1 > "$TMP/container-id"
@@ -23,6 +28,17 @@ cat > "$TMP/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 root="${STAGING_EXACT_FIXTURE:?}"
+swap_lease() {
+  [ -f "$root/swap-lease" ] || return 0
+  rm "$root/swap-lease"
+  lease="$root/guest/srv/staging/_lease"
+  old=$(jq -r .epoch "$lease/bot.json")
+  sh "$STAGING_LEASE_PAYLOAD" "$lease" bot canonical stop "$old" "$root/absent.pid"
+  acquired=$(sh "$STAGING_LEASE_PAYLOAD" "$lease" bot canonical acquire ephemeral 60 normal)
+  next="${acquired#OK }"
+  sh "$STAGING_LEASE_PAYLOAD" "$lease" bot canonical launch "$next" "$root/successor.pid" "$root/worker.log" 'exec sleep 60' "$root" 8>&-
+  printf '%s\n' "$next" > "$root/successor-epoch"
+}
 case "$1" in
  info) exit 0 ;;
  list) printf 'RUNNING\n'; exit 0 ;;
@@ -33,6 +49,7 @@ case "$1" in
    case "$2" in -u|-g) printf '%s\n' "$DEV_UID" ;; *) exit 1 ;; esac
    exit 0
   fi
+  if [ "$1" = sh ] && [ "${7:-}" = fenced ]; then swap_lease; fi
   if [ "$1" = docker ]; then
    shift
    case "$1" in
@@ -43,9 +60,22 @@ case "$1" in
       '{{.State.Running}}') cat "$root/running" ;;
       *) printf '%s %s canonical\n' "$(cat "$root/container-id")" "$(cat "$root/running")" ;;
      esac ;;
-    exec) exit 1 ;;
-    stop) printf 'false\n' > "$root/running" ;;
-    rm) rm -f "$root/container-id" "$root/running" ;;
+    exec)
+     # The fresh exact observation already read A; replace it before the host captures authority.
+     if [ -f "$root/swap-after-observation" ]; then
+       mv "$root/swap-after-observation" "$root/swap-lease"
+       swap_lease
+     fi
+     exit 1 ;;
+
+    stop|rm)
+     operation="$1"
+     swap_lease
+     if [ -r "$root/successor.pid" ]; then kill -TERM -- "-$(cat "$root/successor.pid")" 2>/dev/null || true; fi
+     if [ "$operation" = stop ]; then printf 'false\n' > "$root/running"
+     else rm -f "$root/container-id" "$root/running"; fi
+     ;;
+    ps) [ ! -f "$root/container-id" ] || cat "$root/container-id" ;;
     *) exit 1 ;;
    esac
    exit 0
@@ -60,7 +90,11 @@ case "$1" in
  *) exit 1 ;;
 esac
 MOCK
-chmod 0755 "$TMP/bin/incus"
+cat > "$TMP/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+exec "${STAGING_EXACT_FIXTURE:?}/bin/incus" exec fixture -- docker "$@"
+MOCK
+chmod 0755 "$TMP/bin/incus" "$TMP/bin/docker"
 prepare() { SUBYARD_RESOURCE_MODE=prepare "$HANDLER" "$@" > "$TMP/plan"; }
 apply() {
  SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION="$(jq -r .action "$TMP/plan")" \
@@ -100,4 +134,32 @@ prepare destroy --purge
 apply destroy --purge
 verify destroy --purge
 [ ! -e "$TMP/guest/srv/staging/canonical" ]
+# A delayed host operation must not stop/remove an in-yard successor.
+lease_dir="$TMP/guest/srv/staging/_lease"
+for boundary in fenced after-observation; do
+for operation in down destroy; do
+  mkdir -p "$TMP/guest/srv/staging/canonical" "$TMP/guest/srv/env-secrets/staging-canonical"
+  printf '%064d\n' 1 > "$TMP/container-id"
+  printf 'true\n' > "$TMP/running"
+  sh "$STAGING_LEASE_PAYLOAD" "$lease_dir" bot canonical acquire canonical 60 normal >/dev/null
+  prepare "$operation"
+  if [ "$boundary" = fenced ]; then : > "$TMP/swap-lease"
+  else : > "$TMP/swap-after-observation"; fi
+  if apply "$operation"; then echo "FAIL: stale host $operation accepted" >&2; exit 1; fi
+  [ -f "$TMP/successor-epoch" ]
+  [ "$(cat "$TMP/running")" = true ] && [ -f "$TMP/container-id" ] \
+    || { echo "FAIL: stale host $operation stopped its successor" >&2; exit 1; }
+  [ "$(jq -r .epoch "$lease_dir/bot.json")" = "$(cat "$TMP/successor-epoch")" ]
+  successor=$(cat "$TMP/successor.pid")
+  kill -0 "$successor"
+  [ "$(sed 's/.*) //' "/proc/$successor/stat" | cut -d' ' -f1)" != Z ]
+  # A fresh operation owns that same fence and confirms container stop before release.
+  prepare "$operation"
+  apply "$operation"
+  [ ! -e "$lease_dir/bot.json" ]
+  if [ "$operation" = down ]; then [ "$(cat "$TMP/running")" = false ]
+  else [ ! -e "$TMP/container-id" ]; fi
+  rm -f "$TMP/successor.pid" "$TMP/successor-epoch"
+done
+done
 printf 'ok: exact staging rejects replaced runtime and expanded artifacts, verifies cleanup and retention\n'

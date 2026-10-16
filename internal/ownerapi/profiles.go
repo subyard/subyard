@@ -17,6 +17,8 @@ import (
 
 type ProfileSelection struct {
 	Value      string              `json:"value"`
+	Requested  []string            `json:"requested"`
+	Effective  []string            `json:"effective"`
 	Present    bool                `json:"present"`
 	Provenance []SettingProvenance `json:"provenance"`
 }
@@ -49,7 +51,8 @@ type ProfileList struct {
 func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 	loaded := service.Loaded
 	result := ProfileList{SchemaVersion: 1, YardName: loaded.Context.YardName,
-		Selection: ProfileSelection{Value: loaded.Environment["ENVIRONMENT_PROFILES"],
+		Selection: ProfileSelection{Value: strings.Join(loaded.EnvironmentProfiles.Requested, " "),
+			Requested: slices.Clone(loaded.EnvironmentProfiles.Requested), Effective: slices.Clone(loaded.EnvironmentProfiles.Effective),
 			Provenance: settingProvenance(loaded.Settings["ENVIRONMENT_PROFILES"], false)},
 		Profiles: []Profile{}}
 	hooks, err := service.ProvisionProfiles()
@@ -64,7 +67,7 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 		return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile catalog is unavailable"}
 	}
 	declarations := loaded.Catalog.Profiles()
-	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"]
+	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"], loaded.EnvironmentProfiles.Present
 	result.Selection.Present = explicit
 	_, _, sourceGroup := config.ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
 	for _, directory := range entries {
@@ -85,32 +88,23 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 			if declaration.Name == name {
 				version := declaration.SchemaVersion
 				entry.DescriptorVersion = &version
-				entry.Selected = declaration.Selected(loaded.Context.YardName, loaded.Environment)
 			}
 		}
-		if selection == "" && entry.DescriptorVersion == nil {
-			entry.Selected = entry.Provisionable
+		entry.Eligible, entry.Eligibility, err = config.EnvironmentProfileEligibility(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment, loaded.Catalog, name)
+		if err != nil {
+			return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile eligibility is invalid"}
 		}
-		exclusive := loaded.Environment["EXCLUSIVE_ENVIRONMENT_PROFILE"]
-		if exclusive != "" && exclusive != name {
-			entry.Eligible, entry.Eligibility = false, "exclusive-role"
-		} else if scope == "dedicated" && (exclusive != name || loaded.Context.YardName == "default") {
-			entry.Eligible, entry.Eligibility = false, "dedicated-role-required"
-		}
-		entry.Requested = slices.Contains(strings.Fields(selection), name)
-		if !explicit {
-			entry.Requested = entry.Selected
-		}
+		entry.Requested = slices.Contains(loaded.EnvironmentProfiles.Requested, name)
 		entry.Effective, entry.SourceGroup = entry.Selected && entry.Eligible, sourceGroup
 		switch {
+		case entry.Eligibility == "policy-disabled":
+			entry.Reason = "policy-disabled"
 		case !entry.Eligible:
 			entry.Reason = "role-restricted"
 		case entry.Requested && !entry.Selected:
 			entry.Reason = "policy-disabled"
 		case entry.Selected && !explicit:
-			entry.Reason = "implicit-provision-default"
-		case entry.Selected && !entry.Requested && entry.DescriptorVersion == nil:
-			entry.Reason = "legacy-provision-fallback"
+			entry.Reason = "declared-default"
 		case entry.Selected && sourceGroup == "shipped defaults":
 			entry.Reason = "inherited-default"
 		case entry.Selected && sourceGroup == "Git settings":

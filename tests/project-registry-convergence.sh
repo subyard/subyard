@@ -31,6 +31,7 @@ if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; th
   printf '%s\n' rpc >> "$REGISTRY_TEST_STATE/owner-calls"
   exec env -u SUBYARD_STATE_DIR -u SUBYARD_CONFIG_LOADED -u SUBYARD_ENGINE_CONTEXT \
     -u OWNER_ENDPOINT -u OWNER_YARD_NAME -u SUBYARD_YARD -u YARD_NAME \
+    -u ENVIRONMENT_PROFILES -u YARD_PROFILES \
     SUBYARD_OPERATOR_HOME="$REGISTRY_TEST_STATE/owner-home" \
     SUBYARD_CONFIG_HOME="$REGISTRY_TEST_STATE/owner-config" \
     SUBYARD_HOME="$REGISTRY_TEST_STATE/owner-data" \
@@ -52,6 +53,7 @@ sys.stdout.buffer.write(b"\0".join(word.encode() for word in words)+b"\0")
   [ "${#owner_arguments[@]}" -gt 0 ] || exit 1
   exec env -u SUBYARD_STATE_DIR -u SUBYARD_CONFIG_LOADED -u SUBYARD_ENGINE_CONTEXT \
     -u OWNER_ENDPOINT -u OWNER_YARD_NAME -u SUBYARD_YARD -u YARD_NAME \
+    -u ENVIRONMENT_PROFILES -u YARD_PROFILES \
     SUBYARD_OPERATOR_HOME="$REGISTRY_TEST_STATE/owner-home" \
     SUBYARD_CONFIG_HOME="$REGISTRY_TEST_STATE/owner-config" \
     SUBYARD_HOME="$REGISTRY_TEST_STATE/owner-data" \
@@ -104,8 +106,10 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
 export REGISTRY_TEST_STATE="$TMP/state"
 export PROJECT_OWNER_REPOSITORY="$TMP/runtime"
 install -d -m 0700 "$REGISTRY_TEST_STATE/owner-home" "$REGISTRY_TEST_STATE/owner-config/yards" "$REGISTRY_TEST_STATE/owner-data"
-printf 'SSH_PORT=3333\n' > "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
+printf 'SSH_PORT=3333\nENVIRONMENT_PROFILES=synthetic\n' > "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
 chmod 0600 "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
+printf 'owner-a\n' > "$REGISTRY_TEST_STATE/owner-config/host-id"
+chmod 0600 "$REGISTRY_TEST_STATE/owner-config/host-id"
 
 
 # The hidden owner endpoint creates a yard-originated record without importing a foreign path.
@@ -175,22 +179,29 @@ ACCESS_KIND=remote
 OWNER_ENDPOINT=owner
 OWNER_YARD_NAME=inner
 SSH_PORT=2222
+ENVIRONMENT_PROFILES=
 ENV
 mkdir -p "$TMP/projects/RemoteDemo"
 printf 'demo\n' > "$TMP/projects/RemoteDemo/file.txt"
 remote_id=RemoteDemo
-"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target synthetic --yes >/dev/null
 remote_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$remote_id.json"
 [ ! -e "$remote_state" ] || fail 'native sync published obsolete controller project state'
 [ -s "$REGISTRY_TEST_STATE/owner-calls" ] || fail 'native sync did not converge owner state'
-jq -e '.projectId == $id and .target == "yard"' --arg id "$remote_id" \
+jq -e '.projectId == $id and .target == "synthetic"' --arg id "$remote_id" \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null || fail 'yard metadata omitted the project target'
 [ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'native sync did not stream the project archive'
 cp "$REGISTRY_TEST_STATE/yard-meta.json" "$REGISTRY_TEST_STATE/yard-meta-first.json"
 
+# Native owner inventory routes inherit the controller's empty profile selection.
+install -d -m 0700 "$SUBYARD_HOME/owner-inventory/connections"
+printf '%s\n' '{"hostId":"owner-a","destination":"owner","yards":{"inner":{"sshHost":"yard-remote"}}}' \
+  > "$SUBYARD_HOME/owner-inventory/connections/owner-a.json"
+chmod 0600 "$SUBYARD_HOME/owner-inventory/connections/owner-a.json"
+
 rm -f "$REGISTRY_TEST_STATE/tar-stream"
 printf 'second\n' > "$TMP/projects/RemoteDemo/file.txt"
-"$TMP/runtime/bin/yard" -Y remote sync "$TMP/projects/RemoteDemo" --target yard --yes >/dev/null
+"$TMP/runtime/bin/yard" -Y owner-a/inner sync "$TMP/projects/RemoteDemo" --target synthetic --yes >/dev/null
 [ -e "$REGISTRY_TEST_STATE/tar-stream" ] || fail 'second native sync did not stream the project archive'
 jq -e '.projectId == "RemoteDemo-2" and .name == "RemoteDemo-2"' \
   "$REGISTRY_TEST_STATE/yard-meta.json" >/dev/null \
@@ -250,7 +261,7 @@ git -C "$clone_source" -c user.name=Fixture -c user.email=fixture@example.invali
 clone_revision="$(git -C "$clone_source" rev-parse HEAD)"
 : > "$REGISTRY_TEST_STATE/owner-calls"
 clone_id=ForeignClone
-"$TMP/runtime/bin/yard" -Y remote clone "$clone_source" ForeignClone \
+"$TMP/runtime/bin/yard" -Y owner-a/inner clone "$clone_source" ForeignClone \
   --target synthetic --yes >/dev/null
 clone_state="$SUBYARD_CONFIG_HOME/yards/remote/projects/$clone_id.json"
 [ ! -e "$clone_state" ] || fail 'native clone published obsolete controller project state'
@@ -272,5 +283,24 @@ clone_path="$REGISTRY_TEST_STATE/guest/workspaces/$clone_id/src"
   || fail 'native owner clone lost its default branch upstream'
 [ "$(cat "$clone_path/file.txt")" = 'approved content' ] \
   || fail 'native owner clone did not materialize the approved contents'
+
+# A controller selection cannot admit a target deselected on its owner.
+printf 'SSH_PORT=3333\nENVIRONMENT_PROFILES=\n' > "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
+printf 'ENVIRONMENT_PROFILES=synthetic\n' > "$SUBYARD_CONFIG_HOME/config.env"
+chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+before="$(find "$REGISTRY_TEST_STATE/guest" "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects" -type f -exec sha256sum {} + | sort | sha256sum)"
+for operation in sync clone up; do
+  case "$operation" in
+    sync) args=(sync "$TMP/projects/RemoteDemo" --target synthetic) ;;
+    clone) args=(clone "$clone_source" RejectedClone --target synthetic) ;;
+    up) args=(up ForeignClone) ;;
+  esac
+  if output="$("$TMP/runtime/bin/yard" -Y owner-a/inner "${args[@]}" --yes 2>&1)"; then
+    fail "owner-inactive $operation was admitted"
+  fi
+  assert_contains "$output" 'not active'
+done
+after="$(find "$REGISTRY_TEST_STATE/guest" "$REGISTRY_TEST_STATE/owner-config/yards/inner/projects" -type f -exec sha256sum {} + | sort | sha256sum)"
+[ "$before" = "$after" ] || fail 'owner target refusal changed project files'
 
 printf 'ok: native sync and clone preserve registry ownership\n'

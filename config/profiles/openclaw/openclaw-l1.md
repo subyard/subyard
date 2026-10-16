@@ -31,15 +31,15 @@ versioned shared cache. System libraries are supplied by the profile; dependency
 the development user. With the system Chromium provided by `browser_tests`:
 
     playwright_version=$(node -p 'require("playwright/package.json").version')
-    export PLAYWRIGHT_BROWSERS_PATH="/srv/cache/playwright/$playwright_version"
+    export PLAYWRIGHT_BROWSERS_PATH="/srv/cache/playwright/$(sy-cache key browser "$playwright_version")"
     export PLAYWRIGHT_SKIP_BROWSER_GC=1
     export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-    pnpm exec playwright install ffmpeg
+    sy-cache browser "$playwright_version" -- pnpm exec playwright install ffmpeg
     pnpm test:ui:e2e
 
 Playwright's ffmpeg binary is needed for video capture even when Chromium is installed system-wide.
 If the checkout does not support the system Chromium override, install its pinned browser with
-`pnpm exec playwright install chromium` and unset `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`.
+`sy-cache browser "$playwright_version" -- pnpm exec playwright install chromium` and unset `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`.
 
 ## Live model move, no gateway (operator-gated)
 
@@ -77,21 +77,42 @@ scripts and provider/model selectors against the checkout's own testing document
 
 ## Shared caches (you must understand this)
 
-All agents in this yard share `/srv/cache` (pnpm store, npm, pip[, playwright]). The cache locations
-are preconfigured for you — pnpm's store via the `pnpm` wrapper, npm + pip via your `~/.npmrc` and
-`~/.config/pip/pip.conf` — so they apply in every shell (login or `yard shell -- <cmd>`). Do NOT
-override the store/cache dirs per checkout, or you fork the cache and re-download everything.
+The provisioned pnpm/npm/npx entrypoints and `/opt/venv` pip entrypoints (including
+`/opt/venv/bin/python -m pip`) coordinate on the existing `/srv/cache/.sy-cache.lock` inode.
+Normal installs hold shared locks, so installs can overlap. Cache maintenance holds an exclusive
+lock, waits for installs and blocks new installs. Lock errors stop the command. Run
+`sy-cache clean` for npm or `sy-cache purge` for pip; raw `npm cache` / `pip cache` and
+`pnpm store` commands also take the exclusive lock. Maintenance inside a shared install/build
+fails instead of deadlocking; run it separately. `sy-cache prune` and `all` refuse because a
+cross-mount pnpm store can have no hardlinked references: pruning empties the shared download
+store. An intentional raw `pnpm store prune` still locks exclusively.
 
-- Cache mutations self-serialize: run `sy-cache prune|clean|purge|all` (or even a raw `pnpm store
-  prune` — the pnpm wrapper locks it for you). The pnpm STORE is guarded by an exclusive lock that
-  waits for in-flight `pnpm install`/fetch (which hold a shared lock) and blocks new ones, so a prune
-  never corrupts the store mid-fetch. The npm/pip caches are NOT shared-locked — don't run `sy-cache
-  clean`/`purge` while an `npm install` / `pip install` is in flight.
-- DO NOT prune the pnpm store. Your workspace is a bind-mounted host dir — a different MOUNT than the
-  store — so pnpm cannot hardlink into `node_modules` (EXDEV) and copies instead. Nothing references
-  the store, so a prune deletes ALL of it and every agent re-downloads. (`sy-cache prune` now refuses;
-  a raw `pnpm store prune` does not.) Hence the store dedupes DOWNLOADS, not disk: each checkout
-  carries its own full `node_modules` (OpenClaw: ~3.3 GB). See profile.conf for the sharing rules.
+pnpm keys its store by OS, architecture, Node ABI and pnpm version. pip keys by OS, architecture
+and interpreter cache tag; pip's own wheel tags and `http-v2` namespace distinguish native cache
+formats. npm's integrity-addressed download blobs can be shared across tool versions. Browser
+binaries use OS, architecture and Playwright version: use `sy-cache browser VERSION -- CMD...`
+for installs and export the matching path for tests as above. Browser GC remains disabled; the
+exclusive install lock provides serialization. Direct Node/Playwright API calls must use that
+helper too.
+Browser commands with workspace/filter or package selectors, global execution, `pnpm dlx`,
+package-qualified executables, or ambiguous options require that helper with the selected package's
+exact Playwright version. [npm exec](https://docs.npmjs.com/cli/v11/commands/npm-exec/) and
+[pnpm dlx](https://pnpm.io/cli/dlx) can select a different package from the local dependency, so the
+local version cannot determine their shared browser key.
+
+Keep the same numeric UID/GID for every cache writer. A participating L2 image must contain the
+profile's pnpm/npm/npx adapters and the pip hook in its own venv, with the L1 helper and **same lock
+file** mounted read-only. The profile's mounts supply the helper and lock; arbitrary base images
+do not acquire hooks merely by mounting cache directories. Use private/read-only caches until
+those images adopt the contract, or wrap every writer with `sy-cache shared -- CMD...` and every
+maintenance command with `sy-cache exclusive -- CMD...`. Other Python environments, pip invoked
+as an embedded API, manually bypassed entrypoints and direct cache filesystem edits are outside
+this cooperative contract. pip `--isolated` ignores the keyed environment and is rejected unless
+`--no-cache-dir` is supplied. This is coordination among cooperating tools, not isolation between
+hostile processes running as the same L1 user.
+
+`node_modules`, `.venv`, browser profiles, credentials and Docker data roots stay private to the
+checkout/container. Shared directories contain reusable downloads, never sessions or secrets.
 
 ## This lane does NOT
 - start a gateway or connect Telegram (that is the staging/qa lane, operator-provisioned);

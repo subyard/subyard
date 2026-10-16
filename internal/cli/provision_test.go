@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
-func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
+func TestProvisionSelectionDoesNotExpandActiveProfilesFromProjects(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "sample-a")
 	writeProvisionProfile(t, root, "sample-h")
@@ -38,7 +39,7 @@ func TestProvisionSelectionUsesYardThenProjectProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(execution.profiles, []string{"sample-o", "sample-a", "sample-s"}) {
+	if !slices.Equal(execution.profiles, []string{"sample-o", "sample-a"}) {
 		t.Fatalf("profiles=%v", execution.profiles)
 	}
 	loaded.Environment["ENVIRONMENT_PROFILES"] = "sample-h"
@@ -82,7 +83,7 @@ func TestDedicatedProvisionRequiresOptIn(t *testing.T) {
 	}
 }
 
-func TestDeclaredProvisionSelectionPreservesLegacyProfiles(t *testing.T) {
+func TestDeclaredProvisionSelectionRequiresExplicitLegacyProfiles(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeProvisionProfile(t, root, "selected")
 	writeProvisionProfile(t, root, "legacy")
@@ -108,20 +109,29 @@ func TestDeclaredProvisionSelectionPreservesLegacyProfiles(t *testing.T) {
 		{yard: "default", disabled: true, selected: false},
 		{yard: "other", selection: &selected, disabled: true, selected: false},
 	} {
-		loaded.Context.YardName = scenario.yard
-		delete(loaded.Environment, "ENVIRONMENT_PROFILES")
-		delete(loaded.Environment, "DISABLE_SERVICE")
-		if scenario.disabled {
-			loaded.Environment["DISABLE_SERVICE"] = "1"
+		// Resolve an authored snapshot as the config loader does before provisioning.
+		path := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "yards", scenario.yard, "config.env")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
 		}
+		writeCLIFile(t, path, "", 0600)
+		values := append([]string{}, environment...)
 		if scenario.selection != nil {
-			loaded.Environment["ENVIRONMENT_PROFILES"] = *scenario.selection
+			values = append(values, "ENVIRONMENT_PROFILES="+*scenario.selection)
+		}
+		if scenario.disabled {
+			values = append(values, "DISABLE_SERVICE=1")
+		}
+		loaded, err = config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: environmentValue(environment, "HOME"), YardName: scenario.yard, Environment: environmentMap(values)})
+		if err != nil {
+			t.Fatal(err)
 		}
 		execution, err := program.prepareProvisionExecution(loaded, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slices.Contains(execution.profiles, "selected") != scenario.selected || !slices.Contains(execution.profiles, "legacy") {
+		legacy := scenario.selection != nil && strings.Contains(*scenario.selection, "legacy")
+		if slices.Contains(execution.profiles, "selected") != scenario.selected || slices.Contains(execution.profiles, "legacy") != legacy {
 			t.Fatalf("unexpected profile selection for %s: %v", scenario.yard, execution.profiles)
 		}
 	}
@@ -172,7 +182,10 @@ func TestProvisionAssessmentChecksRunningProfilesReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Environment["YARD_PROFILES"] = "sample-a sample-o"
+	loaded, err = config.WithEnvironmentProfiles(loaded, []string{"sample-a", "sample-o"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	execution, err := program.prepareProvisionExecution(loaded, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +214,7 @@ func TestProvisionCLIAndRPCUseNativeRunner(t *testing.T) {
 	writeProvisionProfile(t, root, "sample-s")
 	dispatcher := filepath.Join(root, "selected-engine")
 	writeCLIFile(t, dispatcher, "#!/bin/sh\nexit 0\n", 0o700)
-	environment = append(environment, "YARD_KIND=vm", "VM_CPU_WEIGHT=100", "SUBYARD_DISPATCHER_PATH=/ambient/engine")
+	environment = append(environment, "ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm", "VM_CPU_WEIGHT=100", "SUBYARD_DISPATCHER_PATH=/ambient/engine")
 	for _, scenario := range []struct{ rpcMode, stopped bool }{{false, true}, {true, true}, {false, false}, {true, false}} {
 		rpcMode := scenario.rpcMode
 		incus := lifecycleIncus()
@@ -314,7 +327,7 @@ func TestProvisionCPUAuthorizationPrecedesTemporaryStart(t *testing.T) {
 	incus := lifecycleIncus()
 	incus.Instances["subyard/yard"].Config["user.subyard.vm_cpu_weight"] = "1000"
 	program, err := New(Options{RepositoryRoot: root, WorkingDir: root, Incus: incus,
-		Environment: append(environment, "YARD_KIND=vm", "PATH="+commands)})
+		Environment: append(environment, "ENVIRONMENT_PROFILES=sample-s", "YARD_KIND=vm", "PATH="+commands)})
 	if err != nil {
 		t.Fatal(err)
 	}

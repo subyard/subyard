@@ -57,6 +57,7 @@ type LayerPaths struct {
 type Loaded struct {
 	Catalog               Catalog
 	Integrations          IntegrationSelection
+	EnvironmentProfiles   EnvironmentProfileSelection
 	Context               domain.Context
 	Environment           map[string]string
 	Settings              map[string]SettingTrace
@@ -110,6 +111,7 @@ func Load(options LoadOptions) (Loaded, error) {
 	return Loaded{
 		Catalog: tracker.catalog, Context: ctx, Environment: environment, Settings: tracker.traces(values),
 		ConfigurationLayers: tracker.configurationLayers(), Integrations: tracker.integrations,
+		EnvironmentProfiles:   tracker.environmentProfiles,
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
 	}, nil
@@ -412,10 +414,13 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
-
 	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
 		return domain.Context{}, nil, err
 	}
+	if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
+		return domain.Context{}, nil, err
+	}
+
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
 	if err == nil {
 		err = applySavedResourceEndpoints(root, options, ctx, values, tracker)
