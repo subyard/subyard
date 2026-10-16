@@ -13,6 +13,8 @@ CANDIDATE_VERSION="0.14.1-p0.smoke.$TOKEN"
 if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
   CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
 fi
+COMPATIBLE_VERSION="$CANDIDATE_VERSION-p0.compatible.$TOKEN"
+COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
 INSTALLER="$STATE_ROOT/subyard-install-baseline.sh"
 SMOKE_PROJECT=ReleaseSmoke
 SMOKE_SOURCE="$OPERATOR_HOME/$SMOKE_PROJECT"
@@ -96,6 +98,24 @@ resume_checkpoint_update() {
   ok 'checkpoint publication interruption, reboot and fresh-process resume passed'
 }
 
+verify_predecessor_rollback_refusal() {
+  local path
+  for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
+    sudo -n install -m 0600 "$path" "$STATE_ROOT/rollback-refusal-${path##*/}"
+  done
+  if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
+    die 'release smoke allowed incompatible published predecessor rollback'
+  fi
+  grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
+    || die 'release smoke predecessor rollback failed for an unexpected reason'
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
+    sudo -n cmp -s "$STATE_ROOT/rollback-refusal-${path##*/}" "$path" \
+      || die "refused predecessor rollback changed ${path##*/}"
+  done
+  ok 'incompatible published predecessor rollback refused without mutation'
+}
+
 prepare_smoke() {
   local phase=smoke-ready
   prepare_fixture
@@ -111,6 +131,11 @@ prepare_smoke() {
       --version "$CANDIDATE_VERSION" >/dev/null
   fi
   chmod -R a+rX "$RELEASE_ROOT"
+  # A separate standard package retains the same current activation owners.
+  # The authentic predecessor remains the upgrade/checkpoint baseline only.
+  "$ROOT/dev/package-engine.sh" --output-dir "$COMPATIBLE_RELEASE_ROOT" \
+    --version "$COMPATIBLE_VERSION" >/dev/null
+  chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT"
   info "installing published baseline $OLD_VERSION"
   curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
     "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
@@ -159,7 +184,7 @@ prepare_smoke() {
 }
 
 finish_smoke() {
-  local route="$STATE_ROOT/route-after" exported phase
+  local route="$STATE_ROOT/route-after" exported phase compatible_target
   assert_state_root
   CLEANUP_ARMED=1
   phase="$(read_fixture_value "$PHASE_STATE")"
@@ -183,22 +208,34 @@ finish_smoke() {
   operator_yard export "$SMOKE_PROJECT" --yes
   exported="$(operator_env grep -Rl guest-change "$OPERATOR_HOME/.subyard/exports")"
   [ -n "$exported" ] || die 'release smoke export lost the guest change'
-  operator_yard update --rollback --yes
-  assert_runtime_links "$OLD_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
-  verify_smoke_state "$OLD_VERSION"
+  verify_predecessor_rollback_refusal
+  # Establish current=A/previous=B using only verified public update operations.
+  # This leaves the exact candidate active for its compatible rollback cycle.
+  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
+  compatible_target="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  assert_runtime_links "$compatible_target" "$CANDIDATE_RELEASE_TARGET"
+  verify_smoke_state "$COMPATIBLE_VERSION"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$compatible_target"
+  verify_smoke_state "$CANDIDATE_VERSION"
+  operator_yard update --rollback --yes
+  assert_runtime_links "$compatible_target" "$CANDIDATE_RELEASE_TARGET"
+  verify_smoke_state "$COMPATIBLE_VERSION"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$compatible_target"
   verify_smoke_state "$CANDIDATE_VERSION"
   operator_yard remove "$SMOKE_PROJECT" --yes
   operator_yard teardown --yes
   ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'release smoke teardown left its project'
   [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
     || die 'last-yard teardown removed the installed runtime'
-  ok 'release smoke upgrade, reboot, data preservation, rollback and teardown passed'
+  ok 'release smoke upgrade, reboot, data preservation, rollback refusal, compatible rollback/roll-forward and teardown passed'
 }
 
-for command in sudo systemctl timeout cmp curl go incus ip jq sha256sum; do
+for command in sudo systemctl timeout cmp curl go incus ip jq rg sha256sum; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'

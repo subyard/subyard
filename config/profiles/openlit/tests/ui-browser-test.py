@@ -19,7 +19,19 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('browser', Path(__file__).parent/'e2e/ui-browser.py')
 browser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser)
-BINARY = shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
+
+
+def select_browser():
+    configured = os.environ.get('CHROME_BIN')
+    if configured:
+        binary = shutil.which(configured)
+        if not binary:
+            raise ValueError('CHROME_BIN must name an executable browser')
+        return binary
+    return shutil.which('chromium') or shutil.which('chromium-browser') or shutil.which('google-chrome')
+
+
+BINARY = select_browser()
 CAPTURE_ROOT = Path(__file__).resolve().parents[4]/'.build/test-runs'
 
 
@@ -172,6 +184,31 @@ class BrowserDOMTest(unittest.TestCase):
         self.assertTrue(self.cdp.evaluate(browser.OBSERVE)['clearControlPresent'])
         self.assertEqual(self.cdp.evaluate(browser.CLEAR_FILTERS), 'CLICKED')
         self.assertFalse(self.cdp.evaluate(browser.OBSERVE)['clearControlPresent'])
+
+
+class BrowserSelectionTest(unittest.TestCase):
+    def test_configured_browser_takes_precedence_over_path_fallback(self):
+        with tempfile.TemporaryDirectory(prefix='openlit-browser-selection-', dir='/tmp') as name:
+            root = Path(name)
+            for browser_name in ('chromium', 'configured-chrome'):
+                executable = root/browser_name
+                executable.write_text('#!/bin/sh\nexit 0\n')
+                executable.chmod(0o700)
+            with patch.dict(os.environ, {'PATH': name, 'CHROME_BIN': str(root/'configured-chrome')}):
+                self.assertEqual(select_browser(), str(root/'configured-chrome'))
+            with patch.dict(os.environ, {'PATH': name, 'CHROME_BIN': 'configured-chrome'}):
+                self.assertEqual(select_browser(), str(root/'configured-chrome'))
+            with patch.dict(os.environ, {'PATH': name, 'CHROME_BIN': ''}):
+                self.assertEqual(select_browser(), str(root/'chromium'))
+            for invalid in ('missing-chrome', str(root)):
+                with self.subTest(configured=invalid), \
+                     patch.dict(os.environ, {'PATH': name, 'CHROME_BIN': invalid}):
+                    with self.assertRaisesRegex(ValueError, 'CHROME_BIN must name an executable browser'):
+                        select_browser()
+            (root/'configured-chrome').chmod(0o600)
+            with patch.dict(os.environ, {'PATH': name, 'CHROME_BIN': str(root/'configured-chrome')}):
+                with self.assertRaisesRegex(ValueError, 'CHROME_BIN must name an executable browser'):
+                    select_browser()
 
 
 class StartupCaptureTest(unittest.TestCase):

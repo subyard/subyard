@@ -5,8 +5,10 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +24,104 @@ spec.loader.exec_module(probe)
 
 
 class StockProbeTests(unittest.TestCase):
+    def rpc_reply(self, error=None, method="terminal.stopExact", correlation=None, result=None):
+        """Exercise the real framing/parser over one fixture-owned local socket."""
+        with tempfile.TemporaryDirectory(prefix="orca-safe-rpc-", dir="/tmp") as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            metadata = root / "config/orca"
+            metadata.mkdir(parents=True, mode=0o700)
+            metadata.parent.chmod(0o700)
+            endpoint = root / "rpc.sock"
+            metadata_file = metadata / "orca-runtime.json"
+            metadata_file.write_text(json.dumps({
+                "transport": {"kind": "unix", "endpoint": str(endpoint)},
+                "authToken": "synthetic-private-payload", "runtimeId": "fixture-runtime",
+            }))
+            metadata_file.chmod(0o600)
+            requests, failures = [], []
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(endpoint))
+                server.listen(1)
+                server.settimeout(3)
+
+                def respond():
+                    try:
+                        with server.accept()[0] as connection:
+                            connection.settimeout(3)
+                            with connection.makefile("rb") as stream:
+                                request = json.loads(stream.readline(16384))
+                            requests.append(request)
+                            frame = {"id": request["id"], "ok": result is not None,
+                                     "_meta": {"runtimeId": "fixture-runtime"},
+                                     "error": error, "result": result}
+                            if correlation == "id":
+                                frame["id"] = "other-request"
+                            elif correlation == "runtime":
+                                frame["_meta"]["runtimeId"] = "other-runtime"
+                            connection.sendall(json.dumps(frame).encode() + b"\n")
+                    except Exception as failure:
+                        failures.append(type(failure).__name__)
+
+                worker = threading.Thread(target=respond, daemon=True)
+                worker.start()
+                arguments = argparse.Namespace(
+                    state=str(root), method=method,
+                    params=json.dumps({"worktree": "id:fixture::/synthetic/project",
+                                       "expectedPtyIds": ["fixture-pty"], "keepHistory": True}),
+                )
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(probe, "read_runtime_metadata", wraps=probe.read_runtime_metadata) as read:
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = probe.rpc_call(arguments)
+                    read.assert_called_once()
+                worker.join(timeout=4)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([], failures)
+                self.assertEqual(1, len(requests))
+                self.assertEqual(method, requests[0]["method"])
+                self.assertEqual(json.loads(arguments.params), requests[0]["params"])
+                return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_stop_exact_refusals_report_only_safe_categories(self):
+        categories = {
+            "selector_not_found": "selector_missing",
+            "terminal_stop_pty_set_mismatch": "pty_set_mismatch",
+            "terminal_liveness_unavailable": "liveness_unavailable",
+            "terminal_exact_stop_unavailable": "stop_unavailable",
+            "terminal_exact_stop_failed": "stop_failed",
+        }
+        for native, category in categories.items():
+            with self.subTest(category=category):
+                code, stdout, stderr = self.rpc_reply({
+                    "message": native, "details": "synthetic-private-payload"})
+                self.assertEqual(1, code)
+                self.assertEqual("", stdout)
+                self.assertEqual("orca-projects-helper: terminal.stopExact: runtime rejected method "
+                                 f"({category})\n", stderr)
+        for error in (None, [], 7, {}, {"message": []}, "synthetic-private-payload",
+                      {"code": "synthetic-private-payload", "message": "synthetic-private-payload"},
+                      {"code": "selector_not_found", "message": "terminal_exact_stop_failed"}):
+            with self.subTest(shape=type(error).__name__):
+                code, stdout, stderr = self.rpc_reply(error)
+                self.assertEqual((1, "", "orca-projects-helper: terminal.stopExact: "
+                                  "runtime rejected method (unknown)\n"), (code, stdout, stderr))
+
+    def test_rpc_refusal_preserves_correlation_and_other_methods(self):
+        error = {"message": "terminal_exact_stop_failed", "details": "synthetic-private-payload"}
+        for correlation, reason in (("id", "response correlation mismatch"),
+                                    ("runtime", "response runtime mismatch")):
+            with self.subTest(correlation=correlation):
+                self.assertEqual((1, "", f"orca-projects-helper: terminal.stopExact: {reason}\n"),
+                                 self.rpc_reply(error, correlation=correlation))
+        self.assertEqual((1, "", "orca-projects-helper: terminal.list: runtime rejected method\n"),
+                         self.rpc_reply(error, method="terminal.list"))
+
+    def test_stop_exact_success_keeps_original_result(self):
+        result = {"stopped": 1, "postStopVerified": True}
+        self.assertEqual((0, json.dumps(result, separators=(",", ":")) + "\n", ""),
+                         self.rpc_reply(result=result))
+
     def test_valid_snapshot_and_recovery_shapes(self):
         snapshots = {"snapshots": [{"worktree": "repo-1::/synthetic/project",
                                     "tabs": [{"id": "tab-1", "type": "terminal"}]}]}

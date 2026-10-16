@@ -263,7 +263,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			"04-provision-subyard.sh", "--yes"); err != nil {
 			return err
 		}
-		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
+		// Native runtimes can consume the canonical authenticated SSH transport.
+		// Base provisioning supplies the guest user/server before its existing owner runs.
+		if err := runtime.ApplyStage(ctx, ports.ReconcileStageSSH); err != nil {
+			return err
+		}
 		if err := runtime.applyProfileRuntimes(ctx); err != nil {
 			return err
 		}

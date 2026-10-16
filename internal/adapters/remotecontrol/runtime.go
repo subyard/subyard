@@ -115,7 +115,7 @@ func (runtime Runtime) ProbeOwner(ctx context.Context, spec domain.RemoteSpec) (
 }
 
 func (runtime Runtime) ScanYardKeys(ctx context.Context, spec domain.RemoteSpec, port int) ([]domain.RemoteKey, error) {
-	payload, err := runtime.hostCall(ctx, spec.OwnerEndpoint, nil, "ssh-keyscan",
+	payload, err := runtime.hostCall(ctx, spec.OwnerEndpoint, runtime.timeout(), nil, "ssh-keyscan",
 		"-T", strconv.Itoa(runtime.timeoutSeconds()), "-p", strconv.Itoa(port), "127.0.0.1")
 	if err != nil {
 		return nil, err
@@ -393,10 +393,16 @@ func (runtime Runtime) ownerCall(ctx context.Context, spec domain.RemoteSpec, st
 	}
 	owner = append(owner, arguments...)
 	command := shellquote.Command(owner)
-	return runtime.hostCall(ctx, spec.OwnerEndpoint, stdin, "bash", "-lc", shellquote.Word(command))
+	// Authorization includes full installed readiness and native owner work;
+	// its execution budget is separate from the SSH connection/probe budget.
+	executionTimeout := runtime.Timeout
+	if executionTimeout <= 0 {
+		executionTimeout = 10 * time.Minute
+	}
+	return runtime.hostCall(ctx, spec.OwnerEndpoint, executionTimeout, stdin, "bash", "-lc", shellquote.Word(command))
 }
 
-func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin []byte, arguments ...string) ([]byte, error) {
+func (runtime Runtime) hostCall(ctx context.Context, destination string, executionTimeout time.Duration, stdin []byte, arguments ...string) ([]byte, error) {
 	if !domain.SafeSSHTarget(destination) {
 		return nil, fmt.Errorf("invalid SSH target %q", destination)
 	}
@@ -406,23 +412,25 @@ func (runtime Runtime) hostCall(ctx context.Context, destination string, stdin [
 		return nil, err
 	}
 	command = append(options, command...)
-	return runtime.call(ctx, append(command, arguments...), stdin)
+	return runtime.call(ctx, append(command, arguments...), stdin, executionTimeout)
 }
 
 func (runtime Runtime) probeData(ctx context.Context, name string) error {
-	_, err := runtime.call(ctx, []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), "-o", "ControlMaster=no", "-o", "ControlPath=none", "yard-" + name, "--", "true"}, nil)
+	_, err := runtime.call(ctx, []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + strconv.Itoa(runtime.timeoutSeconds()), "-o", "ControlMaster=no", "-o", "ControlPath=none", "yard-" + name, "--", "true"}, nil, runtime.timeout())
 	return err
 }
 
-func (runtime Runtime) call(ctx context.Context, arguments []string, stdin []byte) ([]byte, error) {
+func (runtime Runtime) call(ctx context.Context, arguments []string, stdin []byte, executionTimeout time.Duration) ([]byte, error) {
 	program := runtime.SSH
 	if program == "" {
 		program = "ssh"
 	}
+	ctx, cancel := context.WithTimeout(ctx, executionTimeout)
+	defer cancel()
 	if runtime.processCall != nil {
 		return runtime.processCall(ctx, program, arguments, stdin)
 	}
-	return (transport.Process{Program: program, Arguments: arguments, Env: runtime.Environment, Timeout: runtime.timeout()}).Call(ctx, "", stdin)
+	return (transport.Process{Program: program, Arguments: arguments, Env: runtime.Environment, Timeout: executionTimeout}).Call(ctx, "", stdin)
 }
 
 func (runtime Runtime) ensureIdentity(ctx context.Context) ([]byte, string, error) {

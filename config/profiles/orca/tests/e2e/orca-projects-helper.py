@@ -89,7 +89,24 @@ def call_any_result(metadata_path, method, params):
                     if not isinstance(metadata, dict) or metadata.get("runtimeId") != runtime_id:
                         raise SafeRpcError("response runtime mismatch")
                     if frame.get("ok") is False:
-                        raise SafeRpcError("runtime rejected method")
+                        message = "runtime rejected method"
+                        if method == "terminal.stopExact":
+                            categories = {
+                                "selector_not_found": "selector_missing",
+                                "terminal_stop_pty_set_mismatch": "pty_set_mismatch",
+                                "terminal_liveness_unavailable": "liveness_unavailable",
+                                "terminal_exact_stop_unavailable": "stop_unavailable",
+                                "terminal_exact_stop_failed": "stop_failed",
+                            }
+                            error = frame.get("error")
+                            values = [error] if isinstance(error, str) else [
+                                error.get("code"), error.get("message")
+                            ] if isinstance(error, dict) else []
+                            matched = {categories[value] for value in values
+                                       if isinstance(value, str) and value in categories}
+                            category = next(iter(matched)) if len(matched) == 1 else "unknown"
+                            message += f" ({category})"
+                        raise SafeRpcError(message)
                     if frame.get("ok") is not True or "result" not in frame:
                         raise SafeRpcError("runtime returned invalid envelope")
                     return frame["result"]

@@ -1348,8 +1348,68 @@ def verify_completed_source_repair(release, version, baseline, arch, root):
     require(json.loads(fixture.journal.read_text())["checkpoint"] == "complete",
             "actual source owner did not produce terminal history")
     verify_alias_source_repair(fixture, release)
+    # Retain a canonical Git selection so removing a local override restores it.
+    source = fixture.root / "selection-source"
+    host = source / "hosts/fixture"
+    host.mkdir(parents=True, mode=0o700)
+    (source / "subyard-config.json").write_text('{"schemaVersion":1}\n')
+    (host / "config.env").write_text("ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS='codex paseo'\nSSH_PORT=2228\n")
+    for path in source.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    for command in (["git", "-C", str(source), "init", "-q"],
+                    ["git", "-C", str(source), "add", "."],
+                    ["git", "-C", str(source), "-c", "user.name=Fixture",
+                     "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Seed selection"]):
+        fixture.run(command)
+    fixture.run([str(fixture.old_launcher), "config", "sync", "connect", str(source),
+                 "--host-id", "fixture", "--checkout", str(fixture.root / "checkout"), "--yes"])
+    fixture.run([str(fixture.old_launcher), "-Y", "hermes", "config", "set",
+                 "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "yard", "--local", "--yes"])
     fixture.update("--version", version, "--yes")
     fixture.complete()
+    verify_completed_source_selection(fixture, root)
+
+
+def verify_completed_source_selection(fixture, root):
+    launcher = str(fixture.runtime / "current/bin/yard")
+    before = snapshot(fixture.config / "release-transition")
+    links = (os.readlink(fixture.runtime / "current"), os.readlink(fixture.runtime / "previous"))
+    fixture.run([launcher, "-Y", "hermes", "config", "unset", "CODING_TOOL_INTEGRATIONS",
+                 "--scope", "yard", "--local", "--yes"])
+    # A running consumer exposes ordinary materialized drift. Keep every other
+    # runtime absent/current so this exercises completed config.set admission.
+    control = root / "incus-observation.json"
+    set_fixture_observation(control, "Running")
+    shims = fixture.root / "selection-commands"
+    shims.mkdir(mode=0o700)
+    unexpected = fixture.root / "unexpected-selection-host-command"
+    write_observation_incus(shims, control, unexpected)
+    write_observation_systemctl(shims, unexpected)
+    sudo = shims / "sudo"
+    sudo.write_text("#!/usr/bin/python3\nimport pathlib, sys\n"
+                    "if sys.argv[1:] == ['-n', 'true']:\n    sys.exit(0)\n"
+                    f"pathlib.Path({str(unexpected)!r}).write_text('sudo operation rejected')\n"
+                    "sys.exit(99)\n")
+    sudo.chmod(0o700)
+    fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+    gate = json.loads(fixture.run([launcher, "migrate", "--check", "--json"]))
+    require(gate["outcome"]["status"] == "migration-required" and not gate.get("blockers")
+            and [(decision["resource"], decision["decision"]) for decision in gate.get("decisions", [])
+                 if decision["decision"] != "preserve"]
+            == [("activation.materialized-config", "canonicalize")],
+            "completed selection fixture must have only materialized config drift")
+    fixture.run([launcher, "-Y", "hermes", "config", "set", "CODING_TOOL_INTEGRATIONS", "",
+                 "--scope", "yard", "--local", "--yes"])
+    registration = fixture.config / "yards/hermes/config.env"
+    require("CODING_TOOL_INTEGRATIONS=''" in registration.read_text()
+            and snapshot(fixture.config / "release-transition") == before
+            and (os.readlink(fixture.runtime / "current"), os.readlink(fixture.runtime / "previous")) == links
+            and not unexpected.exists(),
+            "completed selection authoring changed protected history, links or host state")
+    set_fixture_observation(control)
+    fixture.complete()
+    print(f"PASS: actual {fixture.baseline_version} upgrade retains historical domain prefixes; "
+          "completed materialized drift admits local unset then empty set without changing history", flush=True)
 
 
 def main():

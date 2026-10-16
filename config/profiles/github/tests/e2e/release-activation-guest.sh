@@ -582,7 +582,7 @@ printf 'release_activation_dev_uid=%s cached_image_availability=verified\n' "$FI
 FINAL_ENGINE="$(release_candidate_prepare "$ROOT")" || die 'frozen transported candidate is required'
 read -r CANDIDATE SYNTHETIC BASELINE_INSTALLER_SHA < <(candidate_identity "$ROOT/.subyard-acceptance/candidate.json" "$BASELINE") \
   || die 'frozen candidate identity is invalid'
-[ "$("$FINAL_ENGINE" --version)" = "yard $CANDIDATE" ] || die 'frozen candidate engine version differs from metadata'
+[ "$("$FINAL_ENGINE" --version)" = "yard-engine $CANDIDATE" ] || die 'frozen candidate engine version differs from metadata'
 printf 'release_activation_candidate=%s authentic_predecessor=%s synthetic_successor=%s\n' "$CANDIDATE" "$BASELINE" "$SYNTHETIC"
 FINAL_SOURCE="${FINAL_ENGINE%/bin/yard-engine}"
 FINAL_RELEASE="$ROOT/.subyard-acceptance/release"

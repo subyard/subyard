@@ -1541,14 +1541,18 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 		return err
 	}
 	comparison = &integrationComparison{approved.Fingerprint == plan.Fingerprint, approved.Scope == plan.Scope, approved.Changed, plan.Changed}
+	compared, err := runtime.ProjectIntegrationPlanAfterProfileActivation(ctx, approved, plan)
+	if err != nil {
+		return err
+	}
 	if reconciler.projectedIntegrationPlans {
 		stage = "compare-projected"
-		if err := reconcileruntime.CheckIntegrationPlan(approved, plan); err != nil {
+		if err := reconcileruntime.CheckIntegrationPlan(approved, compared); err != nil {
 			return err
 		}
 	} else {
 		stage = "compare-exact"
-		if plan.Fingerprint != approved.Fingerprint {
+		if compared.Fingerprint != approved.Fingerprint {
 			return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
 		}
 	}

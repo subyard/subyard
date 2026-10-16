@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 from types import SimpleNamespace
 import unittest
@@ -41,44 +42,165 @@ def result(stdout=b'', code=0):
 
 
 class AcceptanceDiagnosticsTest(unittest.TestCase):
-    def test_failure_probes_preserve_exit_and_suppress_native_contents(self):
+    def test_private_failure_bytes_survive_cleanup_with_original_exit(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
-        start = source.index('diagnose_failure() {')
-        function = source[start:source.index('\n}\n', start) + 3]
+        functions = source.split('diagnose_failure() {', 1)[1].split('trap cleanup_acceptance EXIT', 1)[0]
+        functions = 'diagnose_failure() {' + functions
+        for fault, original, cleanup in (('', 23, 1), ('transport', 23, 1), ('stalled', 23, 1), ('signal-during-capture', 23, 1),
+                                         ('cleanup-stalled', 23, 1), ('', 0, 0), ('', 0, 1)):
+            with self.subTest(fault=fault, original=original, cleanup=cleanup), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                directory = Path(temporary)
+                binary = directory / 'bin'
+                binary.mkdir()
+                output = directory / 'output'
+                output.mkdir(mode=0o700)
+                incus = binary / 'incus'
+                incus.write_text('''#!/bin/sh
+case "$*" in
+  *user.subyard.managed*) echo true ;;
+  *) echo private-native-canary; echo private-error-canary >&2; exit 255 ;;
+esac
+''')
+                incus.chmod(0o700)
+                for name in ('free', 'systemctl', 'journalctl'):
+                    stub = binary / name
+                    stub.write_text('#!/bin/sh\necho synthetic-native-state\n')
+                    stub.chmod(0o700)
+                ssh = binary / 'ssh'
+                ssh.write_text('''#!/bin/sh
+case "$*" in
+  *failure-capture.py*)
+    [ "$FAULT" != transport ] || exit 19
+    [ "$FAULT" != stalled ] || exec sleep 100
+    [ "$FAULT" != signal-during-capture ] || sleep 0.3
+    exec python3 "$CAPTURE" collect ;;
+  *) [ "$ORIGINAL" = 0 ] || test -s "$OUTPUT/failure.tar"; touch "$CLEANED" ;;
+esac
+''')
+                ssh.chmod(0o700)
+                timeout = binary / 'timeout'
+                timeout.write_text('''#!/usr/bin/env bash
+args=("$@")
+if [ "${args[2]:-}" = 110 ] && [ "$FAULT" = stalled ]; then args[2]=0.2; fi
+if [ "$FAULT" = cleanup-stalled ] && [ "${args[1]:-}" = 95 ]; then args[1]=0.2; fi
+exec /usr/bin/timeout "${args[@]}"
+''')
+                timeout.chmod(0o700)
+                script = '''set -euo pipefail
+ROOT="$REPOSITORY"
+LOCAL_TEMP="$TEMP_ROOT/local"
+mkdir "$LOCAL_TEMP"
+GUEST_DIRS[1]=/var/tmp/subyard-worktree.synthetic
+LEASE_KEEPER_PID=''
+CLIENT_CONFIG=synthetic-config
+quote_ssh_command() { printf '%q ' "$@"; }
+release_lease() { touch "$RELEASED"; [ "$FAULT" != cleanup-stalled ] || sleep 100; return "$CLEANUP_FAILURE"; }
+''' + functions + f'\ntrap cleanup_acceptance EXIT\nexit {original}\n'
+                started = time.monotonic()
+                environment = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'],
+                             OUTPUT=str(output), REPOSITORY=str(PROFILE.parents[2]), TEMP_ROOT=str(directory),
+                             CAPTURE=str(PROFILE / 'tests/e2e/failure-capture.py'), FAULT=fault,
+                             CLEANED=str(directory / 'cleaned'), RELEASED=str(directory / 'released'),
+                             ORIGINAL=str(original), CLEANUP_FAILURE=str(cleanup))
+                with subprocess.Popen(['bash', '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      env=environment) as process:
+                    if fault == 'signal-during-capture':
+                        deadline = time.monotonic() + 2
+                        while not (output / 'failure.tar').exists() and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                        process.send_signal(signal.SIGTERM)
+                    stdout, stderr = process.communicate(timeout=10)
+                    observed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+                self.assertEqual(observed.returncode, original or (3 if cleanup else 0))
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertNotIn(b'private-', observed.stdout + observed.stderr)
+                self.assertTrue((directory / 'cleaned').exists())
+                self.assertTrue((directory / 'released').exists())
+                receipt = (output / 'result').read_text()
+                self.assertIn(f'original_exit_code={original}\n', receipt)
+                self.assertIn(f'capture_exit_code={1 if original else 0}\n', receipt)
+                self.assertIn(f'cleanup_exit_code={3 if cleanup else 0}\n', receipt)
+                if original:
+                    capture_result = (output / 'capture-result').read_text()
+                    transport_code = 19 if fault == 'transport' else 124 if fault == 'stalled' else 0
+                    self.assertIn(f'transport_exit_code={transport_code}\n', capture_result)
+                self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.iterdir()))
+                if original and fault not in ('transport', 'stalled'):
+                    with tarfile.open(output / 'failure.tar') as archive:
+                        self.assertEqual(archive.extractfile('observe.stdout').read(), b'private-native-canary\n')
+                        self.assertEqual(archive.extractfile('observe.stderr').read(), b'private-error-canary\n')
+                        result = json.load(archive.extractfile('result.json'))
+                        self.assertEqual(result['probes']['observe']['exit_code'], 255)
+                        self.assertEqual(result['probes']['state']['stdout_bytes'], 22)
+                        self.assertTrue(all(item.isfile() and item.mode == 0o600 for item in archive.getmembers()))
+
+    def test_capture_rejects_unsafe_archives_and_caps_native_output(self):
+        capture = load_module('amnezia_capture_test', PROFILE / 'tests/e2e/failure-capture.py')
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            path = directory / 'bad.tar'
+            with tarfile.open(path, 'w') as archive:
+                item = tarfile.TarInfo('../foreign')
+                item.type = tarfile.SYMTYPE
+                item.linkname = '/etc/passwd'
+                archive.addfile(item)
+            self.assertEqual(capture.validate(path), 1)
+            incus = directory / 'incus'
+            incus.write_text('''#!/bin/sh
+case "$*" in
+  *user.subyard.managed*) echo true ;;
+  *) head -c 70000 /dev/zero ;;
+esac
+''')
+            incus.chmod(0o700)
+            for name in ('free', 'systemctl', 'journalctl'):
+                stub = directory / name
+                stub.write_text('#!/bin/sh\necho synthetic-native-state\n')
+                stub.chmod(0o700)
+            observed = subprocess.run(['python3', str(PROFILE / 'tests/e2e/failure-capture.py'), 'collect'],
+                capture_output=True, timeout=10, env=dict(os.environ, PATH=str(directory) + ':' + os.environ['PATH']))
+            self.assertEqual(observed.returncode, 0)
+            self.assertLess(len(observed.stdout), 2097152)
+            with tarfile.open(fileobj=io.BytesIO(observed.stdout)) as archive:
+                self.assertLessEqual(archive.getmember('observe.stdout').size, capture.LIMIT)
+                result = json.load(archive.extractfile('result.json'))
+                self.assertTrue(result['probes']['observe']['truncated'])
+
+    def test_capture_refuses_unowned_instances(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             directory = Path(temporary)
             incus = directory / 'incus'
             incus.write_text('''#!/bin/sh
-case "$*" in
-  *"docker container ls"*) echo private-container-canary; exit 17 ;;
-  *"runtime.py observe-management"*) echo private-management-canary; exit 18 ;;
-  *"systemctl show"*)
-    printf '%s\\n' "$*" > "$DIAGNOSTIC_SYSTEMD_CALL"
-    printf 'Id=docker.service\\nActiveState=activating\\n'
-    exit 19 ;;
-  *) echo private-observation-canary ;;
-esac
+printf '%s\\n' "$*" >> "$CALLS"
+echo false
 ''')
-            incus.chmod(0o755)
-            script = '''GUEST_DIRS[1]=fixture
-guest() { shift; [ "$2" != 100 ] || "$@"; }
-''' + function + '\ndiagnose_failure 23\n'
-            call = directory / 'systemd-call'
-            observed = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
-                                      env=dict(os.environ, PATH=str(directory) + ':/usr/bin:/bin',
-                                               DIAGNOSTIC_SYSTEMD_CALL=str(call)), timeout=10)
-            self.assertEqual(observed.returncode, 23)
-            self.assertNotIn('canary', observed.stdout + observed.stderr)
-            for label, code in [('guest-docker-enumerate', 17), ('guest-observe-management', 18),
-                                ('guest-service-state', 19)]:
-                self.assertRegex(observed.stderr, rf'startup_probe={label} duration_seconds=[0-9]+ exit={code}')
-            self.assertIn('Id=docker.service\nActiveState=activating\n', observed.stderr)
-            self.assertEqual(call.read_text().split(), [
-                'exec', 'yard-vpn-e2e', '--project', 'subyard-vpn-e2e', '--', 'systemctl', 'show',
-                'docker.service', 'containerd.service', 'subyard-amnezia.service',
-                '--property=Id', '--property=LoadState', '--property=ActiveState', '--property=SubState',
-                '--property=Result', '--property=ExecMainStatus',
-                '--property=ExecMainStartTimestampMonotonic', '--property=NRestarts'])
+            incus.chmod(0o700)
+            calls = directory / 'calls'
+            observed = subprocess.run(['python3', str(PROFILE / 'tests/e2e/failure-capture.py'), 'collect'],
+                capture_output=True, timeout=10,
+                env=dict(os.environ, PATH=str(directory) + ':' + os.environ['PATH'], CALLS=str(calls)))
+            self.assertEqual(observed.returncode, 0)
+            self.assertEqual(calls.read_text().splitlines(), [
+                'config get yard-vpn-e2e user.subyard.managed --project subyard-vpn-e2e'])
+            with tarfile.open(fileobj=io.BytesIO(observed.stdout)) as archive:
+                result = json.load(archive.extractfile('result.json'))
+                self.assertFalse(result['owned'])
+                self.assertEqual(result['probes']['observe']['exit_code'], None)
+                self.assertEqual(archive.extractfile('state.stdout').read(), b'')
+
+    def test_recovery_steps_keep_failure_codes_and_deadlines(self):
+        source = (PROFILE / 'tests/e2e/owner.sh').read_text()
+        function = 'recovery_step() {' + source.split('recovery_step() {', 1)[1].split('case "$phase" in', 1)[0]
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            script = 'set -euo pipefail\nfixture=$1\ninstall -m 0600 /dev/null "$fixture/recovery.steps"\n' + function
+            script += '\nrecovery_step refused 1 bash -c "exit 1" || test "$?" = 1\n'
+            script += 'recovery_step stalled 0.1 sleep 10\n'
+            observed = subprocess.run(['bash', '-c', script, '_', temporary], capture_output=True, timeout=3)
+            self.assertEqual(observed.returncode, 124)
+            steps = (Path(temporary) / 'recovery.steps').read_text()
+            self.assertRegex(steps, r'step=refused state=end duration_seconds=[0-9]+ exit=1')
+            self.assertIn('step=stalled state=start limit_seconds=0.1', steps)
+            self.assertRegex(steps, r'step=stalled state=end duration_seconds=[0-9]+ exit=124')
 
 
 class OwnerHandlerTest(unittest.TestCase):

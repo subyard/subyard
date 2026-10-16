@@ -19,6 +19,7 @@ die() { printf 'orca-projects-e2e: %s\n' "$*" >&2; exit 1; }
 [ "${SUBYARD_E2E_ORCA_PROJECTS:-}" = 1 ] \
   || die 'set SUBYARD_E2E_ORCA_PROJECTS=1 inside a disposable test host'
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
+[ "$(id -un)" = dev ] || die 'run as the allocated dev user'
 if [ "${SUBYARD_E2E_ORCA_LOAD_DIAGNOSTIC:-}" = 1 ]; then
   python3 -B - <<'PYGUARD' || die 'load diagnostic requires the matching disposable VM lease'
 import json, os, pathlib, stat
@@ -38,11 +39,16 @@ except (OSError, ValueError, KeyError, TypeError):
     raise SystemExit(1)
 PYGUARD
 fi
-for command in git go incus jq python3 ssh ssh-keygen ssh-keyscan sudo; do
+for command in git go incus jq python3 sg ssh ssh-keygen ssh-keyscan sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 [ -x /usr/sbin/sshd ] || die '/usr/sbin/sshd is required'
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
+if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf -v reexec 'exec bash %q' "$ROOT/config/profiles/orca/tests/e2e/orca-projects.sh"
+  exec sg incus-admin -c "$reexec"
+fi
 platform_marker="$ORIGINAL_HOME/.cache/subyard-e2e-platform/.subyard-e2e-platform-marker"
 [ -f "$platform_marker" ] && [ "$(<"$platform_marker")" = subyard-e2e-platform-v1 ] \
   || die 'the shared E2E platform marker is missing or invalid'
@@ -226,7 +232,7 @@ if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
 else
   bash "$ROOT/dev/build-engine.sh" >/dev/null
 fi
-install -d -m 0700 "$STATE/home" "$STATE/config/yards/$YARD_NAME" "$STATE/data" "$STATE/host"
+install -d -m 0700 "$STATE/home" "$STATE/config" "$STATE/data" "$STATE/host"
 export HOME="$STATE/home"
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
@@ -235,6 +241,32 @@ export STORAGE_PATH="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus/incus/stor
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
+# Activation observes the native owner API before any yard is registered.
+(
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_context "$STATE/incus-foundation"
+  export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME="$ORIGINAL_HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+  export SUBYARD_DISPATCHER_PATH="$YARD_BIN"
+  export STORAGE_PATH="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus/incus/storage"
+  set -a
+  # shellcheck source=config/host.env
+  . "$ROOT/config/host.env"
+  set +a
+  bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
+)
+timeout 10 /usr/bin/incus query /1.0 >/dev/null
+timeout 10 /usr/bin/incus storage show default --project default >/dev/null
+timeout 10 /usr/bin/incus network show incusbr0 --project default >/dev/null
+printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$SUBYARD_CONFIG_HOME/config.env"
+chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
+unset YARD_ENGINE_PATH
+# The supported installer commits the publication reader boundary before init.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 SSH_PORT=$SSH_PORT
 ORCA_HOST_PORT=$ORCA_PORT
@@ -665,20 +697,27 @@ stage 'adopting an existing project record from a mixed manual group for the fir
 adopt_source="$STATE/host/adopt-source"
 mkdir -p "$adopt_source"
 printf 'existing project\n' > "$adopt_source/content.txt"
-# Create a real Subyard project while the optional resource hook is unavailable.
-# Then seed the pre-existing Orca representation through its supported API.
-guest_root chmod 0644 /usr/local/libexec/subyard/projects-changed.d/orca
-yard sync "$adopt_source" --name adopt-project --yes >/dev/null
-guest_root chmod 0755 /usr/local/libexec/subyard/projects-changed.d/orca
 adopt_root=/srv/workspaces/adopt-project/src
+# Pinned Orca accepts a future folder without creating its workspace.
+# Seed the unowned native record before the first Subyard project event.
+guest_dev test ! -e "${adopt_root%/src}" && guest_dev test ! -L "${adopt_root%/src}" \
+  || die 'first-adoption workspace already exists'
 assert_absent_repo "$adopt_root"
+guest_dev jq -e --arg path "$adopt_root" '.projects | all(.root != $path)' \
+  /srv/agents/orca/subyard-registration.json >/dev/null \
+  || die 'first-adoption root already has registration ownership'
 adopt_json="$(orca_rpc repo.add "$(rpc_params --arg path "$adopt_root" '{path:$path,kind:"folder"}')")"
 adopt_id="$(jq -er '.repo.id' <<<"$adopt_json")"
 rpc_write repo.update "$(rpc_params --arg repo "id:$adopt_id" \
   '{repo:$repo,updates:{displayName:"Existing manual root"}}')"
 rpc_write projectGroup.moveProject "$(rpc_params --arg repo "id:$adopt_id" --arg group "$manual_group" \
   '{repo:$repo,groupId:$group,order:44}')"
-yard orca sync --yes >/dev/null
+guest_dev test ! -e "${adopt_root%/src}" && guest_dev test ! -L "${adopt_root%/src}" \
+  || die 'manual folder registration created the workspace'
+guest_dev jq -e --arg path "$adopt_root" '.projects | all(.root != $path)' \
+  /srv/agents/orca/subyard-registration.json >/dev/null \
+  || die 'manual folder registration acquired Subyard ownership'
+yard sync "$adopt_source" --name adopt-project --yes >/dev/null
 adopt_group="$(group_id "$adopt_root")"
 [ "$adopt_group" != "$manual_group" ] || die 'first adoption reused a mixed manual group'
 [ "$(repo_id "$adopt_root")" = "$adopt_id" ] || die 'first adoption replaced the existing Orca record'
@@ -852,25 +891,32 @@ orca_rpc session.tabs.listAll | jq -e --arg root "$session_id" \
   || die 'restart lost the existing project terminal tab after pending-layout cleanup'
 resume_discovery
 
-stage 'preserving a changed hook list and repairing the missing dispatcher through explicit init'
+stage 'reporting an optional hook failure before repairing owned wiring through explicit init'
 pause_discovery
 recovery_source="$STATE/host/recovery-source"
 mkdir -p "$recovery_source"
 printf 'recovery\n' > "$recovery_source/content.txt"
-guest_root cp /etc/subyard/agent-project-hooks /tmp/orca-project-hooks-original
-guest_root rm -f -- /usr/local/libexec/subyard/projects-changed
-guest_root sh -c 'printf "%s\n" stale-hook > /etc/subyard/agent-project-hooks'
+# Invalid project data fails the active hook without changing installed runtime.
+printf 'gitdir: /nonexistent/orca-projects-recovery-fixture\n' > "$recovery_source/.git"
 if ! yard sync "$recovery_source" --name recovery-project --yes \
   >"$STATE/recovery.out" 2>"$STATE/recovery.err"; then
-  die 'project sync failed because its optional hook was unavailable'
+  die 'project sync failed because its optional hook rejected project data'
 fi
 grep -Fq "optional agent project hook failed; run 'yard init'" "$STATE/recovery.out" "$STATE/recovery.err" \
   || die 'project success did not include the hook recovery warning'
 assert_absent_repo /srv/workspaces/recovery-project/src
+# Undo only this project's injected marker before explicit wiring recovery.
+guest_dev grep -Fxq 'gitdir: /nonexistent/orca-projects-recovery-fixture' \
+  /srv/workspaces/recovery-project/src/.git || die 'recovery project marker differs'
+guest_dev rm -- /srv/workspaces/recovery-project/src/.git
+guest_root cp /etc/subyard/agent-project-hooks /tmp/orca-project-hooks-original
+guest_root rm -f -- /usr/local/libexec/subyard/projects-changed
+guest_root sh -c 'printf "%s\n" stale-hook > /etc/subyard/agent-project-hooks'
 if yard init --yes >"$STATE/changed-hooks.out" 2>"$STATE/changed-hooks.err"; then
   die 'init silently overwrote the changed owned hook list'
 fi
-grep -Fq 'owned artifact drift at "/etc/subyard/agent-project-hooks"' "$STATE/changed-hooks.err" \
+jq -e --arg conflict 'owned artifact drift at "/etc/subyard/agent-project-hooks"' \
+  '.message | contains($conflict)' "$STATE/changed-hooks.err" >/dev/null \
   || die 'init did not report the changed hook ownership conflict'
 guest_root grep -Fxq stale-hook /etc/subyard/agent-project-hooks \
   || die 'init changed the conflicting hook list'

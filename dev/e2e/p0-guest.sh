@@ -1148,8 +1148,9 @@ peer_yard_start() {
     base_image="$OWNER_BASE_IMAGE"
   fi
   install -d -m 0700 "$PEER_ROOT/config"
-  printf 'AGENTS=none\nSSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
-    "$base_image" "$base_image" > "$PEER_ROOT/config/config.env"
+  printf 'AGENTS=none\nSSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
+    "$base_image" "$base_image" "$PEER_KEYS_CONSUMER_ROOT" > "$PEER_ROOT/config/config.env"
+  chmod 0600 "$PEER_ROOT/config/config.env"
   timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
   timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
   "$PEER_YARD_ENTRY" check

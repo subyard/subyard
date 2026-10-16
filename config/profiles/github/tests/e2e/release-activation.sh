@@ -62,7 +62,7 @@ engine="$(release_candidate_prepare "$WORK/source-a")"
 read -r candidate synthetic baseline_installer_sha < <(bash "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh" \
   --candidate-identity "$WORK/source-a/.subyard-acceptance/candidate.json" "$baseline") \
   || { printf 'release-activation: frozen candidate identity is invalid\n' >&2; exit 2; }
-[ "$("$engine" --version)" = "yard $candidate" ] \
+[ "$("$engine" --version)" = "yard-engine $candidate" ] \
   || { printf 'release-activation: frozen candidate engine version differs from metadata\n' >&2; exit 2; }
 mkdir "$WORK/source-b"
 bash "$ROOT/tests/helpers/source-files.sh" "$WORK/source-a" \

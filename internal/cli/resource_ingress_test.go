@@ -8,8 +8,11 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -154,6 +157,131 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"purge","changed
 	}
 	if _, err := os.Stat(applyLog); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only retry reached mutation: %v", err)
+	}
+}
+
+func TestResourceShutdownProbeRetainsBoundedFailureHistory(t *testing.T) {
+	for _, stop := range []string{"deadline", "cancelled"} {
+		t.Run(stop, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
+			writeCLIFile(t, handler, `#!/bin/sh
+set -eu
+[ "${SUBYARD_RESOURCE_MODE:-}" = prepare ] || exit 70
+counter="$SUBYARD_REPOSITORY_ROOT/shutdown-attempts"
+if [ ! -e "$counter" ]; then
+  printf 'attempt\n' >"$counter"
+  printf 'synthetic-private-output\n'
+  printf 'synthetic-private-error: prepare timed out or was cancelled\n' >&2
+  exit 1
+fi
+printf 'attempt\n' >>"$counter"
+: >"$SUBYARD_REPOSITORY_ROOT/shutdown-blocked"
+exec sleep 60
+`, 0o700)
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.resources.Lookup("demo")
+			runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition, localAction: "purge"}
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			started := time.Now()
+			done := make(chan error, 1)
+			go func() { done <- (&resourceIngress{}).probeShutdown(ctx, runner) }()
+			if stop == "cancelled" {
+				deadline := time.Now().Add(4 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, err := os.Stat(filepath.Join(root, "shutdown-blocked")); err == nil {
+						cancel()
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			select {
+			case err = <-done:
+			case <-time.After(9 * time.Second):
+				t.Fatal("shutdown verification did not respect parent cancellation")
+			}
+			elapsed := time.Since(started).Milliseconds()
+			want := context.DeadlineExceeded
+			lastClass, stopClass := "prepare_timeout", "parent_deadline"
+			if stop == "cancelled" {
+				want, lastClass, stopClass = context.Canceled, "prepare_cancelled", "parent_cancelled"
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("shutdown verification lost parent outcome: %v", err)
+			}
+			message := err.Error()
+			for _, fragment := range []string{"attempts=2", "budget_ms=300000", "first_failure=plan_invalid",
+				"last_outcome=" + lastClass, "stop=" + stopClass} {
+				if !strings.Contains(message, fragment) {
+					t.Errorf("shutdown failure missing %q: %s", fragment, message)
+				}
+			}
+			if strings.Contains(message, "synthetic-private") || len(message) > 512 {
+				t.Errorf("shutdown diagnostic exposed or exceeded bounded metadata: %s", message)
+			}
+			measurement := regexp.MustCompile(`elapsed_ms=([0-9]+) first_attempt_ms=([0-9]+) last_attempt_ms=([0-9]+)`).FindStringSubmatch(message)
+			if len(measurement) != 4 {
+				t.Errorf("shutdown failure lacks measured durations: %s", message)
+			} else {
+				reported, _ := strconv.ParseInt(measurement[1], 10, 64)
+				if reported < elapsed-1000 || reported > elapsed+1000 {
+					t.Errorf("reported elapsed %d differs from measured %d", reported, elapsed)
+				}
+			}
+			if attempts := readResourceApplyLog(t, filepath.Join(root, "shutdown-attempts")); attempts != "attempt\nattempt\n" {
+				t.Errorf("parent cancellation started another attempt: %q", attempts)
+			}
+			if _, err := os.Stat(applyLog); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("read-only shutdown verification reached mutation: %v", err)
+			}
+		})
+	}
+}
+
+func TestResourceShutdownProbeTerminalRefusalsHideHandlerContents(t *testing.T) {
+	for _, test := range []struct {
+		name, script, outcome string
+		cause                 error
+	}{
+		{"usage", "printf 'synthetic-private-error\\n' >&2\nexit 2\n", "usage_invalid", resource.ErrResourceUsageInvalid},
+		{"assessment", "printf 'synthetic-private-output\\n'\n", "assessment_invalid", resource.ErrResourcePlanInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, environment, applyLog := resourceCommandFixture(t)
+			handler := filepath.Join(root, "config", "profiles", "fixture", "resources", "demo", "handler.sh")
+			writeCLIFile(t, handler, "#!/bin/sh\n"+test.script, 0o700)
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.resources.Lookup("demo")
+			runner := &resourceApplyRunner{cli: program, loaded: loaded, definition: definition, localAction: "purge"}
+			err = (&resourceIngress{}).probeShutdown(context.Background(), runner)
+			if !errors.Is(err, test.cause) {
+				t.Fatalf("shutdown refusal lost native classification: %v", err)
+			}
+			message := err.Error()
+			if !strings.Contains(message, "attempts=1") || !strings.Contains(message, "last_outcome="+test.outcome) ||
+				!strings.Contains(message, "stop=refused") || strings.Contains(message, "synthetic-private") {
+				t.Fatalf("shutdown refusal metadata is missing or exposed handler contents: %s", message)
+			}
+			if _, err := os.Stat(applyLog); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("shutdown refusal reached mutation: %v", err)
+			}
+		})
 	}
 }
 

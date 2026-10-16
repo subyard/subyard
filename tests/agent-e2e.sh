@@ -3806,6 +3806,144 @@ for release_smoke_failure in success prepare reboot finish; do
   fi
 done
 
+# Exercise the complete post-reboot smoke flow with a strict retained-runtime model.
+# shellcheck disable=SC2034 # context globals are consumed by extracted smoke functions
+smoke_rollback_fixture_contract() {
+  (
+    set -euo pipefail
+    local scenario="$1" fixture="$TMP/smoke-rollback-$1"
+    for function_name in verify_predecessor_rollback_refusal finish_smoke; do
+      eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
+    done
+    STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
+    RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+    CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
+    CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+    OLD_RELEASE_TARGET=releases/predecessor-bbbbbbbbbbbb
+    V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+    V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
+    PHASE_STATE="$STATE_ROOT/phase" BOOT_ID_STATE="$STATE_ROOT/boot-id"
+    DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route" SMOKE_PROJECT=ReleaseSmoke PROJECT=subyard
+    install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT"
+    printf 'smoke-ready\n' > "$PHASE_STATE"
+    printf 'before-reboot\n' > "$BOOT_ID_STATE"
+    printf 'retained-route\n' > "$DEFAULT_ROUTE_STATE"
+    printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
+    printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/previous"
+    for record in history-checkpoint.json ledger.json journal.json; do
+      printf 'retained %s\n' "$record" > "$V2_STATE_ROOT/$record"
+      chmod 0600 "$V2_STATE_ROOT/$record"
+    done
+    die() { printf '%s\n' "$*" >&2; exit 2; }
+    info() { :; }
+    ok() { case "$*" in *'and teardown passed') printf '%s\n' "$*" > "$STATE_ROOT/passed" ;; esac; }
+    assert_state_root() { [ -d "$STATE_ROOT" ]; }
+    read_fixture_value() { cat "$1"; }
+    load_release_targets() { :; }
+    assert_runtime_links() {
+      [ "$(cat "$STATE_ROOT/current")" = "$1" ] \
+        && [ "$(cat "$STATE_ROOT/previous")" = "$2" ] || die 'unexpected runtime links'
+    }
+    verify_smoke_state() {
+      [ "$(operator_yard --version)" = "yard $1" ] || die 'incorrect active smoke version'
+    }
+    sudo() { [ "$1" = -n ] || die 'unexpected sudo arguments'; shift; "$@"; }
+    ip() { printf 'retained-route\n'; }
+    incus() { [ "$*" = "project show $PROJECT" ] || die 'unexpected Incus call'; return 1; }
+    operator_env() {
+      case "$1" in
+        readlink) cat "$STATE_ROOT/current" ;;
+        grep) "$@" ;;
+        env)
+          [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] \
+            || [ "$2" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] \
+            || die 'unexpected release source'
+          shift 3
+          operator_yard "$@"
+          ;;
+        *) die 'unexpected operator command' ;;
+      esac
+    }
+    operator_yard() {
+      local current previous next
+      current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
+      case "$*" in
+        --version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
+        "export $SMOKE_PROJECT --yes")
+          install -d -m 0700 "$OPERATOR_HOME/.subyard/exports"
+          printf 'guest-change\n' > "$OPERATOR_HOME/.subyard/exports/retained.patch"
+          ;;
+        'update --rollback --yes')
+          if [ "$previous" = "$OLD_RELEASE_TARGET" ]; then
+            case "$scenario" in
+              unexpected-accept) return 0 ;;
+              wrong-reason) printf 'dependency-unavailable\n' >&2; return 1 ;;
+              links-change) printf 'releases/foreign\n' > "$STATE_ROOT/previous" ;;
+              checkpoint-change) printf 'changed\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
+              ledger-change) printf 'changed\n' > "$V2_LEDGER" ;;
+              journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
+            esac
+            printf 'operator-action-required: code=rollback-incompatible\n' >&2
+            return 1
+          fi
+          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] \
+            && [ "$previous" = releases/compatible-bbbbbbbbbbbb ] || die 'unexpected compatible rollback'
+          [ "$scenario" != rollback-fail ] || return 45
+          next="$previous"
+          ;;
+        'update --version compatible --yes')
+          [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'compatible setup started from foreign runtime'
+          next=releases/compatible-bbbbbbbbbbbb
+          ;;
+        'update --version candidate --yes')
+          [ "$current" = releases/compatible-bbbbbbbbbbbb ] || die 'candidate update started from foreign runtime'
+          if [ "$scenario" = rollforward-fail ] && [ "$(wc -l < "$STATE_ROOT/updates")" = 3 ]; then
+            return 45
+          fi
+          next="$CANDIDATE_RELEASE_TARGET"
+          ;;
+        "remove $SMOKE_PROJECT --yes") [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'removed project before restoring candidate' ;;
+        'teardown --yes') [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'teardown did not retain candidate' ;;
+        *) die 'unexpected yard operation' ;;
+      esac
+      if [ -n "${next:-}" ]; then
+        printf '%s\n' "$*" >> "$STATE_ROOT/updates"
+        printf '%s\n' "$current" > "$STATE_ROOT/previous"
+        printf '%s\n' "$next" > "$STATE_ROOT/current"
+      fi
+    }
+    finish_smoke
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
+    [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
+    [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
+  )
+}
+for smoke_rollback_scenario in success wrong-reason unexpected-accept links-change \
+  checkpoint-change ledger-change journal-change rollback-fail rollforward-fail; do
+  smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
+  set +e
+  smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
+  smoke_rollback_rc=$?
+  set -e
+  if [ "$smoke_rollback_scenario" = success ]; then
+    if [ "$smoke_rollback_rc" != 0 ]; then
+      cat "$smoke_rollback_log" >&2
+      fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
+    fi
+  else
+    smoke_rollback_expected=2
+    [[ "$smoke_rollback_scenario" != *-fail ]] || smoke_rollback_expected=45
+    [ "$smoke_rollback_rc" = "$smoke_rollback_expected" ] \
+      || fail "release smoke concealed $smoke_rollback_scenario failure"
+    [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/passed" ] \
+      || fail 'release smoke reported success after a rollback contract failure'
+    if [[ "$smoke_rollback_scenario" != *-fail ]]; then
+      [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
+        || fail 'release smoke continued after an invalid predecessor refusal'
+    fi
+  fi
+done
+
 # Publication must stop before reboot; altered retained state must fail before resume.
 # shellcheck disable=SC2034 # context globals are consumed by the extracted fixture helpers
 smoke_checkpoint_fixture_contract() {
