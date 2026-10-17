@@ -27,6 +27,27 @@ done
 yard orca sync --yes >/dev/null
 
 incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
+stage 'repairing a legacy Codex chat launch environment through yard init'
+codex_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
+guest_root python3 - <<'PY'
+from pathlib import Path
+
+Path('/usr/local/libexec/subyard/orca-codex/codex').unlink()
+profile = Path('/etc/profile.d/subyard-orca-codex.sh')
+profile.write_text('''if [ "${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
+  codex() { /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/codex_launch.py "$@"; }
+fi
+''')
+PY
+yard init --yes >"$STATE/codex-launch-repair.out" 2>"$STATE/codex-launch-repair.err" \
+  || die 'yard init did not repair the legacy Codex launch environment'
+guest_root test -x /usr/local/libexec/subyard/orca-codex/codex \
+  || die 'yard init omitted the Codex chat launcher'
+guest_root grep -Fq 'export PATH=/usr/local/libexec/subyard/orca-codex:' /etc/profile.d/subyard-orca-codex.sh \
+  || die 'yard init retained the legacy Codex login integration'
+[ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$codex_orca_pid" ] \
+  || die 'Codex launcher repair restarted Orca'
+
 stage 'running stock Orca native Codex chat start and resume'
 chat_helper="$ROOT/config/profiles/orca/tests/e2e/codex-chat.py"
 incus --project "$PROJECT" file push "$chat_helper" "$INSTANCE/tmp/subyard-codex-chat.py" --mode 0644

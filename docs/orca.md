@@ -44,7 +44,9 @@ It shows one combined plan before applying changes. Repeating it converges the s
 configuration and preserves server state.
 
 `yard update` also refreshes the project-registration files of existing Orca
-installations in all running local yards, including named yards. This does not
+installations in all running local yards, including named yards. The refresh includes
+the Codex chat launcher and its login environment, so updated chat permission helpers
+are used by newly started or reopened chats. This does not
 install Orca in other yards, change endpoints or start a stopped Orca service.
 Registration-only changes do not restart the service. Stopped yards are left
 stopped; after starting one, run `yard init` to repair its installed handler before
@@ -254,7 +256,8 @@ inherit the thread's permissions. Native managed requirements still enforce user
 approval and command rules. If the effective permissions cannot be read, the chat
 fails instead of guessing a permission mode.
 
-After updating this integration, run `yard orca up` and start or reopen the chat.
+After updating this integration, start or reopen the chat. For a yard that was stopped
+during the update, run `yard init` after starting it to refresh the launch integration.
 The launcher belongs to the Orca server's login environment; SSH/VS Code launches
 and the installed Codex executable keep their existing behavior. An explicit Orca
 Command override bypasses this launcher and remains subject to native requirements.

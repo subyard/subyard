@@ -376,6 +376,22 @@ WantedBy=timers.target
 UNIT
 }
 
+render_codex_profile() {
+  cat <<CODEX_PROFILE
+if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
+  export PATH=${ORCA_CODEX_BIN%/*}:\$PATH
+  codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
+fi
+CODEX_PROFILE
+}
+
+render_codex_bin() {
+  cat <<CODEX_BIN
+#!/bin/sh
+exec /usr/bin/python3 -B $ORCA_REGISTRATION/codex_appserver.py /usr/local/bin/codex "\$@"
+CODEX_BIN
+}
+
 registration_desired_digest() {
   local version
   version="$(registration_contract_version)" || return 1
@@ -394,6 +410,10 @@ registration_desired_digest() {
     render_discovery_service | sha256sum | awk '{print $1}'
     printf '644 0:0 discovery-timer '
     render_discovery_timer | sha256sum | awk '{print $1}'
+    printf '644 0:0 codex-profile '
+    render_codex_profile | sha256sum | awk '{print $1}'
+    printf '755 0:0 codex-bin '
+    render_codex_bin | sha256sum | awk '{print $1}'
     printf 'enabled discovery-timer\n'
     printf '644 0:0 lock\n'
     printf '644 0:0 marker %s\n' "$version"
@@ -408,12 +428,15 @@ observe_registration_contract() {
   yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
     "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" \
-    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "${names[@]}" <<'YARD'
+    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "${names[@]}" <<'YARD'
 set -euo pipefail
 desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"
 discovery_service="$8"; discovery_timer="$9"; shift 9
+codex_profile="$1"; codex_bin="$2"; shift 2
 if [ ! -e "$executable" ] && [ ! -e "$unit" ] && [ ! -e "$hook" ] &&
-  [ ! -e "$directory" ] && [ ! -e "$marker" ] && [ ! -e "$lock" ]; then
+  [ ! -e "$directory" ] && [ ! -e "$marker" ] && [ ! -e "$lock" ] &&
+  [ ! -e "$codex_profile" ] && [ ! -L "$codex_profile" ] &&
+  [ ! -e "$codex_bin" ] && [ ! -L "$codex_bin" ]; then
   printf '{"state":"absent","actual":"","desired":""}\n'
   exit 0
 fi
@@ -442,11 +465,13 @@ actual="$({
       *) printf 'unexpected %s\n' "${installed##*/}" ;;
     esac
   done
-  for artifact in "$directory/discover" "$discovery_service" "$discovery_timer"; do
+  for artifact in "$directory/discover" "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin"; do
     case "$artifact" in
       "$directory/discover") label=discover ;;
       "$discovery_service") label=discovery-service ;;
-      *) label=discovery-timer ;;
+      "$discovery_timer") label=discovery-timer ;;
+      "$codex_profile") label=codex-profile ;;
+      *) label=codex-bin ;;
     esac
     if [ -f "$artifact" ]; then
       printf '%s %s:%s %s ' "$(stat -c %a "$artifact")" "$(stat -c %u "$artifact")" "$(stat -c %g "$artifact")" "$label"
@@ -485,6 +510,8 @@ stage_registration_contract() {
   render_registration_hook discover >"$ORCA_TMP_DIR/discover"
   render_discovery_service >"$ORCA_TMP_DIR/$ORCA_DISCOVERY_UNIT"
   render_discovery_timer >"$ORCA_TMP_DIR/$ORCA_DISCOVERY_TIMER"
+  render_codex_profile >"$ORCA_TMP_DIR/orca-codex-profile"
+  render_codex_bin >"$ORCA_TMP_DIR/orca-codex-bin"
   chmod 0755 "$sync"
   desired="$(registration_desired_digest)" || die "Orca registration helper contract unavailable"
   version="$(registration_contract_version)" || die "Orca registration helper contract unavailable"
@@ -497,22 +524,26 @@ stage_registration_contract() {
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" \
       "${PROJ[@]}" --mode 0644 >/dev/null
   done
-  for source in "$ORCA_TMP_DIR/discover" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_UNIT" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_TIMER"; do
+  for source in "$ORCA_TMP_DIR/discover" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_UNIT" "$ORCA_TMP_DIR/$ORCA_DISCOVERY_TIMER" \
+    "$ORCA_TMP_DIR/orca-codex-profile" "$ORCA_TMP_DIR/orca-codex-bin"; do
     incus file push "$source" "$YARD_INSTANCE_NAME$ORCA_GUEST_TMP_DIR/${source##*/}" "${PROJ[@]}" --mode 0644 >/dev/null
   done
   yexec bash -se -- "$ORCA_GUEST_TMP_DIR" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$version" \
-    "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" <<'YARD'
+    "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" \
+    "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" <<'YARD'
 set -euo pipefail
 stage="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; version="$6"
 discovery_service="$7"; discovery_timer="$8"
+codex_profile="$9"; codex_bin="${10}"
 install -d -m 0755 "$(dirname "$lock")"
 touch "$lock"
 chmod 0644 "$lock"
 chown 0:0 "$lock"
 exec 9>"$lock"
 flock -x 9
-install -d -m 0755 "$directory" "$(dirname "$hook")" "$(dirname "$discovery_service")"
+install -d -m 0755 "$directory" "$(dirname "$hook")" "$(dirname "$discovery_service")" \
+  "$(dirname "$codex_profile")" "$(dirname "$codex_bin")"
 rm -f -- "$marker"
 for installed in "$directory"/*.py; do
   [ -e "$installed" ] || continue
@@ -523,6 +554,8 @@ install -m 0755 "$stage/orca-sync" "$hook"
 install -m 0755 "$stage/discover" "$directory/discover"
 install -m 0644 "$stage/${discovery_service##*/}" "$discovery_service"
 install -m 0644 "$stage/${discovery_timer##*/}" "$discovery_timer"
+install -m 0644 "$stage/orca-codex-profile" "$codex_profile"
+install -m 0755 "$stage/orca-codex-bin" "$codex_bin"
 temporary="$marker.$$"
 printf '%s\n' "$version" >"$temporary"
 chmod 0644 "$temporary"
@@ -537,8 +570,6 @@ stage_runtime_contract() {
   local ingress="$ORCA_TMP_DIR/orca-ingress"
   local capture="$ORCA_TMP_DIR/orca-capture-ready"
   local sync="$ORCA_TMP_DIR/orca-sync"
-  local codex_profile="$ORCA_TMP_DIR/orca-codex-profile"
-  local codex_bin="$ORCA_TMP_DIR/orca-codex-bin"
   local unit="$ORCA_TMP_DIR/$ORCA_UNIT"
   local source contract_version
   local -a helpers=()
@@ -549,8 +580,6 @@ stage_runtime_contract() {
     || die "Orca guest staging returned an unsafe temporary path"
   local guest_ingress="$ORCA_GUEST_TMP_DIR/orca-ingress"
   local guest_capture="$ORCA_GUEST_TMP_DIR/orca-capture-ready"
-  local guest_codex_profile="$ORCA_GUEST_TMP_DIR/orca-codex-profile"
-  local guest_codex_bin="$ORCA_GUEST_TMP_DIR/orca-codex-bin"
   local guest_unit="$ORCA_GUEST_TMP_DIR/$ORCA_UNIT"
   cat >"$ingress" <<'INGRESS'
 #!/usr/bin/env bash
@@ -599,16 +628,6 @@ CAPTURE
   # not a security boundary against explicit commands or in-session mode changes.
   # An existing function suppresses Orca's own wrapper; codex_launch.py also owns
   # its supported --no-daemon policy and managed-account hook preparation.
-  cat >"$codex_profile" <<CODEX_PROFILE
-if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
-  export PATH=${ORCA_CODEX_BIN%/*}:\$PATH
-  codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
-fi
-CODEX_PROFILE
-  cat >"$codex_bin" <<CODEX_BIN
-#!/bin/sh
-exec /usr/bin/python3 -B $ORCA_REGISTRATION/codex_appserver.py /usr/local/bin/codex "\$@"
-CODEX_BIN
   render_registration_hook >"$sync"
   cat >"$unit" <<UNIT
 [Unit]
@@ -646,17 +665,11 @@ UNIT
     "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$capture" "$YARD_INSTANCE_NAME$guest_capture" \
     "${PROJ[@]}" --mode 0755 >/dev/null
-  incus file push "$codex_profile" "$YARD_INSTANCE_NAME$guest_codex_profile" \
-    "${PROJ[@]}" --mode 0644 >/dev/null
-  incus file push "$codex_bin" "$YARD_INSTANCE_NAME$guest_codex_bin" \
-    "${PROJ[@]}" --mode 0755 >/dev/null
   incus file push "$unit" "$YARD_INSTANCE_NAME$guest_unit" \
     "${PROJ[@]}" --mode 0644 >/dev/null
   stage_registration_contract
   if ! yexec cmp -s "$guest_ingress" "$ORCA_INGRESS" ||
     ! yexec cmp -s "$guest_capture" "$ORCA_CAPTURE" ||
-    ! yexec cmp -s "$guest_codex_profile" "$ORCA_CODEX_PROFILE" ||
-    ! yexec cmp -s "$guest_codex_bin" "$ORCA_CODEX_BIN" ||
     ! yexec cmp -s "$guest_unit" "/etc/systemd/system/$ORCA_UNIT" ||
     ! ingress_active; then
     ORCA_RUNTIME_CHANGED=1
@@ -664,9 +677,6 @@ UNIT
   yexec install -d -m 0755 "$(dirname "$ORCA_CAPTURE")" "$(dirname "$ORCA_SYNC")"
   yexec install -m 0755 "$guest_ingress" "$ORCA_INGRESS"
   yexec install -m 0755 "$guest_capture" "$ORCA_CAPTURE"
-  yexec install -m 0644 "$guest_codex_profile" "$ORCA_CODEX_PROFILE"
-  yexec install -d -m 0755 "${ORCA_CODEX_BIN%/*}"
-  yexec install -m 0755 "$guest_codex_bin" "$ORCA_CODEX_BIN"
   yexec install -m 0644 "$guest_unit" "/etc/systemd/system/$ORCA_UNIT"
   yexec bash -se -- "$ORCA_CONTRACT_DIGEST" "$contract_version" \
     "$ORCA_INGRESS" "$ORCA_CAPTURE" "$ORCA_SYNC" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "/etc/systemd/system/$ORCA_UNIT" "${helpers[@]}" <<'YARD'

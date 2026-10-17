@@ -135,10 +135,11 @@ case "${1:-}" in
         if [[ "${command[0]}" = /tmp/subyard-orca.* ]]; then
           for index in 0 1 2 3 4; do mapped+=("$guest${command[$index]}"); done
           mapped+=("${command[5]}" "$guest${command[6]}" "$guest${command[7]}")
+          mapped+=("$guest${command[8]}" "$guest${command[9]}")
         else
           mapped+=("${command[0]}")
-          for index in 1 2 3 4 5 6 7 8; do mapped+=("$guest${command[$index]}"); done
-          mapped+=("${command[@]:9}")
+          for index in 1 2 3 4 5 6 7 8 9 10; do mapped+=("$guest${command[$index]}"); done
+          mapped+=("${command[@]:11}")
         fi
         export ORCA_TEST_GUEST_ROOT="$guest" ORCA_TEST_STATE_ROOT="$state_root"
         stat() {
@@ -462,10 +463,43 @@ jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/nu
 [ ! -e "$ORCA_TEST_SERVICE" ] || fail 'bootstrap assessment started the service'
 rm -f "$TMP/missing-yard"
 if [ "${1:-}" = --source-observer-fixture ]; then
-  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/up-output"
   observer="$ROOT/config/profiles/orca/resources/orca/handler.sh"
+  for artifact in etc/profile.d/subyard-orca-codex.sh usr/local/libexec/subyard/orca-codex/codex; do
+    target="$ORCA_TEST_GUEST/$artifact"
+    mkdir -p "${target%/*}"
+    printf 'orphaned Codex integration\n' >"$target"
+    "$observer" _runtime-contract observe >"$TMP/codex-orphan.json"
+    jq -e '.state == "stale"' "$TMP/codex-orphan.json" >/dev/null \
+      || fail "runtime contract ignored orphaned $artifact"
+    rm -f "$target"
+  done
+  ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/up-output"
   touch "$TMP/drain-exec-stdin"
   "$observer" _runtime-contract observe >"$2/current.json"
+  restart_count="$(count_log 'systemctl restart subyard-orca.service')"
+  unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
+  cp "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" "$TMP/expected-codex-profile"
+  cp "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex" "$TMP/expected-codex-bin"
+  for artifact in etc/profile.d/subyard-orca-codex.sh usr/local/libexec/subyard/orca-codex/codex; do
+    target="$ORCA_TEST_GUEST/$artifact"
+    cp -p "$target" "$TMP/codex-artifact"
+    for drift in missing content mode; do
+      case "$drift" in
+        missing) rm -f "$target" ;;
+        content) printf '# legacy Codex integration\n' >"$target" ;;
+        mode) chmod 0600 "$target" ;;
+      esac
+      "$observer" _runtime-contract observe >"$TMP/codex-artifact-stale.json"
+      jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-artifact-stale.json" >/dev/null \
+        || fail "runtime contract accepted $drift drift in $artifact with intact helpers"
+      cp -p "$TMP/codex-artifact" "$target"
+    done
+  done
+  rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex"
+  printf '# legacy Codex login integration\n' >"$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh"
+  "$observer" _runtime-contract observe >"$TMP/codex-launch-stale.json"
+  jq -e '.state == "stale" and .actual != .desired' "$TMP/codex-launch-stale.json" >/dev/null \
+    || fail 'runtime contract accepted missing Codex chat launcher and legacy login integration'
   printf '# old helper\n' >>"$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration/reconcile.py"
   pushes="$(cat "$ORCA_TEST_PUSH_COUNTER")"
   stages="$(count_log 'mktemp -d /tmp/subyard-orca.')"
@@ -475,6 +509,18 @@ if [ "${1:-}" = --source-observer-fixture ]; then
   "$observer" _runtime-contract apply source-observer-repair \
     "$(jq -r .actual "$2/stale.json")" "$(jq -r .desired "$2/stale.json")" >"$TMP/applied.json"
   "$observer" _runtime-contract observe >"$2/repaired.json"
+  cmp -s "$TMP/expected-codex-profile" "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" \
+    || fail 'runtime contract repair left the legacy Codex login integration'
+  cmp -s "$TMP/expected-codex-bin" "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex" \
+    || fail 'runtime contract repair omitted the Codex chat launcher'
+  [ "$(stat -c %a "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh")" = 644 ] \
+    || fail 'runtime contract repair changed the Codex login integration mode'
+  [ "$(stat -c %a "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-codex/codex")" = 755 ] \
+    || fail 'runtime contract repair changed the Codex chat launcher mode'
+  [ "$(count_log 'systemctl restart subyard-orca.service')" -eq "$restart_count" ] \
+    || fail 'Codex launcher repair restarted Orca'
+  [ "$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")" = "$unit_hash" ] \
+    || fail 'Codex launcher repair changed the installed service unit'
   exit 0
 fi
 if [ "${1:-}" = --startup-binding-fixture ]; then

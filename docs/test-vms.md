@@ -853,14 +853,15 @@ writes each runtime field.
 For Codex permissions across terminal and Orca launches:
 
 ```sh
-dev/agent-e2e.sh --slot "$slot" --purpose codex-permissions --vm 1 -- \
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose codex-permissions --vm 1 -- \
   env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
   bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 ```
 
 This focused mode installs the native Codex CLI and stock Orca in a disposable yard.
 It verifies managed policy drift refusal, authorized release repair and subsequent
-`yard init` readiness, and exercises runtime approval
+`yard init` readiness, repairs a legacy Codex login environment and missing chat launcher
+without restarting Orca, and exercises runtime approval
 with synthetic model responses and disposable Git repositories. Stock Orca native chat
 starts and resumes a real Codex thread and writes outside the workspace to verify the
 yard sandbox default. It uses no real agent credentials
