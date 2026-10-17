@@ -568,6 +568,31 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             m.update_result(receipt)
             self.assertEqual(receipt["result"], expected)
 
+    def test_external_required_policy_and_optional_execution_status(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            checkout = fixture_checkout(Path(temporary))
+            manifest = checkout / "config/profiles/sample/tests/e2e/external-obligations.json"
+            declaration = {"id": "account", "description": "Live account check", "required_inputs": ["account"]}
+            for required in (None, True, False):
+                item = {**declaration, **({"required": required} if required is not None else {})}
+                manifest.write_text(json.dumps({"schema_version": 1, "obligations": [item]}))
+                inventory = m.external_inventory(checkout)
+                self.assertEqual(inventory, {"sample:account": {**item, "status": "not-run"}})
+                with patch.object(m, "ROOT", checkout), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    report = m.preflight(only=["verify"])
+                self.assertEqual(report["external_prerequisites"][0]["required"], required is not False)
+                for status in ("not-run", "passed", "failed", "unknown", "pending"):
+                    receipt = {"checks": {"verify": {"status": "passed"}},
+                               "external_obligations": {"sample:account": {**item, "status": status}}}
+                    m.update_result(receipt)
+                    self.assertEqual(receipt["result"], "passed" if status == "passed" or
+                                     status == "not-run" and required is False else "incomplete")
+                    self.assertEqual(receipt["external_obligations"]["sample:account"]["status"], status)
+            for required in (0, 1, "false", [], {}):
+                manifest.write_text(json.dumps({"schema_version": 1, "obligations": [{**declaration, "required": required}]}))
+                with self.subTest(required=required), self.assertRaises(ValueError):
+                    m.external_inventory(checkout)
+
     def test_explicit_external_deferral_preserves_execution_and_candidate_binding(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

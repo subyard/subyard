@@ -7,7 +7,8 @@
       "required_inputs": [
         "Authorized test model-provider account",
         "Prepared Hermes application configuration"
-      ]
+      ],
+      "required": false
     }
   ]
 }

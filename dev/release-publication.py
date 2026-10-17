@@ -520,6 +520,8 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
         if "deferral" in result:
             a.validate_external_deferral(result, identity_hash(identity))
             external[name] = {"status": "not-run", "deferral": result["deferral"]}
+        elif a.optional_external_not_run(result):
+            external[name] = {"status": "not-run"}
         else:
             if result["status"] != "passed" or not re.fullmatch(r"[0-9a-f]{64}", result.get("evidence_sha256", "")):
                 raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
@@ -614,9 +616,12 @@ def validate_attestation(document, identity, root):
                         or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100
                         or not re.fullmatch(r"[0-9a-f]{64}", item["base_fingerprint"])):
                         raise ValueError("invalid physical acceptance environment")
-    if set(document["external_obligations"]) != set(a.external_inventory(root)):
+    external = a.external_inventory(root)
+    if set(document["external_obligations"]) != set(external):
         raise ValueError("external obligation attestation inventory mismatch")
-    for result in document["external_obligations"].values():
+    for name, result in document["external_obligations"].items():
+        if external[name].get("required", True) is False and result == {"status": "not-run"}:
+            continue
         if "deferral" in result:
             if set(result) != {"status", "deferral"}:
                 raise ValueError("invalid external deferral attestation")
@@ -638,7 +643,10 @@ def verify_owned_ref(github, tag, marker, commit, ref=None):
     return ref
 
 
-def report_profile_deferrals(document):
+def report_unrun_checks(document):
+    optional = [name for name, result in document["external_obligations"].items() if result == {"status": "not-run"}]
+    if optional:
+        print("PUBLICATION external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
     if document.get("profile_deferrals"):
         print("PUBLICATION profile_deferred=" + ",".join(document["profile_deferrals"])
               + " status=not-run execution=operator-deferred", flush=True)
@@ -651,7 +659,7 @@ def publish_remote(github, prepared, document, root):
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
-    report_profile_deferrals(document)
+    report_unrun_checks(document)
     for name in document.get("operator_acceptances", []):
         print(f"PUBLICATION operator_accepted={name} native_status=failed exit_code={document['checks'][name]['exit_code']}", flush=True)
     deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
@@ -900,7 +908,7 @@ def main():
             document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance], args.defer_profile,
                                    args.deferral_reason, args.deferral_authorization_reference)
             validate_attestation(document, identity, output / "source")
-        report_profile_deferrals(document)
+        report_unrun_checks(document)
         deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
         if deferred:
             print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)

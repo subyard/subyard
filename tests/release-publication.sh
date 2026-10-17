@@ -6,6 +6,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import base64
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import tempfile
 import unittest
 import zlib
 from unittest.mock import patch
+from contextlib import redirect_stdout
 
 ROOT = Path(sys.argv[1])
 sys.argv = [sys.argv[0]]
@@ -24,7 +26,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory, lanes=()):
+def fixture(directory, lanes=(), external_required=None):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -39,8 +41,10 @@ def fixture(directory, lanes=()):
     if lanes:
         (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
             {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
-    (profile / "external-obligations.json").write_text(json.dumps({"schema_version": 1, "obligations": [
-        {"id": "fixture-external", "description": "fixture obligation", "required_inputs": ["fixture account"]}]}))
+    external = {"id": "fixture-external", "description": "fixture obligation", "required_inputs": ["fixture account"]}
+    if external_required is not None:
+        external["required"] = external_required
+    (profile / "external-obligations.json").write_text(json.dumps({"schema_version": 1, "obligations": [external]}))
     (root / "dev/package-engine.sh").write_text("#!/bin/bash\necho 'must not repackage'; exit 99\n")
     prepared = directory / "prepared"
     prepared.mkdir()
@@ -71,7 +75,7 @@ def fixture(directory, lanes=()):
     return root, prepared, identity
 
 
-def accepted(directory, prepared, identity):
+def accepted(directory, prepared, identity, external_passed=True):
     output = directory / "acceptance"
     with patch.object(m.a, "execution_environment", return_value={"system": "Linux", "machine": "x86_64", "go": "go version fixture"}):
         m.a.prepare(output, identity["version"], prepared)
@@ -85,8 +89,9 @@ def accepted(directory, prepared, identity):
                 "execution_environment": receipt["environment"]}
             if m.a.is_live(name):
                 receipt["checks"][name]["environments"] = [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]
-    for item in receipt["external_obligations"].values():
-        item.update({"status": "passed", "evidence_sha256": "c" * 64})
+    if external_passed:
+        for item in receipt["external_obligations"].values():
+            item.update({"status": "passed", "evidence_sha256": "c" * 64})
     m.a.save(output, receipt)
     return output, root, m.attestation(output, identity)
 
@@ -248,6 +253,93 @@ class Contracts(unittest.TestCase):
         self.assertTrue(self.publish()["immutable"])
         self.assertEqual(self.github.assets, before)
         self.assertFalse(any(method == "DELETE" for _, method in self.github.calls))
+
+    def test_optional_external_not_run_publishes_without_credentials(self):
+        directory = self.directory / "r123-a1"
+        directory.mkdir()
+        _, prepared, identity = fixture(directory, external_required=False)
+        output, frozen, document = accepted(directory, prepared, identity, external_passed=False)
+        name = "sample:fixture-external"
+        self.assertEqual(document["external_obligations"], {name: {"status": "not-run"}})
+        self.assertEqual(json.loads((output / "receipt.json").read_text())["result"], "passed")
+        github = FakeGitHub(identity)
+        captured = io.StringIO()
+        with patch.object(m, "GitHub", return_value=github), \
+             patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+             patch.object(m.a, "execute", side_effect=AssertionError("already passed")), \
+             patch.object(m.signal, "signal"), redirect_stdout(captured), \
+             patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
+                                       "accept", "--candidate", identity["candidate_id"], "--slots", "1"]):
+            self.assertEqual(m.main(), 0)
+        self.assertIn("external_optional_not_run=" + name, captured.getvalue())
+        self.assertEqual(json.loads((directory / "attestation.json").read_text())["external_obligations"],
+                         {name: {"status": "not-run"}})
+        self.assertTrue(m.publish_remote(github, prepared, document, frozen)["immutable"])
+        # The same strict schema derives optionality from the frozen source.
+        self.assertEqual(document["schema_version"], 1)
+        for invalid_result in ({"status": "failed"}, {"status": "unknown"}, {"status": "pending"},
+                               {"status": "not-run", "evidence_sha256": "c" * 64},
+                               {"status": "not-run", "exit_code": 1},
+                               {"status": "not-run", "required": False}):
+            invalid = copy.deepcopy(document)
+            invalid["external_obligations"][name] = invalid_result
+            refusing = FakeGitHub(identity)
+            with self.subTest(result=invalid_result), self.assertRaises(ValueError):
+                m.publish_remote(refusing, prepared, invalid, frozen)
+            self.assertFalse(any(method in ("POST", "PATCH", "DELETE") for _, method in refusing.calls))
+        for key in (name, "extra:check"):
+            invalid = copy.deepcopy(document)
+            if key == name:
+                del invalid["external_obligations"][key]
+            else:
+                invalid["external_obligations"][key] = {"status": "not-run"}
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                m.validate_attestation(invalid, identity, frozen)
+        # Optional external checks cannot waive local, physical or profile gates.
+        for check in ("verify", "p0-release-smoke", "profile:sample"):
+            invalid = copy.deepcopy(document)
+            invalid["checks"][check] = {"status": "not-run"}
+            with self.subTest(check=check), self.assertRaises(ValueError):
+                m.validate_attestation(invalid, identity, frozen)
+        _, receipt = m.a.load_bound(output)
+        original = copy.deepcopy(receipt)
+        for mutation in ({"status": "failed"}, {"status": "unknown"}, {"status": "pending"},
+                         {"status": "not-run", "evidence_sha256": "c" * 64}, {"required": True},
+                         {"required": 0}, {"required": None},
+                         {"deferral": {"reason": "fixture", "authorization_reference": "fixture",
+                                       "candidate_sha256": m.identity_hash(identity)}, "exit_code": 1}):
+            receipt = copy.deepcopy(original)
+            receipt["external_obligations"][name].update(mutation)
+            m.a.save(output, receipt)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                m.attestation(output, identity)
+        receipt = copy.deepcopy(original)
+        del receipt["external_obligations"][name]["required"]
+        m.a.save(output, receipt)
+        with self.assertRaisesRegex(ValueError, "external obligations changed"):
+            m.attestation(output, identity)
+        # Frozen-source policy cannot be changed underneath its candidate identity.
+        manifest = frozen / "config/profiles/sample/tests/e2e/external-obligations.json"
+        contents = json.loads(manifest.read_text())
+        contents["obligations"][0]["required"] = True
+        manifest.write_text(json.dumps(contents))
+        with self.assertRaisesRegex(ValueError, "source/repository mismatch"):
+            m.publish_remote(FakeGitHub(identity), prepared, document, frozen)
+
+    def test_historical_external_manifest_remains_required(self):
+        name = "sample:fixture-external"
+        document = copy.deepcopy(self.document)
+        document["external_obligations"][name] = {"status": "not-run"}
+        with self.assertRaisesRegex(ValueError, "external obligation evidence"):
+            m.validate_attestation(document, self.identity, self.frozen)
+        _, receipt = m.a.load_bound(self.output)
+        original = copy.deepcopy(receipt)
+        for result in ({"status": "not-run"}, {"status": "not-run", "required": False}):
+            receipt = copy.deepcopy(original)
+            receipt["external_obligations"][name] = {**m.a.external_inventory(self.frozen)[name], **result}
+            m.a.save(self.output, receipt)
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                m.attestation(self.output, self.identity)
 
     def test_reviewed_transfer_survives_attestation_and_rejects_remote_provenance_drift(self):
         target = self.directory / "transferred"

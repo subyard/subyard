@@ -348,7 +348,7 @@ Check prerequisites before packaging or acquiring a VM, then freeze the final ca
 
 ```sh
 python3 dev/release-acceptance.py preflight --slots 1 2 3 --types subyard-pair android-test
-python3 dev/release-acceptance.py prepare --version 0.14.1 --output .build/release-acceptance
+python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/release-acceptance
 python3 dev/release-acceptance.py run --output .build/release-acceptance --slots 1 2 3
 ```
 
@@ -376,10 +376,8 @@ archive is removed after extraction. Neither the source copy nor the VM payload 
 repository or index. Every controller receives the same checksum-verified transport archive; profile fixtures
 execute the packaged engine and runtime assets. The core smoke installs those assets through the
 public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck, real local adapters and updater compatibility precede physical checks.
-Process coverage is an optional diagnostic (`dev/process-coverage.sh`); ordinary core
-and profile process contracts remain in `make verify`. New receipts retain its inventory
-entry as `not-applicable`; older frozen receipts retain their original required status
-and command-bound evidence, including import and publication validation.
+Process coverage (`dev/process-coverage.sh`) is optional; ordinary process contracts remain in
+`make verify`. Frozen receipts retain their recorded coverage requirement and command binding.
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
 attribution while executing controllers and guest payloads from the frozen candidate.
 
@@ -418,8 +416,9 @@ Local evidence also requires its recorded execution environment to match.
 profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
 remain identical. This exception never applies to local gates or continuous release smoke.
 
-After reviewing changed inputs, use the separate per-check transfer contract.
-It accepts inherited coverage, never execution on the new candidate:
+#### Reviewed evidence transfers
+
+After reviewing changed inputs, transfer per-check evidence as inherited coverage:
 
 ```sh
 python3 dev/release-acceptance.py transfer --output NEW --from OLD --check CHECK --review REVIEW.json
@@ -453,58 +452,29 @@ controller log must retain the VM base, successful cleanup of every VM and lease
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
 for direct controllers and stays unknown; any observed failed phase rejects the transfer.
-The rich manual launcher contract records `cwd`, `argv`, `source_fingerprint`,
-`runtime_sha256`, `bundle_sha256`, `acceptance_script_sha256` and, when measured,
-`launched_at_utc`. Original raw launch records containing `cwd`, `argv` and valid timezone-aware
-`started_at` are also supported. At transfer application, their original checksum-bound bundle
-must contain exactly the frozen public source and candidate metadata/complete release asset
-inventory. Archive headers are read incrementally; directory members must be unique ancestors
-of that inventory. Source bytes and executable modes, including the actual check script,
-must reproduce the original fingerprint; runtime and metadata bytes must match the verified receipt.
-No hash fields are added to the original launch. Partial, contradictory or malformed rich bindings
-are rejected. A valid raw `started_at` supplies a UTC launch time; invalid or contradictory times
-and malformed supplied monotonic clocks reject the transfer, including rich launches without
-an optional timestamp. Its actual command must be the exact check plus `--slot N`, inside the
-existing finite `timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`
-and the three declared controller/transport assignments. Other wrappers or check-scope mappings
-are rejected. Whole-run duration and independently measured execution environment remain
-unknown when this launcher did not record them; preparation environment is kept separately.
-The native tool's final-poll duration is never presented as whole-run duration.
+Rich launch records contain `cwd`, `argv`, `source_fingerprint`, `runtime_sha256`, `bundle_sha256`,
+`acceptance_script_sha256` and optional `launched_at_utc`. Original raw records with `cwd`, `argv`
+and timezone-aware `started_at` are also supported. Their checksum-bound bundle must exactly match
+the frozen source, executable modes, candidate metadata and complete release inventory; do not
+add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
+The command must be the exact check plus `--slot N`, in the supported
+`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR` and the three
+controller/transport assignments. Unmeasured duration and execution environment stay unknown;
+preparation environment and final-poll duration cannot substitute for them.
 
-Transfer copies and hashes the original review, receipt and logs, plus standalone terminal
-and launcher artifacts when applicable. Subsequent loads revalidate them and the exact target.
-Receipts distinguish `coverage.executed` from `coverage.inherited`; unaffected pending gates
-stay pending. Tampered, failed, incomplete, wrong-command or unauthorized evidence is rejected.
-Publication retains sanitized tested/target identities, original artifact hashes, actual and
-declared commands, environment provenance and the reviewed authorization. It uploads no raw
-logs, native objects or private evidence paths.
+Transfer retains and revalidates the review, original evidence and exact target. Receipts distinguish
+`coverage.executed` from `coverage.inherited`; pending gates stay pending. Publication sends only
+sanitized identities, hashes, command/environment provenance and authorization.
 
-Profile-owned `tests/e2e/external-obligations.json` declares checks requiring an authorized external
-application/account. The receipt distinguishes these from reproducible VM results and initially
-marks them `not-run`; synthetic credentials do not prove external API acceptance. Missing external
-evidence leaves the overall result incomplete even when `reproducible_result` is `passed`. Record
-actual external check evidence and its SHA-256 in the corresponding receipt entry only after that
-check passes on the same candidate. Do not put credentials or private payloads in receipts.
+#### External checks and publication
 
-An explicitly authorized external deferral can be recorded with `defer-external --output DIR
---obligation PROFILE:ID --reason PUBLIC_REASON --authorization-reference PUBLIC_REFERENCE`.
-Repeat `--obligation` for each declared external check authorized for that reason. The collector
-binds the declaration to the frozen candidate and retains execution `status: not-run`; it never
-creates passing evidence. `result` stays `incomplete` and `run`/release `accept` still exit nonzero,
-even when `reproducible_result` is `passed`. Unknown IDs, missing reason or authorization,
-failed checks and changed bindings reject the declaration. This cannot defer local or VM gates.
-The [publication contract](reference/release-publication.md) describes the explicit exception
-for these bound external deferrals; publication defaults to actual passing external evidence.
+The [external-check contract](reference/release-publication.md#external-checks) defines profile-owned
+requirements, optional `not-run` results, actual PASS evidence and explicit required-check deferrals.
+These do not replace required local or VM gates.
 
-Acceptance receipts and logs stay in the local output directory while the task is active and are not
-committed to Git. Follow the [task evidence and cleanup policy](#evidence-handoff-and-cache-cleanup)
-before removing completed outputs. For actual publication, use the
-[release preparation and publication commands](reference/release-publication.md): their `accept`
-entrypoint imports exact CI assets without repackaging and retains the same collector gates.
-Release publication requires the trusted operator's complete sanitized acceptance attestation,
-including physical VM results and actual external results or explicitly authorized external
-deferrals. Cross-compiled assets retain their separate
-build checks.
+Keep receipts/logs local and follow the [cleanup policy](#evidence-handoff-and-cache-cleanup) before
+removing them. For publication, use the [release flow](reference/release-publication.md), which
+imports exact CI assets and submits bound acceptance without repackaging.
 
 GitHub CI runs the full core gate, profile host-free checks, warning-level ShellCheck and
 `bash tests/real-host/adapter-contracts.sh` in one `verify` job on every branch push and pull request;

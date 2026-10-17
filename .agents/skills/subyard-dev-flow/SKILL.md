@@ -81,13 +81,14 @@ coordinator, and do not create or close shared task files or start another full 
   only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted
   lanes cannot adequately cover. Explain that reason before the expensive run; availability of
   VMs alone does not justify using them.
-- Before publishing a runtime release, run the fresh release smoke
-  (`dev/e2e/p0-acceptance.sh --slot N`) and release compatibility checks documented in
-  [Development](../../../docs/development.md), plus the declared acceptance checks of all shipped
-  profiles against the same candidate. A core-only pass is not release acceptance; missing required
-  profile results leave it incomplete. This publication gate does not apply to every
-  development edit. Existing CI/merge checks remain unchanged; full P0 is a separate risk-based
-  or explicitly requested check, not a synonym for release smoke.
+- Before publishing a runtime release, run fresh release smoke
+  (`dev/e2e/p0-acceptance.sh --slot N`), the full release compatibility check in
+  [Development](../../../docs/development.md), and all shipped-profile acceptance on the same candidate.
+  Required local/VM gates remain mandatory; optional live checks may stay `not-run` under the
+  [release contract](../../../docs/reference/release-publication.md#external-checks).
+  Failed or invalid external results still block publication. These gates do not apply to every edit;
+  existing CI/merge checks are unchanged. Full P0 remains separate from release smoke and risk-selected
+  or explicitly requested.
 - Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
   risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
   the full lifecycle or release gate passed.
@@ -187,8 +188,8 @@ Release publication retains its separate gates.
 
 If implementation or required validation steps remain, report **partial** and continue
 executable work. If none can proceed without missing input or access, report **blocked**
-and name what is needed. Required external acceptance checks remain pending until their
-results arrive. Moving an in-scope step to another file or ending a session does not complete it.
+and name what is needed. Report pending required checks and optional `not-run` checks accurately.
+Moving an in-scope step to another file or ending a session does not complete it.
 
 Report what changed, what was actually checked, and the operator handoff. A component or
 host-free pass proves only that scope; it does not prove the planned yard lifecycle

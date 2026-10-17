@@ -822,21 +822,13 @@ feature-release prerequisites and required release gates stand.
 
 ## Evidence and acceptance limits
 
-Acceptance proves the specific candidate and boundary exercised. Host-free checks do not prove
-installed lifecycle; packaging does not prove actual immutable publication; VM tests do not
-prove real Desktop/VPN/external account behavior. Native ARM checks run in CI. Core plus all
-shipped-profile same-candidate gates remain required for runtime publication; limited current VM
-checks do not replace that gate. See [Testing](../testing.md), [Test VMs](../test-vms.md), and
-[Development](../development.md).
-
-External profile acceptance is separately deferred for GitHub App live API, Hermes live provider,
-OpenClaw staging gateway and OpenClaw QA credential broker. Reproducible checks keep those four declared
-obligations unpassed until their own authorized external evidence is recorded for the same candidate.
-
-Choose the smallest allocation that proves the behavior: one standard VM for independent
-single-host checks, a pair for checks that coordinate two hosts, and the dedicated larger guest
-for Android acceptance. A passing focused check does not establish full lifecycle acceptance
-or external-account behavior. The owning guide and profile declare the required evidence.
+Acceptance proves only the candidate and boundary exercised. Host-free checks do not prove installed
+lifecycle, packaging does not prove immutable publication, and VMs do not prove real Desktop/VPN or
+external-account behavior. Skipped external checks remain `not-run` without implying a PASS.
+Required core/profile VM gates and optional live checks follow the
+[release contract](release-publication.md); choose checks using
+[Subyard dev-flow](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk) and allocation
+using the [VM allocation guide](../testing.md#choose-the-vm-allocation).
 
 Security exemptions must be current graph-specific triage, never copied permanently from
 historical counts. Client-only Incus import does not make daemon-side findings runtime client

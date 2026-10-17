@@ -1,29 +1,15 @@
 # Release preparation, acceptance and publication
 
-A stable version is reserved only by the final publication operation. Preparation and
-acceptance failures create no `vMAJOR.MINOR.PATCH` ref and permit a corrected commit to use
-the same version. Existing releases, installer names, manifests, provenance and updater
-verification remain unchanged.
+A stable version is reserved only by final publication. Preparation or acceptance failures
+create no `vMAJOR.MINOR.PATCH` ref, so a corrected commit can use the same version.
 
 ## Operator commands and retained state
 
-Run from the managed development checkout with Python 3, GitHub CLI authentication and
-the ordinary acceptance prerequisites. The dispatch workflows must already be on the
-repository's default branch. The source commit must contain the release tooling.
-
-Keep release repairs on a dedicated `release/X.Y.Z` branch. The workflow ref and source
-branch are separate: preparation pins the full source commit below, while dispatch
-workflows can remain on the default branch. Creating the release branch does not
-authorize committing or pushing changes.
-
-Before requesting a repair commit/push, finish every available required worktree check
-from the [release validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk),
-including all shipped profile suites.
-`make verify`, the core runner and the shared profile runner stop on failure. Repair and
-resume their remaining checks; run independent gates separately so one failure does not
-hide later failures. A focused regression pass is insufficient for this handoff. Exact-SHA
-CI and acceptance of its frozen assets remain required after the commit is pushed;
-unavailable access and explicitly authorized release exceptions stay visible as incomplete.
+Run from the managed development checkout with Python 3, authenticated GitHub CLI and the
+[acceptance prerequisites](../testing.md#one-release-candidate). The dispatch workflows must exist
+on the default branch and selected workflow ref; the source commit must contain the release tooling.
+Choose worktree checks using the
+[validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 
 ```sh
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
@@ -31,52 +17,54 @@ dev/release.sh accept --candidate rRUN_ID-aATTEMPT --slots 1 2 3
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT
 ```
 
-`prepare` requires a full lowercase 40-character commit SHA and a stable version. It
-starts Release preparation through `workflow_dispatch`, with that SHA pinned in every
-checkout. It keeps native ARM64, both native Paseo builds, full core/profile host-free
-verification, CLI freshness, complete profile acceptance inventory, local adapters and
-the complete released-caller compatibility matrix. Final-version runtime files are built
-once per preparation attempt; publication never renames or rebuilds them. A successful
-run uploads an immutable attempt-specific artifact containing the public source archive,
-complete exact release inventory and SHA-256 identity manifest. The artifact is retained
-for 90 days. `CANDIDATE` prints its ID and local directory; no stable tag is created.
+`prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
+runs native ARM64 and Paseo builds, core/profile host-free checks, CLI freshness, profile inventory,
+local adapters and the complete released-caller compatibility matrix. It builds final-version assets
+once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
+`CANDIDATE` prints the attempt-specific ID and local directory. Publication never rebuilds these assets.
 
-The default directory `.build/release-publication/rRUN_ID-aATTEMPT/` contains
-`prepared/{source.tar.gz,identity.json,assets/}`, a copied `identity.json`,
-`acceptance/{source/,candidate-bundle.tar.gz,receipt.json,events.jsonl,*.log}` and, once
-complete, `attestation.json` and `publication.json`. Dispatch requests are durable under
-`.build/release-publication/requests/`. `--state-dir DIR` before the subcommand selects a
-separate local root; `--workflow-ref BRANCH` selects the branch containing the workflow,
-without changing the source SHA. `--repository OWNER/REPO` supports repository fixtures
-or a fork containing the same workflows. Preserve the whole candidate directory when
-moving accepted evidence to another operator machine.
+The default `.build/release-publication/rRUN_ID-aATTEMPT/` directory holds:
 
-`accept` downloads the exact successful run/attempt artifact if it is absent locally,
-then imports its frozen sources and assets into the existing acceptance collector without
-packaging again. It retains the original CI provenance SHA, complete release hashes,
-source fingerprint, runtime identity, command/log bindings, execution environment and
-all profile inventories. The local gates precede fresh release smoke and every shipped
-profile lane on leased disposable VMs. The managed invoking checkout still supplies lease
-attribution. A repeat runs only pending checks; workers and transport use the existing
-collector contracts. SIGINT/SIGTERM drain owned workers and retain interrupted evidence.
-An unavailable environment or missing result stays incomplete.
+- `prepared/{source.tar.gz,identity.json,assets/}` and a copied `identity.json`;
+- `acceptance/{source/,candidate-bundle.tar.gz,receipt.json,events.jsonl,*.log}`;
+- `attestation.json` and `publication.json` when generated.
 
-Before allocating, use the [collector preflight](../testing.md#one-release-candidate) and
-native VM status to choose capacity. For a downloaded candidate, use
-`python3 dev/release-acceptance.py preflight --output .build/release-publication/ID/acceptance
---slots 1 2 3`. The ordinary collector `run --only CHECK`, `--first CHECK` and other
-selectors can target this same acceptance directory. Source/artifact changes require a
-new preparation candidate. Do not amend a frozen tree or alter its assets.
+Dispatch requests persist under `.build/release-publication/requests/`. Global `--state-dir DIR`
+selects another root; `--repository OWNER/REPO` selects a fork or fixture. `--workflow-ref BRANCH`
+selects the dispatch workflow independently of the source SHA. Preserve the whole candidate
+directory when moving evidence between operator machines.
 
-External-service obligations remain required. As in the existing collector, after an
-actual authorized external check passes on this same candidate, record `status: passed`
-and `evidence_sha256` in that obligation's receipt entry. This hash identifies retained
-actual external evidence; synthetic VM credentials do not establish external acceptance.
-Keep credentials and private payloads out of receipts. An all-green reproducible subset
-with external results missing remains incomplete and cannot publish.
+`accept` imports the successful preparation into the collector without repackaging. Local gates
+precede fresh release smoke and every shipped-profile lane on leased disposable VMs. A repeat
+runs only pending checks; SIGINT/SIGTERM drain workers and retain interrupted evidence.
+Unavailable environments and missing required results stay incomplete.
 
-When the operator explicitly authorizes deferring named external obligations for this release,
-record each exact declared ID against the already-frozen candidate:
+Before allocating, use the [collector preflight](../testing.md#one-release-candidate) and native
+VM status. Collector selectors can target the downloaded candidate's acceptance directory:
+
+```sh
+python3 dev/release-acceptance.py preflight \
+  --output .build/release-publication/ID/acceptance --slots 1 2 3
+```
+
+Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
+or its assets; the pinned candidate determines available tooling and validation rules.
+
+## External checks
+
+The frozen profile-owned `tests/e2e/external-obligations.json` manifests determine external gates.
+Boolean `required` defaults to `true` when absent. The shipped GitHub App live API, Hermes provider,
+OpenClaw staging gateway and QA broker checks declare `required: false`: they may remain `not-run`
+without real credentials or external staging. No deferral is needed; `accept` exits zero once its
+required gates pass. Acceptance and publication report skipped IDs as `external_optional_not_run`.
+
+Local, core and all shipped-profile VM gates remain required, including OpenClaw's synthetic staging
+safety/lifecycle fixture. Synthetic checks do not prove live API/provider behavior or deployed Convex
+allocation, concurrency and exhaustion. Failed, unknown or malformed external results block
+publication; skipped entries cannot carry execution evidence. After an actual same-candidate PASS,
+record `status: passed` and its `evidence_sha256` in the receipt. Keep secrets out of receipts.
+
+Missing required external results remain incomplete. For an explicitly authorized deferral:
 
 ```sh
 python3 dev/release-acceptance.py defer-external \
@@ -86,81 +74,38 @@ python3 dev/release-acceptance.py defer-external \
   --authorization-reference 'Public reference to the operator authorization'
 ```
 
-Repeat `--obligation` for checks covered by the same reason and authorization. Keep both strings
-public and free of credentials or private details. The declaration is bound to the exact preparation
-identity (including candidate ID, pinned commit, source and all asset hashes). Its receipt entry stays
-`status: not-run`, with a separate `deferral` containing the reason, authorization reference and
-candidate identity hash. No actual evidence hash or PASS is invented. The complete `result` remains
-`incomplete`; the collector and `accept` keep their nonzero exit status. By itself, a valid deferral permits
-`publish` only when `reproducible_result` is `passed` and every other external obligation has actual
-passing evidence or its own valid authorization. Publication prints the deferred IDs and `execution=not-run`.
-
-There are no default deferrals. Unknown IDs, missing/blank reason or authorization, failed actual
-checks, changed declarations and candidate bindings reject this path. External deferrals cannot
-waive local, physical, core or shipped-profile checks; the separate publication-only profile
-decisions below preserve their original evidence. Existing candidates prepared before
-this tooling change cannot use the exception: publication checks out the pinned candidate code,
-so commit the change and prepare a new candidate before using it. Never edit an older frozen source.
+Repeat `--obligation` for checks sharing a public reason and authorization. This candidate-bound
+declaration preserves `not-run`; collector acceptance stays incomplete and exits nonzero.
+Publication permits a valid deferral when all other requirements are met. Unknown IDs, blank
+authorization, failed checks or changed bindings are refused. This cannot waive local or VM gates.
 
 ## Acceptance handoff and cross-machine serialization
 
-`publish` loads and verifies the frozen collector receipt, source, transport, asset
-inventory, hashes and passing logs before dispatching Release publication. It requires
-all declared checks (passing evidence or the explicit publication-only profile decisions below)
-and external obligations (actual passes or authorized deferrals), matching command provenance and local
-execution environments. It sends only a sanitized attestation: candidate and identity
-hash, receipt hash, complete expected check IDs/statuses/log hashes, public execution and
-VM base identities, and external evidence hashes or the bound public deferral declarations.
-The receipt hash includes those declarations. No raw acceptance receipt, controller
-logs, credentials or VM payloads are uploaded to GitHub.
+`publish` verifies the frozen receipt, source, transport, complete inventories, hashes, commands,
+logs and execution environments. It sends a sanitized attestation containing candidate/receipt
+identities, check statuses and evidence hashes, public VM identities and any explicit decisions.
+Raw receipts, logs, credentials and VM payloads stay local.
 
-This attestation is a statement by the authenticated, trusted release operator. GitHub
-validates its complete inventory, statuses and candidate binding; GitHub does not
-independently execute or inspect local physical/external checks. Native CI evidence is
-verified separately using the exact successful preparation run and attempt. The worker
-checks out the artifact's commit, verifies its public source fingerprint and publishes
-its exact assets. Branch movement cannot change the candidate.
+GitHub validates this statement by the trusted operator; it does not rerun local physical or external
+checks. It separately verifies the successful preparation run/attempt, checks out the pinned commit,
+verifies its source fingerprint and publishes its exact assets. Branch movement cannot change the
+candidate. [Reviewed evidence transfers](../testing.md#reviewed-evidence-transfers) retain the actual tested
+candidate and distinguish inherited coverage from current execution; affected scenarios need fresh checks.
 
-Explicit [reviewed evidence transfers](../testing.md#one-release-candidate) retain the
-candidate that was actually tested and distinguish inherited coverage from current execution.
-An attestation containing transfers uses schema version 2 with an exact `reviewed_transfers`
-check-ID list and complete sanitized per-check transfer provenance. Remote validation checks
-that inventory, the target preparation identity, original hashes, declared/actual command,
-environment provenance and nonblank scope, reason and review reference. Ordinary attestations retain
-strict schema version 1; transfer fields cannot be silently downgraded to that schema.
-The review establishes the unchanged scope. A transfer does not waive
-new or affected scenarios, invent an old collector PASS or replace current preparation.
-The pinned publication candidate must contain this tooling before using schema version 2;
-never amend an older frozen snapshot to add support.
+Attestation encoding and schema selection are automatic. Compressed and legacy plain inputs have
+a 1 MiB uncompressed limit; complete dispatch inputs must fit GitHub's
+[65,535-character limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
+Malformed, oversized or hash-mismatched inputs are rejected before remote mutation.
 
-Publication transports the complete canonical attestation in a `subyard-attestation-zlib-v1`
-JSON envelope inside the workflow's existing outer Base64 input. The envelope contains exactly
-`transport`, `uncompressed_bytes`, `sha256` and a Base64 `payload` holding one zlib stream.
-Its size and hash describe the uncompressed original canonical JSON; durable
-`attestation_sha256` continues to identify that original document. Compression preserves every
-check, status, identity, inventory and reviewed transfer field. The unchanged initial workflow
-checkout decodes the outer Base64 JSON and persists the envelope; the pinned candidate's
-`publish-ci` expands it with a 1 MiB uncompressed limit before running the existing complete
-attestation validators. Plain JSON attestations from earlier workflow inputs remain supported
-within that limit. Malformed, truncated, trailing, oversized or hash-mismatched compressed data
-refuses publication before remote mutation.
+All publication runs share one repository-wide concurrency group with `cancel-in-progress: false`
+and `queue: max`, preserving queued retries across operator machines and versions. Local locks
+protect local state only. Neither workflow reacts to tag pushes.
 
-The complete serialized dispatch inputs, including candidate and durable request ID, must fit
-GitHub's [65,535-character inputs limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
-An oversized request is refused before dispatch intent or a remote request. Transport does not
-change trusted operator authority, request recovery, permissions or worker checkout behavior.
-The pinned candidate must include envelope decoding before using compressed publication inputs;
-prepare a new candidate rather than modifying an older frozen snapshot.
+## Explicit publication exceptions
 
-An operator can explicitly accept a known terminal failure of one exact declared runnable
-profile check for one exact preparation candidate. This publication-only decision requires
-a public reason, authorization reference and separate repair reference. It does not change
-collector receipts, native outcomes, passing-evidence transfers or external deferrals. The
-collector and `accept` retain their original failed/incomplete results. Core, packaging,
-physical smoke, other profile checks and external obligations keep their normal requirements;
-there is no default decision or automatic waiver.
-
-Supply a local JSON declaration explicitly when publishing:
+An operator may accept a known terminal failure of one exact runnable profile check for one
+candidate. This publication-only decision preserves the failed collector result and requires
+a public reason, authorization and repair reference:
 
 ```sh
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT \
@@ -173,38 +118,22 @@ The declaration has exactly these fields:
 | --- | --- |
 | `schema_version` | Integer `1` |
 | `check` | Exact runnable `profile:NAME` or `profile:NAME/LANE` from the frozen inventory |
-| `target` | Complete target preparation `identity.json`, including candidate, version, commit and every asset hash |
-| `tested` | Original frozen receipt's complete public transfer-candidate identity: version, source/runtime/bundle hashes, runtime filename, complete release inventory and candidate identity hash |
-| `command` | Exact normalized declared check command (`release_acceptance.command_identity`) |
+| `target` | Complete target preparation `identity.json` |
+| `tested` | Original receipt's complete identity from `release_acceptance.transfer_candidate` |
+| `command` | Exact normalized declared command from `release_acceptance.command_identity` |
 | `decision` | Exactly `reason`, `authorization_reference`, `repair_reference`; nonblank public English strings without credentials or private paths |
 | `source` | Exactly local frozen acceptance `output` path and original `receipt_sha256` |
-| `artifacts` | Exactly `native`, `launch`, `timing`, `log`; each has a local `path` and its original `sha256` |
+| `artifacts` | Exactly `native`, `launch`, `timing`, `log`; each with local `path` and original `sha256` |
 
-Paths resolve relative to the declaration. Repeat `--operator-acceptance` only for separately
-authorized distinct checks. The source must retain its verified source, exact runtime, bundle
-and full release asset inventory. Original and target normalized commands and versions must
-match. The original native object must contain a terminal nonzero exit, without a live session
-or interruption status. Its complete timing record must match the launch, terminal exit and
-monotonic whole duration. The bounded controller launch must select the original frozen source
-and checksum-bound bundle through its existing transport arguments. The log must retain physical
-base identities, successful cleanup for every allocated guest and one successful lease release.
-Missing, changed, ambiguous or incomplete evidence refuses this path. Only pending/uncollected
-or matching failed collector entries are eligible; passing or inherited entries cannot use it.
+Paths resolve relative to the declaration. Repeat `--operator-acceptance` for separately authorized
+checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
+commands and versions must match. Evidence must prove terminal nonzero exit, complete launch/timing,
+VM identities, successful cleanup of every guest and lease release. Interrupted, incomplete, changed
+or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
+passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
+the original exit and log hash without claiming a PASS.
 
-An attestation with such decisions uses strict schema version `3`, with exact
-`operator_acceptances` and `reviewed_transfers` lists. The check remains `status: failed` with
-the original nonzero `exit_code`, `execution: operator-accepted` and original log hash. Its
-sanitized `operator_acceptance` binds the full target preparation, tested identity, normalized
-and actual commands, public decision, original evidence hashes, native failure, original and
-target collector statuses, whole duration, launch/end times, base identities and cleanup/release
-facts. Local paths and raw evidence are omitted. Publication prints the accepted check and
-`native_status=failed`; it does not claim that the check passed. GitHub validates this complete
-statement by the trusted operator against the pinned candidate and all other required gates.
-Schemas `1` and `2` continue to require normal passing evidence and cannot contain decisions.
-The pinned candidate must include schema `3` support before using this explicit path.
-
-For an explicitly authorized live profile check that has never run, use the separate
-publication-only deferral:
+For an explicitly authorized runnable profile check that has never run:
 
 ```sh
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT \
@@ -213,78 +142,51 @@ dev/release.sh publish --candidate rRUN_ID-aATTEMPT \
   --deferral-authorization-reference 'Public reference to operator authorization'
 ```
 
-Repeat `--defer-profile` for exact declared IDs; lane profiles require `profile:NAME/LANE`.
-Only pristine pending runnable profile entries without execution logs or collector attempt events
-qualify. Failed, interrupted, blocked, passed and not-applicable checks cannot use this path.
-Every other gate, including all CI checks, remains mandatory. Receipts and logs stay unchanged;
-collector acceptance remains incomplete. Local and remote publication report `not-run` and
-`operator-deferred`. Strict attestation schema `4` binds each decision to the full preparation
-identity, normalized command, original receipt hash/status, public reason and authorization.
-Its exact `profile_deferrals`, `operator_acceptances` and `reviewed_transfers` lists allow existing
-failure decisions, transfers and external deferrals to coexist. Remote validation precedes mutation;
-schemas `1`–`3` cannot contain these deferrals. Retry with the same decision and receipt.
-The pinned candidate must contain this tooling; prepare a new candidate rather than editing an old one.
-
-All publication workflow runs use the same repository-wide stable concurrency group,
-`cancel-in-progress: false` and `queue: max`. This serializes different versions as well
-as same-version retries across operator machines, and preserves queued requests. Local
-locks protect local state only. Neither workflow reacts to tag pushes, so creating a tag
-with a GitHub token, App token or PAT cannot start a second release pipeline.
+Repeat `--defer-profile` for exact IDs; lane profiles require `profile:NAME/LANE`. Only pristine
+pending entries without logs or attempt events qualify. Receipts stay unchanged and collector
+acceptance remains incomplete; publication reports `not-run` and `operator-deferred`.
+Both exception paths bind the decision to the exact candidate, command and original receipt.
+Other gates, including CI, packaging, core smoke and other profiles, retain their requirements.
+Retry with the same decision and receipt.
 
 ## Publication and recovery
 
-Publication checks evidence before creating an annotated stable tag whose message binds
-the candidate ID, identity manifest hash and exact source commit. It creates an owned
-draft, uploads missing assets, verifies the complete remote inventory and downloaded
-bytes, publishes, then confirms the actual release is immutable and verifies its ref and
-assets again. Installer/updater discovery sees the completed published release.
+Publication validates evidence before creating an annotated stable tag bound to the candidate ID,
+identity manifest hash and source commit. It creates an owned draft, uploads missing assets, verifies
+the complete remote inventory and downloaded bytes, publishes, then verifies the immutable release,
+ref and assets again. Installer/updater discovery sees only the completed published release.
 
-Repeat the same command after a lost response or interruption. An unfinished dispatched
-workflow is watched; a failed or cancelled one is rerun with its original inputs and
-workflow SHA. A matching annotated ref left before draft creation is adopted. An owned
-matching draft resumes missing uploads; already uploaded bytes must match. A zero-byte
-`starter` asset left by GitHub's documented HTTP 502 upload failure may be deleted and
-retried only on that owned unpublished draft. Conflicting uploaded bytes, unexpected
-assets or foreign state stop publication and are never overwritten. A published matching
-immutable release is verified and returned as success after response loss.
+Repeat the same command after interruption or a lost response. Active workflows are watched;
+failed or cancelled ones rerun with their original inputs and workflow SHA. A matching owned ref
+or draft resumes publication. Uploaded bytes must match. A zero-byte `starter` asset from an HTTP 502
+upload failure may be deleted and retried only on that owned unpublished draft. Foreign state,
+unexpected assets and conflicting bytes are never overwritten. A matching published immutable
+release is verified and returned as success.
 
-If dispatch succeeded but its response/run discovery was lost, the stored request UUID
-is used to find the original run. Discovery timeout leaves outcome unknown, with no
-second dispatch. Repeat after GitHub makes the run visible. If the original request
-never reached GitHub, inspect the Actions run inventory before explicitly retiring that
-local request file and issuing a new request; unknown outcome is never reported as PASS.
+If dispatch/run discovery was lost, the persisted request UUID locates the original run. Discovery
+timeout leaves outcome unknown without a second dispatch. Retry once the run becomes visible.
+If it never reached GitHub, inspect the Actions inventory before explicitly retiring the local
+request and issuing another; unknown outcome is never PASS.
 
-After a stable ref exists, its version is bound to this candidate even if later steps
-fail. Retry that candidate. The tooling never moves or deletes stable refs and never
-replaces foreign or published releases. Occupied legacy tags, including failed old
-publication runs, refuse adoption even if they point at the same commit. Their resolution
-requires a separate explicit operator decision; use a free version in this workflow.
+Once a stable ref exists, its version belongs to that candidate even after failure: retry that
+candidate. The tooling never moves/deletes stable refs or replaces foreign/published releases.
+Occupied legacy tags need a separate operator decision; otherwise use a free version.
 
-GitHub immutable releases must already be enabled. The tooling does not change that
-setting and refuses success if the actual published release is mutable. Preserve its
-state for investigation; never roll back a published release. Artifact expiration also
-blocks publication: do not rebuild accepted bytes or substitute another run.
+Immutable releases must already be enabled. A mutable published release or expired preparation
+artifact blocks success; preserve state for investigation. Never roll back a published release,
+rebuild accepted bytes or substitute another preparation run.
 
-A historical candidate whose `.github/workflows` differs from the default branch can
-hit GitHub's additional `Workflows:write` restriction when creating a release/ref.
-`GITHUB_TOKEN` cannot grant that permission. The operation fails safely and keeps the
-exact pinned SHA and unfinished state. Inspect the permission failure and resolve it
-through separately authorized repository credentials/workflow policy; never change the
-candidate to current branch HEAD as a workaround.
+A candidate whose workflows differ from the default branch may hit GitHub's `Workflows:write`
+restriction. `GITHUB_TOKEN` cannot grant it. Resolve the permission failure through separately
+authorized credentials/workflow policy while retaining the pinned SHA and unfinished state;
+never substitute current branch HEAD.
 
 ## Development verification
 
-`TMPDIR=/tmp bash tests/release-publication.sh` exercises exact imports, absent/changed
-acceptance, candidate/provenance/inventory binding, foreign refs/drafts, partial upload,
-HTTP 502 starter recovery, response loss at ref/draft/upload/publication, idempotent
-retry, large complete reviewed-transfer transport, legacy plain inputs, bounded malformed/bomb
-refusal, explicit exact-candidate profile failure decisions, unrun live profile deferrals with
-unchanged receipts, mixed decisions, retained retry binding and the native workflow serialization
-contract using an in-memory GitHub fixture.
-The existing collector, workflow gates and packaging contracts cover their own preserved
-behavior. These tests perform no real workflow dispatch, release publication or VM work;
-actual GitHub runner behavior, immutable publication and full runtime/profile/external
-acceptance remain checks of the next separately authorized release.
+`TMPDIR=/tmp bash tests/release-acceptance.sh` and
+`TMPDIR=/tmp bash tests/release-publication.sh` check candidate/evidence binding, optional external
+results, explicit decisions, transport validation and publication recovery with synthetic fixtures.
+They do not dispatch workflows, publish releases or establish physical/external acceptance.
 
 GitHub references: [concurrency](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency),
 [release API](https://docs.github.com/en/rest/releases/releases),

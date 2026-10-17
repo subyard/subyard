@@ -921,11 +921,9 @@ Namespace capacity, aggregate-byte limits and sequences beyond 512 cancellations
 contracts, not claims of this physical fixture. This targeted evidence does not replace release smoke
 or shipped-profile acceptance.
 
-Four declared external profile checks are deferred separately: GitHub App live API, Hermes live model
-provider, OpenClaw staging gateway and OpenClaw QA credential broker. Their required accounts,
-credentials and authorized external actions belong to the owning profile. Reproducible VM results
-leave those obligations unpassed; record their evidence separately under the
-[same-candidate acceptance contract](testing.md#one-release-candidate).
+Live account/service checks follow the [external-check contract](reference/release-publication.md#external-checks).
+Required synthetic VM fixtures, including OpenClaw staging safety/lifecycle, establish their own
+boundaries; they do not prove real service behavior.
 
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.

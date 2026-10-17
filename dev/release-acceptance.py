@@ -201,10 +201,17 @@ def external_inventory(root):
             raise ValueError(f"invalid external obligations: {path.relative_to(root)}")
         for item in document["obligations"]:
             key = path.parts[-4] + ":" + item["id"]
-            if key in result or not item.get("description") or not item.get("required_inputs"):
+            if (key in result or not item.get("description") or not item.get("required_inputs")
+                or type(item.get("required", True)) is not bool):
                 raise ValueError("invalid or duplicate external obligation")
+            # Missing required means true without rewriting historical receipt inventories.
             result[key] = {**item, "status": "not-run"}
     return result
+
+
+def optional_external_not_run(result):
+    return (result.get("required") is False and result.get("status") == "not-run"
+            and set(result) <= {"id", "description", "required_inputs", "required", "status"})
 
 
 def deferral_candidate_sha256(receipt):
@@ -289,7 +296,9 @@ def update_result(receipt):
         for name in receipt.get("operator_exclusions", [])):
         receipt["reproducible_result"] = "incomplete"
     receipt["result"] = receipt["reproducible_result"]
-    if receipt["result"] == "passed" and any(item["status"] != "passed" for item in receipt["external_obligations"].values()):
+    if receipt["result"] == "passed" and any(
+        item["status"] != "passed" and not optional_external_not_run(item)
+        for item in receipt["external_obligations"].values()):
         receipt["result"] = "incomplete"
     if receipt.get("superseded"):
         receipt["result"] = "incomplete"
@@ -508,10 +517,16 @@ def load_bound(output):
         raise ValueError("profile obligations changed")
     external = external_inventory(root)
     if set(external) != set(receipt["external_obligations"]) or any(
+        ("required" in receipt["external_obligations"][name]) != ("required" in item) or
+        receipt["external_obligations"][name].get("required", True) is not item.get("required", True) or
         any(receipt["external_obligations"][name].get(key) != value
             for key, value in item.items() if key != "status") for name, item in external.items()):
         raise ValueError("external obligations changed")
-    for result in receipt["external_obligations"].values():
+    for name, result in receipt["external_obligations"].items():
+        if result["status"] == "not-run" and external[name].get("required", True) is False:
+            expected = {**external[name], **({"deferral": result["deferral"]} if "deferral" in result else {})}
+            if result != expected:
+                raise ValueError("optional external not-run result contains execution evidence")
         if "deferral" in result:
             validate_external_deferral(result, deferral_candidate_sha256(receipt))
     if set(receipt["checks"]) != set(commands(root, receipt["version"], receipt["profiles"])) | {"package"}:
@@ -629,7 +644,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                           "excluded": name in excluded, "physical": is_live(name)}
                          for name, entry in checks.items()],
               "pending": [name for name, entry in checks.items() if entry["status"] not in ("passed", "not-applicable")],
-              "external_prerequisites": [{"id": name, "status": entry["status"],
+              "external_prerequisites": [{"id": name, "status": entry["status"], "required": entry.get("required", True),
                                           "required_inputs": entry["required_inputs"],
                                           "readiness": readiness.get(name, "unknown")}
                                          for name, entry in receipt["external_obligations"].items()],
@@ -821,6 +836,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
         receipt["error"] = "source changed during acceptance"
     save(output, receipt)
     event(output, "run-result", status="interrupted" if STOP.is_set() else receipt["result"])
+    optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
+    if optional:
+        print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
     print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
     return 0 if receipt["result"] == "passed" else 1
 

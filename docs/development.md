@@ -67,16 +67,11 @@ and serialize publication with setup, updates, and full uninstall.
 
 `make package VERSION=<version>` writes amd64 or arm64 Linux engine artifacts and a complete
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
-compatibility manifest and provenance. Use the
-[prepare → accept → publish flow](reference/release-publication.md) for runtime releases.
-`dev/release.sh prepare --version X.Y.Z --commit FULL_SHA` dispatches all release checks
-and builds final-version assets on that exact commit without reserving a stable tag.
-`accept --candidate ID --slots N...` runs the existing physical/profile/external collector
-against those exact CI assets. `publish --candidate ID` hands complete bound acceptance
-to the serialized publication workflow, which creates the stable ref, verifies an owned
-draft's complete uploaded bytes and confirms the actual immutable release. Failed
-preparation leaves the version free; unfinished publication resumes the same candidate.
-Neither workflow runs on tag pushes. `yard update`
+compatibility manifest and provenance. Runtime releases use the
+[prepare → accept → publish flow](reference/release-publication.md): CI builds exact assets,
+acceptance checks core and every shipped profile on disposable VMs, and publication verifies the
+immutable release. [Live external checks](reference/release-publication.md#external-checks) are
+optional; required VM checks remain mandatory. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable
 release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime
@@ -197,30 +192,3 @@ Live platform and release acceptance runs only on operator-allocated E2E VMs; se
 On a trusted KVM-capable host, the two-instance portion can run in an opt-in container yard through
 [`yard test-vms`](test-vms.md). Its lifecycle, lease fencing and heartbeat expiry are covered host-free by
 `tests/test-vms.sh`; actual VM boot and SSH remain an E2E VM gate.
-
-## Delivery spike
-
-The initial amd64 measurement on Debian 13 (2026-07-20, clean cache after compilation) produced a
-3,031,202-byte statically linked core binary. `yard --list` cold start was 2–4 ms and an idle
-`yard rpc --stdio` session reported about 4.1–4.3 MiB RSS with no observable background CPU activity. The
-bounded official-Incus-client delivery spike linked to 14,074,018 bytes; that adapter is now the
-production path for native status/inventory and typed RPC. These
-figures are a regression baseline, not release limits; release evidence should repeat them on the
-target host.
-
-The switched engine was measured again in the same development class on 2026-07-21: the stripped
-amd64 artifact was about 14.4 MB, 20 warm `yard --list` process samples had a 13.3 ms median
-(7.2–22.5 ms range), and a negotiated idle stdio RPC process used about 11.9 MiB RSS with zero CPU
-ticks over one second. The expected step from the core baseline is explained by the official Incus,
-HTTP and WebSocket client graph now being linked into the sole production binary. RPC remains
-request-driven with no background polling. Real snapshot latency is recorded separately on the
-dedicated release host because it depends on a live container/VM and Incus socket.
-
-### Combined profile release acceptance
-
-Before publication, follow [one release candidate](testing.md#one-release-candidate) to freeze and
-verify core plus every shipped profile. Branch CI validates the same complete profile inventory;
-its host-free subset does not claim physical acceptance. Release preparation retains the full
-native CI gates. Publication requires the trusted operator's complete bound acceptance
-attestation; physical and external-service receipts/logs stay local and are not committed.
-See [release publication and recovery](reference/release-publication.md).
