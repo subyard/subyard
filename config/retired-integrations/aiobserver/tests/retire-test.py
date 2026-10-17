@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Predecessor ownership, stale assessment and resumable control retirement."""
+import copy
 import importlib.util
 import json
 import os
@@ -109,6 +110,58 @@ class RetirementTest(unittest.TestCase):
                 elif conflict=='container': self.container['Config']['Labels']={}
                 else: self.snapshot['expanded_devices']={}
                 with self.assertRaises(ValueError): retirement.observe()
+                self.assertEqual(self.effects,[])
+
+    def test_equivalent_docker_mount_enumeration_preserves_observation(self):
+        self.snapshot['config'][retirement.PROVISION]='a'*64
+        self.container['Mounts'] = [
+            {'Type':'bind','Source':'/srv/agents','Destination':'/data',
+             'Mode':'ro','RW':False,'Propagation':'rprivate'},
+            {'Type':'volume','Name':'observer-state','Source':'/var/lib/docker/volumes/observer-state/_data',
+             'Destination':'/state','Driver':'local','Mode':'z','RW':True,'Propagation':''},
+        ]
+        first,_ = retirement.observe()
+        self.container['Mounts'].reverse()
+        repeated,_ = retirement.observe()
+        self.assertEqual(first, repeated,
+                         'equivalent Docker mount enumeration changed exact retirement observation')
+        self.assertEqual(self.effects, [])
+        self.apply(first)
+        self.assertEqual(retirement.observe()[0],{'state':'absent','actual':'','desired':''})
+        self.assertIsNone(self.container)
+        self.assertEqual(self.service,'')
+        self.assertEqual(self.snapshot['config'],{})
+        self.assertEqual(self.snapshot['devices'],{})
+        self.assertIn(('timeout','20','docker','stop','--time','10','owned-container'),self.effects)
+        self.assertFalse(any('/srv/' in str(effect) or 'volume' in effect for effect in self.effects))
+
+    def test_changed_retirement_evidence_still_refuses_before_effects(self):
+        self.container['Mounts']=[{'Type':'bind','Source':'/srv/agents','Destination':'/data','RW':False}]
+        self.container['Config']['Env']=['FIRST=one','SECOND=two']
+        self.container['HostConfig']={'ReadonlyRootfs':False}
+        self.snapshot['config'][retirement.PROVISION]='a'*64
+        container, snapshot, service=copy.deepcopy(self.container),copy.deepcopy(self.snapshot),self.service
+        for change in ('mount-source','mount-destination','mount-mode','mount-field','mount-duplicate',
+                       'container-id','container-running','container-image','config-env-order',
+                       'host-config','service','provision','route'):
+            with self.subTest(change=change):
+                self.container,self.snapshot,self.service=copy.deepcopy(container),copy.deepcopy(snapshot),service
+                self.effects=[]
+                observed,_=retirement.observe()
+                if change=='mount-source': self.container['Mounts'][0]['Source']='/srv/other'
+                elif change=='mount-destination': self.container['Mounts'][0]['Destination']='/other'
+                elif change=='mount-mode': self.container['Mounts'][0]['RW']=True
+                elif change=='mount-field': self.container['Mounts'][0]['Propagation']='rshared'
+                elif change=='mount-duplicate': self.container['Mounts'].append(copy.deepcopy(self.container['Mounts'][0]))
+                elif change=='container-id': self.container['Id']='different'
+                elif change=='container-running': self.container['State']['Running']=False
+                elif change=='container-image': self.container['Image']='other-image'
+                elif change=='config-env-order': self.container['Config']['Env'].reverse()
+                elif change=='host-config': self.container['HostConfig']['ReadonlyRootfs']=True
+                elif change=='service': self.service=service.replace('active\n','')
+                elif change=='provision': self.snapshot['config'][retirement.PROVISION]='b'*64
+                elif change=='route': self.snapshot['devices']['ai-observer']['connect']='tcp:127.0.0.1:9999'
+                with self.assertRaises(ValueError): self.apply(observed)
                 self.assertEqual(self.effects,[])
 
     def test_stale_container_or_route_refuses_apply(self):

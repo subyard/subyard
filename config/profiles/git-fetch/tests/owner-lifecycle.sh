@@ -14,6 +14,7 @@ args=sys.argv[1:]
 if os.environ.get('GIT_FETCH_FIXTURE_FAIL')==args[0]: sys.exit(1)
 if args[0]=='list': print(os.environ.get('GIT_FETCH_FIXTURE_STATE','RUNNING')); sys.exit()
 assert args[0]=='exec'
+Path(os.environ['GIT_FETCH_FIXTURE_CALLS']+'.argv').write_text(json.dumps(args))
 with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
     names=sorted(member.name for member in archive)
 assert names==['fetch.py','guest.py','subyard-git-fetch.service.in','subyard-git-fetch.timer']
@@ -70,6 +71,18 @@ PY
 [ "$(GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" observe)" = '{"state":"deferred"}' ]
 [ "$(GIT_FETCH_FIXTURE_STATE='' bash "$root/config/profiles/git-fetch/runtime.sh" observe)" = '{"state":"absent"}' ]
 expect_exit 2 env GIT_FETCH_FIXTURE_FAIL=exec bash "$root/config/profiles/git-fetch/runtime.sh" observe
+ENVIRONMENT_PROFILES='' SUBYARD_YARD=default bash "$root/config/profiles/git-fetch/runtime.sh" observe > /dev/null
+python3 - "$root/config/profiles/git-fetch" "$state/calls.argv" <<'PY'
+import json,pathlib,runpy,sys
+profile=pathlib.Path(sys.argv[1])
+fixture=runpy.run_path(str(profile/'tests/release-observation.py'))['read_only_commands']
+commands=fixture(profile,project='subyard-fixture',instance='yard-fixture')
+assert len(commands)==1
+arguments,response=commands[0]
+assert json.loads(pathlib.Path(sys.argv[2]).read_text())==arguments
+assert json.loads(response)=={'state':'absent'}
+assert fixture(profile,yard='named',project='subyard-fixture',instance='yard-fixture')[0][0][-1]!=arguments[-1]
+PY
 expect_exit 2 env GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" apply operation "$expected" "$expected"
 if SUBYARD_ENGINE_CONTEXT=0 bash "$root/config/profiles/git-fetch/owner.sh" --yes >/dev/null 2>&1; then
   echo 'FAIL: unprepared owner invocation accepted' >&2; exit 1

@@ -127,6 +127,9 @@ func (store *POSIXV2Store) ResolveRecoveryTransaction(
 // ValidateCurrentRecovery requires provenance for the reserved successor IDs.
 // Ordinary journals remain independent of unrelated recovery receipts.
 func (store *POSIXV2Store) ValidateCurrentRecovery(current JournalRecord) error {
+	if err := store.validateMigrationOwnerCurrent(current); err != nil {
+		return err
+	}
 	_, err := store.ValidatedCurrentRecovery(current)
 	return err
 }

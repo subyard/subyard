@@ -132,7 +132,7 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}
-	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities
+	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities || request.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities
 	if !capabilityProbe &&
 		(request.RegistryDigest != owner.registryDigest || request.ArtifactDigest != owner.manifestDigest || request.Target != owner.candidate.release) {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("recovery request does not match its sealed owner")
@@ -171,6 +171,9 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		expected := releasetransition.ActivationOnlyRecoveryCapabilities()
 		if request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
 			expected = releasetransition.ActivationRecoveryLifecycleCapabilities()
+		}
+		if request.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities {
+			expected = releasetransition.MigrationOwnerReplacementCapabilities()
 		}
 		if *response.Capabilities != expected {
 			return releasetransition.RecoveryProcessResponse{}, errors.New("recovery capability probe returned another contract")
@@ -230,6 +233,9 @@ func (runtime *Runtime) invokePreparedTransitionExecution(
 }
 
 func (runtime *Runtime) validateFreshRecoveryConvergence(request releasetransition.RecoveryProcessRequest, outcome releasetransition.Outcome) error {
+	if request.MigrationOwner != nil {
+		return validateMigrationOwnerConvergence(request, outcome)
+	}
 	if outcome.Transaction == nil || *outcome.Transaction == request.Recovery.Transaction {
 		if outcome.Status == releasetransition.StatusReady {
 			return errors.New("fresh recovery returned ready without a successor transaction")

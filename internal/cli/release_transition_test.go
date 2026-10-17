@@ -26,6 +26,123 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+func TestRuntimeCapabilitiesAcceptExplicitEmptyV2Contract(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	request := releasetransition.RecoveryProcessRequest{
+		SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
+		Mode:          releasetransition.RecoveryProcessRuntimeCapabilities,
+	}
+	payload, err := releasetransition.MarshalRecoveryProcessRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Stdin: bytes.NewReader(payload), Stdout: &stdout, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.runReleaseTransition(context.Background(), nil); code != 0 {
+		t.Fatalf("runtime capability probe exit=%d: %s", code, stderr.String())
+	}
+	response, err := releasetransition.ParseRecoveryProcessResponse(stdout.Bytes())
+	if err != nil || !slices.Contains(response.ActivationOwners, "sample-runtime") {
+		t.Fatalf("aware V2 owner did not report installed profile capability: %#v, %v", response, err)
+	}
+}
+
+func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	source := filepath.Join(root, "repo.rules")
+	writeCLIFile(t, source, "allow_rule()\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "agents.env"),
+		"CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\nAGENT_codex_RULES="+source+"\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n", 0o600)
+	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o755)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	observe := func() (releasetransition.V2ActivationObservation, *materializedConfigActivationReconciler) {
+		t.Helper()
+		pinned, err := os.Open(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pinned.Close() })
+		alias := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), pinned.Fd())
+		fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+			"subyard/yard": {Name: "yard", Project: "subyard", Status: "Running"},
+		}}
+		for range 8 {
+			fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+				Stdout: []byte(strings.Repeat("0", 64) + "  /home/dev/.codex/rules/repo.rules\n"), ExitCode: 0,
+			}})
+		}
+		program, err := New(Options{RepositoryRoot: alias, Environment: environment,
+			WorkingDir: root, InitPlatform: newInitPlatformFixture(), Incus: fake, Executor: fake,
+			Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconciler := &materializedConfigActivationReconciler{cli: program, configHome: configHome}
+		observation, err := reconciler.Observe(context.Background(),
+			releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
+			releasetransition.ReleaseLinks{Active: "release-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return observation, reconciler
+	}
+	first, firstReconciler := observe()
+	second, secondReconciler := observe()
+	if first.Converged || first.Actual != second.Actual || first.Desired != second.Desired || first.Converged != second.Converged {
+		t.Fatalf("pinned aliases changed semantic facts: first=%+v second=%+v", first, second)
+	}
+	registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+	goal := releasetransition.Goal{Target: "release-a", Direction: releasetransition.DirectionActivateTarget}
+	authorizations := 0
+	options := releasetransition.V2Options{ConfigHome: configHome,
+		Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"},
+		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
+			return releasetransition.ReleaseLinks{Active: "release-a"}, nil
+		}, RegistryPayload: registry, ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+		Reconcilers: []releasetransition.V2ActivationReconciler{firstReconciler},
+		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool {
+			authorizations++
+			return false
+		}}
+	transition, err := releasetransition.NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := transition.Inspect(context.Background(), goal)
+	if err != nil || len(inspection.Blockers) != 0 {
+		t.Fatalf("inspect: blockers=%v err=%v", inspection.Blockers, err)
+	}
+	options.Reconcilers = []releasetransition.V2ActivationReconciler{secondReconciler}
+	fresh, err := releasetransition.NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := fresh.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan})
+	if err != nil || outcome.Code != releasetransition.CodeConfirmationRequired || authorizations != 1 {
+		t.Fatalf("same pinned source did not reach exact consent: code=%s transaction_nil=%t message=%q authorizations=%d err=%v", outcome.Code, outcome.Transaction == nil, outcome.Message, authorizations, err)
+	}
+	if !slices.Equal(first.Consequences, second.Consequences) {
+		t.Fatalf("same files and semantic fingerprints changed plan consequences: first=%q second=%q", first.Consequences, second.Consequences)
+	}
+	// Moving the real declaration changes provenance and must still stale consent.
+	agents := filepath.Join(root, "config", "agents.env")
+	payload, err := os.ReadFile(agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, agents, "\n"+string(payload), 0o600)
+	outcome, err = fresh.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan})
+	if err != nil || outcome.Code != releasetransition.CodePlanStale || authorizations != 1 {
+		t.Fatalf("changed real source line lost stale refusal: code=%s authorizations=%d err=%v", outcome.Code, authorizations, err)
+	}
+
+}
+
 func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)

@@ -55,3 +55,5 @@ profile rather than a generic Subyard service.
   ownership boundaries and resource budgets.
 - [Release transitions](reference/resumable-release-transition-design.md) — migration, activation
   and recovery invariants, decision matrices and design tradeoffs.
+- [Rust release owner](reference/rust-release-owner-design.md) — proposed ownership and protocol
+  design selected for evaluation; production cutover remains gated.

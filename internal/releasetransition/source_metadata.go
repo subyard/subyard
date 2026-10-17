@@ -78,6 +78,20 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 			}
 		}
 	}
+	ownerReceipts, err := store.migrationOwnerReceipts()
+	if err != nil {
+		return proof, err
+	}
+	ownerPredecessors := map[TransactionID]bool{}
+	for _, receipt := range ownerReceipts {
+		if _, err := store.migrationOwnerCompletion(receipt, proof.Journal); err != nil {
+			return proof, err
+		}
+		if err := store.migrationOwnerEvidence(receipt.Predecessor); err != nil {
+			return proof, err
+		}
+		ownerPredecessors[receipt.Predecessor.Transaction] = true
+	}
 	current := TransactionID("")
 	if proof.Journal != nil {
 		current = proof.Journal.Transaction
@@ -113,6 +127,9 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 		}
 		if proof.Journal == nil {
 			for transaction := range graph.directories {
+				if ownerPredecessors[transaction] {
+					continue
+				}
 				closed, exists := journals[transaction]
 				if !exists || closed.Checkpoint != JournalComplete {
 					return proof, errors.New("source repair without a current journal requires terminal typed provenance for every retained transaction")
@@ -120,15 +137,47 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 			}
 		}
 		for transaction := range graph.directories {
+			if ownerPredecessors[transaction] {
+				continue
+			}
 			bound, exists := journals[transaction]
 			if !exists {
 				bound, err = store.sourceRetainedTerminalEvidence(transaction, registry)
+				if err != nil {
+					for _, receipt := range ownerReceipts {
+						original, _, parseErr := ParseRegistryV2(receipt.SourceRegistry, BuiltinCapabilityCatalog())
+						if parseErr == nil {
+							bound, err = store.sourceRetainedTerminalEvidence(transaction, original)
+							if err == nil && migrationOwnerRetainedTarget(receipt.Predecessor.Releases, receipt.PreviousSource, bound.Releases.Target) {
+								break
+							}
+						}
+					}
+				}
 				if err != nil {
 					return proof, err
 				}
 			}
 			if err := store.sourceTerminalBindings(bound, registry, "", proof.Ledger); err != nil {
-				return proof, err
+				proved := false
+				for _, receipt := range ownerReceipts {
+					original, _, parseErr := ParseRegistryV2(receipt.SourceRegistry, BuiltinCapabilityCatalog())
+					if parseErr != nil {
+						continue
+					}
+					sourceLedger, _, ledgerErr := ParseLedgerV2(receipt.ProjectionPayload, original)
+					if ledgerErr != nil {
+						continue
+					}
+					retained, retainedErr := store.sourceRetainedTerminalEvidence(transaction, original)
+					if retainedErr == nil && migrationOwnerRetainedTarget(receipt.Predecessor.Releases, receipt.PreviousSource, retained.Releases.Target) && store.sourceTerminalBindings(retained, original, receipt.Projection, MigrationLedgerSnapshot{Ledger: sourceLedger, ProjectionSnapshot: ProtectedSnapshot{Exists: true, Fingerprint: receipt.Projection, Payload: receipt.ProjectionPayload}}) == nil {
+						proved = true
+						break
+					}
+				}
+				if !proved {
+					return proof, err
+				}
 			}
 		}
 		// Existing typed supersession can retain unfinished predecessors at
@@ -537,6 +586,19 @@ type sourceMetadataInput struct {
 // This is a bounded inventory of the existing typed store, including absence,
 // pending records, directory identities, and unrelated recovery namespaces.
 func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
+	return store.sourceMetadataInventoryWithMigrationOwner(false)
+}
+
+func (store *POSIXV2Store) sourceMetadataInventoryWithoutMigrationOwner() (Fingerprint, error) {
+	// Publication changes this namespace, so its bytes cannot join the predecessor
+	// binding. Validate its complete typed grammar before excluding it instead.
+	if _, err := store.migrationOwnerReceipts(); err != nil {
+		return "", err
+	}
+	return store.sourceMetadataInventoryWithMigrationOwner(true)
+}
+
+func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude bool) (Fingerprint, error) {
 	inputs := map[string]sourceMetadataInput{}
 	remaining := 8192
 	remainingBytes := int64(32 << 20)
@@ -557,6 +619,11 @@ func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
 			return err
 		}
 		inputs[key] = metadataInput(stat, "")
+		if exclude && len(parts) == 1 {
+			input := inputs[key]
+			input.Links = 0
+			inputs[key] = input
+		}
 		entries, _, err := store.readDirectoryEntries(parts, remaining)
 		if err != nil {
 			return err
@@ -568,7 +635,16 @@ func (store *POSIXV2Store) sourceMetadataInventory() (Fingerprint, error) {
 		for _, entry := range entries {
 			name := entry.Name()
 			child := append(slices.Clone(parts), name)
+			if exclude && len(child) == 2 && child[1] == "migration-owner" {
+				continue
+			}
 			if strings.HasSuffix(name, ".pending") {
+				if exclude && len(child) == 3 && child[1] == "v2" && name == ".journal.json.pending" {
+					if err := store.validateMigrationOwnerPreparedJournal(); err != nil {
+						return err
+					}
+					continue
+				}
 				return errors.New("finish the pending protected publication with its sealed owner before source repair")
 			}
 			if entry.IsDir() {
@@ -637,7 +713,7 @@ func metadataInput(stat unix.Stat_t, fingerprint Fingerprint) sourceMetadataInpu
 
 func sourceMetadataDirectory(parts []string) bool {
 	path := strings.Join(parts, "/")
-	for _, root := range []string{"release-transition/v2", "release-transition/v2/compatibility", "release-transition/v2/transactions", "release-transition/recovery", "release-transition/recovery/v1", "release-transition/recovery/v1/transactions", "release-transition/recovery/v2", "release-transition/recovery/v2/transactions", "release-transition/recovery/v2/archive", "release-transition/recovery/v2/frontiers"} {
+	for _, root := range []string{"release-transition/migration-owner", "release-transition/migration-owner/v1", "release-transition/migration-owner/v1/transactions", "release-transition/migration-owner/v1/completed", "release-transition/v2", "release-transition/v2/compatibility", "release-transition/v2/transactions", "release-transition/recovery", "release-transition/recovery/v1", "release-transition/recovery/v1/transactions", "release-transition/recovery/v2", "release-transition/recovery/v2/transactions", "release-transition/recovery/v2/archive", "release-transition/recovery/v2/frontiers"} {
 		if path == root {
 			return true
 		}
@@ -649,6 +725,9 @@ func sourceMetadataDirectory(parts []string) bool {
 }
 
 func sourceMetadataFile(parts []string) bool {
+	if len(parts) == 5 && (slices.Equal(parts[:4], migrationOwnerReceiptParts) || slices.Equal(parts[:4], migrationOwnerCompletedParts)) {
+		return strings.HasSuffix(parts[4], ".json")
+	}
 	if len(parts) == 3 && parts[1] == "v2" {
 		return parts[2] == "journal.json" || parts[2] == "ledger.json" || parts[2] == migrationLedgerCheckpointName
 	}

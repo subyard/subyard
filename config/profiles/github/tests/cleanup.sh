@@ -80,4 +80,36 @@ SH
   [ "$(cat "$SERVICE_LOG")" = "$(printf 'stop\nstart')" ] || fail 'owned service pause/resume failed'
 )
 
-printf 'ok: GitHub partial-init cleanup\n'
+# Exact release observations include the real owner's read-only removed check.
+(
+  # shellcheck source=tests/helpers/test-context.sh
+  . "$ROOT/tests/helpers/test-context.sh"
+  setup_test_context "$TMP/release-observation"
+  export SUBYARD_PROFILE_SELECTED=0 SUBYARD_YARD=default
+  export GITHUB_RELEASE_FIXTURE="$ROOT/config/profiles/github/tests/release-observation.py"
+  export GITHUB_RELEASE_FIXTURE_LOG="$TMP/release-observation/commands.jsonl"
+  cat > "$TMP/bin/incus" <<'PY'
+#!/usr/bin/env python3
+import json,os,pathlib,runpy,sys
+fixture=pathlib.Path(os.environ['GITHUB_RELEASE_FIXTURE'])
+commands=runpy.run_path(str(fixture))['read_only_commands'](fixture.parent.parent)
+responses={tuple(entry[0]):(entry[1],entry[2] if len(entry)==3 else 0) for entry in commands}
+arguments=tuple(sys.argv[1:])
+if arguments not in responses: sys.exit(99)
+sys.stdin.buffer.read()
+with open(os.environ['GITHUB_RELEASE_FIXTURE_LOG'],'a') as output: output.write(json.dumps(arguments)+'\n')
+output,code=responses[arguments]
+sys.stdout.write(output)
+sys.exit(code)
+PY
+  chmod 0755 "$TMP/bin/incus"
+  export PATH="$TMP/bin:$PATH"
+  bash "$ROOT/config/profiles/github/owner.sh" --check
+  python3 - "$GITHUB_RELEASE_FIXTURE_LOG" <<'PY'
+import json,pathlib,sys
+calls=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+assert len(calls)==2 and calls[0][-3:]==['getent','passwd','dev'] and calls[1][-1]=='--check-removed'
+PY
+)
+
+printf 'ok: GitHub partial-init cleanup and exact release absence observations\n'

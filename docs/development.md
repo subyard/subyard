@@ -143,6 +143,22 @@ history, reproduce the released alias writer defect, stage verified repair tooli
 consent, and require separate original-owner recovery consent before ordinary upgrade. Use
 `--only-source-repair` for this focused check. It does not replace the complete released-caller matrix.
 
+The ordinary released-caller compatibility gate includes the unmodified, checksum-pinned
+v0.19.0 updater on both architectures: direct upgrade to the fixed candidate, a controlled
+activation observation failure after verified migration effects, preservation of the owning
+diagnostic during reread, and fresh-process resume without replaying completed migrations.
+It verifies retained config/data, checkpoint/projection and a normal readiness-gated command.
+`--only-direct-019` selects this vector alone; supplying the authentic custom predecessor flags
+adds that incident-specific history without making public CI depend on a private artifact.
+
+For the exact migration-ledger owner defect, `--only-migration-owner-replacement` additionally
+requires `--migration-owner-baseline-dir` containing the checksum-pinned official v0.21.0 Linux
+amd64 bundle and `--migration-owner-source-dir` / `--migration-owner-source-version` identifying
+an authentic retained predecessor. The fixture preserves both update generations' transaction
+evidence, reproduces the released reader failure, checks fresh consent, interrupts successor
+publication and resumes the ordinary V2 candidate journal. This local fixture uses observation-only
+Incus responses and does not establish installed Incus/systemd activation behavior.
+
 The packaged bootstrap supports pinned staging without loading broken configuration:
 
 ```sh

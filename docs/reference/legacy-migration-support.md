@@ -82,6 +82,8 @@ The existing released baselines cover distinct contracts:
 | v0.17.3 | Actual activation-only journal producer and recovery baseline using Ledger V2 |
 | v0.18.6 | Actual completed and interrupted activation-only source-repair producer; original-owner schema-2 recovery and separately consented candidate upgrade |
 | v0.18.1 | Published caller using frozen process V1 and Ledger V2; update, interrupted resume, rollback, forward retry and checkpoint-reader bridge ordering |
+| v0.19.0 | Actual direct-upgrade caller with independent completed domain history; post-effects activation failure, reread and fresh-process resume on the fixed candidate |
+| v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession; unknown artifacts fail closed |
 
 The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
 pair, registry, journal and observed postconditions. It does not admit arbitrary historical
@@ -142,8 +144,10 @@ Published v0.18.1 has no sealed checkpoint-reader marker; it cannot itself serve
 Retirement guidance must state the v0.11.0 source boundary, affected V1 formats, full-uninstall
 data loss and the user's separate clean-install step. Diagnose unsupported legacy state when
 encountered; ordinary ready operation needs no deprecation warning. Supported V2 unfinished
-transactions retain their exact sealed owners, artifacts and evidence until closure, and
-compatible retained rollback within the support boundary remains protected. Refusing an old
+transactions retain their exact sealed owners, artifacts and evidence until closure. The separately negotiated `migration-ledger-owner-replacement-v1` contract may retain an exactly proved
+defective owner as typed superseded evidence and select a freshly authorized forward candidate;
+it never manufactures old activation readiness. Compatible retained rollback within the support
+boundary remains protected. Refusing an old
 upgrade never authorizes deleting its data. Only an explicitly confirmed full uninstall may
 remove its owned data without migration; ordinary evidence cleanup still requires proven closure
 and absence of required references. See

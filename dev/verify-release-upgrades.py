@@ -4,6 +4,7 @@
 import argparse
 import ctypes
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import platform
 import runpy
 import select
 import signal
+import socket
 import shutil
 import stat
 import subprocess
@@ -59,6 +61,13 @@ PUBLISHED_BASELINE_SHA256 = {
     "amd64": "a2e4a18ac806079b70b35a5b679ef6c616bc22137453d6f3f0e0e34ef491ef74",
     "arm64": "2172f375871fe280297f69e9ae88a7d1ca1df5678c02d6189551cfa98aa07d9a",
 }
+DIRECT_BASELINE = "0.19.0"
+DIRECT_BASELINE_SHA256 = {
+    "amd64": "81c55205368ef891976f28ef21b303da5ef97114d80f76c6ec60e9f3a2b698a9",
+    "arm64": "5b8646eabda155eb48203eac80fba81bde2a773050a35839fc6d9216b6ec47d7",
+}
+MIGRATION_OWNER_BASELINE = "0.21.0"
+MIGRATION_OWNER_SHA256 = {"amd64": "1fee6251856ede2c1cbd0c01f48d226fbce64915f712df97085d35abb4991282"}
 SOURCE_BASELINE = "0.18.6"
 SOURCE_BASELINE_SHA256 = {
     "amd64": "458950eccd3831df8d4ed059ccc51a5dece6f8a85aedaae38f863b7252f635f2",
@@ -75,7 +84,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write_observation_incus(shims, control, unexpected):
+def write_observation_incus(shims, control, unexpected, activation_failure=None):
     source = Path(__file__).resolve().parent.parent
     probes = {}
     host_probes = {}
@@ -103,6 +112,15 @@ def write_observation_incus(shims, control, unexpected):
     incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
                      "arguments = sys.argv[1:]\n"
                      f"probes = {probes!r}\n"
+                     f"activation_failure = {str(activation_failure) if activation_failure else None!r}\n"
+                     "if activation_failure and pathlib.Path(activation_failure).exists():\n"
+                     "    journal = json.loads(pathlib.Path(activation_failure).read_text())\n"
+                     "    state_path = pathlib.Path(journal['journal'])\n"
+                     "    state = json.loads(state_path.read_text()) if state_path.exists() else {}\n"
+                     "    if state.get('checkpoint') == 'reconciling' and arguments[:1] == ['exec']:\n"
+                     "        pathlib.Path(journal['marker']).write_text('controlled activation observation failure after migration effects\\n')\n"
+                     "        sys.stderr.write('controlled activation observation failure after migration effects\\n')\n"
+                     "        sys.exit(65)\n"
                      "if arguments == ['query', '/1.0/instances/yard?project=subyard']:\n"
                      f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
                      "    if not observation.get('instances'): sys.exit(1)\n"
@@ -180,11 +198,31 @@ def snapshot(root):
     }
 
 
+def verify_observed_instance_removed(fixture):
+    """Verify exact fixture cleanup through the actual shared API inventory."""
+    connection = http.client.HTTPConnection("fixture", timeout=5)
+    try:
+        connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.sock.settimeout(5)
+        connection.sock.connect(fixture.env["SUBYARD_INCUS_SOCKET"])
+        connection.request("GET", "/1.0/instances?recursion=1&all-projects=true")
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        require(response.status == 200 and isinstance(payload.get("metadata"), list),
+                "cannot verify owned fixture instance cleanup")
+        require(not any(instance.get("project") == "subyard" and instance.get("name") == "yard"
+                        for instance in payload["metadata"]),
+                "owned fixture left its instance in the shared inventory")
+        (fixture.root / "instance-cleanup.json").write_text(json.dumps(payload) + "\n")
+    finally:
+        connection.close()
+
+
 def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
-                interrupt_replacement=None):
+                interrupt_replacement=None, interrupt_checkpoint=None, allow_failed_checkpoint=False):
     watch = None
-    if interrupt_replacement is not None:
-        journal, _, _ = interrupt_replacement
+    if interrupt_replacement is not None or interrupt_checkpoint is not None:
+        journal, _, _ = interrupt_replacement or interrupt_checkpoint
         libc = ctypes.CDLL(None, use_errno=True)
         watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         require(watch >= 0, "cannot observe the owned recovery journal")
@@ -194,6 +232,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                              stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, start_new_session=True)
+    failure = None
     try:
         if interrupt_replacement is not None:
             journal, predecessor, marker = interrupt_replacement
@@ -209,7 +248,7 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                 os.killpg(child.pid, signal.SIGSTOP)
                 current = json.loads(journal.read_text())
                 if current["transaction"] != predecessor:
-                    require(current["transaction"].startswith(("recovery-v1-", "recovery-v2-"))
+                    require(current["transaction"].startswith(("recovery-v1-", "recovery-v2-", "migration-owner-v1-"))
                             and current["checkpoint"] != "complete",
                             "fresh recovery passed its observed publication boundary")
                     marker.write_text(json.dumps({"transaction": current["transaction"],
@@ -220,6 +259,34 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                     break
                 os.killpg(child.pid, signal.SIGCONT)
             require(observed, "fresh recovery did not publish an observable successor")
+        if interrupt_checkpoint is not None:
+            journal, checkpoint, marker = interrupt_checkpoint
+            deadline = time.monotonic() + timeout
+            observed = False
+            while child.poll() is None and time.monotonic() < deadline:
+                readable, _, _ = select.select([watch], [], [], 0.02)
+                if not readable:
+                    continue
+                os.read(watch, 65536)
+                os.killpg(child.pid, signal.SIGSTOP)
+                current = json.loads(journal.read_text())
+                if current["checkpoint"] == checkpoint:
+                    marker.write_text(json.dumps({"transaction": current["transaction"],
+                                                  "checkpoint": checkpoint}) + "\n")
+                    marker.chmod(0o600)
+                    os.killpg(child.pid, signal.SIGKILL)
+                    observed = True
+                    break
+                os.killpg(child.pid, signal.SIGCONT)
+            if not observed and allow_failed_checkpoint and child.poll() is not None:
+                current = json.loads(journal.read_text())
+                if child.returncode != 0 and current.get("checkpoint") == checkpoint:
+                    marker.write_text(json.dumps({"transaction": current["transaction"],
+                                                  "checkpoint": checkpoint,
+                                                  "nativeFailureExit": child.returncode}) + "\n")
+                    marker.chmod(0o600)
+                    observed = True
+            require(observed, "released migration owner did not reach its checkpoint")
         if interrupt_marker is not None:
             deadline = time.monotonic() + timeout
             while not interrupt_marker.is_file() and child.poll() is None:
@@ -230,6 +297,10 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
                 os.killpg(child.pid, signal.SIGKILL)
         stdout, stderr = child.communicate(input=input_text, timeout=timeout)
         return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+    except (subprocess.TimeoutExpired, RuntimeError) as error:
+        failure = error
+        error.child_before_cleanup_returncode = child.poll()
+        raise
     finally:
         if watch is not None:
             os.close(watch)
@@ -239,7 +310,18 @@ def run_process(command, env, timeout, input_text=None, interrupt_marker=None,
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        child.communicate()
+        final_stdout, final_stderr = child.communicate()
+        if failure is not None:
+            failure.stdout = final_stdout
+            failure.stderr = final_stderr
+            failure.child_after_cleanup_returncode = child.returncode
+        interrupted = interrupt_replacement or interrupt_checkpoint
+        marker = interrupted[2] if interrupted is not None else interrupt_marker
+        if marker is not None:
+            for suffix, payload in ((".stdout", final_stdout), (".stderr", final_stderr)):
+                with os.fdopen(os.open(str(marker) + suffix, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as output:
+                    os.fchmod(output.fileno(), 0o600)
+                    output.write(payload)
 
 
 def set_fixture_observation(control, status=None, journal=None):
@@ -1095,7 +1177,7 @@ def verify_recovery_preservation(fixture, expected, transaction, links_before, u
     require(False, "released-caller resume changed recovery evidence, selections, ledger or runtime links")
 
 
-def verify_fresh_activation_recovery(release, version, baseline, arch, root, compatible=False, failure_dir=None):
+def verify_fresh_activation_recovery(release, version, baseline, arch, root, compatible=False, failure_dir=None, evidence_dir=None):
     failure_dir = failure_dir or Path.cwd() / ".build/release-upgrade-failures"
     fixture = Fixture(root / ("fresh-activation-compatible" if compatible else "fresh-activation"),
                       release, version, baseline, arch)
@@ -1126,139 +1208,190 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     interrupted = Path(str(control) + ".held")
     if interrupted.exists():
         interrupted.unlink()
-    observe("Running", True)
-    result = run_process([str(launcher), "migrate", "--yes"], fixture.env,
-                         timeout=60, interrupt_marker=interrupted)
-    require(result.returncode == -signal.SIGKILL and interrupted.is_file(),
-            "candidate did not interrupt activation-only reconciliation: " + result.stdout + result.stderr)
-    original_bytes = fixture.journal.read_bytes()
-    original = json.loads(original_bytes)
-    require(original["checkpoint"] == "reconciling" and original["steps"] == []
-            and not original.get("sourceIngress")
-            and original["releases"]["from"] == original["releases"]["target"],
-            "candidate did not publish a supported activation-only predecessor")
-    observe("Stopped", False)
-    unchanged = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
-    require(unchanged["outcome"]["status"] == "recovering" and not unchanged.get("blockers"),
-            "unchanged activation inputs did not retain ordinary resume")
-    host_settings.write_text("ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=claude\n")
-    host_settings.chmod(0o600)
-    changed_bytes = host_settings.read_bytes()
-    before = snapshot(fixture.config)
-    fresh = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
-    require(fresh["outcome"]["status"] == "recovering" and not fresh.get("blockers")
-            and fresh["outcome"].get("transaction") == original["transaction"],
-            "capable owner did not offer an authorized fresh assessment")
-    require(snapshot(fixture.config) == before, "fresh recovery inspection mutated protected state")
-    declined = run_process([str(launcher), "migrate"], fixture.env, timeout=60)
-    require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
-            and snapshot(fixture.config) == before,
-            "fresh recovery reused old consent or changed state without consent")
-    request = {"schemaVersion": 2, "mode": "inspect", "runtimeRoot": str(fixture.runtime),
-               "configHome": str(fixture.config), "yard": "default", "target": original["goal"]["target"],
-               "direction": "activate-target", "artifactDigest": original["artifactDigest"],
-               "registryDigest": original["registryDigest"],
-               "recovery": {"transaction": original["transaction"],
-                            "fingerprint": hashlib.sha256(original_bytes).hexdigest()}}
+    try:
+        observe("Running", True)
+        result = None
+        try:
+            # This budget covers the whole native operation, including repeated
+            # completed owner observations before the backend hold. Match
+            # Fixture.run; it is not a timeout for an individual owner probe.
+            result = run_process([str(launcher), "migrate", "--yes"], fixture.env,
+                                 timeout=180, interrupt_marker=interrupted)
+            require(result.returncode == -signal.SIGKILL and interrupted.is_file(),
+                    "candidate did not interrupt activation-only reconciliation: " + result.stdout + result.stderr)
+        except (subprocess.TimeoutExpired, RuntimeError) as error:
+            try:
+                if evidence_dir:
+                    destination = evidence_dir.resolve() / ("fresh-activation-compatible" if compatible else "fresh-activation") / "interruption-failure"
+                    destination.mkdir(parents=True, mode=0o700)
+                    destination.chmod(0o700)
+                    records = {"journal.json": fixture.journal, "ledger.json": ledger,
+                               "checkpoint.json": fixture.config / "release-transition/v2/history-checkpoint.json",
+                               "control.json": control, "control.applied": Path(str(control) + ".applied"),
+                               "control.held": interrupted, "unexpected-command.bytes": unexpected}
+                    diagnostic = {"reason": type(error).__name__,
+                                  "childBeforeCleanupReturncode": getattr(error, "child_before_cleanup_returncode", result.returncode if result is not None else None),
+                                  "childAfterCleanupReturncode": getattr(error, "child_after_cleanup_returncode", None),
+                                  "records": {}, "selectionSHA256": {}, "links": {}}
+                    artifacts = {"stdout": (getattr(error, "stdout", None) or (result.stdout if result is not None else "")).encode(),
+                                 "stderr": (getattr(error, "stderr", None) or (result.stderr if result is not None else "")).encode()}
+                    for name, path in records.items():
+                        diagnostic["records"][name] = {"path": str(path), "present": path.is_file()}
+                        if path.is_file():
+                            artifacts[name] = path.read_bytes()
+                            diagnostic["records"][name]["sha256"] = hashlib.sha256(artifacts[name]).hexdigest()
+                    for name in ("config.env", "settings.env"):
+                        path = fixture.config / name
+                        diagnostic["selectionSHA256"][name] = digest(path) if path.is_file() else None
+                    for name in ("current", "previous"):
+                        path = fixture.runtime / name
+                        diagnostic["links"][name] = os.readlink(path) if path.is_symlink() else None
+                    artifacts["state.json"] = (json.dumps(diagnostic, indent=2) + "\n").encode()
+                    for name, payload in artifacts.items():
+                        with os.fdopen(os.open(destination / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+                            output.write(payload)
+            except Exception as capture_error:
+                error.add_note("fresh interruption capture failed: " + type(capture_error).__name__)
+            raise
+        original_bytes = fixture.journal.read_bytes()
+        original = json.loads(original_bytes)
+        require(original["checkpoint"] == "reconciling" and original["steps"] == []
+                and not original.get("sourceIngress")
+                and original["releases"]["from"] == original["releases"]["target"],
+                "candidate did not publish a supported activation-only predecessor")
+        observe("Stopped", False)
+        unchanged = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
+        require(unchanged["outcome"]["status"] == "recovering" and not unchanged.get("blockers"),
+                "unchanged activation inputs did not retain ordinary resume")
+        host_settings.write_text("CODING_TOOL_INTEGRATIONS=claude\nENVIRONMENT_PROFILES=\n")
+        host_settings.chmod(0o600)
+        changed_bytes = host_settings.read_bytes()
+        before = snapshot(fixture.config)
+        fresh = json.loads(fixture.run([str(launcher), "migrate", "--check", "--json"]))
+        require(fresh["outcome"]["status"] == "recovering" and not fresh.get("blockers")
+                and fresh["outcome"].get("transaction") == original["transaction"],
+                "capable owner did not offer an authorized fresh assessment")
+        require(snapshot(fixture.config) == before, "fresh recovery inspection mutated protected state")
+        declined = run_process([str(launcher), "migrate"], fixture.env, timeout=60)
+        require(declined.returncode != 0 and "confirmation" in (declined.stdout + declined.stderr).lower()
+                and snapshot(fixture.config) == before,
+                "fresh recovery reused old consent or changed state without consent")
+        request = {"schemaVersion": 2, "mode": "inspect", "runtimeRoot": str(fixture.runtime),
+                   "configHome": str(fixture.config), "yard": "default", "target": original["goal"]["target"],
+                   "direction": "activate-target", "artifactDigest": original["artifactDigest"],
+                   "registryDigest": original["registryDigest"],
+                   "recovery": {"transaction": original["transaction"],
+                                "fingerprint": hashlib.sha256(original_bytes).hexdigest()}}
 
-    def protocol(value):
-        result = run_process([str(launcher), "_release-transition"], fixture.env, timeout=60,
-                             input_text=json.dumps(value))
-        require(result.returncode == 0, "candidate recovery protocol failed: " + result.stdout + result.stderr)
-        return json.loads(result.stdout)
+        def protocol(value):
+            result = run_process([str(launcher), "_release-transition"], fixture.env, timeout=60,
+                                 input_text=json.dumps(value))
+            require(result.returncode == 0, "candidate recovery protocol failed: " + result.stdout + result.stderr)
+            return json.loads(result.stdout)
 
-    for mode, contract, schema in (("capabilities", "activation-only-replacement-v1", 1),
-                                   ("lifecycle-capabilities", "activation-only-replacement-v2", 2)):
-        capabilities = protocol({"schemaVersion": 2, "mode": mode})["capabilities"]
-        require(capabilities == {"contract": contract, "processSchema": 2,
-                                 "journalSchema": 2, "receiptSchema": schema},
-                "recovery capability negotiation changed its closed contract")
-    legacy_inspection = protocol(request)["inspection"]
-    require(not legacy_inspection.get("blockers") and snapshot(fixture.config) == before,
-            "original recovery V1 inspection semantics changed")
-    request["contract"] = "activation-only-replacement-v2"
-    inspection = protocol(request)["inspection"]
-    require(inspection.get("resume") is None and inspection["assessment"]["changed"]
-            and inspection["plan"] not in (original["authorizationPlan"], original["resumePlan"])
-            and snapshot(fixture.config) == before,
-            "fresh recovery did not bind a new plan without mutation")
-    apply = dict(request, mode="converge", execution={"plan": original["authorizationPlan"], "authorization": ""})
-    refused = protocol(apply)["outcome"]
-    require(refused["code"] == "plan-stale" and snapshot(fixture.config) == before,
-            "old activation authorization admitted replacement")
-    apply["execution"] = {"plan": inspection["plan"], "authorization": ""}
-    refused = protocol(apply)["outcome"]
-    after_refusal = snapshot(fixture.config)
-    changed_paths = sorted(path for path in before.keys() | after_refusal.keys()
-                           if before.get(path) != after_refusal.get(path))
-    require(refused["code"] == "confirmation-required" and after_refusal == before,
-            "fresh recovery missing-grant guard disagreed: code=" + refused["code"]
-            + "; changed_paths=" + ",".join(changed_paths))
-    host_settings.write_text("ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\n")
-    host_settings.chmod(0o600)
-    stale_before = snapshot(fixture.config)
-    refused = protocol(apply)["outcome"]
-    require(refused["code"] == "plan-stale" and snapshot(fixture.config) == stale_before,
-            "stale fresh recovery assessment permitted mutation")
-    host_settings.write_bytes(changed_bytes)
-    host_settings.chmod(0o600)
-    marker = fixture.root / "successor-observed.json"
-    result = run_process([str(launcher), "migrate", "--yes"], fixture.env, timeout=60,
-                         interrupt_replacement=(fixture.journal, original["transaction"], marker))
-    require(result.returncode == -signal.SIGKILL and marker.is_file(),
-            "fresh authorized recovery did not reach durable successor publication")
-    successor_bytes = fixture.journal.read_bytes()
-    successor = json.loads(successor_bytes)
-    transaction = successor["transaction"]
-    require(transaction.startswith("recovery-v2-") and transaction != original["transaction"]
-            and successor["steps"] == [] and successor["checkpoint"] != "complete",
-            "fresh replacement did not publish a distinct ordinary V2 successor")
-    receipt_path = fixture.config / "release-transition/recovery/v2/transactions" / (transaction + ".json")
-    receipt_bytes = receipt_path.read_bytes()
-    receipt = json.loads(receipt_bytes)
-    require(receipt["schemaVersion"] == 2 and receipt["contract"] == "activation-only-replacement-v2"
-            and receipt["basePlan"]
-            and (json.dumps(receipt["predecessor"], separators=(",", ":")) + "\n").encode() == original_bytes
-            and receipt["replacement"] == request["recovery"]
-            and receipt["ledgerFingerprint"] == hashlib.sha256(ledger_before).hexdigest(),
-            "fresh recovery lost canonical predecessor or completed ledger bindings")
-    require(fixture.check()["outcome"]["status"] == "recovering",
-            "released V1 caller cannot inspect the ordinary V2 successor")
-    fixture.update("--offline", "--version", version)
-    fixture.complete()
-    verify_recovery_preservation(fixture,
-        {"journal": successor_bytes,
-         "receipt": receipt_bytes, "ledger": ledger_before, "selection": changed_bytes},
-        transaction, links_before, unexpected, failure_dir)
-    if compatible:
-        # Equal epochs do not prove a stopped yard's deferred profile/helper
-        # consumers absent. The released owner cannot activate those contracts.
-        before_rollback = snapshot(fixture.config)
-        refused = run_process([str(launcher), "update", "--rollback", "--yes"], fixture.env, timeout=60)
-        require(refused.returncode != 0 and "code=rollback-incompatible" in refused.stderr
-                and "cannot verify installed runtime activation" in refused.stderr
-                and snapshot(fixture.config) == before_rollback
-                and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == links_before,
-                "component-incompatible stopped-yard rollback changed protected recovery state")
-    else:
-        verify_power_rollback_refusal(fixture)
-        require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+        for mode, contract, schema in (("capabilities", "activation-only-replacement-v1", 1),
+                                       ("lifecycle-capabilities", "activation-only-replacement-v2", 2)):
+            capabilities = protocol({"schemaVersion": 2, "mode": mode})["capabilities"]
+            require(capabilities == {"contract": contract, "processSchema": 2,
+                                     "journalSchema": 2, "receiptSchema": schema},
+                    "recovery capability negotiation changed its closed contract")
+        legacy_inspection = protocol(request)["inspection"]
+        require(not legacy_inspection.get("blockers") and snapshot(fixture.config) == before,
+                "original recovery V1 inspection semantics changed")
+        request["contract"] = "activation-only-replacement-v2"
+        inspection = protocol(request)["inspection"]
+        require(inspection.get("resume") is None and inspection["assessment"]["changed"]
+                and inspection["plan"] not in (original["authorizationPlan"], original["resumePlan"])
+                and snapshot(fixture.config) == before,
+                "fresh recovery did not bind a new plan without mutation")
+        apply = dict(request, mode="converge", execution={"plan": original["authorizationPlan"], "authorization": ""})
+        refused = protocol(apply)["outcome"]
+        require(refused["code"] == "plan-stale" and snapshot(fixture.config) == before,
+                "old activation authorization admitted replacement")
+        apply["execution"] = {"plan": inspection["plan"], "authorization": ""}
+        refused = protocol(apply)["outcome"]
+        after_refusal = snapshot(fixture.config)
+        changed_paths = sorted(path for path in before.keys() | after_refusal.keys()
+                               if before.get(path) != after_refusal.get(path))
+        require(refused["code"] == "confirmation-required" and after_refusal == before,
+                "fresh recovery missing-grant guard disagreed: code=" + refused["code"]
+                + "; changed_paths=" + ",".join(changed_paths))
+        host_settings.write_text("CODING_TOOL_INTEGRATIONS=\nENVIRONMENT_PROFILES=\n")
+        host_settings.chmod(0o600)
+        stale_before = snapshot(fixture.config)
+        refused = protocol(apply)["outcome"]
+        require(refused["code"] == "plan-stale" and snapshot(fixture.config) == stale_before,
+                "stale fresh recovery assessment permitted mutation")
+        host_settings.write_bytes(changed_bytes)
+        host_settings.chmod(0o600)
+        marker = fixture.root / "successor-observed.json"
+        result = run_process([str(launcher), "migrate", "--yes"], fixture.env, timeout=60,
+                             interrupt_replacement=(fixture.journal, original["transaction"], marker))
+        require(result.returncode == -signal.SIGKILL and marker.is_file(),
+                "fresh authorized recovery did not reach durable successor publication")
+        successor = json.loads(fixture.journal.read_text())
+        transaction = successor["transaction"]
+        require(transaction.startswith("recovery-v2-") and transaction != original["transaction"]
+                and successor["steps"] == [] and successor["checkpoint"] != "complete",
+                "fresh replacement did not publish a distinct ordinary V2 successor")
+        receipt_path = fixture.config / "release-transition/recovery/v2/transactions" / (transaction + ".json")
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes)
+        require(receipt["schemaVersion"] == 2 and receipt["contract"] == "activation-only-replacement-v2"
+                and receipt["basePlan"]
+                and (json.dumps(receipt["predecessor"], separators=(",", ":")) + "\n").encode() == original_bytes
+                and receipt["replacement"] == request["recovery"]
+                and receipt["ledgerFingerprint"] == hashlib.sha256(ledger_before).hexdigest(),
+                "fresh recovery lost canonical predecessor or completed ledger bindings")
+        require(fixture.check()["outcome"]["status"] == "recovering",
+                "released V1 caller cannot inspect the ordinary V2 successor")
+        fixture.update("--offline", "--version", version)
+        fixture.complete()
+        verify_recovery_preservation(
+            fixture, {"receipt": receipt_bytes, "ledger": ledger_before, "selection": changed_bytes},
+            transaction, links_before, unexpected, failure_dir)
+        if compatible:
+            # A stopped guest cannot establish absence for owners missing from the
+            # retained release; the ordinary rollback guard must refuse without mutation.
+            before_stopped = snapshot(fixture.config)
+            stopped_links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+            stopped = run_process([str(fixture.runtime / "current/bin/yard"), "update", "--rollback", "--yes"], fixture.env, timeout=60)
+            require(stopped.returncode != 0 and "code=rollback-incompatible" in (stopped.stdout + stopped.stderr)
+                    and snapshot(fixture.config) == before_stopped and not unexpected.exists()
+                    and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == stopped_links,
+                    "stopped runtime rollback lost its typed refusal or changed protected state")
+            # This positive case proves an absent installation through the API.
+            # Real running activation belongs to installed-runtime acceptance.
+            observe(None, False)
+            verify_observed_instance_removed(fixture)
+            # The changed native observation requires an ordinary fresh assessment
+            # and consent for the current target before selecting another goal.
+            fixture.update("--offline", "--version", version, "--yes", old=False)
+            fixture.complete(old=False)
+            fixture.update("--rollback", "--yes", old=False)
+            require(os.readlink(fixture.runtime / "current") == fixture.initial,
+                    "API-proved absent installation lost eligible matching-epoch rollback")
+        else:
+            verify_power_rollback_refusal(fixture)
+            require(receipt_path.read_bytes() == receipt_bytes and ledger.read_bytes() == ledger_before
+                    and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
+                    "refused power rollback changed protected recovery evidence")
+        fixture.update("--offline", "--version", version, "--yes")
+        fixture.complete()
+        terminal_path = fixture.config / "release-transition/recovery/v2/archive" / (transaction + ".json")
+        retained_receipt = receipt_path.read_bytes() if receipt_path.exists() else (
+            json.dumps(json.loads(terminal_path.read_text())["receipt"], separators=(",", ":")) + "\n").encode()
+        require(retained_receipt == receipt_bytes and ledger.read_bytes() == ledger_before
                 and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
-                "refused power rollback changed protected recovery evidence")
-    fixture.update("--offline", "--version", version, "--yes")
-    fixture.complete()
-    terminal_path = fixture.config / "release-transition/recovery/v2/archive" / (transaction + ".json")
-    retained_receipt = receipt_path.read_bytes() if receipt_path.exists() else (
-        json.dumps(json.loads(terminal_path.read_text())["receipt"], separators=(",", ":")) + "\n").encode()
-    require(retained_receipt == receipt_bytes and ledger.read_bytes() == ledger_before
-            and host_settings.read_bytes() == changed_bytes and not unexpected.exists(),
-            "rollback/refusal and forward update changed protected recovery history")
+                "rollback/refusal and forward update changed protected recovery history")
+    finally:
+        observe(None, False)
+        verify_observed_instance_removed(fixture)
     print(f"PASS: capable {version} fresh activation recovery preserves ledger and links; released {BASELINE} "
-          f"caller inspects and resumes V2 successor, {'component-owner rollback refusal' if compatible else 'power rollback refusal'} and forward", flush=True)
+          f"caller inspects and resumes V2 successor, {'absent-installation rollback' if compatible else 'power rollback refusal'} and forward", flush=True)
     if not compatible:
         bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
-        verify_fresh_activation_recovery(bridge_release, bridge_version, baseline, arch, root,
-                                         compatible=True, failure_dir=failure_dir)
+        verify_fresh_activation_recovery(bridge_release, bridge_version, baseline, arch, root, compatible=True, failure_dir=failure_dir, evidence_dir=evidence_dir)
 
 
 def verify_alias_source_repair(fixture, release, unfinished=False):
@@ -1408,6 +1541,287 @@ def verify_completed_source_selection(fixture, root):
           "completed materialized drift admits local unset then empty set without changing history", flush=True)
 
 
+def verify_migration_owner_replacement(release, version, baseline, source_baseline,
+                                       source_version, history_baseline, arch, root):
+    fixture = Fixture(root / "migration-owner", release, MIGRATION_OWNER_BASELINE,
+                      history_baseline, arch, DIRECT_BASELINE)
+    host_settings = fixture.config / "config.env"
+    host_settings.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    host_settings.chmod(0o600)
+    fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+    official_journal = fixture.journal.read_bytes()
+    official_release = os.readlink(fixture.runtime / "current")
+    projection = fixture.config / "release-transition/v2/ledger.json"
+    projection_bytes = projection.read_bytes()
+    fixture.env["YARD_RELEASE_BASE_URL"] = source_baseline.as_uri()
+    fixture.update("--version", source_version, "--yes")
+    source_journal = json.loads(fixture.journal.read_text())
+    require(source_journal["checkpoint"] == "complete" and source_journal["steps"] == []
+            and source_journal["releases"]["from"] == Path(official_release).name,
+            "authentic same-registry custom update did not close with zero steps")
+    require(projection.read_bytes() == projection_bytes,
+            "same-registry custom update changed the exact official projection")
+    source_release = os.readlink(fixture.runtime / "current")
+    fixture.old_launcher = fixture.runtime / source_release / "bin/yard"
+    require(fixture.run([str(fixture.old_launcher), "--version"]).strip() == f"yard {source_version}",
+            "authentic custom source did not become active")
+    (fixture.root / "official-source-journal.json").write_bytes(official_journal)
+    (fixture.root / "custom-source-journal.json").write_bytes(fixture.journal.read_bytes())
+    transactions = fixture.config / "release-transition/v2/transactions"
+    retained_before = sorted(path.name for path in transactions.iterdir()) if transactions.exists() else []
+    (fixture.root / "source-history.json").write_text(json.dumps({
+        "officialRelease": Path(official_release).name, "customRelease": Path(source_release).name,
+        "retainedTransactionsAfterCustom": retained_before,
+        "projectionSHA256": hashlib.sha256(projection_bytes).hexdigest()}, indent=2) + "\n")
+    registration = fixture.config / "yards/unrelated/config.env"
+    registration.parent.mkdir(parents=True, mode=0o700)
+    registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
+    registration.chmod(0o600)
+    control = root / "incus-observation.json"
+    def observe(status, hold):
+        payload = json.dumps({"instances": [{"project": "subyard", "name": "yard",
+                   "info": {"name": "yard", "status": status, "type": "container",
+                            "config": {}, "devices": {}}}],
+                   "holdJournal": str(fixture.journal) if hold else ""})
+        control.write_text(payload)
+        control.chmod(0o600)
+        deadline = time.monotonic() + 10
+        applied = Path(str(control) + ".applied")
+        while time.monotonic() < deadline:
+            if applied.exists() and applied.read_text() == payload:
+                return
+            time.sleep(0.02)
+        require(False, "migration owner observation fixture did not apply")
+    observe("Running", True)
+    shims = fixture.root / "commands"
+    shims.mkdir()
+    unexpected = fixture.root / "unexpected-host-command"
+    write_observation_incus(shims, control, unexpected)
+    fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+    fixture.env["YARD_RELEASE_BASE_URL"] = baseline.as_uri()
+    marker = Path(str(control) + ".held")
+    result = run_process([str(fixture.old_launcher), "update", "--version", MIGRATION_OWNER_BASELINE,
+                          "--yes"], fixture.env, timeout=180, interrupt_marker=marker)
+    require(result.returncode != 0,
+            "actual released owner unexpectedly completed: " + result.stdout + result.stderr)
+    (fixture.root / "released-owner-failure.log").write_text(result.stdout + result.stderr)
+    original_bytes = fixture.journal.read_bytes()
+    (fixture.root / "predecessor.json").write_bytes(original_bytes)
+    original = json.loads(original_bytes)
+    require(original["checkpoint"] == "reconciling" and
+            [step["migration"] for step in original["steps"]] ==
+            ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"] and
+            all(step["checkpoint"] == "verified" for step in original["steps"]),
+            "actual released owner did not produce the supported completed ledger steps")
+    transactions = fixture.config / "release-transition/v2/transactions"
+    require((transactions / original["transaction"]).is_dir() and
+            (fixture.runtime / official_release).is_dir() and (fixture.runtime / source_release).is_dir()
+            and original["releases"]["from"] == Path(source_release).name
+            and original["releases"]["previous"] == Path(official_release).name,
+            "multi-update fixture lost its exact authentic release generations")
+    require(sorted(path.name for path in transactions.iterdir()) ==
+            sorted(retained_before + [original["transaction"]]),
+            "official owner changed the native retained transaction graph unexpectedly")
+    require(projection.read_bytes() == projection_bytes, "old owner rewrote its frozen projection")
+    # The authentic owner can fail an unavailable retained runtime observation
+    # before reaching the optional hold. Keep that baseline failure evidence;
+    # candidate activation must independently satisfy only recognized probes.
+    if unexpected.exists():
+        unexpected.rename(fixture.root / "released-owner-unavailable-observation")
+    observe("Stopped", False)
+    owner = fixture.runtime / "current/bin/yard"
+    before = snapshot(fixture.config)
+    rejected = run_process([str(owner), "update", "--check", "--offline", "--version",
+                            MIGRATION_OWNER_BASELINE], fixture.env, timeout=60)
+    require(rejected.returncode != 0 or "operator-action-required" in rejected.stdout,
+            "actual affected owner unexpectedly admitted its interrupted journal")
+    require("journaled ledger before state is not a registry prefix" in rejected.stderr,
+            "actual affected owner did not reproduce its independent-domain reader defect")
+    (fixture.root / "released-owner-inspection.log").write_text(rejected.stdout + rejected.stderr)
+    require(snapshot(fixture.config) == before, "old inspection changed protected state")
+    fixture.version = version
+    fixture.env["YARD_RELEASE_BASE_URL"] = release.as_uri()
+    staged = fixture.run(["bash", str(release / "subyard-install.sh"), "--publish-only",
+                          "--version", version])
+    line = next((line for line in staged.splitlines() if line.startswith("staged release=")), "")
+    require(line, "standalone candidate was not staged")
+    candidate = Path(line.split(" candidate=", 1)[1]) / "bin/yard"
+    command = [str(candidate), "update", "--offline", "--version", version]
+    # Exercise inherited nonempty shipped defaults across separate sealed native
+    # processes; an explicit selection would hide process-owned source pins.
+    saved_host_settings = host_settings.read_bytes()
+    saved_host_mode = host_settings.stat().st_mode & 0o7777
+    try:
+        host_settings.write_text("ENVIRONMENT_PROFILES=\n")
+        host_settings.chmod(0o600)
+        observe("Running", False)
+        provenance_before = snapshot(fixture.config)
+        provenance_checks = [json.loads(fixture.run(command + ["--check", "--json"])) for _ in range(2)]
+        consequences = [value["assessment"].get("consequences", []) for value in provenance_checks]
+        provenance_after = snapshot(fixture.config)
+        stability = {
+            "samePlan": provenance_checks[0]["plan"] == provenance_checks[1]["plan"],
+            "sameConsequences": consequences[0] == consequences[1],
+            "nonemptyShippedOrigin": any("config/agents.env:" in line and "from shipped defaults" in line
+                                         and "requested coding integrations []" not in line for line in consequences[0]),
+            "protectedStateUnchanged": provenance_after == provenance_before,
+        }
+        snapshot_hashes = {name: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                           for name, value in (("before", provenance_before), ("after", provenance_after))}
+        with os.fdopen(os.open(fixture.root / "shipped-default-plan-stability.json",
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+            json.dump({"probeOnlyRunning": True, "checks": provenance_checks, "conditions": stability, "snapshotHashes": snapshot_hashes}, output, indent=2)
+            output.write("\n")
+        print("FIXTURE: Running read-only shipped-default plan stability " + json.dumps({"conditions": stability, "snapshotHashes": snapshot_hashes}), flush=True)
+        require(all(stability.values()), "same shipped-default source did not produce a stable exact native plan")
+    finally:
+        host_settings.write_bytes(saved_host_settings)
+        host_settings.chmod(saved_host_mode)
+        observe("Stopped", False)
+    # Ordinary consent/CAS/resume below retains the original fixture selection;
+    # the Running probe does not claim default integration installation coverage.
+    previous_registry = fixture.runtime / official_release / "config/release-transition.json"
+    previous_payload = previous_registry.read_bytes()
+    before = snapshot(fixture.config)
+    before_links = tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous"))
+    try:
+        previous_registry.write_bytes(previous_payload + b"\n")
+        refused = run_process(command + ["--check", "--json"], fixture.env, timeout=60)
+        require(refused.returncode != 0 and snapshot(fixture.config) == before
+                and tuple(os.readlink(fixture.runtime / name) for name in ("current", "previous")) == before_links,
+                "changed journal-bound previous assets admitted recovery or mutated protected state")
+        (fixture.root / "previous-asset-refusal.log").write_text(refused.stdout + refused.stderr)
+    finally:
+        previous_registry.write_bytes(previous_payload)
+    before = snapshot(fixture.config)
+    inspection = json.loads(fixture.run(command + ["--check", "--json"]))
+    require(not inspection.get("blockers") and inspection.get("resume") is None and
+            inspection["assessment"]["changed"] and
+            inspection["plan"] not in (original["authorizationPlan"], original["resumePlan"]),
+            "candidate did not assess a fresh proved supersession")
+    declined = run_process(command, fixture.env, timeout=60)
+    require(declined.returncode != 0 and "confirmation" in
+            (declined.stdout + declined.stderr).lower() and snapshot(fixture.config) == before,
+            "migration owner replacement reused old consent or mutated while inspecting")
+    marker = fixture.root / "migration-owner-successor.json"
+    result = run_process(command + ["--yes"], fixture.env, timeout=180,
+                         interrupt_replacement=(fixture.journal, original["transaction"], marker))
+    require(result.returncode == -signal.SIGKILL and marker.exists(),
+            "candidate supersession did not reach observed durable successor publication")
+    successor = json.loads(fixture.journal.read_text())
+    transaction = successor["transaction"]
+    require(transaction.startswith("migration-owner-v1-") and successor["steps"] == [],
+            "candidate did not publish an ordinary activation successor")
+    receipt_path = fixture.config / "release-transition/migration-owner/v1/transactions" / (transaction + ".json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    require(receipt["contract"] == "migration-ledger-owner-replacement-v1" and
+            (json.dumps(receipt["predecessor"], separators=(",", ":")) + "\n").encode() == original_bytes,
+            "typed receipt did not preserve canonical unfinished predecessor")
+    fixture.run(command)
+    fixture.complete(old=False, expected_previous="releases/" + original["goal"]["target"])
+    fixture.run([str(fixture.runtime / "current/bin/yard"), "config", "apply", "--yes"])
+    require(json.loads(fixture.journal.read_text())["transaction"] == transaction and
+            receipt_path.read_bytes() == receipt_bytes and projection.read_bytes() == projection_bytes and
+            (transactions / original["transaction"]).is_dir() and not unexpected.exists(),
+            "candidate resume changed predecessor evidence or attempted an unowned host mutation")
+    print(f"PASS: authentic {source_version} history -> actual {MIGRATION_OWNER_BASELINE} reader defect -> "
+          f"negotiated {version} supersession, fresh consent, interrupted CAS successor and ordinary resume", flush=True)
+
+
+def verify_direct_019(release, version, baseline, baseline_version, arch, root):
+    fixture = Fixture(root / ("direct-" + baseline_version), release, version,
+                      baseline, arch, baseline_version)
+    host = fixture.config / "config.env"
+    host.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    host.chmod(0o600)
+    fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
+    source = json.loads(fixture.journal.read_text())
+    require(source["checkpoint"] == "complete", "direct predecessor did not complete")
+    (fixture.root / "source-journal.json").write_bytes(fixture.journal.read_bytes())
+    source_transaction = source["transaction"]
+    projection = fixture.config / "release-transition/v2/ledger.json"
+    projection_before = projection.read_bytes()
+    registration = fixture.config / "yards/unrelated/config.env"
+    registration.parent.mkdir(parents=True, mode=0o700)
+    registration.write_text("YARD_TEMPLATE=''\nSSH_PORT=2226\n")
+    registration.chmod(0o600)
+    control = root / "incus-observation.json"
+    def observe(status):
+        value = ({"removeInstances": [{"project": "subyard", "name": "yard"}]} if status is None else
+                 {"instances": [{"project": "subyard", "name": "yard",
+                   "info": {"name": "yard", "status": status, "type": "container",
+                            "config": {}, "devices": {}}}]})
+        payload = json.dumps(value)
+        control.write_text(payload)
+        control.chmod(0o600)
+        applied = Path(str(control) + ".applied")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if applied.exists() and applied.read_text() == payload:
+                return
+            time.sleep(0.02)
+        require(False, "direct upgrade observation fixture did not apply")
+    try:
+        observe("Running")
+        shims = fixture.root / "commands"
+        shims.mkdir()
+        unexpected = fixture.root / "unexpected-host-command"
+        failure_control = fixture.root / "activation-failure.json"
+        failure_marker = fixture.root / "activation-failure-observed"
+        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
+        write_observation_incus(shims, control, unexpected, activation_failure=failure_control)
+        fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+        transactions = fixture.config / "release-transition/v2/transactions"
+        require((transactions / source_transaction).is_dir(), "direct fixture omitted retained terminal evidence")
+        result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
+                             fixture.env, timeout=180)
+        (fixture.root / "post-effects-failure.log").write_text(result.stdout + result.stderr)
+        require(result.returncode != 0 and failure_marker.is_file(),
+                "direct fixed update did not reach controlled post-effects failure: " + result.stdout + result.stderr)
+        failed = json.loads(fixture.journal.read_text())
+        require(failed["checkpoint"] == "reconciling" and
+                [step["migration"] for step in failed["steps"]] ==
+                ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"] and
+                all(step["checkpoint"] == "verified" for step in failed["steps"]),
+                "controlled activation failure preceded migration verification")
+        require(projection.read_bytes() == projection_before, "direct update rewrote frozen projection")
+        evidence = snapshot(transactions / failed["transaction"])
+        candidate = fixture.runtime / "current/bin/yard"
+        before = snapshot(fixture.config)
+        reread = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
+                                        "--version", version, "--json"]))
+        require(reread.get("resume") == failed["transaction"] and
+                reread["outcome"]["code"] == "dependency-unavailable" and
+                "activation" in json.dumps(reread.get("blockers", [])).lower() and
+                snapshot(fixture.config) == before,
+                "post-error reobservation lost its owning diagnostic or valid history")
+        (fixture.root / "post-effects-inspection.json").write_text(json.dumps(reread) + "\n")
+        failure_control.unlink()
+        observe("Stopped")
+        resumed = json.loads(fixture.run([str(candidate), "update", "--check", "--offline",
+                                         "--version", version, "--json"]))
+        (fixture.root / "resume-inspection.json").write_text(json.dumps(resumed) + "\n")
+        require(resumed.get("resume") == failed["transaction"] and not resumed.get("blockers"),
+                "direct fixed reader could not resume the valid independent-domain history")
+        fixture.run([str(candidate), "update", "--offline", "--version", version])
+        fixture.complete(old=False)
+        fixture.run([str(candidate), "config", "apply", "--yes"])
+        completed = json.loads(fixture.journal.read_text())
+        require(completed["transaction"] == failed["transaction"] and
+                completed["steps"] == failed["steps"] and
+                snapshot(transactions / failed["transaction"]) == evidence and
+                projection.read_bytes() == projection_before,
+                "ordinary restart replayed or replaced completed migration evidence")
+    finally:
+        observe(None)
+        # Read the actual API inventory after the removal acknowledgement, not
+        # merely the desired control file. Other canned instances remain intact.
+        verify_observed_instance_removed(fixture)
+    print(f"PASS: authentic {baseline_version} -> fixed {version} directly; controlled post-effects "
+          "activation error, owning diagnostic/reobservation, new-process resume, no migration replay and gated operation", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
@@ -1435,12 +1849,22 @@ def main():
                         help="run only released-caller checkpoint source and future rollback compatibility")
     parser.add_argument("--only-runtime-recovery", action="store_true",
                         help="run published runtime continuation/rollback and exact sealed activation-owner recovery")
+    parser.add_argument("--only-fresh-activation-recovery", action="store_true",
+                        help="run the owning fresh activation-recovery contract and matching-epoch bridge")
     parser.add_argument("--only-power-publication", action="store_true",
                         help="run actual released caller power reader upgrade and rollback refusal")
     parser.add_argument("--only-power-transition-regression", action="store_true",
                         help="run affected rollback, checkpoint-reader bridge and fresh recovery contracts")
+    parser.add_argument("--only-migration-owner-replacement", action="store_true",
+                        help="run exact released migration-ledger owner supersession regression")
+    parser.add_argument("--migration-owner-baseline-dir", type=Path)
+    parser.add_argument("--migration-owner-source-dir", type=Path)
+    parser.add_argument("--migration-owner-source-version")
+    parser.add_argument("--migration-owner-evidence-dir", type=Path)
+    parser.add_argument("--only-direct-019", action="store_true")
+    parser.add_argument("--direct-baseline-dir", type=Path)
     args = parser.parse_args()
-    require(sum((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression, args.only_legacy_retirement)) <= 1,
+    require(sum((args.only_direct_019, args.only_migration_owner_replacement, args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_fresh_activation_recovery, args.only_legacy_retirement, args.only_power_publication, args.only_power_transition_regression)) <= 1,
             "choose only one focused compatibility regression")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
     require(platform.system() == "Linux" and arch in BASELINE_SHA256, "unsupported platform")
@@ -1468,7 +1892,66 @@ def main():
                 readable, _, _ = select.select([server.stdout], [], [], 10)
                 require(readable and server.stdout.readline().strip() == "ready",
                         "Incus fixture did not become ready")
-                if args.only_legacy_retirement or not any((args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression)):
+                if args.only_fresh_activation_recovery:
+                    baseline = baseline_assets(root, args.baseline_dir, BASELINE, BASELINE_SHA256, arch)
+                    verify_fresh_activation_recovery(release, args.version, baseline, arch, root,
+                                                     failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
+                    return
+                if args.only_direct_019:
+                    require(arch in DIRECT_BASELINE_SHA256, "published direct baseline is not pinned for this architecture")
+                    require(bool(args.migration_owner_source_dir) == bool(args.migration_owner_source_version),
+                            "custom predecessor directory and version must be supplied together")
+                    direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
+                                             DIRECT_BASELINE_SHA256, arch)
+                    predecessors = [(direct, DIRECT_BASELINE)]
+                    if args.migration_owner_source_dir:
+                        predecessors.append((args.migration_owner_source_dir.resolve(), args.migration_owner_source_version))
+                    for baseline, baseline_version in predecessors:
+                        try:
+                            verify_direct_019(release, args.version, baseline, baseline_version, arch, root)
+                        finally:
+                            if args.migration_owner_evidence_dir:
+                                evidence = args.migration_owner_evidence_dir.resolve() / baseline_version
+                                evidence.mkdir(parents=True, exist_ok=True)
+                                fixture_root = root / ("direct-" + baseline_version)
+                                for name in ("source-journal.json", "post-effects-failure.log",
+                                             "post-effects-inspection.json", "resume-inspection.json", "instance-cleanup.json"):
+                                    source_file = fixture_root / name
+                                    if source_file.is_file():
+                                        shutil.copy2(source_file, evidence / name)
+                                protected = fixture_root / "home/.config/subyard/release-transition"
+                                if protected.is_dir():
+                                    shutil.copytree(protected, evidence / "protected-state", dirs_exist_ok=True)
+                    return
+                if args.only_migration_owner_replacement:
+                    require(arch in MIGRATION_OWNER_SHA256, "no verified affected owner artifact is pinned for this architecture")
+                    require(args.migration_owner_source_dir and args.migration_owner_source_version,
+                            "authentic retained source bundle directory and version are required")
+                    baseline = baseline_assets(root, args.migration_owner_baseline_dir,
+                                               MIGRATION_OWNER_BASELINE, MIGRATION_OWNER_SHA256, arch)
+                    history = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
+                                              DIRECT_BASELINE_SHA256, arch)
+                    try:
+                        verify_migration_owner_replacement(release, args.version, baseline,
+                            args.migration_owner_source_dir.resolve(), args.migration_owner_source_version, history, arch, root)
+                    finally:
+                        if args.migration_owner_evidence_dir:
+                            evidence = args.migration_owner_evidence_dir.resolve()
+                            evidence.mkdir(parents=True, exist_ok=True)
+                            fixture_root = root / "migration-owner"
+                            for name in ("official-source-journal.json", "custom-source-journal.json", "source-history.json", "shipped-default-plan-stability.json", "previous-asset-refusal.log",
+                                         "predecessor.json", "released-owner-failure.log",
+                                         "released-owner-inspection.log", "released-owner-unavailable-observation",
+                                         "migration-owner-successor.json", "migration-owner-successor.json.stdout",
+                                         "migration-owner-successor.json.stderr"):
+                                source_file = fixture_root / name
+                                if source_file.is_file():
+                                    shutil.copy2(source_file, evidence / name)
+                            protected = fixture_root / "home/.config/subyard/release-transition"
+                            if protected.is_dir():
+                                shutil.copytree(protected, evidence / "protected-state", dirs_exist_ok=True)
+                    return
+                if args.only_legacy_retirement or not any((args.only_direct_019, args.only_migration_owner_replacement, args.only_fresh_activation_recovery, args.only_activation_recovery, args.only_checkpoint_source, args.only_source_repair, args.only_runtime_recovery, args.only_power_publication, args.only_power_transition_regression)):
                     for baseline_version, hashes in RETIRED_BASELINES.items():
                         directory = args.legacy_baseline_dir if baseline_version == LEGACY_BASELINE else None
                         baseline = baseline_assets(root, directory, baseline_version, hashes, arch)
@@ -1494,8 +1977,7 @@ def main():
                         verify(release, args.version, baseline, arch, root, baseline_version)
                         verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
                         if baseline_version == BASELINE:
-                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root,
-                                                             failure_dir=args.failure_dir)
+                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root, failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
                     return
                 if args.only_power_publication:
                     for baseline_version, hashes, directory in (
@@ -1528,6 +2010,10 @@ def main():
                     verify_activation_only_recovery(release, args.version, source_baseline, arch, root,
                                                    SOURCE_BASELINE, source_repair=True)
                     return
+                if not args.only_activation_recovery and not args.only_checkpoint_source:
+                    direct = baseline_assets(root, args.direct_baseline_dir, DIRECT_BASELINE,
+                                             DIRECT_BASELINE_SHA256, arch)
+                    verify_direct_019(release, args.version, direct, DIRECT_BASELINE, arch, root)
                 if not args.only_activation_recovery:
                     for baseline_version, hashes, directory in (
                             (BASELINE, BASELINE_SHA256, args.baseline_dir),
@@ -1538,8 +2024,7 @@ def main():
                             verify(release, args.version, baseline, arch, root, baseline_version)
                         verify_checkpoint_source(release, args.version, baseline, arch, root, baseline_version)
                         if baseline_version == BASELINE and not args.only_checkpoint_source:
-                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root,
-                                                             failure_dir=args.failure_dir)
+                            verify_fresh_activation_recovery(release, args.version, baseline, arch, root, failure_dir=args.failure_dir, evidence_dir=args.migration_owner_evidence_dir)
                         if baseline_version == SOURCE_BASELINE and not args.only_checkpoint_source:
                             verify_completed_source_repair(release, args.version, baseline, arch, root)
                             verify_activation_only_recovery(release, args.version, baseline, arch, root,
