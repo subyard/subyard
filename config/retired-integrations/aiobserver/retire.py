@@ -111,7 +111,12 @@ def observe():
         if not service or row['Name']!='/subyard-ai-observer' or row['Config']['Labels'].get('org.subyard.managed')!='ai-observer-v1': raise ValueError('foreign-ownership')
         # Do not hash credentials from native Env. Bind complete config locally via a
         # private digest; only the opaque outer CAS value crosses the lifecycle port.
-        container={'id':row['Id'],'running':row['State']['Running'],'identity':digest({k:row.get(k) for k in ('Id','Image','Config','HostConfig','Mounts')})}
+        identity={k:row.get(k) for k in ('Id','Image','Config','HostConfig','Mounts')}
+        # Docker mount enumeration order carries no ownership meaning. Keep every
+        # complete record, including duplicates; all other arrays remain exact.
+        if isinstance(identity['Mounts'],list):
+            identity['Mounts']=sorted(identity['Mounts'],key=lambda mount:json.dumps(mount,sort_keys=True,separators=(',',':')))
+        container={'id':row['Id'],'running':row['State']['Running'],'identity':digest(identity)}
     facts={'service':service,'container':container,'marker':marker,'device':device,'provision':config.get(PROVISION,''),'deferred':saved}
     current=not marker and device is None and not facts['provision'] and not service and not container and not saved
     if current: return {'state':'absent','actual':'','desired':''},facts

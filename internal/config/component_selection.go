@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -95,7 +96,21 @@ func (loaded Loaded) IntegrationInventory() []ComponentSelection {
 func (loaded Loaded) IntegrationSelectionExplanation() string {
 	source, _, group := ComponentSelectionSource(loaded.Settings["CODING_TOOL_INTEGRATIONS"])
 	return fmt.Sprintf("yard %s: requested coding integrations [%s], effective [%s], from %s (%s scope, %s:%d)",
-		loaded.Context.YardName, strings.Join(loaded.Integrations.Requested, " "), strings.Join(loaded.Integrations.Effective, " "), group, source.Scope, source.Path, source.Line)
+		loaded.Context.YardName, strings.Join(loaded.Integrations.Requested, " "), strings.Join(loaded.Integrations.Effective, " "), group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
+}
+
+func (loaded Loaded) componentSelectionSourcePath(source SettingResolution) string {
+	// A sealed candidate can be read through different process-owned directory
+	// descriptors during inspection and convergence. Its shipped asset identity
+	// is relative to that candidate, not the transient /proc pin used to read it.
+	// Keep the original trace and all local source identities unchanged.
+	if source.Scope == "default" && source.Role == "shipped defaults" && loaded.Context.Paths.RepositoryRoot != "" {
+		relative, err := filepath.Rel(loaded.Context.Paths.RepositoryRoot, source.Path)
+		if err == nil && !filepath.IsAbs(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(relative)
+		}
+	}
+	return source.Path
 }
 
 func (loaded Loaded) EnvironmentProfileSelectionExplanation() string {
@@ -104,5 +119,5 @@ func (loaded Loaded) EnvironmentProfileSelectionExplanation() string {
 		return fmt.Sprintf("yard %s: environment profiles selection absent; effective declared defaults [%s]", loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Effective, " "))
 	}
 	return fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s (%s scope, %s:%d)",
-		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), group, source.Scope, source.Path, source.Line)
+		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), group, source.Scope, loaded.componentSelectionSourcePath(source), source.Line)
 }
