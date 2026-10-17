@@ -3,7 +3,7 @@ import hashlib
 import shlex
 
 
-def read_only_commands(package):
+def read_only_commands(package, *, yard="default", project="subyard", instance="yard", user="dev"):
     owner = (package / 'owner.sh').read_text()
     invocation = owner.split('| incus exec ', 1)[1].split(')" || rc=$?', 1)[0]
     arguments = shlex.split(invocation)
@@ -14,8 +14,8 @@ def read_only_commands(package):
     files = ('profile.json', 'runtime.sh', 'owner.sh', 'guest.py', 'fetch.py',
              'subyard-git-fetch.service.in', 'subyard-git-fetch.timer')
     payload = ''.join(hashlib.sha256((package / name).read_bytes()).hexdigest() + '\n'
-                      for name in files).encode() + b'default\0subyard\0yard\0dev\0'
+                      for name in files).encode() + b''.join(value.encode() + b'\0' for value in (yard, project, instance, user))
     binding = hashlib.sha256(payload).hexdigest()
-    command = ['exec', 'yard', '--project', 'subyard', '--', 'bash', '-euo',
-               'pipefail', '-c', arguments[8], 'subyard', 'observe', '0', 'dev', '0', binding]
+    command = ['exec', instance, '--project', project, '--', 'bash', '-euo',
+               'pipefail', '-c', arguments[8], 'subyard', 'observe', '0', user, '0', binding]
     return [(command, '{"state":"absent"}\n')]

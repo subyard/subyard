@@ -65,10 +65,13 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 			}
 			return 0
 		}
-		if parsed.Mode == releasetransition.RecoveryProcessCapabilities || parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
+		if parsed.Mode == releasetransition.RecoveryProcessCapabilities || parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || parsed.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities {
 			capabilities := releasetransition.ActivationOnlyRecoveryCapabilities()
 			if parsed.Mode == releasetransition.RecoveryProcessLifecycleCapabilities {
 				capabilities = releasetransition.ActivationRecoveryLifecycleCapabilities()
+			}
+			if parsed.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities {
+				capabilities = releasetransition.MigrationOwnerReplacementCapabilities()
 			}
 			response := releasetransition.RecoveryProcessResponse{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Capabilities: &capabilities}
 			encoded, err := releasetransition.MarshalRecoveryProcessResponse(response)
@@ -115,7 +118,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		return 1
 	}
 	var publicResponse any = response
-	if recovery != nil {
+	if recovery != nil || request.MigrationOwnerReplacement != nil {
 		publicResponse = releasetransition.RecoveryProcessResponse{
 			SchemaVersion:                 releasetransition.ProcessRecoverySchemaV2,
 			ActivationReconciliationOwned: response.ActivationReconciliationOwned,
@@ -1375,6 +1378,12 @@ func executeReleaseTransitionRequest(
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	transitionOptions.MigrationOwnerReplacement = request.MigrationOwnerReplacement
+	if request.MigrationOwnerReplacement != nil {
+		transitionOptions.MigrationOwnerAssets = func(ctx context.Context) (releasetransition.MigrationOwnerAssetsProof, error) {
+			return releaseruntime.VerifyMigrationOwnerReplacementAssets(ctx, repositoryRoot, request)
+		}
+	}
 	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
 		runtime := releaseruntime.NewSourceInspector(repositoryRoot, io.Discard)
 		defer runtime.Close()

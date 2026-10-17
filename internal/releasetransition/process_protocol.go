@@ -51,6 +51,7 @@ const (
 // the authorization verifier itself is injected through a separate trusted
 // process boundary.
 type ProcessRequest struct {
+	MigrationOwnerReplacement *MigrationOwnerReplacementRequest `json:"-"`
 	// Set only by the separately negotiated recovery ingress; never in V1 JSON.
 	RecoveryContract    string                `json:"-"`
 	SchemaVersion       int                   `json:"schemaVersion"`

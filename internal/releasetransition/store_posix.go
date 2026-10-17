@@ -75,6 +75,9 @@ func (store *POSIXV2Store) CompareAndSwapCurrentJournal(
 			if !sameProtectedSnapshot(current, expected) {
 				return ErrProtectedStoreStale
 			}
+			if err := store.recordCompletedMigrationOwner(before); err != nil {
+				return err
+			}
 			if err := store.RecordCompletedRecovery(before); err != nil {
 				store.retirementCaptureFailed = true
 			}
@@ -483,6 +486,30 @@ func (store *POSIXV2Store) inspectTransactionGraph(
 		return nil, err
 	}
 	graph.protected = map[string]struct{}{string(current): {}}
+	receipts, err := store.migrationOwnerReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for transaction, receipt := range receipts {
+		if err := store.migrationOwnerRetainedHistory(receipt); err != nil {
+			return nil, err
+		}
+		if _, exists := graph.directories[receipt.Predecessor.Transaction]; !exists {
+			return nil, invalid("migration owner receipt references missing predecessor")
+		}
+		if _, exists := graph.successors[receipt.Predecessor.Transaction]; exists {
+			return nil, invalid("migration owner predecessor has a foreign successor")
+		}
+		if _, exists := graph.edges[transaction]; exists {
+			return nil, invalid("migration owner successor has foreign predecessor")
+		}
+		if _, exists := graph.edges[receipt.Predecessor.Transaction]; exists {
+			return nil, invalid("migration owner predecessor has foreign predecessor")
+		}
+	}
+	for _, transaction := range migrationOwnerProtectedTransactions(receipts) {
+		graph.protected[string(transaction)] = struct{}{}
+	}
 	protectJournal := func(journal *JournalRecord) error {
 		if journal == nil {
 			if _, archived := graph.edges[current]; archived {

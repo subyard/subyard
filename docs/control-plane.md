@@ -641,6 +641,22 @@ successor. Links and completed ledger bytes stay unchanged. Replacement chains, 
 (including verified steps), source migrations, foreign state and unproven partial apply remain
 excluded. The protocol does not reconstruct original inputs from a hash or reset settings.
 
+Migration-bearing owner defects use a separate `migration-owner-capabilities` probe and
+`migration-ledger-owner-replacement-v1` contract. Only an explicitly selected verified standalone
+candidate (`--offline` with its exact `--version`) can request it. Its candidate-native proof reads
+canonical protected records and sealed assets directly, validates the independent domain histories
+from frozen projection to checkpoint authority and all completed evidence triples, then assesses
+current candidate activation. Initial support pins the exact official Linux amd64 v0.21.0 owner;
+retained terminal artifacts may belong only to its journal's exact source or previous release.
+The previous release is independently sealed and must have the identical verified source registry.
+Receipt replay validates these identities and evidence; recorded transaction IDs remain protected
+from cleanup. Other earlier releases and arbitrary same-registry targets are unsupported, and
+unknown artifacts and graphs remain blocked. A fresh grant publishes immutable typed predecessor
+and initial-successor evidence under `release-transition/migration-owner/v1/transactions` before
+current-journal CAS. The original activation remains unfinished superseded evidence; ordinary V2
+resume belongs to the candidate successor. This exception does not widen either activation-only
+recovery contract, change frozen V1/V2 wire meanings, or bypass retained rollback gates.
+
 New callers first probe `lifecycle-capabilities` for `activation-only-replacement-v2`, and
 fall back to the original probe when it is unsupported. Only a successful lifecycle probe selects
 the explicit request `contract`. Receipt schema 2 uses the `recovery-v2-` transaction prefix and

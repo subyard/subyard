@@ -82,14 +82,16 @@ type V2Options struct {
 	RegistryPayload           []byte
 	ArtifactDigest            Fingerprint
 	// CandidateVersion is the trusted compiled runtime semver; ReleaseIDs remain opaque identities.
-	CandidateVersion    string
-	RollbackTarget      *RollbackTarget
-	InheritedSettingIDs []string
-	SourceIngress       *SourceIngressRequest
-	Replacement         *JournalReplacement
-	RecoveryContract    string
-	NewTransactionID    func() TransactionID
-	VerifyAuthorization func(PlanToken, Authorization) bool
+	CandidateVersion          string
+	RollbackTarget            *RollbackTarget
+	InheritedSettingIDs       []string
+	SourceIngress             *SourceIngressRequest
+	Replacement               *JournalReplacement
+	MigrationOwnerReplacement *MigrationOwnerReplacementRequest
+	MigrationOwnerAssets      func(context.Context) (MigrationOwnerAssetsProof, error)
+	RecoveryContract          string
+	NewTransactionID          func() TransactionID
+	VerifyAuthorization       func(PlanToken, Authorization) bool
 	// CompletedMetadata observes supported predecessor metadata without historical
 	// operational resources. An empty result leaves ordinary compatibility intact.
 	CompletedMetadata func(context.Context) (Fingerprint, error)
@@ -174,6 +176,7 @@ type v2Observation struct {
 	sourceActivationCheckpointSource Fingerprint
 	replacement                      *JournalReplacement
 	supersededJournal                *JournalRecord
+	migrationOwnerReceipt            *MigrationOwnerReceiptV1
 }
 
 type v2ActivationScope struct {
@@ -193,7 +196,7 @@ type settingsRecoveryV1 struct {
 }
 
 func NewV2Transition(options V2Options) (*V2Transition, error) {
-	if options.RecoveryContract != "" && options.RecoveryContract != ActivationOnlyRecoveryContractV1 && options.RecoveryContract != ActivationOnlyRecoveryContractV2 {
+	if options.RecoveryContract != "" && options.RecoveryContract != ActivationOnlyRecoveryContractV1 && options.RecoveryContract != ActivationOnlyRecoveryContractV2 && options.RecoveryContract != MigrationOwnerReplacementContractV1 {
 		return nil, invalid("unsupported activation recovery contract")
 	}
 	if !filepath.IsAbs(options.ConfigHome) || options.ObserveLinks == nil ||
@@ -245,7 +248,7 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		if err := store.ValidateCurrentRecovery(journal); err != nil {
 			return nil, err
 		}
-		if options.Replacement == nil && journal.Checkpoint != JournalComplete {
+		if options.Replacement == nil && options.MigrationOwnerReplacement == nil && journal.Checkpoint != JournalComplete {
 			if journal.RegistryDigest == fingerprintPayload(options.RegistryPayload) && journal.ArtifactDigest == options.ArtifactDigest {
 				if original, supported := SupportedBuiltinCatalog(journal.CatalogDigest); supported {
 					catalog = original
@@ -581,7 +584,7 @@ func (transition *V2Transition) resolveConvergeGoal(
 		}
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
-		transition.options.Replacement == nil) {
+		transition.options.Replacement == nil && transition.options.MigrationOwnerReplacement == nil) {
 		return goal, found, nil, nil
 	}
 	candidate := Goal{
@@ -667,6 +670,13 @@ func (transition *V2Transition) Converge(
 	if err != nil {
 		return Outcome{}, err
 	}
+	if authorizedPlan != "" && transition.options.MigrationOwnerReplacement != nil && currentSnapshot.Fingerprint != transition.options.MigrationOwnerReplacement.Fingerprint {
+		links, err := transition.options.ObserveLinks(ctx)
+		if err != nil {
+			return Outcome{}, err
+		}
+		return v2OperatorOutcome(links, transition.options.Releases.Target, nil, CodePlanStale, "the migration owner predecessor changed after confirmation", "run yard update --check"), nil
+	}
 	if authorizedPlan != "" && transition.options.Replacement != nil &&
 		currentSnapshot.Fingerprint != transition.options.Replacement.Fingerprint {
 		links, linksErr := transition.options.ObserveLinks(ctx)
@@ -684,7 +694,7 @@ func (transition *V2Transition) Converge(
 			return Outcome{}, parseErr
 		}
 		current = &parsed
-		if current.Checkpoint != JournalComplete {
+		if current.Checkpoint != JournalComplete && transition.options.MigrationOwnerReplacement == nil {
 			recoverableJournal = current
 		}
 	}
@@ -744,6 +754,9 @@ func (transition *V2Transition) Converge(
 		return transition.cleanupReady(ctx, observation.journal.Transaction, outcome), nil
 	}
 
+	if observation.migrationOwnerReceipt != nil {
+		recoverableJournal = nil
+	}
 	journal := observation.journal
 	journalSnapshot := observation.journalSnapshot
 	if journal == nil || journal.Checkpoint == JournalComplete {
@@ -786,6 +799,14 @@ func (transition *V2Transition) Converge(
 		created, createErr := transition.newJournal(observation, plan, execution.Authorization)
 		if createErr != nil {
 			return Outcome{}, createErr
+		}
+		if observation.migrationOwnerReceipt != nil {
+			if err := transition.publishMigrationOwnerReceipt(observation, &created); err != nil {
+				return Outcome{}, err
+			}
+			if err := transition.inject("after-migration-owner-receipt"); err != nil {
+				return Outcome{}, err
+			}
 		}
 		payload, marshalErr := MarshalJournal(created)
 		if marshalErr != nil {
@@ -836,7 +857,7 @@ func (transition *V2Transition) Converge(
 		}
 		recoverableJournal = journal
 		journalSnapshot = protectedSnapshotFromPayload(payload)
-		if observation.replacement != nil {
+		if observation.replacement != nil || observation.migrationOwnerReceipt != nil {
 			if err := transition.inject("after-replacement-journal-cas"); err != nil {
 				return Outcome{}, err
 			}
@@ -1336,7 +1357,10 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	completedHistory := journal != nil && journal.Checkpoint == JournalComplete &&
 		transition.completedJournalMatches(observation)
 	if journal != nil && journal.Checkpoint != JournalComplete {
-		replaced, replaceErr := transition.observePostActivationReplacement(ctx, &observation)
+		replaced, replaceErr := transition.observeMigrationOwnerReplacement(ctx, &observation)
+		if replaceErr == nil && !replaced {
+			replaced, replaceErr = transition.observePostActivationReplacement(ctx, &observation)
+		}
 		if replaceErr != nil {
 			return v2Observation{}, replaceErr
 		}
@@ -2021,7 +2045,7 @@ func (transition *V2Transition) observeResume(
 			journalOwnerMigration = true
 		}
 		if strings.HasPrefix(step.Resource, "ledger.") {
-			ledgerFrom, reconstructErr := transition.ledgerSnapshotForFingerprint(step.Expected)
+			ledgerFrom, reconstructErr := transition.ledgerSnapshotForFingerprint(step.Expected, observation.ledger, journal.Steps)
 			if reconstructErr != nil {
 				return reconstructErr
 			}
@@ -2477,6 +2501,13 @@ func (transition *V2Transition) newJournal(
 	authorization Authorization,
 ) (JournalRecord, error) {
 	transaction := transition.options.NewTransactionID()
+	if observation.migrationOwnerReceipt != nil {
+		var err error
+		transaction, err = transition.migrationOwnerNewJournal(observation, transaction, authorizationPlan)
+		if err != nil {
+			return JournalRecord{}, err
+		}
+	}
 	if requiresSupersededJournalArchive(observation.replacement) {
 		resolved, err := transition.store.ResolveSupersededJournalTransaction(
 			transaction, *observation.replacement, authorizationPlan,
@@ -3623,12 +3654,37 @@ func observationLedgerAdvance(
 
 func (transition *V2Transition) ledgerSnapshotForFingerprint(
 	fingerprint Fingerprint,
+	observed LedgerV2,
+	steps []JournalStep,
 ) (ProtectedSnapshot, error) {
 	absent := absentProtectedSnapshot()
 	if absent.Fingerprint == fingerprint {
 		return absent, nil
 	}
-	ledger := BaselineLedgerV2(transition.registry)
+	// Completed histories are prefixes within each domain, not one prefix of
+	// the cross-domain registry order. Rewind only the journaled domains to
+	// their first recorded migration, preserving independent completed history.
+	ledger := LedgerV2{SchemaVersion: observed.SchemaVersion, Domains: make(map[string]DomainLedgerV2, len(observed.Domains))}
+	for domain, state := range observed.Domains {
+		ledger.Domains[domain] = state
+	}
+	rewound := make(map[string]bool)
+	for _, step := range steps {
+		if !strings.HasPrefix(step.Resource, "ledger.") {
+			continue
+		}
+		migration, exists := transition.migration(step.Migration)
+		if !exists {
+			return ProtectedSnapshot{}, invalid("journal references unknown migration %q", step.Migration)
+		}
+		if rewound[migration.Domain] {
+			continue
+		}
+		ledger.Domains[migration.Domain] = DomainLedgerV2{
+			Epoch: migration.FromEpoch, Applied: append([]string{}, transition.registry.appliedPrefix(migration.Domain, migration.FromEpoch)...),
+		}
+		rewound[migration.Domain] = true
+	}
 	payload, _, err := MarshalLedgerV2(ledger, transition.registry)
 	if err != nil {
 		return ProtectedSnapshot{}, err
@@ -3637,7 +3693,11 @@ func (transition *V2Transition) ledgerSnapshotForFingerprint(
 	if snapshot.Fingerprint == fingerprint {
 		return snapshot, nil
 	}
-	for _, migration := range transition.registry.Migrations {
+	path, err := transition.registry.PendingPath(ledger)
+	if err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	for _, migration := range path {
 		ledger, err = ledger.Advance(transition.registry, migration)
 		if err != nil {
 			return ProtectedSnapshot{}, err

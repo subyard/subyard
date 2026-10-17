@@ -26,6 +26,32 @@ import (
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+func TestRuntimeCapabilitiesAcceptExplicitEmptyV2Contract(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	request := releasetransition.RecoveryProcessRequest{
+		SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
+		Mode:          releasetransition.RecoveryProcessRuntimeCapabilities,
+	}
+	payload, err := releasetransition.MarshalRecoveryProcessRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment,
+		Stdin: bytes.NewReader(payload), Stdout: &stdout, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.runReleaseTransition(context.Background(), nil); code != 0 {
+		t.Fatalf("runtime capability probe exit=%d: %s", code, stderr.String())
+	}
+	response, err := releasetransition.ParseRecoveryProcessResponse(stdout.Bytes())
+	if err != nil || !slices.Contains(response.ActivationOwners, "sample-runtime") {
+		t.Fatalf("aware V2 owner did not report installed profile capability: %#v, %v", response, err)
+	}
+}
+
 func TestReleaseActivationRefreshesProfileRuntimeBeforeMaterializedConfig(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)
