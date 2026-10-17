@@ -9,6 +9,7 @@ TOKEN="${2:-}"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 OLD_VERSION=0.11.0
 OLD_INSTALLER_SHA256=41acb799e55cf82cdbbef8e7f75e8e17c2df344c1ceeb748181fb6aec7ea6f8d
+OLD_BUNDLE_SHA256=30ff2437219dcaaa568599a9df68a62d3f9203d66579d7ee6c802e527ca92163
 OLD_UNIT_FIXTURE=''
 CANDIDATE_VERSION="0.19.1-power-systemd.$TOKEN"
 if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
@@ -21,6 +22,10 @@ OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-power-systemd-home"
 RELEASE_ROOT="$STATE_ROOT/candidate"
 INSTALLER="$STATE_ROOT/subyard-install-v0.11.0.sh"
+COMPATIBLE_VERSION=0.21.0
+COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
+COMPATIBLE_RUNTIME_ROOT="$STATE_ROOT/published-compatible-runtime"
+COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e
 SUDOERS="/etc/sudoers.d/$MARKER"
 SUDOERS_TEMP=''
 PROJECT=subyard
@@ -456,7 +461,7 @@ assert_runtime_state() {
 
 assert_v2_transition() {
   local direction="$1" target="${2#releases/}" expected_catalog="${3:-}"
-  local runtime="$OPERATOR_HOME/.subyard/runtime" artifact_digest registry_digest
+  local runtime="$OPERATOR_HOME/.subyard/runtime" artifact_digest registry_digest record
   artifact_digest="$(operator_env sha256sum "$runtime/releases/$target/runtime-files.sha256" | awk '{print $1}')" \
     || die 'target artifact manifest is unavailable'
   registry_digest="$(operator_env sha256sum "$runtime/$CANDIDATE_RELEASE_TARGET/config/release-transition.json" | awk '{print $1}')" \
@@ -472,7 +477,16 @@ assert_v2_transition() {
       "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]
     }
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
-    || die 'candidate v2 migration ledger is not at its exact per-domain fixed point'
+    || {
+      # Capture allowlisted migration facts before marker-owned cleanup removes them.
+      for record in ledger.json history-checkpoint.json; do
+        printf 'power-reconciler-upgrade: migration record=%s\n' "$record" >&2
+        operator_env jq -c '{schemaVersion, registryDigest, legacyProjection, domains}' \
+          "$OPERATOR_HOME/.config/subyard/release-transition/v2/$record" >&2 \
+          || printf 'power-reconciler-upgrade: migration record unavailable=%s\n' "$record" >&2
+      done
+      die 'candidate v2 migration ledger is not at its exact per-domain fixed point'
+    }
   operator_env jq -e \
     --arg direction "$direction" --arg target "$target" \
     --arg artifact "$artifact_digest" --arg registry "$registry_digest" \
@@ -497,6 +511,7 @@ assert_runtime_links() {
 }
 
 assert_candidate_state() {
+  if [ -f "$STATE_ROOT/legacy-continuation.sha256" ]; then assert_legacy_continuation; fi
   assert_runtime_state "$CANDIDATE_VERSION" \
     "$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
     "$CANDIDATE_RELEASE_TARGET"
@@ -680,51 +695,15 @@ verify_bridge_plan_is_read_only() {
     || die 'unconfirmed standalone bridge mutated stable links, migration state or unit'
 }
 
-historical_init_snapshot() {
-  local endpoint instance pool instances pools
-  bridge_read_only_snapshot
-  operator_env sha256sum "$RECONCILER"
-  ip -4 route show default
-  for endpoint in "/1.0/projects/$PROJECT" \
-    "/1.0/instances?project=$PROJECT&recursion=1" \
-    "/1.0/profiles?project=$PROJECT&recursion=1" \
-    "/1.0/images?project=$PROJECT&recursion=1" \
-    '/1.0/storage-pools?recursion=1'; do
-    incus query "$endpoint" | jq -Sc '
-      if type == "array" then sort_by(.name // .fingerprint) else . end
-    ' | sha256sum
-  done
-  instances="$(incus query "/1.0/instances?project=$PROJECT&recursion=1" | jq -r '.[].name')"
-  for instance in $instances; do
-    [[ "$instance" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'unsafe native instance name'
-    incus query "/1.0/instances/$instance/snapshots?project=$PROJECT&recursion=1" \
-      | jq -Sc 'sort_by(.name)' | sha256sum
-  done
-  pools="$(incus query '/1.0/storage-pools?recursion=1' | jq -r '.[].name')"
-  for pool in $pools; do
-    [[ "$pool" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'unsafe native storage pool name'
-    incus query "/1.0/storage-pools/$pool/volumes?project=$PROJECT&recursion=1" \
-      | jq -Sc 'sort_by(.type, .name)' | sha256sum
-  done
-}
-
 verify_historical_init_boundary() {
-  local before after status=0
-  before="$(historical_init_snapshot)"
-  operator_yard init --yes > "$STATE_ROOT/historical-init.log" 2>&1 || status=$?
-  [ "$status" = 1 ] \
-    && grep -Fq 'existing project has no proven installation ownership; preserve its workloads and restore its original ownership record' \
-      "$STATE_ROOT/historical-init.log" \
-    && grep -Fxq 'yard: init: apply init stage "project": reconcile adapter --yes: exit status 1' \
-      "$STATE_ROOT/historical-init.log" \
-    || die 'historical init did not retain its exact pre-existing ownership refusal'
-  after="$(historical_init_snapshot)"
-  [ "$before" = "$after" ] \
-    || die 'refused historical init changed native resources, V2 history, runtime links or producers'
-  ok 'historical init preserved its existing ownership refusal and exact native state'
+  assert_legacy_continuation
+  operator_yard init --yes
+  assert_legacy_continuation
+  assert_candidate_state
+  ok 'plain init reused the limited continuation grant without adopting installation ownership'
   sudo -n systemctl start subyard-power-reconcile.service
   assert_post_reboot_candidate
-  ok 'installed candidate boot reconciliation is repeatable without adopting historical ownership'
+  ok 'installed candidate boot reconciliation is repeatable with limited legacy authority'
 }
 
 write_fixture_value() {
@@ -815,6 +794,43 @@ assert_post_reboot_candidate() {
     || die "desired-running yard is $instance_state after reboot"
 }
 
+assert_legacy_continuation() {
+  local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  [ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
+    || die 'legacy continuation acquired destructive installation ownership'
+  [ "$(operator_env stat -c '%a' "$grant")" = 600 ] \
+    && [ "$(operator_env sha256sum "$grant" | awk '{print $1}')" = \
+      "$(cat "$STATE_ROOT/legacy-continuation.sha256")" ] \
+    || die 'protected continuation grant changed across init, reboot or release links'
+}
+
+establish_legacy_continuation() {
+  local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  operator_yard init --continue-legacy --yes
+  operator_env jq -e --argjson uid "$(operator_uid)" \
+    '.schema == 1 and .scope == "normal-reconcile" and .operatorUid == $uid and (.instanceUuid | length > 0)' \
+    "$grant" >/dev/null || die 'public legacy continuation did not publish its limited grant'
+  write_fixture_value "$STATE_ROOT/legacy-continuation.sha256" \
+    "$(operator_env sha256sum "$grant" | awk '{print $1}')"
+  assert_legacy_continuation
+  verify_legacy_full_removal_refusal
+  operator_yard init --yes
+  assert_legacy_continuation
+}
+
+verify_legacy_full_removal_refusal() {
+  local refusal="$STATE_ROOT/continuation-full-removal-refusal.log"
+  if operator_yard teardown --full --yes > "$refusal" 2>&1; then
+    die 'continuation-only installation unexpectedly accepted full removal'
+  fi
+  grep -Fq 'legacy continuation grants no full removal ownership' "$refusal" \
+    || die 'full removal did not identify the continuation-only boundary'
+  assert_project_owned
+  incus info "$INSTANCE" --project "$PROJECT" >/dev/null \
+    || die 'full removal refusal changed the retained legacy instance'
+  assert_legacy_continuation
+}
+
 prepare_fixture() {
   [ ! -e "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
     || die "fixture state already exists: $STATE_ROOT"
@@ -848,6 +864,7 @@ prepare_candidate() {
   chmod -R a+rX "$RELEASE_ROOT"
 
   info 'installing exact published v0.11.0 runtime'
+  prepare_compatible_release
   curl -fsSL --proto '=https' --tlsv1.2 \
     "https://github.com/Subyard/Subyard/releases/download/v$OLD_VERSION/subyard-install.sh" \
     -o "$INSTALLER"
@@ -856,6 +873,8 @@ prepare_candidate() {
   chmod 0755 "$INSTALLER"
   operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" \
     "$INSTALLER" --version "$OLD_VERSION" --yes
+  [ "$(operator_env sha256sum "$OPERATOR_HOME/.subyard/releases/$OLD_VERSION/subyard-$OLD_VERSION-linux-amd64.tar.gz" | awk '{print $1}')" = "$OLD_BUNDLE_SHA256" ] \
+    || die 'published v0.11.0 runtime archive checksum changed'
 
   printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
   incus project create "$PROJECT" \
@@ -864,6 +883,8 @@ prepare_candidate() {
   operator_yard start --yes
   old_load=loaded
   OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+  [ "$OLD_RELEASE_TARGET" = "releases/$OLD_VERSION-${OLD_BUNDLE_SHA256:0:12}" ] \
+    || die 'published predecessor runtime has an unexpected artifact identity'
   write_fixture_value "$OLD_RELEASE_TARGET_STATE" "$OLD_RELEASE_TARGET"
   OLD_UNIT_FIXTURE="$OPERATOR_HOME/.subyard/runtime/$OLD_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in"
   assert_runtime_state "$OLD_VERSION" "$OLD_UNIT_FIXTURE" "$old_load" released \
@@ -881,25 +902,189 @@ prepare_candidate() {
   ok 'supported update reached the V2 power fixed point'
 }
 
-finish_candidate_flow() {
-  local rollback_ledger
-  load_release_targets
-  rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" \
-    || die 'candidate migration ledger is unavailable before rollback'
-  info 'checking refusal of the epoch-1 predecessor after power epoch advancement'
-  if operator_yard update --rollback --yes > "$STATE_ROOT/rollback-refusal.log" 2>&1; then
-    die 'incompatible predecessor rollback was accepted'
-  fi
-  grep -Fq 'rollback-incompatible' "$STATE_ROOT/rollback-refusal.log" || die 'rollback refusal lacks its compatibility diagnostic'
-  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] || die 'blocked rollback changed the V2 ledger'
+prepare_compatible_release() {
+  local name digest
+  mkdir -p "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
+  # Immutable official e92 assets, not a rebuilt compatibility fixture.
+  while read -r digest name; do
+    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
+      "https://github.com/Subyard/Subyard/releases/download/v$COMPATIBLE_VERSION/$name" \
+      -o "$COMPATIBLE_RELEASE_ROOT/$name"
+    [ "$(sha256sum "$COMPATIBLE_RELEASE_ROOT/$name" | awk '{print $1}')" = "$digest" ] \
+      || die 'published compatible asset checksum changed'
+  done <<'ASSETS'
+1fee6251856ede2c1cbd0c01f48d226fbce64915f712df97085d35abb4991282 subyard-0.21.0-linux-amd64.tar.gz
+76a91b2233853cd4f75d20e7d8cc3ea468c2cca2782aad08871af12269352cbf subyard-0.21.0-linux-amd64.tar.gz.sha256
+fb17c012f72b45e44ed563f286e734ff38d4b3e473512c04d7fd2fde50a289e3 subyard-0.21.0-linux-amd64.tar.gz.manifest.json
+287e85b4c8aae826d27c2f9560e98358ba5a0513cc992c28685dc8b6eb7475e2 subyard-0.21.0-linux-amd64.tar.gz.provenance.json
+ASSETS
+  tar -xzf "$COMPATIBLE_RELEASE_ROOT/subyard-0.21.0-linux-amd64.tar.gz" -C "$COMPATIBLE_RUNTIME_ROOT"
+  (cd "$COMPATIBLE_RUNTIME_ROOT" && sha256sum --check runtime-files.sha256 >/dev/null) \
+    || die 'published compatible runtime manifest failed'
+  chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
+  # This executable probe belongs to the allocated guest, before cold legacy setup.
+  printf '%s\n' '{"schemaVersion":2,"mode":"runtime-activation-capabilities"}' | \
+    operator_env timeout 30 bash -c 'ulimit -f 64; exec "$@"' _ \
+      env SUBYARD_REPOSITORY_ROOT="$COMPATIBLE_RUNTIME_ROOT" \
+      "$COMPATIBLE_RUNTIME_ROOT/bin/yard-engine" _release-transition \
+      > "$STATE_ROOT/compatible-capabilities.json"
+  verify_compatible_capabilities "$STATE_ROOT/compatible-capabilities.json"
+}
 
-  info 'checking repeat update of the active candidate'
-  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --yes
-  assert_candidate_state
+verify_compatible_capabilities() {
+  local response="$1"
+  [ "$(wc -c < "$response")" -le 65536 ] \
+    && jq -e 'keys == ["activationOwners", "activationReconciliationOwned", "schemaVersion"] and
+      .activationReconciliationOwned == false and .schemaVersion == 2 and
+      (.activationOwners | sort) == ["core-guest-runtime", "git-fetch-runtime", "github-runtime",
+        "host-power", "key-tools-runtime", "openlit-runtime", "orca-runtime",
+        "test-vm-broker", "test-yard-route-consumers"]' \
+      "$response" >/dev/null \
+    || die 'published compatible runtime lacks exact activation capabilities'
+}
+
+capture_legacy_native_policy() {
+  local output="$1" revisions
+  revisions="$(jq -s '[.[].instance_publication.revision_key // empty]' "$ROOT"/config/profiles/*/profile.json)"
+  incus query "/1.0/projects/$PROJECT" > "$output.project"
+  incus query "/1.0/profiles/default?project=$PROJECT" > "$output.profile"
+  incus query "/1.0/instances/$INSTANCE?project=$PROJECT" > "$output.instance"
+  jq -S -n --argjson revisions "$revisions" \
+    --slurpfile project "$output.project" --slurpfile profile "$output.profile" \
+    --slurpfile instance "$output.instance" '
+      def canonical: with_entries(
+        if (.key as $key | $revisions | index($key)) != null then
+          if (.value | test("^0:[a-f0-9]{64}:")) then .value |= sub("^0:[a-f0-9]{64}:"; "0:RELEASE:")
+          else error("invalid disabled publication") end else . end);
+      $instance[0].config as $config |
+      if ($config["volatile.uuid"] | type != "string" or length == 0) then error("missing native UUID") else
+      {project: $project[0].config, profile: {config: $profile[0].config, devices: $profile[0].devices},
+       instance: {profiles: $instance[0].profiles, config: ($config | canonical),
+         expanded_config: ($instance[0].expanded_config | canonical),
+         devices: $instance[0].devices, expanded_devices: $instance[0].expanded_devices}}
+      end' > "$output"
+  chmod 0600 "$output" "$output.project" "$output.profile" "$output.instance"
+}
+
+assert_legacy_native_policy() {
+  capture_legacy_native_policy "$STATE_ROOT/native-policy.current"
+  cmp -s "$STATE_ROOT/native-policy.before" "$STATE_ROOT/native-policy.current" \
+    || die 'compatible transition changed the exact legacy native policy or identity'
+  assert_legacy_continuation
+}
+
+# A supported V2 source may have no V1 state; preserve that absence as well as bytes.
+assert_published_v1_history_unchanged() {
+  local path="$OPERATOR_HOME/.config/subyard/migrations/state.json"
+  if [ "$(cat "$STATE_ROOT/refusal-3.mode")" = absent ]; then
+    operator_env test ! -e "$path" && operator_env test ! -L "$path" \
+      || die 'transition created retired V1 state'
+  else
+    [ "$(operator_env stat -c '%a:%u:%g:%d:%i' "$path")" = "$(cat "$STATE_ROOT/refusal-3.mode")" ] \
+      && operator_env cat "$path" | cmp -s "$STATE_ROOT/refusal-3.bytes" - \
+      || die 'transition changed retained V1 state'
+  fi
+}
+
+verify_legacy_rollback_refusal() {
+  local path index=0 grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  local -a paths=("$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"
+    "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$grant")
+  capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
+  for path in "${paths[@]}"; do
+    # Fresh v0.11.0 is V2: retain V1 evidence if present, never manufacture it.
+    if [ "$index" = 3 ] && operator_env test ! -e "$path" && operator_env test ! -L "$path"; then
+      printf 'absent\n' > "$STATE_ROOT/refusal-$index.mode"
+    else
+      operator_env stat -c '%a:%u:%g:%d:%i' "$path" > "$STATE_ROOT/refusal-$index.mode"
+      operator_env cat "$path" > "$STATE_ROOT/refusal-$index.bytes"
+    fi
+    index=$((index + 1))
+  done
+  if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
+    die 'incompatible published v0.11.0 rollback unexpectedly succeeded'
+  fi
+  grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
+    || die 'published predecessor rollback failed for an unexpected reason'
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  ok 'roll-forward restored the compatible candidate runtime and unit'
+  index=0
+  for path in "${paths[@]}"; do
+    if [ "$index" = 3 ]; then
+      assert_published_v1_history_unchanged
+    else
+      [ "$(operator_env stat -c '%a:%u:%g:%d:%i' "$path")" = "$(cat "$STATE_ROOT/refusal-$index.mode")" ] \
+        && operator_env cat "$path" | cmp -s "$STATE_ROOT/refusal-$index.bytes" - \
+        || die 'refused rollback changed protected history or grant'
+    fi
+    index=$((index + 1))
+  done
+  assert_legacy_native_policy
+  ok 'incompatible published v0.11.0 rollback refused without mutation'
+}
+
+check_compatible_transition() {
+  local version="$1" release_root="$2" target="${3#releases/}" active="${4#releases/}"
+  operator_env env YARD_RELEASE_BASE_URL="file://$release_root" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --check --json \
+    > "$STATE_ROOT/compatible-check.json"
+  jq -e --arg target "$target" --arg active "$active" '
+    .outcome.target == $target and .outcome.active == $active and
+    .outcome.status == "migration-required" and .outcome.code == "transition-required" and
+    .outcome.reachedGoal == false and .assessment.changed == true and
+    (.plan | type == "string" and startswith("plan-v1-")) and
+    ((.blockers // []) | type == "array" and length == 0)
+  ' "$STATE_ROOT/compatible-check.json" >/dev/null \
+    || die 'public update inspection did not authorize the exact compatible target'
+}
+
+finish_candidate_flow() {
+  local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
+  load_release_targets
+  verify_legacy_rollback_refusal
+  info 'retaining the authentic published v0.21.0 runtime through verified public updates'
+  check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
+    "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
+  assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  assert_runtime_state "$COMPATIBLE_VERSION" \
+    "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
+    "$COMPATIBLE_RELEASE_TARGET"
+  assert_legacy_native_policy
+  assert_published_v1_history_unchanged
+  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
+    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  assert_candidate_state
+  assert_legacy_native_policy
+  rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")"
+  rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
+  info 'rolling back to the exact compatible published v0.21.0 runtime'
+  operator_yard update --rollback --yes
+  assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  assert_runtime_state "$COMPATIBLE_VERSION" \
+    "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
+    "$COMPATIBLE_RELEASE_TARGET"
+  assert_published_v1_history_unchanged
+  assert_v2_transition activate-previous "$COMPATIBLE_RELEASE_TARGET" "$rollback_catalog"
+  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] \
+    || die 'rollback changed the exact v2 migration ledger bytes'
+  assert_legacy_native_policy
+  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
+    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+  assert_candidate_state
+  assert_legacy_native_policy
+  operator_yard init --yes
+  assert_legacy_native_policy
+  verify_legacy_full_removal_refusal
+  assert_legacy_native_policy
+  assert_published_v1_history_unchanged
+  ok 'authentic compatible rollback and candidate roll-forward retained limited legacy authority'
 }
 
 # The release smoke reuses the same disposable operator, durable reboot state and
@@ -946,6 +1131,7 @@ case "$MODE" in
       || die 'the P0 Debian image cache is required'
     prepare_candidate
     exercise_activation_only_repair
+    establish_legacy_continuation
     if [ "$MODE" = prepare ]; then
       record_reboot_baseline
       write_fixture_value "$PHASE_STATE" candidate-ready
@@ -954,20 +1140,20 @@ case "$MODE" in
       exit 0
     fi
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 power reconciler update, rollback and roll-forward passed\n'
+    printf 'ok: exact published v0.11.0 upgrade and authentic v0.21.0 rollback/roll-forward passed\n'
     ;;
   resume)
     assert_state_root
     CLEANUP_ARMED=1
     assert_fixture_phase candidate-ready
     assert_post_reboot_candidate
-    info 'checking the historical init ownership boundary and repeatable boot reconciliation'
+    info 'checking repeatable init with limited legacy authority and boot reconciliation'
     verify_historical_init_boundary
     assert_candidate_state
     record_reboot_baseline
     write_fixture_value "$PHASE_STATE" candidate-reconciled
     PRESERVE_FIXTURE=1
-    printf 'ok: candidate survived reboot, preserved historical init ownership and repeated boot reconciliation; ready for second reboot\n'
+    printf 'ok: candidate survived reboot, retained limited legacy authority and repeated boot reconciliation; ready for second reboot\n'
     ;;
   finish)
     assert_state_root
@@ -975,6 +1161,6 @@ case "$MODE" in
     assert_fixture_phase candidate-reconciled
     assert_post_reboot_candidate
     finish_candidate_flow
-    printf 'ok: exact published v0.11.0 update survived two reboots, rollback and roll-forward\n'
+    printf 'ok: exact published v0.11.0 upgrade survived two reboots and authentic v0.21.0 rollback/roll-forward\n'
     ;;
 esac

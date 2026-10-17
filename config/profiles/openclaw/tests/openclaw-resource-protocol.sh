@@ -40,6 +40,9 @@ fi
 # shellcheck source=tests/helpers/test-context.sh
 . "$ROOT/tests/helpers/test-context.sh"
 setup_test_context "$TMP"
+# Keep simulated guest ownership distinct from the unprivileged controller.
+export DEV_UID="$(($(id -u) + 1))"
+export OPENCLAW_TEST_GID="$((DEV_UID + 1))"
 export HOME="$TMP/home" SUBYARD_NO_AUDIT=1 PATH="$TMP/bin:$PATH"
 export SUBYARD_CONFIG_HOST_DIR="$SUBYARD_CONFIG_HOME/overrides/host"
 export SUBYARD_CONFIG_GENERATED_DIR="$SUBYARD_CONFIG_HOME/generated"
@@ -130,6 +133,13 @@ case "${command[0]:-}" in
       -s)
         script="$(cat)"
         if [ "${command[3]:-}" = /srv/staging/_lease ]; then
+          if [ "${command[6]:-}" = setup ]; then
+            # Validate guest IDs before running the real payload as the controller.
+            [ "${#command[@]}" -eq 9 ] && [ "${command[7]}" = "$DEV_UID" ] \
+              && [ "${command[8]}" = "$OPENCLAW_TEST_GID" ] || exit 1
+            command[7]="$(id -u)"
+            command[8]="$(id -g)"
+          fi
           bash -s -- "$state_root/lease" "${command[@]:4}" <<<"$script"
         elif [ "${command[3]:-}" = /srv/env-secrets/qa-pool/secrets.env ]; then
           printf 'RESULT leased=1 distinct=1 exhausted=1\n'
@@ -154,7 +164,7 @@ case "${command[0]:-}" in
     esac
     ;;
   install) touch "$state_root/secret-staged" ;;
-  id) case "${command[1]:-}" in -u) printf '1000\n' ;; -g) printf '1001\n' ;; esac ;;
+  id) case "${command[1]:-}" in -u) printf '%s\n' "$DEV_UID" ;; -g) printf '%s\n' "$OPENCLAW_TEST_GID" ;; esac ;;
   test)
     case "${command[1]:-} ${command[2]:-}" in
       '-r /srv/source/convex.json') exit 0 ;;
@@ -378,7 +388,7 @@ SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-u
 printf '%s\n' "$other_fp" | cmp -s - "$TMP/staged-prod-fingerprints" \
   || fail 'staging up did not copy the normalized validated fingerprint snapshot'
 for cache in pnpm pip npm; do
-  grep -Fq -- "-- install -d -o 1000 -g 1001 /srv/cache/$cache" "$TMP/incus.log" \
+  grep -Fq -- "-- install -d -o $DEV_UID -g $OPENCLAW_TEST_GID /srv/cache/$cache" "$TMP/incus.log" \
     || fail "staging did not preserve the primary group of the $cache cache"
 done
 printf '# refresh existing runner\n%s\n' "${third_fp^^}" >"$prod_fingerprints"
@@ -393,7 +403,7 @@ SUBYARD_RESOURCE_MODE=apply SUBYARD_RESOURCE_ACTION=up SUBYARD_OPERATION_ID=op-u
   SUBYARD_RESOURCE_BINDING="$(jq -r .binding "$TMP/up-refresh-plan.json")" \
   SUBYARD_RESOURCE_STEPS="$(jq -c .steps "$TMP/up-refresh-plan.json")" \
   "$STAGING" up >"$TMP/up-refresh.out"
-grep -Fq -- '-- sh -s -- /srv/staging/_lease bot canonical setup 1000 1001' "$TMP/incus.log" \
+grep -Fq -- "-- sh -s -- /srv/staging/_lease bot canonical setup $DEV_UID $OPENCLAW_TEST_GID" "$TMP/incus.log" \
   || fail 'prepared repeated up skipped the lease ownership repair'
 printf '%s\n' "$third_fp" | cmp -s - "$TMP/staged-prod-fingerprints" \
   || fail 'repeated staging up did not refresh the normalized fingerprint snapshot'

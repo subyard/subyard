@@ -35,6 +35,31 @@ hermes_disabled_resource_assert() {
   ' <<< "$snapshot" >> "$STATE_ROOT/hermes-dashboard-native.jsonl"
 }
 
+# Changing the fixture Tailnet address also changes the attached core preview host.
+# Inspect that one expected owner before authorizing a fresh, bound runtime repair.
+hermes_disabled_resource_reconcile_owner_host() {
+  local boundary="$1" plan="$STATE_ROOT/dashboard-owner-$1-plan.json"
+  local ready="$STATE_ROOT/dashboard-owner-$1-ready.json" log="$STATE_ROOT/dashboard-owner-$1-repair.log"
+  install -m 0600 /dev/null "$plan"
+  operator_yard migrate --check --json > "$plan" || die "cannot inspect Hermes owner address $boundary"
+  jq -e '.schemaVersion == 1 and
+    .outcome.status == "migration-required" and .outcome.code == "transition-required" and
+    .outcome.reachedGoal == false and ((.blockers // []) | length) == 0 and
+    ([.decisions[]? | select(.decision != "preserve")] |
+      length == 1 and .[0].resource == "activation.core-guest-runtime" and
+      .[0].scope == "activation" and .[0].decision == "canonicalize" and .[0].result == "converged")' \
+    "$plan" >/dev/null || die "unexpected activation drift after Hermes owner address $boundary"
+  install -m 0600 /dev/null "$log"
+  operator_yard migrate --yes > "$log" 2>&1 || die "Hermes owner address repair failed after $boundary"
+  install -m 0600 /dev/null "$ready"
+  operator_yard migrate --check --json > "$ready" || die "cannot verify Hermes owner address $boundary"
+  jq -e '.schemaVersion == 1 and .outcome.status == "ready" and .outcome.code == "ready" and
+    .outcome.reachedGoal == true and .outcome.active == .outcome.target and
+    ((.blockers // []) | length) == 0 and
+    ([.decisions[]? | select(.decision != "preserve")] | length) == 0' \
+    "$ready" >/dev/null || die "Hermes owner address repair did not converge after $boundary"
+}
+
 hermes_disabled_resource_prepare() {
   local address port
   address="100.127.253.$((20 + TOKEN % 200))"
@@ -50,6 +75,7 @@ hermes_disabled_resource_prepare() {
     printf "#!/bin/sh\n# subyard-disabled-dashboard-v1\n[ \"\$1\" = ip ] && [ \"\$2\" = -4 ] || exit 2\nprintf \047%%s\\n\047 \047%s\047\n" "$2" > "$1"
     chmod 0700 "$1"
   ' _ "$OPERATOR_HOME/.local/bin/tailscale" "$address"
+  hermes_disabled_resource_reconcile_owner_host added
   guest_yard hermes sh -euc '
     test ! -e /var/tmp/subyard-disabled-dashboard.pid
     install -m 0600 /dev/null /var/tmp/subyard-disabled-dashboard.log
@@ -77,6 +103,7 @@ hermes_disabled_resource_prepare() {
   ' _ "$OPERATOR_HOME/.local/bin/tailscale"
   sudo -n ip address del "$address/32" dev lo
   find "$STATE_ROOT/dashboard-address" -delete
+  hermes_disabled_resource_reconcile_owner_host removed
   printf 'ok: explicitly disabled shipped Hermes resource retains absent route/ownership\n'
 }
 

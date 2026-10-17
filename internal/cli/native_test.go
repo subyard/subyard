@@ -3013,6 +3013,12 @@ esac
 
 func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	manifestPath := filepath.Join(root, "config", "commands.registry")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, manifestPath, string(manifest)+"keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|host credential ledger|--yes --help|add check-exclusive\n", 0o600)
 	runtimeRoot := filepath.Join(root, "runtime-v2")
 	capture := filepath.Join(root, "v2-candidate-inspections")
 	environment = append(environment,
@@ -3098,6 +3104,67 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		t.Fatalf("test-vms status during v2 recovery: code=%d requests=%#v stderr=%q",
 			code, testVMRunner.Requests, testVMStderr.String())
 	}
+	if err := os.Remove(capture); err != nil {
+		t.Fatal(err)
+	}
+	ownerPath := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory", "registration.json")
+	ownerBefore := "{invalid-recovery\n"
+	writeCLIFile(t, ownerPath, ownerBefore, 0o600)
+	ownerInfo, err := os.Lstat(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"keys", "check-exclusive", "canonical"},
+		{"keys", "--yes", "check-exclusive", "canonical"},
+	} {
+		var keyStderr bytes.Buffer
+		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
+		incus := lifecycleIncus()
+		query, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Stdin: input,
+			Stdout: &bytes.Buffer{}, Stderr: &keyStderr, Incus: incus, Executor: incus,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := query.Run(context.Background()); code != 0 || input.reads != 0 || len(incus.ExecCalls) != 0 {
+			t.Fatalf("exclusive read during recovery: code=%d input=%d native=%d stderr=%q",
+				code, input.reads, len(incus.ExecCalls), keyStderr.String())
+		}
+	}
+	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exclusive read inspected the transition candidate: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "keys")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exclusive read created a credential store: %v", err)
+	}
+	ownerAfter, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerAfterInfo, err := os.Lstat(ownerPath)
+	if err != nil || string(ownerAfter) != ownerBefore || !os.SameFile(ownerInfo, ownerAfterInfo) || ownerInfo.Mode() != ownerAfterInfo.Mode() {
+		t.Fatalf("exclusive read changed owner recovery state: %v", err)
+	}
+	for _, arguments := range [][]string{
+		{"keys", "add", "fixture", "--yes"},
+		{"keys", "check-exclusive-extra", "canonical"},
+	} {
+		var keyStderr bytes.Buffer
+		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
+		mutation, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Stdin: input, Stderr: &keyStderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := mutation.Run(context.Background()); code != 1 || input.reads != 0 || !strings.Contains(keyStderr.String(), "recovery-pending") {
+			t.Fatalf("key mutation bypassed recovery: code=%d input=%d stderr=%q", code, input.reads, keyStderr.String())
+		}
+	}
 	after, err := os.ReadFile(journalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -3110,7 +3177,7 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		afterInfo.Mode() != beforeInfo.Mode() {
 		t.Fatal("mutation gate or read-only status changed the protected v2 journal")
 	}
-	if calls, err := os.ReadFile(capture); err != nil || string(calls) != "called" {
+	if calls, err := os.ReadFile(capture); err != nil || string(calls) != "calledcalled" {
 		t.Fatalf("candidate inspection calls=%q err=%v", calls, err)
 	}
 }

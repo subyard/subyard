@@ -498,11 +498,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 		resourceReadOnly = parseErr == nil && (invocation.help ||
 			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
 	}
+	keysReadOnly := false
+	if core && definition.Name == "keys" && definition.Handler == "@keys" && definition.Arg0 == "" {
+		arguments := keysWithoutConsent(commandArguments)
+		keysReadOnly = len(arguments) == 2 && arguments[0] == "check-exclusive"
+	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Handler == "@client-projects") ||
 		(core && definition.Effect == command.EffectRead) ||
 		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
-		resourceReadOnly ||
+		resourceReadOnly || keysReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
@@ -1066,8 +1071,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
 		return 0
 	case "@init":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name>] [--yes]\n", cli.options.Program)
-		fmt.Fprintln(cli.options.Stdout, "\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name> | --continue-legacy] [--yes]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "\n--continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)

@@ -14,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -70,6 +71,93 @@ func (activationIntegrationExecutor) Exec(_ context.Context, _, _ string, reques
 		return ports.InstanceExecResult{Stdout: []byte("changed=0\n")}, nil
 	}
 	return ports.InstanceExecResult{}, nil
+}
+
+func TestIntegrationActivationRetainsApprovalAcrossSiblingDashboardPublication(t *testing.T) {
+	for _, scenario := range []string{"authorized route", "projected route", "unexpected route", "foreign baseline", "foreign device", "partial tuple", "mount drift", "identity drift", "unrelated config", "desired scope", "changed desired port", "inventory drift", "sibling not ready"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, _, _, environment := configCommandFixture(t)
+			loaded := loadConfigCommandContext(t, root, environment, "default")
+			loaded.Integrations = config.IntegrationSelection{Present: true}
+			profileRoot := testkit.TempDir(t)
+			handler := filepath.Join(profileRoot, "runtime.sh")
+			testkit.WriteFile(t, handler, []byte("#!/bin/sh\nprintf '{\"state\":\"current\",\"actual\":\""+strings.Repeat("b", 64)+"\",\"desired\":\""+strings.Repeat("b", 64)+"\"}\\n'\n"), 0700)
+			definition := profile.Definition{Name: "sample", Root: profileRoot,
+				Runtime:   &profile.RuntimeHook{ActivationID: "sample-runtime", Handler: "runtime.sh"},
+				Dashboard: &profile.IntegrationDashboard{GuestPort: 3000, PortSetting: "SAMPLE_PORT", ContainerRoute: &profile.IntegrationRoute{MarkerKey: "user.subyard.sample", DeviceName: "sample-dashboard"}}}
+			old := ownerroute.Device("127.0.0.1", "18080", 3000)
+			if scenario == "foreign baseline" {
+				old["connect"] = "tcp:127.0.0.1:39999"
+			}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{
+				Name: "yard", Project: "subyard", Type: domain.YardContainer, Status: "Running",
+				Config: map[string]string{"user.subyard.sample": "v1:18080"}, LocalConfig: map[string]string{"user.subyard.sample": "v1:18080"},
+				Devices: map[string]map[string]string{"sample-dashboard": old}, LocalDevices: map[string]map[string]string{"sample-dashboard": old}}}}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: incus, Executor: activationIntegrationExecutor{},
+				Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{definition},
+				Environment: []string{"ENVIRONMENT_PROFILES=sample", "SAMPLE_PORT=18081"}, Yard: loaded.Context}
+			approved, err := runtime.IntegrationPlan(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalBinding := approved.StateBinding()
+			instance := &incus.Reconcile.Instance
+			instance.Config["user.subyard.sample"], instance.LocalConfig["user.subyard.sample"] = "v1:18081", "v1:18081"
+			instance.Devices["sample-dashboard"] = ownerroute.Device("127.0.0.1", "18081", 3000)
+			instance.LocalDevices["sample-dashboard"] = ownerroute.Device("127.0.0.1", "18081", 3000)
+			switch scenario {
+			case "unexpected route":
+				instance.Devices["sample-dashboard"]["listen"] = "tcp:127.0.0.1:18082"
+			case "foreign device":
+				instance.Devices["sample-dashboard"]["connect"] = "tcp:127.0.0.1:39999"
+			case "partial tuple":
+				instance.LocalConfig["user.subyard.sample"] = "v1:18080"
+			case "mount drift":
+				instance.Devices["foreign"] = map[string]string{"type": "disk", "source": "/", "path": "/host"}
+			case "identity drift":
+				instance.Name = "foreign"
+			case "unrelated config":
+				instance.Config["security.privileged"] = "true"
+			case "desired scope":
+				runtime.Yard.DevUID++
+			case "changed desired port":
+				runtime.Environment = []string{"ENVIRONMENT_PROFILES=sample", "SAMPLE_PORT=18082"}
+			case "inventory drift":
+				runtime.Executor = changedActivationInventory{}
+			case "sibling not ready":
+				testkit.WriteFile(t, handler, []byte("#!/bin/sh\nprintf '{\"state\":\"stale\",\"actual\":\""+strings.Repeat("a", 64)+"\",\"desired\":\""+strings.Repeat("b", 64)+"\"}\\n'\n"), 0700)
+			}
+			incus.Instances = map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: *instance}
+			fresh, freshErr := runtime.IntegrationPlan(context.Background())
+			if freshErr != nil || reconcileruntime.CheckIntegrationPlan(approved, fresh) == nil {
+				t.Fatalf("ordinary integration guard admitted sibling or unrelated drift: %v", freshErr)
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &materializedConfigActivationReconciler{projectedIntegrationPlans: scenario == "projected route", integrationPlans: map[string]reconcileruntime.IntegrationPlan{"default": approved}}
+			err = reconciler.reconcileIntegrationTarget(context.Background(), program, configTarget{Name: "default", Loaded: loaded})
+			if scenario == "authorized route" || scenario == "projected route" {
+				if err != nil {
+					t.Fatalf("authorized sibling publication invalidated integrations: %v", err)
+				}
+			} else if !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("unexpected change accepted or misclassified: %v", err)
+			}
+			if approved.StateBinding() != originalBinding {
+				t.Fatal("release comparison changed the original approval")
+			}
+		})
+	}
+}
+
+type changedActivationInventory struct{ activationIntegrationExecutor }
+
+func (changedActivationInventory) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	result, err := (activationIntegrationExecutor{}).Exec(ctx, project, instance, request)
+	result.Stdout = bytes.ReplaceAll(result.Stdout, []byte(strings.Repeat("a", 64)), []byte(strings.Repeat("c", 64)))
+	return result, err
 }
 
 func TestIntegrationActivationFailureBoundaries(t *testing.T) {

@@ -30,78 +30,85 @@ done
 
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE=amnezia-acceptance
+# The enclosing runner keeps its fixed work deadline and 300-second TERM grace.
+# Capture (110+2 seconds) and cleanup (under 95 seconds) fit inside that grace.
+install -d -m 0700 "$ROOT/.build/test-runs"
+OUTPUT="$(mktemp -d "$ROOT/.build/test-runs/amnezia.XXXXXX")"
+chmod 0700 "$OUTPUT"
 diagnose_failure() {
-  local rc="$1"
-  if [ "$rc" -ne 0 ] && [ -n "${GUEST_DIRS[1]:-}" ]; then
-    printf 'amnezia_acceptance_failure_exit=%s\n' "$rc" >&2
-    # Bound read-only probes; expose only timings and selected service states.
-    guest 1 timeout 100 bash -c '
-      probe() {
-        local label="$1" started=$SECONDS rc=0
-        shift
-        timeout 20 "$@" >/dev/null 2>&1 || rc=$?
-        printf "startup_probe=%s duration_seconds=%s exit=%s\n" "$label" "$((SECONDS - started))" "$rc"
-      }
-      # Retain only the exact owned native containers state before lease teardown.
-      if [ "$(timeout 10 incus config get yard-vpn-e2e user.subyard.managed --project subyard-vpn-e2e)" = true ]; then
-        rc=0
-        state="$(timeout 10 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-          docker inspect --format "{{.State.Status}}|{{.State.Running}}|{{.State.Restarting}}|{{.State.ExitCode}}" \
-          amnezia-awg2 2>/dev/null)" || rc=$?
-        IFS="|" read -r status running restarting code <<<"$state"
-        case "$status:$running:$restarting" in
-          created:false:false|running:true:false|paused:true:false|restarting:true:true|exited:false:false|dead:false:false)
-            if [[ "$code" =~ ^[0-9]{1,3}$ ]] && [ "$code" -le 255 ]; then
-              printf "native_server_container_status=%s running=%s restarting=%s exit=%s probe_exit=%s\n" \
-                "$status" "$running" "$restarting" "$code" "$rc"
-            fi ;;
-          *) printf "native_server_container_state=unavailable probe_exit=%s\n" "$rc" ;;
-        esac
-      fi
-      probe guest-observe incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-        python3 /usr/local/lib/subyard-amnezia/runtime.py observe
-      probe guest-docker-enumerate incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-        timeout 10 docker container ls -a --format "{{.Names}}"
-      probe guest-observe-management incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-        python3 /usr/local/lib/subyard-amnezia/runtime.py observe-management
-      started=$SECONDS rc=0
-      timeout 20 incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-        systemctl show docker.service containerd.service subyard-amnezia.service \
-          --property=Id --property=LoadState --property=ActiveState --property=SubState \
-          --property=Result --property=ExecMainStatus \
-          --property=ExecMainStartTimestampMonotonic --property=NRestarts 2>/dev/null || rc=$?
-      printf "startup_probe=guest-service-state duration_seconds=%s exit=%s\n" "$((SECONDS - started))" "$rc"
-      probe owner-config incus query "/1.0/instances?recursion=1&all-projects=true"
-      probe owner-state incus list --all-projects --format=json
-      probe guest-projects incus exec yard-vpn-e2e --project subyard-vpn-e2e -- \
-        find /srv/workspaces -mindepth 1 -maxdepth 1 -print -quit
-    ' >&2 || true
-    guest 1 timeout 15 free -b >&2 || true
-    guest 1 timeout 15 sh -c '
-      journalctl -k -b --no-pager -o short-iso \
-        | grep -iE "out of memory|oom-kill|killed process" | tail -n 30
-      journalctl -b -u systemd-oomd --no-pager -n 20
-    ' >&2 || true
-    guest 1 timeout 15 systemctl show subyard-power-reconcile.service \
-      --property=LoadState --property=ActiveState --property=SubState \
-      --property=Result --property=ExecMainStatus \
-      --property=ExecMainStartTimestampMonotonic --property=NRestarts >&2 || true
-    guest 1 timeout 15 journalctl -b -u subyard-power-reconcile.service \
-      --no-pager -n 60 >&2 || true
-    guest 1 timeout 15 incus list yard-vpn-e2e --project subyard-vpn-e2e \
-      --format csv -c ns >&2 || true
-    guest 1 timeout 15 incus info yard-vpn-e2e --project subyard-vpn-e2e \
-      --show-log >&2 || true
-    guest 1 timeout 15 incus console yard-vpn-e2e --project subyard-vpn-e2e \
-      --show-log | tail -n 100 >&2 || true
-  fi
+  local original="$1" command rc=0 started=$SECONDS
+  local -a codes
+  [ "$original" -ne 0 ] && [ -n "${GUEST_DIRS[1]:-}" ] || return 0
+  install -m 0600 /dev/null "$OUTPUT/failure.tar"
+  install -m 0600 /dev/null "$OUTPUT/capture-transport.log"
+  install -m 0600 /dev/null "$OUTPUT/capture-result"
+  command="$(quote_ssh_command python3 "${GUEST_DIRS[1]}/src/config/profiles/amnezia/tests/e2e/failure-capture.py" collect)" || return 2
+  (
+    ulimit -f 128
+    timeout --signal=TERM --kill-after=2 110 ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- "$command" \
+      </dev/null 2>"$OUTPUT/capture-transport.log"
+  ) | head -c 3145728 >"$OUTPUT/failure.tar"
+  codes=("${PIPESTATUS[@]}")
+  printf 'transport_exit_code=%s\narchive_pipe_exit_code=%s\nduration_seconds=%s\narchive_bytes=%s\n' \
+    "${codes[0]}" "${codes[1]}" "$((SECONDS - started))" "$(stat -c %s "$OUTPUT/failure.tar")" >"$OUTPUT/capture-result"
+  [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || rc=1
+  timeout --signal=TERM --kill-after=2 5 python3 \
+    "$ROOT/config/profiles/amnezia/tests/e2e/failure-capture.py" validate "$OUTPUT/failure.tar" || rc=1
   return "$rc"
 }
+cleanup_acceptance_resources() {
+  local cleanup_rc=0 vm command
+  if [ -n "$LEASE_KEEPER_PID" ]; then
+    kill "$LEASE_KEEPER_PID" >/dev/null 2>&1
+    timeout --foreground --signal=KILL 2 tail --pid="$LEASE_KEEPER_PID" -f /dev/null >/dev/null 2>&1
+    kill -KILL "$LEASE_KEEPER_PID" >/dev/null 2>&1
+  fi
+  for vm in "${!GUEST_DIRS[@]}"; do
+    command="$(quote_ssh_command sudo -n find "${GUEST_DIRS[$vm]}" -depth -delete)"
+    case "${GUEST_DIRS[$vm]}" in
+      /var/tmp/subyard-worktree.*)
+        timeout --foreground --signal=TERM --kill-after=2 8 ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command" \
+          </dev/null >/dev/null 2>&1 || cleanup_rc=3 ;;
+      *) cleanup_rc=3 ;;
+    esac
+  done
+  # The original facade retains release authentication and response handling.
+  # shellcheck disable=SC2317
+  ssh() { timeout --foreground --signal=TERM --kill-after=2 65 ssh "$@"; }
+  release_lease || cleanup_rc=3
+  unset -f ssh
+  find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_rc=3
+  return "$cleanup_rc"
+}
 cleanup_acceptance() {
-  local rc=$?
+  local original=$? capture_rc=0 cleanup_rc=0 cleanup_pid started=$SECONDS
+  trap - EXIT
+  # A second signal (including the enclosing work deadline) must leave the
+  # bounded capture/cleanup grace intact. Their native KILL limits still apply.
+  trap '' INT TERM
   set +e
-  diagnose_failure "$rc"
-  cleanup_on_exit
+  diagnose_failure "$original" || capture_rc=$?
+  # One owned process group gives the entire cleanup a hard 95-second ceiling.
+  # Native cleanup timeouts stay in this group so the ceiling also fences children.
+  set -m
+  cleanup_acceptance_resources &
+  cleanup_pid=$!
+  set +m
+  if timeout --signal=KILL 95 tail --pid="$cleanup_pid" -f /dev/null >/dev/null 2>&1; then
+    wait "$cleanup_pid" 2>/dev/null || cleanup_rc=3
+  else
+    kill -KILL -- "-$cleanup_pid" >/dev/null 2>&1
+    wait "$cleanup_pid" 2>/dev/null
+    cleanup_rc=3
+  fi
+  install -m 0600 /dev/null "$OUTPUT/result"
+  printf 'original_exit_code=%s\ncapture_exit_code=%s\ncleanup_exit_code=%s\n' \
+    "$original" "$capture_rc" "$cleanup_rc" >"$OUTPUT/result"
+  printf 'AMNEZIA_RESULT original_exit_code=%s capture_exit_code=%s cleanup_exit_code=%s duration_seconds=%s evidence=%s\n' \
+    "$original" "$capture_rc" "$cleanup_rc" "$((SECONDS - started))" "$OUTPUT"
+  [ "$original" -eq 0 ] || exit "$original"
+  [ "$capture_rc" -eq 0 ] || exit 1
+  exit "$cleanup_rc"
 }
 trap cleanup_acceptance EXIT
 trap 'exit 130' INT
@@ -117,13 +124,19 @@ prepare_guest 1 "$bundle" "$bundle_hash"
 prepare_guest 2 "$bundle" "$bundle_hash"
 
 owner_phase() {
-  local phase="$1" directory="${GUEST_DIRS[1]}"
+  local phase="$1" directory="${GUEST_DIRS[1]}" command
   shift
   printf 'amnezia_acceptance_stage=owner-%s\n' "$phase"
   write_guest_command 1 "$directory" bash config/profiles/amnezia/tests/e2e/owner.sh "$phase" "$@" \
     | guest 1 dd "of=$directory/run.sh" status=none
   guest 1 chmod 0700 "$directory/run.sh" </dev/null
-  guest 1 "$directory/run.sh" </dev/null
+  if [ "$phase" = recovery-state-mount ]; then
+    # Bound the native controller transport, including an unresponsive SSH session.
+    command="$(quote_ssh_command timeout --signal=TERM --kill-after=5 1800 "$directory/run.sh")"
+    timeout --signal=TERM --kill-after=5 1810 ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- "$command" </dev/null
+  else
+    guest 1 "$directory/run.sh" </dev/null
+  fi
   printf 'amnezia_acceptance_stage=owner-%s result=pass\n' "$phase"
 }
 

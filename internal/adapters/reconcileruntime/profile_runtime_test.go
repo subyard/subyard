@@ -302,13 +302,20 @@ func TestApplyProfileRuntimeRejectsObservationChangesAfterAssessment(t *testing.
 
 func TestProvisionRefreshesProfileRuntimesAfterBaseBeforeIntegrationHooks(t *testing.T) {
 	previewLoopbackFixture(t)
-	for _, failure := range []string{"", "route", "network", "base", "runtime"} {
+	sshHelper, err := filepath.Abs("../../../scripts/lib/ssh-config.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"", "route", "network", "base", "ssh", "runtime"} {
 		t.Run("failure="+failure, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			handler := `#!/bin/sh
 set -eu
 [ -e "$BASE_READY" ]
 [ -e "$AGENT_READY" ]
+[ -e "$SSH_READY" ]
+[ -s "$SUBYARD_HOME/ssh/id_ed25519" ]
+[ "$(stat -c %a "$SUBYARD_HOME/ssh/id_ed25519")" = 600 ]
 case "$1" in
   observe)
     if [ -e "$RUNTIME_READY" ]; then
@@ -348,6 +355,16 @@ set -eu
 : > "$AGENT_READY"
 : > "$BASE_READY"
 `,
+				"scripts/07-ssh-access.sh": `#!/bin/bash
+set -euo pipefail
+[ "$1" = --yes ]
+[ -e "$BASE_READY" ]
+[ -e "$AGENT_READY" ]
+[ "$FAIL_STAGE" != ssh ]
+. "$SSH_HELPER"
+ssh_transport_identity_prepare "$SUBYARD_HOME" >/dev/null
+: > "$SSH_READY"
+`,
 				"config/projects-changed.sh":        "#!/bin/sh\nexit 0\n",
 				"scripts/reconcile-integrations.sh": "#!/bin/sh\nexit 0\n",
 			} {
@@ -368,6 +385,8 @@ set -eu
 				"BASE_READY=" + filepath.Join(root, "base-ready"), "RUNTIME_READY=" + ready,
 				"AGENT_READY=" + filepath.Join(root, "agent-ready"),
 				"ROUTE_READY=" + filepath.Join(root, "route-ready"),
+				"SSH_READY=" + filepath.Join(root, "ssh-ready"),
+				"SSH_HELPER=" + sshHelper, "SUBYARD_HOME=" + filepath.Join(root, "data"),
 				"FAIL_STAGE=" + failure, "OLD=" + testRuntimeOldDigest, "NEW=" + testRuntimeNewDigest,
 				"SUBYARD_OPERATION_ID=op-12345678",
 			}
@@ -392,6 +411,28 @@ set -eu
 			}
 			if err != nil || executor.hookAttempts != 1 || executor.commits != 1 || executor.pending {
 				t.Fatalf("provision order failed: err=%v hooks=%d commits=%d pending=%v", err, executor.hookAttempts, executor.commits, executor.pending)
+			}
+			identity := filepath.Join(root, "data", "ssh", "id_ed25519")
+			before, err := os.ReadFile(identity)
+			if err != nil {
+				t.Fatal("canonical transport identity was not created")
+			}
+			// Re-running the generic owners must reuse the protected identity.
+			if err := os.Remove(filepath.Join(root, "base-ready")); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageProvision); err != nil {
+				t.Fatalf("repeat provision failed: %v", err)
+			}
+			after, err := os.ReadFile(identity)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("repeat provision changed the canonical transport identity")
+			}
+			for path, mode := range map[string]os.FileMode{filepath.Dir(identity): 0o700, identity: 0o600, identity + ".pub": 0o644} {
+				info, err := os.Stat(path)
+				if err != nil || info.Mode().Perm() != mode {
+					t.Fatalf("canonical identity mode differs: want %o", mode)
+				}
 			}
 		})
 	}

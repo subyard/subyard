@@ -859,3 +859,43 @@ coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-lo
 `/run/lock/subyard-network` remain: removing an active lock inode would let queued operations
 bypass serialization. Queued mutations and late audit/cache writers recheck their original
 installation generation before writing.
+
+### Continuing an existing legacy yard
+
+After upgrading through the supported release transition, a legacy project may
+lack installation creation ownership. Use the installed local launcher to run
+`yard init --continue-legacy` once. The read-only plan requires protected owner
+configuration, completed verified release history, an existing native instance
+UUID and the already-converged dedicated project policy. Review the exact plan;
+`--yes` accepts it only when `--continue-legacy` is explicitly selected.
+An implicit default yard may use its existing protected mode0600 host
+configuration when the local yard record is absent. Assessment binds that file
+and the absence of a yard record, then rechecks both after confirmation.
+
+The private continuation record permits normal reconciliation of that same
+owner and instance. Later plain `yard init` reuses it after checking the identity.
+The grant also binds the existing project, default-profile and instance security
+policy, including local devices, ID mappings, mount sources and permissions.
+Continuation supports the canonical non-nested unprivileged container setup;
+unknown instance configuration, local NIC overrides and additional devices are
+refused. Exact managed AppArmor compatibility and static-preview publication
+changes remain allowed, alongside normal power and runtime state changes.
+Shipped owners may declare a paired disabled-backend publication contract.
+Its schema and complete protected settings remain bound; only a validated
+release digest and an explicitly compatible older serialization may differ.
+An older disabled backend's missing budget fields do not prove historical
+budget enforcement. For legacy continuation admission, a declared source identity
+must equal the protected yard identity, even when explicitly supplied. This
+constraint does not change the backend's other supported source forms.
+Unknown permissions, unsupported profile configuration and later policy changes
+are refused, including on a new command or a repeated opt-in. Any pending native
+network-policy changes require their separate assessed operation before granting
+continuation. Runtime power, observed addresses and release links are not pinned.
+
+It grants no reset, project creation or full removal ownership; full removal
+refuses while this continuation-only authority remains. It cannot be combined
+with `--configs`, `--reset` or `--profile`. Unknown resources, conflicting or
+partial ownership, unsafe records and changed identities are refused without
+adoption. Configuration roots may be customized, but temporary scalar overrides
+must not redirect the persisted owner context. Do not add installation markers
+manually. Supported release rollback and roll-forward retain this narrow grant.

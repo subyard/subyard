@@ -366,12 +366,24 @@ standalone_ledger_before="$(sha256sum "$standalone_ledger")"
   export HOME="$state/home" SUBYARD_OPERATOR_HOME="$state/home"
   export SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
   export YARD_RUNTIME_ROOT="$state/runtime" SHELL=/bin/bash
+  export SUBYARD_NO_AUDIT=1
   unset YARD_ENGINE_PATH
+  [ ! -e "$SUBYARD_HOME" ] || fail 'fresh profile fixture data directory already exists'
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   launcher="$(release_candidate_install "$fixture" "$state")"
   [ "$launcher" = "$state/bin/yard" ] && [ -x "$launcher" ] \
     || fail 'profile fixture bootstrap did not publish its isolated launcher'
+  [ "$(stat -c '%a' "$SUBYARD_HOME")" = 700 ] \
+    && [ "$(stat -c '%a' "$SUBYARD_HOME/installation.json")" = 600 ] \
+    || fail 'profile fixture bootstrap did not publish private installation ownership'
+  jq -e --arg state "$state" --argjson uid "$(id -u)" \
+    '.schema == 1 and .operatorUid == $uid and .dataHome == ($state + "/data")
+      and .configHome == ($state + "/config") and .runtimeRoot == ($state + "/runtime")
+      and .cacheRoot == ($state + "/releases") and .binDir == ($state + "/bin")
+      and .shellFiles == [($state + "/bashrc"), ($state + "/profile")]' \
+    "$SUBYARD_HOME/installation.json" >/dev/null \
+    || fail 'profile fixture bootstrap installation ownership has incorrect path bindings'
   "$launcher" _publication-contracts >/dev/null \
     || fail 'profile fixture bootstrap left the protected publication reader uncommitted'
   [ -f "$state/bashrc" ] && [ -f "$state/profile" ] \

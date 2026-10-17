@@ -41,16 +41,19 @@ func TestLateAuditWriterCannotRecreateOrEnterNewInstallation(t *testing.T) {
 			}
 			cli := &CLI{}
 			admission := cli.auditWriteAdmission(home)
-			if err := os.Remove(home); err != nil {
-				t.Fatal(err)
-			}
 			if replacement {
+				// Retain the old inode so the replacement cannot immediately reuse it.
+				if err := os.Rename(home, filepath.Join(base, "original-data")); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.Mkdir(home, 0700); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Chmod(home, 0700); err != nil {
 					t.Fatal(err)
 				}
+			} else if err := os.Remove(home); err != nil {
+				t.Fatal(err)
 			}
 			if err := audit.WriteInvocation(audit.Invocation{Home: home, Command: "late.finish", BeforeWrite: admission}); err != nil {
 				t.Fatal(err)

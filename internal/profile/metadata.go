@@ -13,24 +13,25 @@ import (
 // Metadata and IntegrationMetadata contain validated declarations without native
 // roots or executable bindings. Data returns an independent semantic snapshot.
 type MetadataData struct {
-	SchemaVersion              int                   `json:"schema_version"`
-	Name                       string                `json:"-"`
-	DefaultYards               []string              `json:"default_yards,omitempty"`
-	DisabledWhen               map[string]string     `json:"disabled_when,omitempty"`
-	SelectedProvisionOnly      bool                  `json:"selected_provision_only,omitempty"`
-	OwnerService               string                `json:"owner_service,omitempty"`
-	LifecycleOnly              bool                  `json:"lifecycle_only,omitempty"`
-	FullCleanup                string                `json:"full_cleanup,omitempty"`
-	FullCleanupEnvironment     []string              `json:"full_cleanup_environment,omitempty"`
-	Native                     []Native              `json:"native,omitempty"`
-	Consumers                  []Consumer            `json:"consumers,omitempty"`
-	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
-	ManagedPaths               []ManagedPath         `json:"managed_paths,omitempty"`
-	Setup                      *Setup                `json:"setup,omitempty"`
-	Settings                   []Setting             `json:"settings,omitempty"`
-	Runtime                    *RuntimeHook          `json:"runtime,omitempty"`
-	GuestEnvironment           *GuestEnvironmentHook `json:"guest_environment,omitempty"`
-	Dashboard                  *IntegrationDashboard `json:"dashboard,omitempty"`
+	SchemaVersion              int                            `json:"schema_version"`
+	Name                       string                         `json:"-"`
+	DefaultYards               []string                       `json:"default_yards,omitempty"`
+	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
+	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
+	OwnerService               string                         `json:"owner_service,omitempty"`
+	InstancePublication        *RevisionedSettingsPublication `json:"instance_publication,omitempty"`
+	LifecycleOnly              bool                           `json:"lifecycle_only,omitempty"`
+	FullCleanup                string                         `json:"full_cleanup,omitempty"`
+	FullCleanupEnvironment     []string                       `json:"full_cleanup_environment,omitempty"`
+	Native                     []Native                       `json:"native,omitempty"`
+	Consumers                  []Consumer                     `json:"consumers,omitempty"`
+	CredentialImportExclusions [][]string                     `json:"credential_import_exclusions,omitempty"`
+	ManagedPaths               []ManagedPath                  `json:"managed_paths,omitempty"`
+	Setup                      *Setup                         `json:"setup,omitempty"`
+	Settings                   []Setting                      `json:"settings,omitempty"`
+	Runtime                    *RuntimeHook                   `json:"runtime,omitempty"`
+	GuestEnvironment           *GuestEnvironmentHook          `json:"guest_environment,omitempty"`
+	Dashboard                  *IntegrationDashboard          `json:"dashboard,omitempty"`
 }
 type Metadata struct {
 	data  MetadataData
@@ -54,7 +55,7 @@ func (declaration Definition) Metadata() (Metadata, error) {
 	if err := declaration.validateSemantic(); err != nil {
 		return Metadata{}, err
 	}
-	return Metadata{data: cloneMetadataData(MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}), valid: true}, nil
+	return Metadata{data: cloneMetadataData(MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}), valid: true}, nil
 }
 func (metadata Metadata) Data() (MetadataData, error) {
 	if !metadata.valid {
@@ -64,9 +65,20 @@ func (metadata Metadata) Data() (MetadataData, error) {
 }
 func (metadata Metadata) definition() Definition {
 	data := cloneMetadataData(metadata.data)
-	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
+	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, InstancePublication: data.InstancePublication, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
 }
 func cloneMetadataData(data MetadataData) MetadataData {
+	if data.InstancePublication != nil {
+		copy := *data.InstancePublication
+		copy.Settings = slices.Clone(copy.Settings)
+		for i := range copy.Settings {
+			if value := copy.Settings[i].LegacyDefault; value != nil {
+				cloned := *value
+				copy.Settings[i].LegacyDefault = &cloned
+			}
+		}
+		data.InstancePublication = &copy
+	}
 	data.Dashboard = cloneIntegrationMetadataData(IntegrationMetadataData{Dashboard: data.Dashboard}).Dashboard
 	data.FullCleanupEnvironment = slices.Clone(data.FullCleanupEnvironment)
 	data.Native = slices.Clone(data.Native)
@@ -194,11 +206,24 @@ func cloneSettings(settings []Setting) []Setting {
 // ValidateMetadata checks operation-local ownership collisions independently of
 // package files. Zero metadata and invalid snapshots fail closed.
 func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) error {
+	keys, dashboardKeys := map[string]bool{}, map[string]bool{}
 	consumers, setupPaths, settings, activations := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, metadata := range profiles {
 		definition, err := metadata.Data()
 		if err != nil {
 			return err
+		}
+		if publication := definition.InstancePublication; publication != nil {
+			for _, key := range []string{publication.SchemaKey, publication.RevisionKey} {
+				if keys[key] {
+					return errors.New("profile native publication key collision")
+				}
+				keys[key] = true
+			}
+		}
+		if definition.Dashboard != nil && definition.Dashboard.ContainerRoute != nil {
+			key := definition.Dashboard.ContainerRoute.MarkerKey
+			dashboardKeys[key] = true
 		}
 		for _, consumer := range definition.Consumers {
 			if consumers[consumer.ID] {
@@ -228,7 +253,12 @@ func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) e
 			activations[definition.Runtime.ActivationID] = true
 		}
 	}
-	keys, devices, names := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for key := range keys {
+		if dashboardKeys[key] {
+			return errors.New("profile publication collides with a dashboard owner")
+		}
+	}
+	devices, names := map[string]bool{}, map[string]bool{}
 	for _, metadata := range integrations {
 		definition, err := metadata.Data()
 		if err != nil {

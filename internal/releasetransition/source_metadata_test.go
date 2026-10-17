@@ -12,6 +12,108 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestSourceMetadataAcceptsAuthenticatedHistoricalDomainPrefix(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		name := "current"
+		if retained {
+			name = "retained"
+		}
+		t.Run(name, func(t *testing.T) {
+			transition, home, _ := v2TransitionFixture(t, nil)
+			store, err := NewPOSIXV2Store(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The published predecessor completed settings/owner epoch 2 while
+			// power remained at epoch 1, before the new cross-domain ordering.
+			oldRegistry, oldDigest := transition.registry, transition.registryDigest
+			ledger := BaselineLedgerV2(oldRegistry)
+			path, err := oldRegistry.PendingPath(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, migration := range path {
+				ledger, err = ledger.Advance(oldRegistry, migration)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if ledger.Domains["owner-registration"].Epoch != 2 || ledger.Domains["power-metadata"].Epoch != 1 {
+				t.Fatal("fixture lost the historical cross-domain prefix")
+			}
+			payload, _, err := MarshalLedgerV2(ledger, oldRegistry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			missing, err := store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CompareAndSwapLedger(missing, payload); err != nil {
+				t.Fatal(err)
+			}
+			prior, err := store.ReadMigrationLedger(oldRegistry, oldDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err = os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry, digest, err := ParseRegistryV2(payload, BuiltinCapabilityCatalog())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ConvertMigrationLedger(prior, oldRegistry, oldDigest, registry, digest); err != nil {
+				t.Fatal(err)
+			}
+			options := transition.options
+			options.RegistryPayload = payload
+			options.MigrationCheckpoint, options.SourceMigrationCheckpoint = true, true
+			transition, err = NewV2Transition(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			inspection, err := transition.Inspect(context.Background(), goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := transition.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			if err != nil || outcome.Status != StatusReady {
+				t.Fatalf("historical prefix upgrade: %+v %v", outcome, err)
+			}
+			snapshot, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := ParseJournal(snapshot.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retained {
+				transition, store = interruptSourceMetadataActivation(t, transition, store)
+			}
+			before := snapshotStoreV2Tree(t, home)
+			proof, err := store.InspectSourceMetadata(registry, digest)
+			if err != nil {
+				t.Fatalf("authenticated historical prefix refused: %v", err)
+			}
+			for index := range journal.Steps {
+				if journal.Steps[index].Resource == "ledger.power-metadata" {
+					journal.Steps[index].Expected = digestB
+				}
+			}
+			if err := store.sourceTerminalEvidence(journal, registry, proof.Ledger); err == nil {
+				t.Fatal("authenticated terminal admitted an altered historical before state")
+			}
+			if string(snapshotStoreV2Tree(t, home)) != string(before) {
+				t.Fatal("source admission changed protected history")
+			}
+		})
+	}
+}
+
 func TestSourceMetadataRejectsLedgerRecoveryInCompleteCheckpointTriples(t *testing.T) {
 	for _, retained := range []bool{false, true} {
 		name := "current"

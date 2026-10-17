@@ -204,6 +204,17 @@ func (fake *IncusServer) SetInstance(project, name string, instance map[string]a
 	fake.instances[project+"/"+name] = cloneAnyMap(instance)
 }
 
+// ReplaceInstances publishes one complete project/name inventory snapshot.
+func (fake *IncusServer) ReplaceInstances(instances map[string]map[string]any) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	replacement := make(map[string]map[string]any, len(instances))
+	for name, instance := range instances {
+		replacement[name] = cloneAnyMap(instance)
+	}
+	fake.instances = replacement
+}
+
 func (fake *IncusServer) SetProject(name string, project map[string]any) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()

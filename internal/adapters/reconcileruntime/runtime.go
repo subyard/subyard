@@ -54,7 +54,8 @@ type IncusReader interface {
 }
 
 type Runtime struct {
-	RepositoryRoot string
+	LegacyContinuation *domain.LegacyContinuation
+	RepositoryRoot     string
 	// SourceReader is read-only prospective desired input; nil uses normal asset policy.
 	SourceReader func(config.MaterializedAsset) ([]byte, error)
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
@@ -183,8 +184,14 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if err := runtime.checkLegacyContinuation(ctx); err != nil {
+		return err
+	}
 	switch stage {
 	case ports.ReconcileStageProject:
+		if runtime.LegacyContinuation != nil {
+			return runtime.checkLegacyContinuation(ctx)
+		}
 		return runtime.runScript(ctx, runtime.Stderr, "02-create-project.sh", "--yes")
 	case ports.ReconcileStageInstance:
 		return runtime.applyInstanceStage(ctx)
@@ -265,7 +272,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 			"04-provision-subyard.sh", "--yes"); err != nil {
 			return err
 		}
-		// Base provisioning makes a fresh guest reachable before repairing installed hooks.
+		// Native runtimes can consume the canonical authenticated SSH transport.
+		// Base provisioning supplies the guest user/server before its existing owner runs.
+		if err := runtime.ApplyStage(ctx, ports.ReconcileStageSSH); err != nil {
+			return err
+		}
 		if err := runtime.applyProfileRuntimes(ctx); err != nil {
 			return err
 		}
@@ -402,8 +413,17 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 		state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) ||
 		state.ProjectConfig["user.subyard.data_home"] != runtime.environmentValue("SUBYARD_HOME") ||
 		state.ProjectConfig["user.subyard.config_home"] != runtime.environmentValue("SUBYARD_CONFIG_HOME") {
-		return false, nil
+		if runtime.LegacyContinuation == nil {
+			return false, nil
+		}
+		if err := runtime.checkLegacyContinuation(ctx); err != nil {
+			return false, err
+		}
 	}
+	return runtime.projectPolicyConverged(state, reporting), nil
+}
+
+func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, reporting bool) bool {
 	wantInterception := "block"
 	if runtime.Yard.NestedE2EVMs {
 		wantInterception = "allow"
@@ -420,15 +440,15 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 	}
 	for key, value := range want {
 		if state.ProjectConfig[key] != value {
-			return false, nil
+			return false
 		}
 	}
 	if reporting && state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
-		return false, nil
+		return false
 	}
 	_, root := state.ProfileDevices["root"]
 	_, network := state.ProfileDevices["eth0"]
-	return state.ProfileFound && root && network, nil
+	return state.ProfileFound && root && network
 }
 
 func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
@@ -914,6 +934,9 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
+	if runtime.LegacyContinuation != nil {
+		return errors.New("legacy continuation cannot authorize reset or teardown")
+	}
 	if runtime.TeardownResources == nil || runtime.TeardownArtifacts == nil {
 		return errors.New("approved exact reset teardown inventory is required")
 	}

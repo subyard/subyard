@@ -22,6 +22,11 @@ func (definition *Definition) validateSemantic() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported profile schema or name")
 	}
+	if definition.InstancePublication != nil {
+		if err := definition.InstancePublication.validate(definition.Name); err != nil {
+			return err
+		}
+	}
 	for _, yard := range definition.DefaultYards {
 		if !domain.SafeName(yard) {
 			return errors.New("invalid default yard")
@@ -39,7 +44,7 @@ func (definition *Definition) validateSemantic() error {
 
 	}
 	if definition.LifecycleOnly && (definition.FullCleanup == "" || len(definition.DefaultYards) > 0 || definition.OwnerService != "" || definition.Setup != nil || definition.Runtime != nil || len(definition.Settings) > 0 || len(definition.Native) > 0 || len(definition.Consumers) > 0 || definition.GuestEnvironment != nil || definition.Dashboard != nil) {
-		return errors.New("lifecycle-only profiles may declare only full cleanup hooks and managed paths")
+		return errors.New("lifecycle-only profiles may declare only full cleanup hooks, managed paths and native publication metadata")
 	}
 	if definition.FullCleanup != "" && !relative(definition.FullCleanup) {
 		return errors.New("full cleanup path escapes profile")

@@ -43,8 +43,9 @@ and closes their active connections.
 install or reconcile Incus, the yard and its core configuration.
 
 ```text
-Usage: yard init [--configs | --reset | --profile <name>] [--yes]
+Usage: yard init [--configs | --reset | --profile <name> | --continue-legacy] [--yes]
 
+--continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.
 Interactive init offers initial setup declared by selected profiles.
 Leave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.
 ```

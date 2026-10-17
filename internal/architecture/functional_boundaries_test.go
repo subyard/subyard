@@ -24,7 +24,7 @@ func TestFunctionalBoundaryCallGraphsDoNotReachPhysicalAdapters(t *testing.T) {
 		method  bool
 	}
 	functions := map[string][]function{}
-	packages := []string{"profile", "config", "resource", "domain", "adapters/reconcileruntime", "releasetransition"}
+	packages := []string{"profile", "config", "resource", "domain", "adapters/reconcileruntime", "releasetransition", "releasetransition/journal/v2"}
 	for _, packageName := range packages {
 		directory := filepath.Join("..", packageName)
 		files, err := filepath.Glob(filepath.Join(directory, "*.go"))

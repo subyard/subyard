@@ -8,13 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -61,6 +65,15 @@ type IntegrationPlan struct {
 	sources             string
 	// Attribution only; the existing aggregate source binding remains the guard.
 	packageSources map[string]string
+	instance       ports.InstanceInfo
+	instanceScope  string
+	fingerprints   []string
+	profileRoutes  []integrationProfileRoute
+}
+
+type integrationProfileRoute struct {
+	Owner, MarkerKey, DeviceName, Marker string
+	Device                               map[string]string
 }
 
 type integrationFact struct {
@@ -424,12 +437,14 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			delete(guardInstance.LocalDevices, name)
 		}
 	}
-	identity, _ := json.Marshal(struct {
-		Scope    string
-		Instance ports.InstanceInfo
-	}{scope, guardInstance})
-	plan.Scope = fmt.Sprintf("%x", sha256.Sum256(identity))
+	plan.instance, plan.instanceScope = guardInstance, scope
+	plan.profileRoutes = runtime.integrationProfileRoutes(ctx, guardInstance)
+	plan.Scope = integrationInstanceScope(scope, guardInstance)
 	fingerprints := []string{plan.Scope, plan.sources, observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}
+	if len(plan.profileRoutes) != 0 {
+		routeBindings, _ := json.Marshal(plan.profileRoutes)
+		fingerprints = append(fingerprints, string(routeBindings))
+	}
 	for _, definition := range definitions {
 		if definition.Lifecycle == nil {
 			continue
@@ -537,6 +552,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	fingerprints = append(fingerprints, serviceFingerprint)
 	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
+	plan.fingerprints = slices.Clone(fingerprints)
 	if plan.Changed {
 		plan.Steps = []string{"reconcile selected integrations: " + strings.Join(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), " ")}
 		for _, entry := range observed.Retired {
@@ -679,6 +695,104 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 func (runtime Runtime) IntegrationPlan(ctx context.Context) (IntegrationPlan, error) {
 	plan, _, err := runtime.observeIntegrations(ctx)
 	return plan, err
+}
+
+func integrationInstanceScope(scope string, instance ports.InstanceInfo) string {
+	identity, _ := json.Marshal(struct {
+		Scope    string
+		Instance ports.InstanceInfo
+	}{scope, instance})
+	return fmt.Sprintf("%x", sha256.Sum256(identity))
+}
+
+// Record exact declared sibling effects without changing ordinary integration guards.
+func (runtime Runtime) integrationProfileRoutes(ctx context.Context, instance ports.InstanceInfo) []integrationProfileRoute {
+	if runtime.Yard.YardKind == domain.YardVM {
+		return nil
+	}
+	var routes []integrationProfileRoute
+	for _, definition := range runtime.Profiles {
+		if definition.Runtime == nil || definition.Dashboard == nil || definition.Dashboard.ContainerRoute == nil ||
+			!slices.Contains(strings.Fields(runtime.environmentValue("ENVIRONMENT_PROFILES")), definition.Name) {
+			continue
+		}
+		dashboard := definition.Dashboard
+		route := dashboard.ContainerRoute
+		marker, device := instance.Config[route.MarkerKey], instance.Devices[route.DeviceName]
+		if marker != "" || len(device) != 0 {
+			_, _, owned := ownerroute.Owned(marker, device, dashboard.GuestPort)
+			if !owned || instance.LocalConfig[route.MarkerKey] != marker || !maps.Equal(instance.LocalDevices[route.DeviceName], device) {
+				continue
+			}
+		} else if instance.LocalConfig[route.MarkerKey] != "" || len(instance.LocalDevices[route.DeviceName]) != 0 {
+			continue
+		}
+		port := runtime.environmentValue(dashboard.PortSetting)
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1024 || number > 65535 || strconv.Itoa(number) != port {
+			continue
+		}
+		host := ownerroute.Host(ctx)
+		desiredMarker := "v1:" + port
+		if host != "127.0.0.1" {
+			desiredMarker = "v2:" + host + ":" + port
+		}
+		routes = append(routes, integrationProfileRoute{definition.Runtime.ActivationID, route.MarkerKey, route.DeviceName, desiredMarker, ownerroute.Device(host, port, dashboard.GuestPort)})
+	}
+	return routes
+}
+
+// Project only complete, originally captured sibling publications after their
+// native owner verifies readiness. The original plan and every other instance
+// field remain unchanged; the returned plan is for approval comparison only.
+func (runtime Runtime) ProjectIntegrationPlanAfterProfileActivation(ctx context.Context, approved, fresh IntegrationPlan) (IntegrationPlan, error) {
+	if len(approved.profileRoutes) == 0 || approved.Fingerprint == fresh.Fingerprint {
+		return fresh, nil
+	}
+	instance := fresh.instance
+	instance.Config, instance.LocalConfig = maps.Clone(instance.Config), maps.Clone(instance.LocalConfig)
+	instance.Devices, instance.LocalDevices = maps.Clone(instance.Devices), maps.Clone(instance.LocalDevices)
+	for _, route := range approved.profileRoutes {
+		if instance.Config[route.MarkerKey] == approved.instance.Config[route.MarkerKey] &&
+			instance.LocalConfig[route.MarkerKey] == approved.instance.LocalConfig[route.MarkerKey] &&
+			maps.Equal(instance.Devices[route.DeviceName], approved.instance.Devices[route.DeviceName]) &&
+			maps.Equal(instance.LocalDevices[route.DeviceName], approved.instance.LocalDevices[route.DeviceName]) {
+			continue
+		}
+		if instance.Config[route.MarkerKey] != route.Marker || instance.LocalConfig[route.MarkerKey] != route.Marker ||
+			!maps.Equal(instance.Devices[route.DeviceName], route.Device) || !maps.Equal(instance.LocalDevices[route.DeviceName], route.Device) {
+			return fresh, domain.ErrPlanStale
+		}
+		owner, err := runtime.ObserveProfileRuntime(ctx, route.Owner)
+		if err != nil {
+			return fresh, err
+		}
+		if owner.State != ports.RuntimeStateCurrent || owner.Actual == "" || owner.Actual != owner.Desired {
+			return fresh, domain.ErrPlanStale
+		}
+		for _, pair := range [][2]map[string]string{{instance.Config, approved.instance.Config}, {instance.LocalConfig, approved.instance.LocalConfig}} {
+			if value, exists := pair[1][route.MarkerKey]; exists {
+				pair[0][route.MarkerKey] = value
+			} else {
+				delete(pair[0], route.MarkerKey)
+			}
+		}
+		for _, pair := range [][2]map[string]map[string]string{{instance.Devices, approved.instance.Devices}, {instance.LocalDevices, approved.instance.LocalDevices}} {
+			if value, exists := pair[1][route.DeviceName]; exists {
+				pair[0][route.DeviceName] = value
+			} else {
+				delete(pair[0], route.DeviceName)
+			}
+		}
+	}
+	fresh.Scope = integrationInstanceScope(fresh.instanceScope, instance)
+	parts := slices.Clone(fresh.fingerprints)
+	if len(parts) == 0 {
+		return fresh, domain.ErrPlanStale
+	}
+	parts[0] = fresh.Scope
+	fresh.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+	return fresh, nil
 }
 
 // PrepareSourceIntegrationPlan retains the full native ownership, adoption and

@@ -73,6 +73,7 @@ type configApplyActivationFact struct {
 type configApplyTargetFact struct {
 	Name                 string               `json:"name"`
 	DesiredFingerprint   string               `json:"desired_fingerprint"`
+	IntegrationPlan      string               `json:"integration_plan,omitempty"`
 	TeardownRuntimeState teardownRuntimeState `json:"teardown_runtime_state,omitempty"`
 }
 
@@ -302,6 +303,21 @@ func (cli *CLI) prepareActivationRepair(
 			}
 		}
 		changed := assessment.Changed
+		if profileInit && target.Loaded.Integrations.AllowsCodingTools &&
+			(assessment.State == "converged" || assessment.State == "drift") {
+			runtime, available := operation.initPlatform(target.Loaded, nil).(IntegrationRuntime)
+			if operation.options.IntegrationRuntime != nil {
+				runtime, available = operation.integrationRuntime(target.Loaded), true
+			}
+			if available {
+				plan, err := runtime.IntegrationPlan(ctx)
+				if err != nil {
+					return nil, nil
+				}
+				facts.ConfigTargets[len(facts.ConfigTargets)-1].IntegrationPlan = plan.StateBinding()
+				changed = changed || plan.Changed
+			}
+		}
 		if teardown != nil {
 			if target.Name == yard && (operationStateDigest(target.Loaded.Context) != operationStateDigest(teardown.initial.Context) ||
 				integrationConfigurationFingerprint(target.Loaded) != integrationConfigurationFingerprint(teardown.initial)) {

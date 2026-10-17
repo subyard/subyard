@@ -619,7 +619,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.11.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime; historical unlabelled init retains its pre-existing refusal with native state unchanged, then installed boot reconciliation repeats | targeted transport/recovery diagnostic; see the [historical init limitation](reference/legacy-migration-support.md#approved-support-boundary) |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.11.0 upgrade, incompatible rollback refusal and authentic v0.21.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -728,19 +728,23 @@ gated lanes. A generic dependency-free resource pass does not report those handl
 ### Fixture preflight
 
 For GitHub/native-helper release activation, the owning singleton controller requires the same
-frozen public bundle used by supported candidate transport. Package candidate version
-`0.19.1-activation-e2e`, include its normal `.subyard-acceptance` metadata/assets, and run:
+frozen public bundle used by supported candidate transport. Include its normal
+`.subyard-acceptance` metadata/assets; the lane derives the candidate version from that
+checksum-verified package and checks the engine identity. For a current candidate newer than
+0.20.0, select the authentic published predecessor explicitly:
 
 ```sh
-bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --preflight
+bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.20.0 --preflight
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot"
+  bash config/profiles/github/tests/e2e/release-activation.sh --slot "$slot" --baseline 0.20.0
 ```
 
-The controller packages its explicitly synthetic compatible successor before lease acquisition;
-the original candidate's verified assets remain intact. The guest uses the actual checksum-pinned
-0.19.0 installer/updater, two container yards and a config-only absent yard. A first transition may
+The controller packages its explicitly synthetic compatible successor (the next patch version
+with an `activation-fixture` suffix) before lease acquisition; the original candidate's verified
+assets remain intact. The guest uses the actual checksum-pinned 0.20.0 installer/updater, verified
+against immutable published release metadata, two container yards and a config-only absent yard.
+The default `--baseline 0.19.0` preserves the original 0.19.1 activation fixture path. A first transition may
 download unchanged native tool pins once to establish trustworthy activation receipts. The lane
 has a 45-minute work budget and bounded marker-owned cleanup; its terminal output retains native
 phase logs and reports cleanup separately. It does not use external GitHub accounts or manage the
@@ -946,7 +950,21 @@ Standalone `reboot-verify` prepares its own power reconciler through the same ma
 published-release upgrade fixture used by `power-systemd`. It works after the last test yard
 was torn down, when the power service may be absent. This adds release installation and migration
 to the two reboots; the fixture restores the previous host runtime afterward. It does not run the
-additional systemd parser fixtures from `power-systemd`.
+additional systemd parser fixtures from `power-systemd`. The exact published v0.11.0,
+the inclusive supported migration floor, remains the genuine legacy-upgrade baseline.
+After its verified update, explicit `yard init --continue-legacy --yes` establishes only
+bounded normal-reconcile authority; repeated plain init and both reboots must retain that
+grant without adding installation ownership. Its incompatible
+rollback must refuse without changing release links, protected V2 checkpoint/history,
+ledger, journal, native identity or grant, including retained V1 evidence or its absence.
+Fresh sources below v0.11.0 remain refused; accepted completed V2 history and recovery
+retain their separate supported contracts.
+The guest verifies checksum-pinned official v0.21.0 assets and compiled activation
+capabilities before creating the cold legacy baseline. Public update checks must identify
+the exact unblocked target before installing v0.21.0, restoring the candidate, then
+performing a real compatible rollback and candidate roll-forward. Both passages preserve
+the limited grant, native policy and absence of installation ownership; final normal init
+and full-removal refusal verify that the grant never acquires destructive authority.
 
 List or run one lane:
 

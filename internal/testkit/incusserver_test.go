@@ -2,6 +2,7 @@ package testkit
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,42 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestIncusInventoryReplacementReturnsAuthoritativeAbsence(t *testing.T) {
+	fake := &IncusServer{instances: map[string]map[string]any{}}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	get := func(name string, status int) map[string]any {
+		t.Helper()
+		response, err := server.Client().Get(server.URL + "/1.0/instances/" + name + "?project=subyard")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != status {
+			t.Fatalf("instance %s: status %d, want %d", name, response.StatusCode, status)
+		}
+		if status == http.StatusNotFound && (body["type"] != "error" || body["error_code"] != float64(http.StatusNotFound)) {
+			t.Fatalf("absence is not an authoritative Incus error: %#v", body)
+		}
+		return body
+	}
+	fake.SetInstance("subyard", "old", map[string]any{"name": "old", "status": "Running"})
+	get("old", http.StatusOK)
+	replacement := map[string]map[string]any{"subyard/new": {"name": "new", "status": "Running"}}
+	fake.ReplaceInstances(replacement)
+	replacement["subyard/new"]["status"] = "Stopped"
+	get("old", http.StatusNotFound)
+	if body := get("new", http.StatusOK); body["metadata"].(map[string]any)["status"] != "Running" {
+		t.Fatal("replacement retained caller-owned inventory data")
+	}
+	fake.ReplaceInstances(nil)
+	get("new", http.StatusNotFound)
+}
 
 func TestIncusExecOutputWaitsForStdin(t *testing.T) {
 	for _, stream := range []string{"stdout", "stderr"} {

@@ -48,12 +48,14 @@ The cutoff concerns legacy migration V1. Supported v0.11.0+ updates, process V1,
 recovery receipts and checkpoint-reader contracts retain their own compatibility requirements.
 The source-version cutoff does not raise the domain epoch floor or retire V2 checkpoint history.
 
-Supported historical updates do not invent project ownership labels. A pre-existing limitation
-remains: `yard init` refuses an existing unlabelled project, including one created by v0.11.0,
-even after its supported update succeeds. The retirement does not adopt or relabel that project.
-The power acceptance fixture records this refusal and unchanged native state separately from
-successful update, interrupted activation recovery and repeatable installed boot reconciliation.
-Current-owned projects retain their ordinary repeatable initialization contract.
+Supported historical updates do not invent project ownership labels. Plain `yard init` refuses
+an existing unlabelled project without proven authority, including one created by v0.11.0,
+even after its supported update succeeds. Explicit `yard init --continue-legacy` can establish
+a separately confirmed, protected grant for bounded normal reconciliation of a supported,
+exactly assessed legacy resource. It does not relabel the project or authorize full removal.
+The power acceptance fixture exercises this opt-in, repeated plain init, two reboots and
+compatible rollback/forward while preserving the grant and native identity. Current-owned
+projects retain their ordinary repeatable initialization contract.
 
 ## Existing compatibility inventory
 

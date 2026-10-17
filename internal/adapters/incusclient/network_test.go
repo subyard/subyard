@@ -566,7 +566,7 @@ func (fake *networkIncusServer) ServeHTTP(writer http.ResponseWriter, request *h
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == "/1.0":
 		writeNetworkIncusSync(writer, map[string]any{
-			"api_extensions": []string{"projects", "instances", "network", "network_leases", "network_acl"},
+			"api_extensions": []string{"projects", "instances", "network", "network_leases", "network_acl", "storage"},
 			"environment": map[string]any{
 				"server": "incus", "server_version": "6.23", "firewall": "nftables",
 				"server_clustered": fake.clustered,

@@ -484,3 +484,78 @@ func TestAdmittedSSHInputWaitSerializesBeforeFullRemoval(t *testing.T) {
 		t.Fatal("signing namespace survived completed removal")
 	}
 }
+
+func TestRemoteAddGapRetainsOriginalOwnerAuthority(t *testing.T) {
+	for _, scenario := range []string{"retirement", "replacement", "generation", "cancellation", "managed-drift"} {
+		t.Run(scenario, func(t *testing.T) {
+			options, runtime := auditedRemoteOwnerFixture(t)
+			gap := testkit.TempDir(t)
+			runtime.Environment = append(runtime.Environment, "REMOTE_GAP="+gap)
+			options.RemoteControl = runtime
+			var stderr bytes.Buffer
+			options.Stderr = &stderr
+			program, err := New(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan int, 1)
+			go func() { done <- program.Run(ctx) }()
+			// Always release the finite fixture command even if an assertion fails.
+			defer testkit.WriteFile(t, filepath.Join(gap, "release"), nil, 0600)
+			deadline := time.Now().Add(time.Second)
+			for {
+				if _, err := os.Stat(filepath.Join(gap, "entered")); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("authorization did not enter unlocked gap")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			switch scenario {
+			case "retirement", "replacement":
+				retireWriterInstallation(t, loaded, true)
+				if scenario == "replacement" {
+					nativeInstallationFixture(t, options.Environment)
+				}
+			case "generation":
+				home := loaded.Context.Paths.DataHome
+				if err := os.Rename(home, home+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(home, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "cancellation":
+				cancel()
+			case "managed-drift":
+				testkit.WriteFile(t, filepath.Join(runtime.Home, ".ssh", "config"), []byte("Host changed\n"), 0600)
+			}
+			testkit.WriteFile(t, filepath.Join(gap, "release"), nil, 0600)
+			select {
+			case code := <-done:
+				if code == 0 {
+					t.Fatal("changed original authority unexpectedly committed")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("remote gap did not return")
+			}
+			for _, path := range []string{filepath.Join(runtime.ConfigHome, "yards", "self-fixture", "config.env"), filepath.Join(runtime.Home, ".ssh", "subyard-self-fixture.config"), filepath.Join(runtime.DataHome, "remote-self-fixture.cache")} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatal("failed gap published registration", err)
+				}
+			}
+			if scenario == "retirement" {
+				if _, err := os.Lstat(runtime.DataHome); !os.IsNotExist(err) {
+					t.Fatal("retired data home was recreated", err)
+				}
+			}
+		})
+	}
+}

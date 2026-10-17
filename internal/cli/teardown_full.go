@@ -53,6 +53,24 @@ func (prepared *preparedCommand) bindFullInstallation() error {
 
 func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, execution *fullTeardown) error {
 	execution.full, execution.revokeAgent = true, true
+	// A normal-reconcile grant is not evidence that deleting its config/data or
+	// native workloads is authorized, even when bootstrap inventory exists.
+	legacyRoot := filepath.Join(current.Context.Paths.ConfigHome, "ownership", "legacy-continuations")
+	if info, err := os.Lstat(legacyRoot); err == nil {
+		if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+			return errors.New("unsafe legacy continuation namespace; preserve its records before full removal")
+		}
+		entries, err := os.ReadDir(legacyRoot)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return errors.New("legacy continuation grants no full removal ownership; preserve legacy workloads and their protected continuation record")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
 	installation, err := uninstall.ReadInstallation(current.Context.Paths.DataHome, uint32(os.Getuid()))
 	if errors.Is(err, os.ErrNotExist) {
 		runtimeRoot := runtimeRootForRepository(cli.options.RepositoryRoot, firstNonempty(current.Environment["YARD_RUNTIME_ROOT"], filepath.Join(current.Context.Paths.DataHome, "runtime")))

@@ -179,7 +179,7 @@ grep -Fq 'systemctl disable --now subyard-orca.service' "$RESOURCE_TEST_LOG" \
 [ ! -e "$TMP/service-active" ] && [ ! -e "$TMP/discovery-active" ] \
   && [ ! -e "$TMP/ingress" ] && [ -e "$TMP/missing-orca-route" ] \
   || fail 'Orca down did not converge all captured native targets'
-incus config device show yard | grep -Fq 'unrelated-device:' \
+incus config device show yard | grep -F 'unrelated-device:' >/dev/null \
   || fail 'Orca down removed an unrelated device'
 # The native dispatcher must cancel detached publication intent even when every
 # guest target and the live device are already absent.

@@ -1,7 +1,10 @@
 {
   "schema_version": 1,
   "managed_paths": [
-    {"root": "data", "path": "e2e/routes/{yard}"}
+    {
+      "root": "data",
+      "path": "e2e/routes/{yard}"
+    }
   ],
   "full_cleanup": "full-cleanup.py",
   "full_cleanup_environment": [
@@ -10,5 +13,56 @@
     "SUBYARD_TEST_VMS_SINK_SERVICE_PATH",
     "SUBYARD_TEST_VMS_SINK_TIMER_PATH"
   ],
-  "lifecycle_only": true
+  "lifecycle_only": true,
+  "instance_publication": {
+    "schema_key": "user.subyard.test_vms_spool_schema",
+    "schema_value": "1",
+    "revision_key": "user.subyard.test_vms_revision",
+    "disabled_setting": "NESTED_E2E_VMS",
+    "legacy_settings_count": 7,
+    "settings": [
+      {
+        "name": "E2E_VM_IMAGE"
+      },
+      {
+        "name": "E2E_VM_CPU"
+      },
+      {
+        "name": "E2E_VM_MEMORY"
+      },
+      {
+        "name": "E2E_VM_DISK"
+      },
+      {
+        "name": "E2E_VM_SLOT_COUNT"
+      },
+      {
+        "name": "E2E_VM_BOOT_TIMEOUT"
+      },
+      {
+        "name": "E2E_BROKER_SOURCE",
+        "fallback_setting": "YARD_NAME"
+      },
+      {
+        "name": "E2E_DISK_BUDGET",
+        "legacy_default": "0GiB"
+      },
+      {
+        "name": "E2E_CACHE_BUDGET",
+        "legacy_default": "24GiB"
+      },
+      {
+        "name": "E2E_DISK_RESERVE",
+        "legacy_default": "5GiB"
+      },
+      {
+        "name": "E2E_MEMORY_RESERVE",
+        "legacy_default": "4GiB"
+      },
+      {
+        "name": "E2E_VM_OVERHEAD",
+        "legacy_default": "512MiB"
+      }
+    ]
+  }
 }
