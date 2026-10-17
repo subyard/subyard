@@ -80,7 +80,8 @@ pending read/detail/state requests coalesce and owner commands have bounded admi
 
 ## Build and focused checks
 
-Use Rust 1.88 or newer, `pkg-config`, and system GTK4 development files
+Use current stable Rust selected by [`rust-toolchain.toml`](../../rust-toolchain.toml),
+`pkg-config`, and system GTK4 development files
 (`libgtk-4-dev` on Debian/Ubuntu). The Rust bindings use GTK's baseline APIs,
 including Ubuntu 24.04's GTK4.14. Build output stays outside the source directory:
 
@@ -163,10 +164,12 @@ identity death after app-directed shutdown must not be reported as a child exit0
 ## Linux GTK package preparation
 
 `python3 dev/package-veranda.py --version MAJOR.MINOR.PATCH` builds a separate
-`subyard-veranda_<version>_<arch>.deb` with Rust 1.88.0, locked dependencies and an
+`subyard-veranda_<version>_<arch>.deb` with current stable Rust, locked dependencies and an
 optimized, stripped native artifact. The required stable version is the shared
 Yard/Veranda product version, passed to the native client through
 `VERANDA_PRODUCT_VERSION`; internal Cargo package versions remain unchanged.
+The builder explicitly selects `+stable` regardless of its working directory or
+`RUSTUP_TOOLCHAIN` override and records the actual compiler version in package provenance.
 This builder leaves core bootstrap, runtime packaging and CLI updates independent.
 
 Native Linux amd64/arm64 preparation requires the Rust toolchain, GTK4 development

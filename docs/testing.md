@@ -497,7 +497,8 @@ against the shipped rules for that evidence; real client approve/deny needs sepa
 
 ## Run Veranda host-free checks
 
-Install Python 3 and Rust 1.88 or newer, then run from the repository root:
+Install Python 3 and the current stable Rust toolchain selected by
+[`rust-toolchain.toml`](../rust-toolchain.toml), then run from the repository root:
 
 ```sh
 make verify-veranda
@@ -505,7 +506,8 @@ make verify-veranda
 
 The target runs `python3 dev/check-veranda.py`; override the interpreter with
 `make verify-veranda PYTHON=python` when needed. CI runs the same entrypoint with
-`python` and Rust 1.88.0. The native client has no npm/WebKit dependencies.
+`python` and current stable Rust. The native client has no npm/WebKit dependencies.
+The entrypoint explicitly selects `+stable`, including when `RUSTUP_TOOLCHAIN` is set.
 The target and entrypoint do not install toolchains. `make verify` retains its
 separate core and shipped-profile scope.
 

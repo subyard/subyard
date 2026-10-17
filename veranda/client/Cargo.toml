@@ -3,7 +3,6 @@ name = "subyard-veranda-client"
 version = "0.1.0"
 description = "Native Subyard Veranda RPC, trust and session client"
 edition = "2021"
-rust-version = "1.88"
 license = "MIT"
 
 [lib]

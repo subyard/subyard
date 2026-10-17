@@ -102,6 +102,7 @@ class PackageBoundaryTest(unittest.TestCase):
             binary=root/'debian/subyard-veranda/usr/bin/subyard-veranda';binary.parent.mkdir(parents=True)
             subprocess.run(['cc',str(root/'main.c'),'-L'+str(library.parent),'-l:libfixture.so.0','-o',str(binary)],check=True)
             package.write(sdk/'DEBIAN/control',f'Package: libfixture0\nVersion: 1.2.3\nArchitecture: {arch}\nMaintainer: Fixture <fixture@example.test>\nDescription: synthetic package fixture\n'.encode())
+            (sdk/'DEBIAN').chmod(0o755)
             package.write(sdk/'DEBIAN/shlibs',b'libfixture 0 libfixture0 (>= 1.2.0)\n')
             archive=archives/'fixture.deb'
             subprocess.run(['dpkg-deb','--root-owner-group','--build',str(sdk),str(archive)],check=True,stdout=subprocess.DEVNULL)
@@ -161,6 +162,7 @@ class PackageBoundaryTest(unittest.TestCase):
             arch=subprocess.check_output(['dpkg','--print-architecture'],text=True).strip()
             for version in ['0.1.0','0.1.1']:
                 package.write(root/'stage/DEBIAN/control',f'Package: subyard-veranda\nVersion: {version}\nArchitecture: {arch}\nMaintainer: Fixture <fixture@example.test>\nDescription: fixture\n'.encode())
+                (root/'stage/DEBIAN').chmod(0o755)
                 deb=root/f'fixture-{version}.deb';debs.append(str(deb))
                 subprocess.run(['dpkg-deb','--root-owner-group','--build',str(root/'stage'),str(deb)],check=True,stdout=subprocess.DEVNULL)
             source=Path(__file__).parent.joinpath('e2e/veranda-package.sh').read_text()

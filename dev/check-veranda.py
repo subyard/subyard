@@ -24,7 +24,7 @@ def check(name, command, env):
 
 
 def rust_check(env):
-    command = ["cargo", "test", "--manifest-path", "veranda/client/Cargo.toml", "--locked"]
+    command = ["cargo", "+stable", "test", "--manifest-path", "veranda/client/Cargo.toml", "--locked"]
     if sys.platform != "linux":
         print("Linux symlink TMPDIR probe: skipped on this platform", flush=True)
         return check("native Rust tests", command, env)

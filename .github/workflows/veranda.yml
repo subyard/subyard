@@ -2,11 +2,11 @@ name: Veranda native client contracts
 
 on:
   pull_request:
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   push:
     branches: ['**']
     tags: ['v*']
-    paths: ['veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   workflow_dispatch:
 
 permissions:
@@ -34,10 +34,10 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+        run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Check Veranda host-free contracts
         env:
-          RUSTUP_TOOLCHAIN: 1.88.0
+          RUSTUP_TOOLCHAIN: stable
         run: python dev/check-veranda.py
 
   gtk-desktop:
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      RUSTUP_TOOLCHAIN: 1.88.0
+      RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_DIR: ${{ github.workspace }}/.build/veranda-desktop/target
       CARGO_BUILD_JOBS: 2
     steps:
@@ -55,7 +55,7 @@ jobs:
       - name: Install system GTK SDK
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+        run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Test GTK desktop models
         run: cargo test --manifest-path veranda/desktop/Cargo.toml --locked
       - name: Build GTK desktop

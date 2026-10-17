@@ -15,7 +15,7 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLCHAIN = '1.88.0'
+TOOLCHAIN = 'stable'
 APP_ID = 'org.subyard.Veranda'
 
 

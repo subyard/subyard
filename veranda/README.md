@@ -15,7 +15,8 @@ UI delivery and acceptance remain incomplete.
 
 ## Native client checks
 
-Host-free checks require Python 3 and Rust 1.88 or newer:
+Host-free checks require Python 3 and current stable Rust, selected by the repository's
+[`rust-toolchain.toml`](../rust-toolchain.toml):
 
 ```sh
 make verify-veranda

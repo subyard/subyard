@@ -16,12 +16,13 @@ spec.loader.exec_module(runner)
 class RustTemporaryPathTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux", "Linux symlink TMPDIR probe")
     def test_child_environment_failure_and_cleanup(self):
-        env = {"TMPDIR": "/synthetic-original", "FIXTURE": "inherited"}
+        env = {"TMPDIR": "/synthetic-original", "FIXTURE": "inherited", "RUSTUP_TOOLCHAIN": "uninstalled-override"}
         original = dict(env)
         ambient = dict(os.environ)
         paths = []
 
-        def child(_name, _command, child_env):
+        def child(_name, command, child_env):
+            self.assertEqual(command[:3], ["cargo", "+stable", "test"])
             alias = Path(child_env["TMPDIR"])
             self.assertTrue(alias.is_symlink())
             self.assertTrue(alias.resolve().is_dir())
