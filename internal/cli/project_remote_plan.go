@@ -103,7 +103,7 @@ func (cli *CLI) prepareOwnerProjectCopy(ctx context.Context, loaded config.Loade
 	if source.TargetProfile != "yard" {
 		project.Record.Profile = source.TargetProfile
 	}
-	prepared := &preparedCommand{CLI: cli, Definition: definition, Loaded: loaded, Project: project, exactState: operationStateDigest(source)}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: loaded, Project: project, exactState: operationStateDigest(source)}
 	prepared.stepsComplete = true
 	prepared.policy = commandPolicy(definition, loaded.Context, nil, project)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {

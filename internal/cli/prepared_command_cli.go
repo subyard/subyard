@@ -69,17 +69,7 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	assumeYes = assumeYes || slices.Contains(prepared.Arguments, "--yes") || slices.Contains(prepared.Arguments, "-y")
 	orchestrator := cli.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
-	confirmationPlan := prepared.Plan
-	if prepared.ownerPlan {
-		// The owner resolved the action policy. Confirm its concrete policy here;
-		// do not resolve the remote assessment again against the controller registry.
-		if request := confirmationPlan.ConfirmationRequest; request != nil && request.Summary != "" {
-			confirmationPlan.Command = request.Summary
-		}
-		confirmationPlan.Assessment = nil
-		confirmationPlan.ConfirmationRequest = nil
-	}
-	plan, err := orchestrator.Confirm(ctx, confirmationPlan, assumeYes)
+	plan, err := prepared.Confirm(ctx, orchestrator, assumeYes)
 	if err != nil {
 		switch {
 		case errors.Is(err, application.ErrDeclined):
@@ -106,13 +96,13 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 		}
 		return 1
 	}
-	if prepared.ownerPlan {
-		prepared.Plan.Confirmed = plan.Confirmed
-		plan = prepared.Plan
-	} else {
-		prepared.Plan = plan
-	}
 	if plan.Target == domain.TargetRemoteOwner {
+		finish, err := prepared.consume()
+		if err != nil {
+			cli.errorf("%s: %v", prepared.Definition.Name, err)
+			return 1
+		}
+		defer finish()
 		release, err := cli.beginProjectMutation(ctx, prepared.Project)
 		if err != nil {
 			cli.errorf("prepare remote %s: %v", prepared.Definition.Name, err)

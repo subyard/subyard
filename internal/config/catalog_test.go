@@ -235,3 +235,62 @@ func TestProfileDefaultsLayersAndListenerCollision(t *testing.T) {
 		t.Fatal("profile host listener collision was ignored")
 	}
 }
+
+func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
+	metadata, err := profile.Decode("fixture", []byte(`{"schema_version":1,"disabled_when":{"OFF":"1"},"settings":[{"name":"FIXTURE_MODE","type":"string","enum":["safe","fast"],"scopes":["shipped","command"],"application":"next-command","default":"safe"},{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"default_from":{"setting":"SSH_PORT","offset":1000}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	integration, err := profile.DecodeIntegration("sample", []byte(`{"schema_version":1,"lifecycle":{"handler":"lifecycle.sh","source_files":["source"],"instance_config_keys":["user.subyard.sample"],"instance_devices":["sample"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := BuildCatalog([]profile.Metadata{metadata}, []profile.IntegrationMetadata{integration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles := settings.Profiles()
+	profiles[0].DisabledWhen["OFF"] = "changed"
+	profiles[0].Settings[0].Enum[0] = "unsafe"
+	profiles[0].Settings[0].Scopes[0] = "host"
+	*profiles[0].Settings[0].Default = "unsafe"
+	profiles[0].Settings[1].DefaultFrom.Setting = "FOREIGN"
+	integrations := settings.Integrations()
+	integrations[0].Lifecycle.SourceFiles[0] = "foreign"
+	for _, definition := range settings.SettingCatalog() {
+		if len(definition.Scopes) > 0 {
+			definition.Scopes[0] = ScopeHost
+		}
+		if len(definition.Enum) > 0 {
+			definition.Enum[0] = "unsafe"
+		}
+		if definition.DefaultFrom != nil {
+			definition.DefaultFrom.Setting = "FOREIGN"
+		}
+	}
+	field, _ := settings.LookupSetting("FIXTURE_MODE")
+	field.Enum[0] = "unsafe"
+	field.Scopes[0] = ScopeHost
+	port, _ := settings.LookupSetting("FIXTURE_PORT")
+	port.DefaultFrom.Setting = "FOREIGN"
+	if err := settings.ValidateSetting(ScopeCommand, "FIXTURE_MODE", "unsafe", false); err == nil {
+		t.Fatal("export changed enum validation")
+	}
+	if err := settings.ValidateSetting(ScopeHost, "FIXTURE_MODE", "safe", false); err == nil {
+		t.Fatal("export changed scope validation")
+	}
+	again := settings.Profiles()[0]
+	if again.DisabledWhen["OFF"] != "1" || *again.Settings[0].Default != "safe" || again.Settings[1].DefaultFrom.Setting != "SSH_PORT" || settings.Integrations()[0].Lifecycle.SourceFiles[0] != "source" {
+		t.Fatal("export changed retained declaration")
+	}
+	if port, _ := settings.LookupSetting("FIXTURE_PORT"); port.DefaultFrom.Setting != "SSH_PORT" {
+		t.Fatal("export changed derived default")
+	}
+	// Core catalog values have the same ownership contract.
+	core, _ := LookupSetting("SSH_PORT")
+	core.Scopes[0] = ScopeCommand
+	againCore, _ := LookupSetting("SSH_PORT")
+	if againCore.Scopes[0] == ScopeCommand {
+		t.Fatal("core catalog aliases caller")
+	}
+}

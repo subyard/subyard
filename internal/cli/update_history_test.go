@@ -75,12 +75,14 @@ func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t 
 							t.Fatalf("gate outcome=%#v err=%v", outcome, err)
 						}
 					} else {
-						prepared := &preparedCommand{CLI: program, Loaded: loaded, Arguments: []string{"--check", "--json"}, Plan: domain.OperationPlan{Confirmed: true}}
+						prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Arguments: []string{"--check", "--json"}, Plan: domain.OperationPlan{Confirmed: true}}
 						if err := prepared.prepareCurrentMigration(context.Background(), nil); err != nil {
 							t.Fatal(err)
 						}
 						defer prepared.Close()
-						result, err := prepared.execute(context.Background(), &application.Orchestrator{Clock: wallClock{}}, nil)
+						orchestrator := &application.Orchestrator{Clock: wallClock{}}
+						prepared.Plan = confirmedAdapterFixture(t, orchestrator, prepared.Plan)
+						result, err := prepared.execute(context.Background(), orchestrator, nil)
 						if err != nil {
 							t.Fatalf("current migration: %v (%#v)", err, result)
 						}

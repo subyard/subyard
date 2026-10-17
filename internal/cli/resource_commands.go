@@ -147,7 +147,7 @@ func (cli *CLI) runResourceCommand(
 		bootstrap: bootstrap, consequences: resourceConsequences, ingress: ingress, startupIntent: intent,
 	}
 	if native.Schema == resource.PrepareAssessmentSchemaV2 && cli.resourceExactInvocation(definition, arguments) {
-		prepared := &preparedCommand{CLI: cli, Definition: resourceCommandDefinition(definition), Arguments: slices.Clone(arguments), Loaded: loaded}
+		prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: resourceCommandDefinition(definition), Arguments: slices.Clone(arguments), Loaded: loaded}
 		if err := prepared.attachResourceExecution(runner, baseline, native); err != nil {
 			cli.errorf("%s: prepare exact resource: %v", definition.Command, err)
 			return 1

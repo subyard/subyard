@@ -33,7 +33,7 @@ func exactOperationDigest(prepared *preparedCommand, plan exactOperationPlan) st
 }
 
 func bindExactOperationPlan(prepared *preparedCommand, now time.Time) exactOperationPlan {
-	plan := exactOperationPlan{Schema: 1, Plan: prepared.Plan, ExpiresAt: now.Add(exactPlanLifetime)}
+	plan := exactOperationPlan{Schema: 1, Plan: prepared.Plan.Clone(), ExpiresAt: now.Add(exactPlanLifetime)}
 	if prepared.stepsComplete {
 		plan.StepSchema = 1
 	}

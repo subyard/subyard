@@ -73,3 +73,22 @@ func repositoryRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
 }
+
+func TestManifestExportsOwnNestedDeclarations(t *testing.T) {
+	manifest, err := Parse(strings.NewReader("one|alias|one.sh||local|read|never|public|x|simple|one|first|--help|show\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, _ := manifest.Lookup("alias")
+	command.Aliases[0] = "foreign"
+	command.Options[0] = "--foreign"
+	command.Verbs[0] = "foreign"
+	commands := manifest.Commands()
+	commands[0].Aliases[0] = "other"
+	commands[0].Options[0] = "--other"
+	commands[0].Verbs[0] = "other"
+	again, found := manifest.Lookup("alias")
+	if !found || again.Aliases[0] != "alias" || again.Options[0] != "--help" || again.Verbs[0] != "show" {
+		t.Fatal("caller changed retained manifest")
+	}
+}

@@ -237,11 +237,12 @@ func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
 			}
 			beforeExecution := nativeTreeSnapshot(t, root)
 			called := false
-			prepared := &preparedCommand{CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
 				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 					called = true
 					return domain.AdapterResult{Status: "ok"}, nil
 				}}
+			authorizePreparedFixture(prepared)
 			_, err = prepared.Execute(ctx, &application.Orchestrator{}, io.Discard)
 			if change == "unchanged" {
 				if err != nil || !called {
@@ -456,11 +457,12 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 			before := nativeTreeSnapshot(t, store.Root)
 			writeCLIFile(t, denied, "denied\n", 0o600)
 			physicalWork := false
-			prepared := &preparedCommand{CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
 				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 					physicalWork = true
 					return domain.AdapterResult{Status: "ok"}, nil
 				}}
+			authorizePreparedFixture(prepared)
 			if _, err := prepared.Execute(context.Background(), &application.Orchestrator{}, io.Discard); err == nil ||
 				!strings.Contains(err.Error(), "role on owner") || physicalWork {
 				t.Fatalf("owner role change reached %s execution: physical=%v err=%v", name, physicalWork, err)

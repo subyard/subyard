@@ -14,7 +14,9 @@ pinned descriptor roots, symlink policies and `SourceBinding` remain physical
 adapter responsibilities.
 
 `config.BuildCatalog` builds an operation-local settings catalog from metadata.
-`LoadCatalog` binds the same catalog to inspected packages. Existing
+`LoadCatalog` binds the same catalog to inspected packages. Settings and declaration accessors
+return independent nested values; mutating them cannot change retained catalog policy.
+Command manifest lookup/list follows the same ownership contract. Existing
 `LoadOptions.Catalog` injection supports policy consumers without loading a
 package tree. Catalogs built directly have unbound compatibility declarations;
 consumers that execute hooks must obtain definitions from the package adapter.

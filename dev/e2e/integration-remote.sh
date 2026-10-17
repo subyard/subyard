@@ -8,7 +8,59 @@ die() { printf 'integration-remote: %s\n' "$*" >&2; exit 1; }
 for command in jq python3 sudo ss ssh ssh-keygen; do command -v "$command" >/dev/null || die "$command is required"; done
 [ -x /usr/sbin/sshd ] || die 'OpenSSH server is required in the allocated VM'
 sudo -n true || die 'passwordless sudo is required in the allocated VM'
-[ -x "$ROOT/.build/yard" ] || "$ROOT/dev/build-engine.sh"
+[ ! -e "$ROOT/.subyard-acceptance/candidate.json" ] && [ ! -L "$ROOT/.subyard-acceptance/candidate.json" ] \
+  || die 'this synthetic-profile fixture requires a plain source bundle'
+"$ROOT/dev/build-engine.sh"
+# Source runtime observations bind shipped native helpers even when deselected.
+"$ROOT/dev/build-profiles.sh"
+[ -x "$ROOT/.build/yard" ] || die 'source engine is unavailable'
+# Keep only the retained test platform directory operator-owned; Incus children stay root-owned.
+platform_root="$HOME/.cache/subyard-e2e-platform"
+platform_marker="$platform_root/.subyard-e2e-platform-marker"
+[ ! -L "$HOME/.cache" ] || die 'platform parent must not be a symlink'
+if [ -e "$platform_root" ] || [ -L "$platform_root" ]; then
+  [ -d "$platform_root" ] && [ ! -L "$platform_root" ] || die 'platform root must be a plain directory'
+fi
+if [ -e "$platform_marker" ] || [ -L "$platform_marker" ]; then
+  [ -f "$platform_marker" ] && [ ! -L "$platform_marker" ] || die 'platform marker must be a plain file'
+  [ "$(sudo -n cat "$platform_marker")" = subyard-e2e-platform-v1 ] || die 'unexpected platform marker'
+fi
+sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0711 "$platform_root"
+ensure_owner_incus() {
+  [ ! -L "$platform_root/incus" ] || die 'platform Incus root must not be a symlink'
+  if ! timeout 10 /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
+    || ! timeout 10 /usr/bin/incus storage show default --project default >/dev/null 2>&1 \
+    || ! timeout 10 /usr/bin/incus network show incusbr0 --project default >/dev/null 2>&1; then
+    (
+      # Prepare the product host foundation without registering a yard.
+      # shellcheck source=tests/helpers/test-context.sh
+      . "$ROOT/tests/helpers/test-context.sh"
+      setup_test_context "$platform_root/incus/bootstrap"
+      export SUBYARD_USER SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_DIR="$ROOT/config"
+      SUBYARD_USER="$(id -un)"
+      set -a
+      # shellcheck source=config/host.env
+      . "$ROOT/config/host.env"
+      set +a
+      export STORAGE_PATH="$platform_root/incus/incus/storage"
+      bash "$ROOT/scripts/01-install-incus.sh" --yes
+    )
+  fi
+  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    local command
+    printf -v command 'exec bash %q' "$ROOT/dev/e2e/integration-remote.sh"
+    exec sg incus-admin -c "$command"
+  fi
+  timeout 10 /usr/bin/incus query '/1.0/instances?project=default' >/dev/null \
+    || die 'owner native Incus API is unavailable'
+  timeout 10 /usr/bin/incus storage show default --project default >/dev/null \
+    || die 'owner default storage is unavailable'
+  timeout 10 /usr/bin/incus network show incusbr0 --project default >/dev/null \
+    || die 'owner default bridge is unavailable'
+  printf 'integration-remote: native-Incus-preflight=PASS\n'
+}
+ensure_owner_incus
 STATE="$(mktemp -d /var/tmp/subyard-integration-remote.XXXXXX)"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 MARKER="subyard-integration-remote-v1-$token"
@@ -21,6 +73,7 @@ config="$OWNER_CONFIG/yards/$YARD_NAME/config.env"
 sshd_job=''
 printf '%s\n' "$MARKER" > "$STATE/.marker"
 export SUBYARD_OPERATOR_HOME="$HOME"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 incus() {
@@ -108,6 +161,34 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+# Stage the unselected synthetic catalog before packaging.
+resource_profile="fixture-exact-$token"
+resource_root="$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture"
+[ ! -e "$ROOT/config/profiles/$resource_profile" ] || die 'exact resource fixture already exists'
+install -d -m 0700 "$resource_root"
+printf 'PROFILE_NAME=%s\n' "$resource_profile" > "$ROOT/config/profiles/$resource_profile/profile.conf"
+cat > "$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture.res" <<'RESOURCE'
+COMMAND=exact-ssh-fixture
+HANDLER=resources/exact-ssh-fixture/handler.sh
+TITLE="Exact SSH native fixture"
+ACTION="up up host-change reversible"
+BRINGUP=up
+SHUTDOWN=up
+RESOURCE
+chmod 0600 "$ROOT/config/profiles/$resource_profile/profile.conf" "$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture.res"
+install -m 0755 dev/e2e/exact-resource-fixture.py "$resource_root/handler.sh"
+# Commit the isolated release baseline before creating any yard registration.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+SUBYARD_CONFIG_HOME="$OWNER_CONFIG" SUBYARD_HOME="$STATE/owner-data" \
+  release_candidate_install "$ROOT" "$STATE" > "$STATE/launcher"
+fixture_launcher="$(cat "$STATE/launcher")"
+candidate_version="$("$fixture_launcher" --version)"
+candidate_version="${candidate_version#yard }"
+YARD_BUILD_VERSION="$candidate_version" "$ROOT/dev/build-engine.sh" --force
+cmp -s "$ROOT/.build/yard" "$YARD_RUNTIME_ROOT/current/bin/yard-engine" \
+  || die 'source and installed engines differ'
+printf 'integration-remote: engine-identity-preflight=PASS\n'
 install -d -m 0700 "$OWNER_CONFIG/yards/$YARD_NAME" "$CONTROLLER_CONFIG/yards/remote" "$STATE/client-bin"
 port=$((35000 + ($$ % 1000)))
 while ss -Hln "sport = :$port" 2>/dev/null | grep -q .; do port=$((port + 1)); done
@@ -125,19 +206,12 @@ HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 CONFIG
 chmod 0600 "$config"
-# Keep only the retained test platform directory operator-owned; Incus children stay root-owned.
-platform_root="$HOME/.cache/subyard-e2e-platform"
-platform_marker="$platform_root/.subyard-e2e-platform-marker"
-[ ! -L "$HOME/.cache" ] || die 'platform parent must not be a symlink'
-if [ -e "$platform_root" ] || [ -L "$platform_root" ]; then
-  [ -d "$platform_root" ] && [ ! -L "$platform_root" ] || die 'platform root must be a plain directory'
-fi
-if [ -e "$platform_marker" ] || [ -L "$platform_marker" ]; then
-  [ -f "$platform_marker" ] && [ ! -L "$platform_marker" ] || die 'platform marker must be a plain file'
-  [ "$(sudo -n cat "$platform_marker")" = subyard-e2e-platform-v1 ] || die 'unexpected platform marker'
-fi
-sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0711 "$platform_root"
-owner init --yes
+owner init --yes || {
+  rc=$?
+  SUBYARD_CONFIG_HOME="$OWNER_CONFIG" SUBYARD_HOME="$STATE/owner-data" \
+    "$fixture_launcher" migrate --check --json | jq '{outcome, decisions}' >&2 || true
+  exit "$rc"
+}
 owner start --yes
 incus info >/dev/null
 incus storage show default --project default >/dev/null
@@ -171,6 +245,7 @@ import pathlib,sys
 path,root,state,yard,home,storage=sys.argv[1:]
 environment={"SUBYARD_OPERATOR_HOME":home,"SUBYARD_CONFIG_HOME":state+"/owner-config",
              "SUBYARD_HOME":state+"/owner-data","SUBYARD_REPOSITORY_ROOT":root,
+             "YARD_RUNTIME_ROOT":state+"/runtime",
              "STORAGE_PATH":storage,"SUBYARD_NO_AUDIT":"1","SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE":"1"}
 program="#!/usr/bin/env python3\nimport os,re,shlex,sys\n"
 program += "OWNER_YARD="+repr(yard)+"\nOWNER_ENGINE="+repr(root+"/.build/yard")+"\nOWNER_ENV="+repr(environment)+"\n"
@@ -292,14 +367,29 @@ done
   printf '#!/usr/bin/env bash\nset -euo pipefail\n'
   declare -f incus owner
   cat <<'PROBE'
+[ ! -L "$STATE" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || exit 1
+[ -f "$config" ] && [ ! -L "$config" ] && grep -Fqx "# $MARKER" "$config" || exit 1
 case "$1" in
   probe) sha256sum "$config"; incus list "$INSTANCE" --project "$PROJECT" --format json | jq -c 'map({name,status})' ;;
-  drift) owner config set SSH_PORT 64992 --scope yard --yes >/dev/null ;;
+  drift)
+    [ ! -e "$STATE/exact-config-baseline" ] && [ ! -L "$STATE/exact-config-baseline" ] || exit 1
+    [ ! -e "$STATE/exact-config-drifted" ] && [ ! -L "$STATE/exact-config-drifted" ] || exit 1
+    install -m 0600 "$config" "$STATE/exact-config-baseline"
+    owner config set SSH_PORT 64992 --scope yard --yes >/dev/null
+    install -m 0600 "$config" "$STATE/exact-config-drifted"
+    ;;
+  restore)
+    for snapshot in "$STATE/exact-config-baseline" "$STATE/exact-config-drifted"; do
+      [ -f "$snapshot" ] && [ ! -L "$snapshot" ] && grep -Fqx "# $MARKER" "$snapshot" || exit 1
+    done
+    cmp -s "$config" "$STATE/exact-config-drifted"
+    cat "$STATE/exact-config-baseline" > "$config"
+    ;;
 esac
 PROBE
 } > "$STATE/exact-native-probe"
 chmod 0700 "$STATE/exact-native-probe"
-export ROOT STATE OWNER_CONFIG config INSTANCE PROJECT YARD_NAME
+export ROOT STATE MARKER OWNER_CONFIG config INSTANCE PROJECT YARD_NAME
 python3 - "$STATE" <<'FIXTURE'
 import json, pathlib, sys
 state=pathlib.Path(sys.argv[1])
@@ -308,30 +398,15 @@ base={"ssh":["ssh","-T","integration-owner","--","yard","rpc","--stdio"],
       "probe":[str(state/"exact-native-probe"),"probe"]}
 (state/"exact-integration.json").write_text(json.dumps(base))
 base.update(command="config",arguments=["set","SSH_PORT","64993","--scope","yard"],
-            drift=[str(state/"exact-native-probe"),"drift"])
+            drift=[str(state/"exact-native-probe"),"drift"],
+            driftRejection="transition-required",
+            restore=[str(state/"exact-native-probe"),"restore"])
 (state/"exact-config.json").write_text(json.dumps(base))
 FIXTURE
-original_ssh_port="$(sed -n 's/^SSH_PORT=//p' "$config")"
 PATH="$STATE/client-bin:$PATH" python3 dev/e2e/exact-operation-ssh.py "$STATE/exact-integration.json"
 PATH="$STATE/client-bin:$PATH" python3 dev/e2e/exact-operation-ssh.py "$STATE/exact-config.json"
-owner config set SSH_PORT "$original_ssh_port" --scope yard --yes >/dev/null
 # Synthetic native resource uses the real owner resource dispatcher, filesystem
 # observation, native lock and verify; it has no external workload dependency.
-resource_profile="fixture-exact-$token"
-resource_root="$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture"
-[ ! -e "$ROOT/config/profiles/$resource_profile" ] || die 'exact resource fixture already exists'
-install -d -m 0700 "$resource_root"
-printf 'PROFILE_NAME=%s\n' "$resource_profile" > "$ROOT/config/profiles/$resource_profile/profile.conf"
-cat > "$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture.res" <<'RESOURCE'
-COMMAND=exact-ssh-fixture
-HANDLER=resources/exact-ssh-fixture/handler.sh
-TITLE="Exact SSH native fixture"
-ACTION="up up host-change reversible"
-BRINGUP=up
-SHUTDOWN=up
-RESOURCE
-chmod 0600 "$ROOT/config/profiles/$resource_profile/profile.conf" "$ROOT/config/profiles/$resource_profile/resources/exact-ssh-fixture.res"
-install -m 0755 dev/e2e/exact-resource-fixture.py "$resource_root/handler.sh"
 owner config set ENVIRONMENT_PROFILES "$resource_profile" --scope yard --yes >/dev/null
 cat > "$STATE/exact-resource-probe" <<'RESOURCE_PROBE'
 #!/usr/bin/env bash

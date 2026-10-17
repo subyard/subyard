@@ -937,7 +937,7 @@ func (cli *CLI) applyConfig(
 		return 1
 	}
 	definition := nativeConfigCommandDefinition()
-	prepared := &preparedCommand{CLI: cli, Definition: definition, Loaded: targets[0].Loaded, Arguments: []string{"apply"}}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: targets[0].Loaded, Arguments: []string{"apply"}}
 	prepared.policy = commandPolicy(definition, prepared.Loaded.Context, prepared.Arguments, nil)
 	prepared.attachConfigApply(execution)
 	if err := prepared.preparePlan(ctx); err != nil {

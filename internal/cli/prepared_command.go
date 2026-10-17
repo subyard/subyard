@@ -178,10 +178,7 @@ type preparedCommand struct {
 	printResult      func(domain.AdapterResult)
 	remoteArguments  func([]string) ([]string, error)
 	executeNoOp      bool
-	closed           bool
-	executed         bool
-	closeOnce        sync.Once
-	closeErr         error
+	lifecycle        *preparedLifecycle
 	ownerAdmission   ownerWriteAdmission
 	remotePhased     bool
 }
@@ -324,11 +321,13 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 		return nil, fmt.Errorf("command has no prepared execution: %s", behavior.nonRPCReason)
 	}
 	cli.ensureOperationID()
-	prepared := &preparedCommand{CLI: cli, Definition: request.Definition,
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: request.Definition,
 		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
 		if err != nil {
 			_ = prepared.Close()
+		} else {
+			prepared.seal()
 		}
 	}()
 	prepared.Project, err = cli.prepareProjectExecution(ctx, prepared.Loaded, prepared.Definition,
@@ -435,35 +434,134 @@ func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
 			return &commandPreparationError{phase: "owner generation", err: err}
 		}
 	}
+	prepared.seal()
 	return nil
+}
+
+// Copies share lifecycle ownership. Calls to Confirm, Execute and Close serialize;
+// callers must not concurrently mutate the preview or other preparation inputs.
+type preparedLifecycle struct {
+	mu       sync.Mutex
+	phase    preparedPhase
+	scope    string
+	plan     domain.OperationPlan
+	closeErr error
+}
+type preparedPhase uint8
+
+const (
+	commandPrepared preparedPhase = iota
+	commandAuthorized
+	commandConsumed
+	commandClosed
+)
+
+func (prepared *preparedCommand) scope() string {
+	return operationStateDigest(struct {
+		Plan       domain.OperationPlan
+		Definition command.Definition
+		Context    domain.Context
+		Arguments  []string
+		State      string
+	}{prepared.Plan, prepared.Definition, prepared.Loaded.Context, prepared.Arguments, prepared.exactState})
+}
+
+func (prepared *preparedCommand) seal() {
+	if prepared.lifecycle == nil {
+		prepared.lifecycle = &preparedLifecycle{}
+	}
+	prepared.lifecycle.plan = prepared.Plan.Clone()
+	prepared.lifecycle.scope = prepared.scope()
+}
+
+// Confirm is the sole transition that grants this command execution authority.
+// An owner plan uses its resolved prompt policy, without a controller reassessment.
+func (prepared *preparedCommand) Confirm(ctx context.Context, orchestrator *application.Orchestrator, assumeYes bool) (domain.OperationPlan, error) {
+	if prepared == nil || prepared.lifecycle == nil {
+		return domain.OperationPlan{}, errors.New("prepared command is not executable")
+	}
+	state := prepared.lifecycle
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.phase != commandPrepared {
+		return domain.OperationPlan{}, errors.New("prepared command is not awaiting confirmation")
+	}
+	if state.scope != prepared.scope() {
+		return domain.OperationPlan{}, domain.ErrPlanStale
+	}
+	confirmation := state.plan.Clone()
+	confirm := orchestrator.Confirm
+	if prepared.ownerPlan {
+		confirm = orchestrator.ConfirmResolved
+	}
+	plan, err := confirm(ctx, confirmation, assumeYes)
+	if err != nil {
+		return domain.OperationPlan{}, err
+	}
+	prepared.Plan = plan.Clone()
+	state.plan = plan.Clone()
+	state.scope = prepared.scope()
+	state.phase = commandAuthorized
+	return plan.Clone(), nil
 }
 
 func (prepared *preparedCommand) Close() error {
 	if prepared == nil {
 		return nil
 	}
-	prepared.closeOnce.Do(func() {
-		prepared.closed = true
-		if prepared.CLI != nil {
-			prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
-		}
-		if prepared.Project != nil {
-			prepared.closeErr = prepared.Project.closePreparedSource()
-		}
-		if prepared.closeResource != nil {
-			prepared.closeErr = errors.Join(prepared.closeErr, prepared.closeResource())
-		}
-	})
-	return prepared.closeErr
+	if prepared.lifecycle == nil {
+		return nil
+	}
+	state := prepared.lifecycle
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.phase == commandClosed {
+		return state.closeErr
+	}
+	state.phase = commandClosed
+	if prepared.CLI != nil {
+		prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
+	}
+	if prepared.Project != nil {
+		state.closeErr = prepared.Project.closePreparedSource()
+	}
+	if prepared.closeResource != nil {
+		state.closeErr = errors.Join(state.closeErr, prepared.closeResource())
+	}
+	return state.closeErr
+}
+
+// consume holds lifecycle ownership until the caller finishes its execution path.
+func (prepared *preparedCommand) consume() (func(), error) {
+	if prepared == nil || prepared.lifecycle == nil {
+		return nil, errors.New("prepared command is not executable")
+	}
+	state := prepared.lifecycle
+	state.mu.Lock()
+	fail := func(err error) (func(), error) { state.mu.Unlock(); return nil, err }
+	if state.phase == commandPrepared {
+		return fail(domain.ErrConfirmationRequired)
+	}
+	if state.phase != commandAuthorized {
+		return fail(errors.New("prepared command is not executable"))
+	}
+	if state.scope != prepared.scope() {
+		return fail(domain.ErrPlanStale)
+	}
+	// Consume before admission: a refused attempt requires fresh preparation.
+	state.phase = commandConsumed
+	return state.mu.Unlock, nil
 }
 
 func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-	if prepared.closed || prepared.executed || prepared.execute == nil {
+	if prepared == nil || prepared.lifecycle == nil || prepared.execute == nil {
 		return domain.AdapterResult{}, errors.New("prepared command is not executable")
 	}
-	if !prepared.Plan.Confirmed {
-		return domain.AdapterResult{}, domain.ErrConfirmationRequired
+	finish, err := prepared.consume()
+	if err != nil {
+		return domain.AdapterResult{}, err
 	}
+	defer finish()
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
 		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)
@@ -472,7 +570,6 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		}
 		defer unlock()
 	}
-	prepared.executed = true
 	noOp := func() (domain.AdapterResult, error) {
 		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
 	}

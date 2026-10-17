@@ -43,7 +43,7 @@ func configExactPlan(t *testing.T, program *CLI, loaded config.Loaded, arguments
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = prepared.Close() })
-	prepared.Plan.Confirmed = true
+	authorizePreparedFixture(prepared)
 	return prepared
 }
 
@@ -404,14 +404,14 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 	writeConfigCommandFile(t, target, "YARD_TEMPLATE=isolated\n")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	program := configExactProgram(t, root, environment, nil, nil)
-	valid := &preparedCommand{CLI: program, Loaded: loaded}
+	valid := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded}
 	err := valid.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"})
 	_ = valid.Close()
 	if err != nil {
 		t.Fatalf("valid profile-compatible draft rejected: %v", err)
 	}
 	for _, arguments := range [][]string{{"ENVIRONMENT_PROFILES", "another"}, {"YARD_KIND", "container"}} {
-		prepared := &preparedCommand{CLI: program, Loaded: loaded}
+		prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded}
 		err := prepared.prepareConfigScalar(context.Background(), "set", append(arguments, "--scope", "yard"))
 		_ = prepared.Close()
 		if err == nil {
@@ -594,7 +594,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 				writeConfigCommandFile(t, dependency, content, mode)
 				writeConfigCommandFile(t, target, initial)
 				loaded := loadConfigCommandContext(t, root, environment, "named")
-				prepared := &preparedCommand{CLI: configExactProgram(t, root, environment, nil, nil), Loaded: loaded}
+				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: configExactProgram(t, root, environment, nil, nil), Loaded: loaded}
 				t.Cleanup(func() { _ = prepared.Close() })
 				if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
 					t.Fatal(errors.Unwrap(err))

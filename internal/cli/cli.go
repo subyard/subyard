@@ -207,7 +207,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 		}
 		defer prepared.Close()
 		orchestrator := operation.operationOrchestrator(operationID, loaded, nil, &definition)
-		prepared.Plan, err = orchestrator.Confirm(ctx, prepared.Plan, true)
+		_, err = prepared.Confirm(ctx, orchestrator, true)
 		if err != nil {
 			return err
 		}
@@ -4348,11 +4348,10 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		orchestrator := planned.CLI.operationOrchestrator(
 			call.OperationID, planned.Loaded, rpcOperationEvents{emit: emit}, &planned.Definition,
 		)
-		plan, err := orchestrator.Confirm(ctx, planned.Plan, true)
+		plan, err := planned.Confirm(ctx, orchestrator, true)
 		if err != nil {
 			return nil, operationRPCError("confirmation_failed", err)
 		}
-		planned.Plan = plan
 		result, err := planned.Execute(ctx, orchestrator, planned.CLI.options.Stderr)
 		if err != nil {
 			var commitErr *commandCommitError

@@ -167,7 +167,7 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 				t.Fatalf("fixture did not produce a native no-op plan: %#v", owner.Plan)
 			}
 			if kind == "preconfirmed-prompt" {
-				owner.Plan.Confirmed = true
+				authorizePreparedFixture(owner)
 			}
 			ownerNow := time.Now()
 			if kind == "owner-clock-ahead" {

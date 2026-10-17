@@ -110,7 +110,7 @@ func TestVerandaBootstrapUsesNativeInitWithoutSwitchingSession(t *testing.T) {
 			}
 			if action == "discard" {
 				_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.discard", OperationID: "bootstrap", Params: json.RawMessage(`{}`)}, nil)
-				if err != nil || !prepared.closed {
+				if err != nil || !(prepared.lifecycle.phase == commandClosed) {
 					t.Fatal("discard did not release bootstrap")
 				}
 				if _, err := os.Lstat(target); !os.IsNotExist(err) {
@@ -149,7 +149,7 @@ func TestVerandaBootstrapUsesNativeInitWithoutSwitchingSession(t *testing.T) {
 			}
 			_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "bootstrap", Params: params}, nil)
 			var fault *rpc.Error
-			if !errors.As(err, &fault) || fault.Code != "plan_not_found" || !prepared.closed {
+			if !errors.As(err, &fault) || fault.Code != "plan_not_found" || !(prepared.lifecycle.phase == commandClosed) {
 				t.Fatal("bootstrap replay or retained resources accepted")
 			}
 			if !reflect.DeepEqual(handler.loaded, original) || !maps.Equal(environment, handler.cli.env) {

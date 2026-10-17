@@ -55,7 +55,7 @@ func (declaration Definition) Metadata() (Metadata, error) {
 	if err := declaration.validateSemantic(); err != nil {
 		return Metadata{}, err
 	}
-	return Metadata{data: cloneMetadataData(MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}), valid: true}, nil
+	return Metadata{data: cloneMetadataData(declaration.metadataData()), valid: true}, nil
 }
 func (metadata Metadata) Data() (MetadataData, error) {
 	if !metadata.valid {
@@ -150,7 +150,7 @@ func (declaration IntegrationDefinition) Metadata() (IntegrationMetadata, error)
 	if err := declaration.validateSemantic(); err != nil {
 		return IntegrationMetadata{}, err
 	}
-	return IntegrationMetadata{data: cloneIntegrationMetadataData(IntegrationMetadataData{SchemaVersion: declaration.SchemaVersion, Retired: declaration.Retired, RetiredRoutes: declaration.RetiredRoutes, RetiredSettings: declaration.RetiredSettings, Name: declaration.Name, Inputs: declaration.Inputs, Settings: declaration.Settings, Provision: declaration.Provision, Command: declaration.Command, Check: declaration.Check, Health: declaration.Health, Cleanup: declaration.Cleanup, Depends: declaration.Depends, Persist: declaration.Persist, Lifecycle: declaration.Lifecycle, Dashboard: declaration.Dashboard, Native: declaration.Native}), valid: true}, nil
+	return IntegrationMetadata{data: cloneIntegrationMetadataData(declaration.metadataData()), valid: true}, nil
 }
 func (metadata IntegrationMetadata) Data() (IntegrationMetadataData, error) {
 	if !metadata.valid {
@@ -284,4 +284,28 @@ func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) e
 		}
 	}
 	return nil
+}
+
+func (declaration Definition) metadataData() MetadataData {
+	return MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}
+}
+
+// Clone returns an independent declaration, preserving its inspected package binding.
+func (declaration Definition) Clone() Definition {
+	copy := (Metadata{data: declaration.metadataData()}).definition()
+	copy.Root = declaration.Root
+	copy.validationInputs = slices.Clone(declaration.validationInputs)
+	return copy
+}
+
+func (declaration IntegrationDefinition) metadataData() IntegrationMetadataData {
+	return IntegrationMetadataData{SchemaVersion: declaration.SchemaVersion, Retired: declaration.Retired, RetiredRoutes: declaration.RetiredRoutes, RetiredSettings: declaration.RetiredSettings, Name: declaration.Name, Inputs: declaration.Inputs, Settings: declaration.Settings, Provision: declaration.Provision, Command: declaration.Command, Check: declaration.Check, Health: declaration.Health, Cleanup: declaration.Cleanup, Depends: declaration.Depends, Persist: declaration.Persist, Lifecycle: declaration.Lifecycle, Dashboard: declaration.Dashboard, Native: declaration.Native}
+}
+
+// Clone returns an independent declaration, preserving its inspected package binding.
+func (declaration IntegrationDefinition) Clone() IntegrationDefinition {
+	copy := (IntegrationMetadata{data: declaration.metadataData()}).definition()
+	copy.Root = declaration.Root
+	copy.validationInputs = slices.Clone(declaration.validationInputs)
+	return copy
 }

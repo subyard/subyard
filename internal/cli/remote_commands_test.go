@@ -163,7 +163,7 @@ func TestRPCOperationPlanMapsActionPolicyInvalid(t *testing.T) {
 	}
 }
 
-func TestRPCOperationExecuteMapsActionPolicyInvalid(t *testing.T) {
+func TestRPCOperationExecuteRejectsForgedPlanConfirmation(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	control := &remoteControlStub{}
 	program, err := New(Options{
@@ -197,7 +197,7 @@ func TestRPCOperationExecuteMapsActionPolicyInvalid(t *testing.T) {
 		Method: "operation.execute", OperationID: plan.OperationID, Params: execute,
 	}, func(string, any) (uint64, error) { return 1, nil })
 	rpcErr, ok := err.(*rpc.Error)
-	if !ok || rpcErr.Code != domain.ActionPolicyInvalid || control.applied != 0 {
+	if !ok || rpcErr.Code != "plan_stale" || control.applied != 0 {
 		t.Fatalf("operation.execute err=%#v applies=%d", err, control.applied)
 	}
 }

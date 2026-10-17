@@ -10,6 +10,7 @@ The caller owns provisioning/cleanup and the agent-e2e source-hash envelope.
 import datetime
 import json
 import os
+import re
 import select
 import subprocess
 import sys
@@ -80,9 +81,11 @@ def session(argv):
             raise RuntimeError("owner did not close its SSH session")
 
 
-def error(response, code):
-    require(response.get("error", {}).get("code") == code,
-            "owner returned unexpected rejection category")
+def error(response, code, stage):
+    actual = response.get("error", {}).get("code")
+    safe_actual = actual if isinstance(actual, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", actual) else "<invalid>"
+    require(actual == code,
+            f"owner returned unexpected rejection category: stage={stage} expected={code} actual={safe_actual}")
 
 
 def probe(argv):
@@ -124,37 +127,45 @@ def run(fixture):
         operation, digest = plan(process)
         require(probe(fixture["probe"]) == initial, "preparation mutated target state")
         error(call(process, "operation.execute", operation,
-                   {"confirmed": False, "digest": digest}), "confirmation_required")
+                   {"confirmed": False, "digest": digest}), "confirmation_required", "decline")
         require(probe(fixture["probe"]) == initial, "decline mutated target state")
         require("result" in call(process, "operation.discard", operation),
                 "discard failed")
         error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": digest}), "plan_not_found")
+                   {"confirmed": True, "digest": digest}), "plan_not_found", "discard-replay")
         operation, digest = plan(process)
         error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": "0" * 64}), "plan_binding_invalid")
+                   {"confirmed": True, "digest": "0" * 64}), "plan_binding_invalid", "digest-tamper")
         error(call(process, "operation.execute", operation,
-                   {"confirmed": True, "digest": digest}), "plan_not_found")
+                   {"confirmed": True, "digest": digest}), "plan_not_found", "tamper-replay")
         disconnected_operation, disconnected_digest = plan(process)
     require(probe(fixture["probe"]) == initial, "rejected or disconnected plan mutated state")
     with session(fixture["ssh"]) as process:
         error(call(process, "operation.execute", disconnected_operation,
-                   {"confirmed": True, "digest": disconnected_digest}), "plan_not_found")
+                   {"confirmed": True, "digest": disconnected_digest}), "plan_not_found", "disconnect-replay")
         if "drift" in fixture:
+            drift_rejection = fixture.get("driftRejection", "plan_stale")
+            require(drift_rejection in ("plan_stale", "transition-required"),
+                    "invalid fixture drift rejection category")
             operation, digest = plan(process)
             require(subprocess.run(fixture["drift"], capture_output=True,
                                    timeout=60).returncode == 0, "native drift injection failed")
             drifted = probe(fixture["probe"])
             require(drifted != initial, "drift injection did not alter native target")
             error(call(process, "operation.execute", operation,
-                       {"confirmed": True, "digest": digest}), "plan_stale")
+                       {"confirmed": True, "digest": digest}), drift_rejection, "native-drift")
             require(probe(fixture["probe"]) == drifted, "stale execution mutated target")
             if fixture.get("exportAdmission"):
                 require(subprocess.run(fixture["temporaryProbe"] + ["absent", operation],
                                        capture_output=True, timeout=60).returncode == 0,
                         "stale export execution created a native temporary")
             error(call(process, "operation.execute", operation,
-                       {"confirmed": True, "digest": digest}), "plan_not_found")
+                       {"confirmed": True, "digest": digest}), "plan_not_found", "stale-replay")
+            if "restore" in fixture:
+                require(subprocess.run(fixture["restore"], capture_output=True,
+                                       timeout=60).returncode == 0, "native drift restoration failed")
+                require(probe(fixture["probe"]) == initial,
+                        "native drift restoration differs from initial state")
     if fixture.get("pinnedClone"):
         clone = fixture["pinnedClone"]
         with session(fixture["ssh"]) as process:
@@ -168,7 +179,7 @@ def run(fixture):
             require(subprocess.run(clone["verify"], capture_output=True,
                                    timeout=60).returncode == 0, "native cloned HEAD differs from approved revision")
             error(call(process, "operation.execute", operation,
-                       {"confirmed": True, "digest": digest}), "plan_not_found")
+                       {"confirmed": True, "digest": digest}), "plan_not_found", "clone-replay")
         print("ok: physical SSH owner clone retains approved revision after native origin advances")
     if fixture.get("copyAdmission") or fixture.get("exportAdmission"):
         for ending in ("abort", "incomplete-finalize", "disconnect"):
@@ -186,16 +197,16 @@ def run(fixture):
                                            capture_output=True, timeout=60).returncode == 0,
                             "owner export temporary native scope differs from admission")
                 error(call(process, "operation.execute", operation,
-                           {"confirmed": True, "digest": digest}), "plan_not_found")
+                           {"confirmed": True, "digest": digest}), "plan_not_found", "copy-admission-replay")
                 if ending == "abort":
                     require("result" in call(process, "project.copy.abort", operation),
                             "owner copy abort failed")
                 elif ending == "incomplete-finalize":
                     error(call(process, "project.copy.finalize", operation,
-                               {"digest": digest}), "project_copy_failed")
+                               {"digest": digest}), "project_copy_failed", "copy-incomplete-finalize")
                 if ending != "disconnect":
                     error(call(process, "project.copy.finalize", operation,
-                               {"digest": digest}), "plan_not_found")
+                               {"digest": digest}), "plan_not_found", "copy-finalize-replay")
             if fixture.get("exportAdmission"):
                 require(subprocess.run(fixture["temporaryProbe"] + ["absent", operation],
                                        capture_output=True, timeout=60).returncode == 0,

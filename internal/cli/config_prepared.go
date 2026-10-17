@@ -451,7 +451,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 // Only their public metadata joins the same consent and execution boundary.
 func (cli *CLI) runPreparedConfigMutation(ctx context.Context, loaded config.Loaded, arguments []string, assumeYes bool, capture func(*preparedCommand) error) int {
 	definition := nativeConfigCommandDefinition()
-	prepared := &preparedCommand{CLI: cli, Definition: definition, Loaded: loaded, Arguments: arguments}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: loaded, Arguments: arguments}
 	prepared.policy = commandPolicy(definition, loaded.Context, arguments, nil)
 	defer prepared.Close()
 	if err := capture(prepared); err != nil {

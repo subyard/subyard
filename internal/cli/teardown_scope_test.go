@@ -155,7 +155,7 @@ func TestFullTeardownRecoveryAssessmentBindsReleaseRepairPermit(t *testing.T) {
 	program.fullTeardownRecovery = directory
 	program.teardownRepair = &configApplyRepairPermit{factsFingerprint: "approved-history"}
 	definition, _ := program.manifest.Lookup("teardown")
-	prepared := &preparedCommand{CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"--full"}}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"--full"}}
 	if err := prepared.prepareTeardown(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -331,10 +331,11 @@ func TestQueuedLocalMutationRefusesCompletedEpochInRetainedRoot(t *testing.T) {
 	}
 	release()
 	called := false
-	prepared := &preparedCommand{CLI: &CLI{}, Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{DataHome: home, ConfigHome: filepath.Join(home, "config")}}}, Plan: domain.OperationPlan{Confirmed: true}, ownerAdmission: ownerWriteAdmission{home: home, generation: []uninstall.Tree{generation}}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: &CLI{}, Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{DataHome: home, ConfigHome: filepath.Join(home, "config")}}}, Plan: domain.OperationPlan{Confirmed: true}, ownerAdmission: ownerWriteAdmission{home: home, generation: []uninstall.Tree{generation}}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 		called = true
 		return domain.AdapterResult{}, nil
 	}}
+	authorizePreparedFixture(prepared)
 	_, err = prepared.Execute(context.Background(), nil, io.Discard)
 	if !errors.Is(err, domain.ErrPlanStale) || called {
 		t.Fatal("queued mutation entered removed generation", err, called)
@@ -508,7 +509,9 @@ func TestTeardownBatchUsesOneApprovedYardSetAndOneLock(t *testing.T) {
 		sessions++
 		return nil
 	}
-	_, err = program.executeTeardownYards(ctx, &application.Orchestrator{Runner: runner, Clock: wallClock{}}, first, domain.OperationPlan{OperationID: "batch", Confirmed: true}, execution, io.Discard, func() error { before = true; return nil }, nil, leaf)
+	orchestrator := &application.Orchestrator{Runner: runner, Clock: wallClock{}}
+	plan := confirmedAdapterFixture(t, orchestrator, domain.OperationPlan{OperationID: "batch"})
+	_, err = program.executeTeardownYards(ctx, orchestrator, first, plan, execution, io.Discard, func() error { before = true; return nil }, nil, leaf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +569,9 @@ func TestLifecycleOnlyManagedPathsWaitForInstallationCleanup(t *testing.T) {
 			}}}}
 			program.options.AdapterRunner = runner
 			leaf := func(string, map[string]string) error { return nil }
-			_, err = program.executeTeardownYards(ctx, &application.Orchestrator{Runner: runner, Clock: wallClock{}}, loaded, domain.OperationPlan{OperationID: "lifecycle-path", Confirmed: true}, execution, io.Discard, nil, nil, leaf)
+			orchestrator := &application.Orchestrator{Runner: runner, Clock: wallClock{}}
+			plan := confirmedAdapterFixture(t, orchestrator, domain.OperationPlan{OperationID: "lifecycle-path"})
+			_, err = program.executeTeardownYards(ctx, orchestrator, loaded, plan, execution, io.Discard, nil, nil, leaf)
 			if err != nil {
 				t.Fatal("common yard executor must finish before installation file cleanup", err)
 			}

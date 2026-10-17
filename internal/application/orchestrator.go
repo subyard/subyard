@@ -15,16 +15,16 @@ import (
 var ErrDeclined = domain.ErrOperationDeclined
 
 type Orchestrator struct {
-	Clock                ports.Clock
-	IDs                  ports.IDSource
-	Prompt               ports.Prompter
-	Runner               ports.AdapterRunner
-	Audit                ports.AuditSink
-	Events               ports.EventSink
-	Actions              *domain.ActionRegistry
-	mu                   sync.Mutex
-	revision             uint64
-	actionAuthorizations map[string]domain.OperationPlan
+	Clock              ports.Clock
+	IDs                ports.IDSource
+	Prompt             ports.Prompter
+	Runner             ports.AdapterRunner
+	Audit              ports.AuditSink
+	Events             ports.EventSink
+	Actions            *domain.ActionRegistry
+	mu                 sync.Mutex
+	revision           uint64
+	planAuthorizations map[string]domain.OperationPlan
 }
 
 func (orchestrator *Orchestrator) Plan(ctx context.Context, yard domain.Context, policy domain.CommandPolicy, assumeYes bool) (domain.OperationPlan, error) {
@@ -126,18 +126,42 @@ func (orchestrator *Orchestrator) Confirm(ctx context.Context, plan domain.Opera
 	if err := orchestrator.validateActionPlan(plan); err != nil {
 		return domain.OperationPlan{}, err
 	}
+	return orchestrator.confirm(ctx, plan, assumeYes)
+}
+
+// ConfirmResolved confirms an authenticated owner's already-resolved policy.
+// The caller validates the negotiated owner plan before entering this boundary;
+// the controller must not reinterpret it against a different action registry.
+func (orchestrator *Orchestrator) ConfirmResolved(ctx context.Context, plan domain.OperationPlan, assumeYes bool) (domain.OperationPlan, error) {
+	if err := domain.ValidateOperationSteps(plan.Steps); err != nil {
+		return domain.OperationPlan{}, err
+	}
+	if plan.Assessment != nil && plan.Confirmation != domain.ConfirmationNever && plan.ConfirmationRequest == nil {
+		return domain.OperationPlan{}, domain.ErrActionPolicyInvalid
+	}
+	if request := plan.ConfirmationRequest; request != nil {
+		expected, prompt := confirmationDefault(plan.Confirmation)
+		if !prompt || request.Default != expected || !slices.Equal(request.Consequences, plan.Consequences) {
+			return domain.OperationPlan{}, fmt.Errorf("%w: owner confirmation request contradicts resolved policy", domain.ErrActionPolicyInvalid)
+		}
+	}
+	return orchestrator.confirm(ctx, plan, assumeYes)
+}
+
+func (orchestrator *Orchestrator) confirm(ctx context.Context, plan domain.OperationPlan, assumeYes bool) (domain.OperationPlan, error) {
 	if !domain.SafeID(plan.OperationID) || plan.Command == "" ||
 		(plan.Effect != domain.CommandRead && plan.Effect != domain.CommandMutate) ||
 		!validConfirmationPolicy(plan.Confirmation) {
 		return domain.OperationPlan{}, errors.New("invalid operation plan")
 	}
-	if plan.Assessment != nil && plan.Confirmed && plan.Confirmation != domain.ConfirmationNever &&
-		!orchestrator.actionPlanAuthorized(plan) {
+	plan = plan.Clone()
+	if plan.Confirmed && plan.Confirmation != domain.ConfirmationNever &&
+		!orchestrator.planAuthorized(plan) {
 		return domain.OperationPlan{}, fmt.Errorf("%w: action plan was not confirmed by this orchestrator", domain.ErrActionPolicyInvalid)
 	}
 	if plan.Confirmation == domain.ConfirmationNever || plan.Confirmed || assumeYes {
 		plan.Confirmed = true
-		orchestrator.authorizeActionPlan(plan)
+		orchestrator.authorizePlan(plan)
 		return plan, nil
 	}
 	if orchestrator.Prompt == nil {
@@ -147,7 +171,9 @@ func (orchestrator *Orchestrator) Confirm(ctx context.Context, plan domain.Opera
 		Summary: plan.Command, Consequences: append([]string(nil), plan.Consequences...),
 	}
 	if plan.Assessment != nil {
-		request = plan.ConfirmationRequest.Clone()
+		if plan.ConfirmationRequest != nil {
+			request = plan.ConfirmationRequest.Clone()
+		}
 	} else {
 		defaultValue, ok := confirmationDefault(plan.Confirmation)
 		if !ok {
@@ -163,7 +189,7 @@ func (orchestrator *Orchestrator) Confirm(ctx context.Context, plan domain.Opera
 		return domain.OperationPlan{}, ErrDeclined
 	}
 	plan.Confirmed = true
-	orchestrator.authorizeActionPlan(plan)
+	orchestrator.authorizePlan(plan)
 	return plan, nil
 }
 
@@ -213,38 +239,38 @@ func equalRequest(left, right *domain.ConfirmationRequest) bool {
 		slices.Equal(left.Consequences, right.Consequences)
 }
 
-func (orchestrator *Orchestrator) authorizeActionPlan(plan domain.OperationPlan) {
-	if plan.Assessment == nil {
-		return
-	}
-	copy := cloneActionPlan(plan)
+func (orchestrator *Orchestrator) authorizePlan(plan domain.OperationPlan) {
+	copy := plan.Clone()
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
-	if orchestrator.actionAuthorizations == nil {
-		orchestrator.actionAuthorizations = make(map[string]domain.OperationPlan)
+	if orchestrator.planAuthorizations == nil {
+		orchestrator.planAuthorizations = make(map[string]domain.OperationPlan)
 	}
-	orchestrator.actionAuthorizations[plan.OperationID] = copy
+	orchestrator.planAuthorizations[plan.OperationID] = copy
 }
 
-func (orchestrator *Orchestrator) actionPlanAuthorized(plan domain.OperationPlan) bool {
+func (orchestrator *Orchestrator) planAuthorized(plan domain.OperationPlan) bool {
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
-	authorized, ok := orchestrator.actionAuthorizations[plan.OperationID]
+	authorized, ok := orchestrator.planAuthorizations[plan.OperationID]
 	return ok && equalActionPlan(authorized, plan)
 }
 
-func cloneActionPlan(plan domain.OperationPlan) domain.OperationPlan {
-	plan.Consequences = slices.Clone(plan.Consequences)
-	plan.Steps = domain.CloneOperationSteps(plan.Steps)
-	if plan.Assessment != nil {
-		copy := plan.Assessment.Clone()
-		plan.Assessment = &copy
+// A controller transfer consumes only the assessment-free projection of the
+// authenticated owner approval. Every scope field and step remains identical.
+func (orchestrator *Orchestrator) adapterPlanAuthorized(plan domain.OperationPlan) bool {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	approved, ok := orchestrator.planAuthorizations[plan.OperationID]
+	if !ok {
+		return false
 	}
-	if plan.ConfirmationRequest != nil {
-		copy := plan.ConfirmationRequest.Clone()
-		plan.ConfirmationRequest = &copy
+	if equalActionPlan(approved, plan) {
+		return true
 	}
-	return plan
+	approved.Assessment = nil
+	approved.ConfirmationRequest = nil
+	return equalActionPlan(approved, plan)
 }
 
 func equalActionPlan(left, right domain.OperationPlan) bool {
@@ -310,10 +336,11 @@ func (orchestrator *Orchestrator) RunAdapter(
 		if err := orchestrator.validateActionPlan(plan); err != nil {
 			return domain.AdapterResult{}, "", err
 		}
-		if !orchestrator.actionPlanAuthorized(plan) {
-			return domain.AdapterResult{}, "", fmt.Errorf("%w: action plan is not authorized", domain.ErrActionPolicyInvalid)
-		}
 	}
+	if !orchestrator.adapterPlanAuthorized(plan) {
+		return domain.AdapterResult{}, "", fmt.Errorf("%w: operation plan is not authorized", domain.ErrActionPolicyInvalid)
+	}
+
 	if orchestrator.Runner == nil {
 		return domain.AdapterResult{}, "", errors.New("adapter runner is required")
 	}

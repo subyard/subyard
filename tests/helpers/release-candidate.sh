@@ -61,7 +61,7 @@ release_candidate_install() {
     candidate_rc=$?
     [ "$candidate_rc" = 1 ] || return "$candidate_rc"
     release="$state/release"
-    version=0.1.0-candidate.e2e
+    version=1.0.0-candidate.e2e
     "$root/dev/package-engine.sh" --version "$version" --output-dir "$release" >&2 || return
   fi
   env YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$state/releases" \

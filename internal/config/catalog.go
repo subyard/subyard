@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -288,9 +289,10 @@ func enum(values ...string) definitionOption {
 
 func (settings Catalog) LookupSetting(name string) (SettingDefinition, bool) {
 	if definition, ok := settings.profiles[name]; ok {
-		return definition, true
+		return definition.Clone(), true
 	}
 	if definition, ok := catalog[name]; ok {
+		definition = definition.Clone()
 		definition.Name = name
 		for alias, canonical := range legacySettingNames {
 			if canonical == name {
@@ -343,7 +345,7 @@ func (settings Catalog) SettingCatalog() []SettingDefinition {
 		result = append(result, definition)
 	}
 	for _, definition := range settings.profiles {
-		result = append(result, definition)
+		result = append(result, definition.Clone())
 	}
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].Name < result[right].Name
@@ -685,4 +687,16 @@ func ValidateSettingName(scope SettingScope, name string, syncable bool) (Settin
 }
 func hostListener() definitionOption {
 	return func(definition *SettingDefinition) { definition.HostListener = true }
+}
+
+// Clone returns an independent setting definition.
+func (definition SettingDefinition) Clone() SettingDefinition {
+	definition.Aliases = slices.Clone(definition.Aliases)
+	definition.Scopes = slices.Clone(definition.Scopes)
+	definition.Enum = slices.Clone(definition.Enum)
+	if definition.DefaultFrom != nil {
+		value := *definition.DefaultFrom
+		definition.DefaultFrom = &value
+	}
+	return definition
 }

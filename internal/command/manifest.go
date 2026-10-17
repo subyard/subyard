@@ -166,11 +166,15 @@ func (manifest Manifest) Lookup(name string) (Definition, bool) {
 	if !ok {
 		return Definition{}, false
 	}
-	return manifest.commands[index], true
+	return manifest.commands[index].Clone(), true
 }
 
 func (manifest Manifest) Commands() []Definition {
-	return slices.Clone(manifest.commands)
+	result := slices.Clone(manifest.commands)
+	for i := range result {
+		result[i] = result[i].Clone()
+	}
+	return result
 }
 
 func (manifest Manifest) PublicNames() []string {
@@ -244,4 +248,12 @@ func splitNonEmpty(value, separator string) []string {
 		return nil
 	}
 	return strings.Split(value, separator)
+}
+
+// Clone returns an independent command declaration.
+func (definition Definition) Clone() Definition {
+	definition.Aliases = slices.Clone(definition.Aliases)
+	definition.Options = slices.Clone(definition.Options)
+	definition.Verbs = slices.Clone(definition.Verbs)
+	return definition
 }

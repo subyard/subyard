@@ -200,8 +200,10 @@ func TestTeardownPhysicalStaleRefusalRetainsErrorType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = program.executeTeardown(context.Background(), &application.Orchestrator{Runner: runner, Clock: wallClock{}}, loaded,
-		domain.OperationPlan{OperationID: "stale-teardown", Confirmed: true}, &teardownExecution{}, io.Discard)
+	orchestrator := &application.Orchestrator{Runner: runner, Clock: wallClock{}}
+	plan := confirmedAdapterFixture(t, orchestrator, domain.OperationPlan{OperationID: "stale-teardown"})
+	_, err = program.executeTeardown(context.Background(), orchestrator, loaded,
+		plan, &teardownExecution{}, io.Discard)
 	if !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("physical drift lost plan_stale type: %v", err)
 	}

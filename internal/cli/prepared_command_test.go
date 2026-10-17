@@ -223,7 +223,7 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 	orchestrator := prepared.CLI.operationOrchestrator(
 		prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition,
 	)
-	prepared.Plan, err = orchestrator.Confirm(context.Background(), prepared.Plan, true)
+	_, err = prepared.Confirm(context.Background(), orchestrator, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 	orchestrator := prepared.CLI.operationOrchestrator(
 		prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition,
 	)
-	prepared.Plan, err = orchestrator.Confirm(context.Background(), prepared.Plan, true)
+	_, err = prepared.Confirm(context.Background(), orchestrator, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +340,7 @@ func TestRPCHandlerCloseReleasesEveryPreparedCommand(t *testing.T) {
 	release := &releaseExecution{runtime: releaseruntime.New(releaseruntime.Config{})}
 	handler := &rpcHandler{plans: map[string]*preparedCommand{
 		"operation-rpc-one": {
+			lifecycle:     &preparedLifecycle{},
 			CLI:           &CLI{},
 			closeResource: release.Close,
 			Project: &projectExecution{

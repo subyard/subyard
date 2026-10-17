@@ -79,7 +79,7 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 			program, execution, source, data := emptyClonePlanFixture(t)
 			data.workspaceRoot = testkit.TempDir(t)
 			definition, _ := program.manifest.Lookup("clone")
-			prepared := &preparedCommand{CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
 			prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 			if err := prepared.prepareProject(context.Background(), nil); err != nil {
 				t.Fatal(err)
@@ -88,7 +88,7 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, nil)
-			confirmed, err := orchestrator.Confirm(context.Background(), prepared.Plan, true)
+			confirmed, err := prepared.Confirm(context.Background(), orchestrator, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +165,7 @@ func TestProjectEmptyCloneRetainsStateAndRefusesNewRefsBeforeAdmission(t *testin
 	if !ok {
 		t.Fatal("clone definition missing")
 	}
-	prepared := &preparedCommand{CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
 	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 	if err := prepared.prepareProject(context.Background(), nil); err != nil {
 		t.Fatal(err)
@@ -190,7 +190,7 @@ func TestProjectEmptyCloneRetainsStateAndRefusesNewRefsBeforeAdmission(t *testin
 	if !execution.cloneUnborn || execution.cloneRevision != "" || execution.sourceBinding() != binding {
 		t.Fatal("cached preparation widened the approved empty source")
 	}
-	prepared.Plan.Confirmed = true
+	authorizePreparedFixture(prepared)
 	data.requests = nil
 	if _, err := prepared.Execute(context.Background(), &application.Orchestrator{}, nil); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("stale empty source reached application: %v", err)

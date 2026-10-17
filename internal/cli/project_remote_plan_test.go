@@ -20,9 +20,9 @@ import (
 )
 
 func TestProjectTransferPlanUsesOwnerConsentAndPreservesScope(t *testing.T) {
-	owner := domain.OperationPlan{OperationID: "owner-copy", Command: "sync", Target: domain.TargetRemoteOwner, Confirmed: true,
-		Steps:      []domain.OperationStep{{ID: "copy", Target: "/srv/projects/Demo"}},
-		Assessment: &domain.ActionAssessment{}, ConfirmationRequest: &domain.ConfirmationRequest{}}
+	owner := domain.OperationPlan{OperationID: "owner-copy", Command: "sync", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetRemoteOwner, Confirmed: true,
+		Steps:      []domain.OperationStep{{ID: "copy", Target: "/srv/projects/Demo", Observed: "absent", Desired: "ready", Decision: domain.StepApply, Verify: "ready"}},
+		Assessment: &domain.ActionAssessment{Action: "project.sync", Effect: domain.ActionMutation, Changed: true}, ConfirmationRequest: &domain.ConfirmationRequest{Summary: "sync", Default: domain.ConfirmationDefaultYes}}
 	transfer := projectTransferPlan(owner)
 	if transfer.OperationID != owner.OperationID || transfer.Target != owner.Target || !transfer.Confirmed || len(transfer.Steps) != 1 || !reflect.DeepEqual(transfer.Steps[0], owner.Steps[0]) {
 		t.Fatal("controller transfer lost approved owner scope")
@@ -32,6 +32,11 @@ func TestProjectTransferPlanUsesOwnerConsentAndPreservesScope(t *testing.T) {
 	}
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{OperationID: owner.OperationID, Status: "ok"}}}}
 	orchestrator := application.Orchestrator{Runner: runner, Clock: testkit.NewManualClock(time.Unix(0, 0))}
+	confirmation := owner.Clone()
+	confirmation.Confirmed = false
+	if _, err := orchestrator.ConfirmResolved(context.Background(), confirmation, true); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := orchestrator.RunAdapter(context.Background(), transfer, domain.AdapterRequest{OperationID: owner.OperationID}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +121,7 @@ func TestProjectOwnerCopyFinalizesOnlyAfterIndependentContentVerification(t *tes
 	for _, corrupt := range []bool{false, true} {
 		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
 			program, prepared, changed := ownerProjectCopyFixture(t)
-			prepared.Plan.Confirmed = true
+			authorizePreparedFixture(prepared)
 			if _, err := program.beginOwnerProjectCopy(context.Background(), prepared); err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +154,7 @@ func TestProjectOwnerCopyFinalizesOnlyAfterIndependentContentVerification(t *tes
 
 func TestProjectOwnerCopyCloseAbortsAdmission(t *testing.T) {
 	program, prepared, _ := ownerProjectCopyFixture(t)
-	prepared.Plan.Confirmed = true
+	authorizePreparedFixture(prepared)
 	if _, err := program.beginOwnerProjectCopy(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +190,7 @@ func TestProjectOwnerCopyRechecksTargetAfterConsentBeforeAdmission(t *testing.T)
 		t.Fatal(err)
 	}
 	defer prepared.Close()
-	prepared.Plan.Confirmed = true
+	authorizePreparedFixture(prepared)
 	testkit.WriteFile(t, configPath, []byte("ENVIRONMENT_PROFILES=\n"), 0600)
 	if _, err := fresh.beginOwnerProjectCopy(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "not active") {
 		t.Fatalf("deselected owner copy admitted: %v", err)

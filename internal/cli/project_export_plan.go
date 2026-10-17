@@ -171,7 +171,7 @@ func (cli *CLI) prepareOwnerProjectExport(ctx context.Context, loaded config.Loa
 		return nil, err
 	}
 	project.ActionChanged = project.exportObservedTree != project.exportSourceTree
-	prepared := &preparedCommand{CLI: cli, Loaded: loaded, Definition: definition, Project: project, stepsComplete: true}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Loaded: loaded, Definition: definition, Project: project, stepsComplete: true}
 	prepared.exactState = project.sourceBinding()
 	prepared.policy = commandPolicy(definition, loaded.Context, nil, project)
 	prepared.steps = project.exportOperationSteps

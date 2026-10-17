@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -79,5 +81,38 @@ func TestOperationStepsRejectInvalidMetadata(t *testing.T) {
 				t.Fatalf("invalid metadata accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestOperationPlanClonePreservesWireAndOwnsNestedValues(t *testing.T) {
+	plan := OperationPlan{OperationID: "clone", Command: "fixture", Effect: CommandMutate, Confirmation: ConfirmationPromptDefaultYes,
+		Consequences: []string{"bounded"}, Steps: []OperationStep{{ID: "step", Preconditions: []string{"owner"}, DependsOn: []string{"prior"}}},
+		Assessment:          &ActionAssessment{Consequences: []string{"bounded"}},
+		ConfirmationRequest: &ConfirmationRequest{Consequences: []string{"bounded"}},
+	}
+	original, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy := plan.Clone()
+	cloned, err := json.Marshal(copy)
+	if err != nil || !bytes.Equal(original, cloned) {
+		t.Fatalf("clone changed wire bytes: %v", err)
+	}
+	copy.Consequences[0] = "changed"
+	copy.Steps[0].Preconditions[0] = "changed"
+	copy.Steps[0].DependsOn[0] = "changed"
+	copy.Assessment.Consequences[0] = "changed"
+	copy.ConfirmationRequest.Consequences[0] = "changed"
+	after, err := json.Marshal(plan)
+	if err != nil || !bytes.Equal(original, after) {
+		t.Fatal("clone changed original plan")
+	}
+	for _, empty := range []OperationPlan{{}, {Consequences: []string{}, Steps: []OperationStep{}}} {
+		original, _ := json.Marshal(empty)
+		copy, _ := json.Marshal(empty.Clone())
+		if !bytes.Equal(original, copy) {
+			t.Fatal("clone changed empty wire bytes")
+		}
 	}
 }

@@ -153,11 +153,19 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 }
 
 func (settings Catalog) Profiles() []profile.Definition {
-	return append([]profile.Definition{}, settings.declarations...)
+	result := make([]profile.Definition, len(settings.declarations))
+	for i := range result {
+		result[i] = settings.declarations[i].Clone()
+	}
+	return result
 }
 
 func (settings Catalog) Integrations() []profile.IntegrationDefinition {
-	return append([]profile.IntegrationDefinition{}, settings.integrations...)
+	result := make([]profile.IntegrationDefinition, len(settings.integrations))
+	for i := range result {
+		result[i] = settings.integrations[i].Clone()
+	}
+	return result
 }
 
 func (settings Catalog) retiredSetting(name string) bool {

@@ -94,7 +94,7 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 		t.Fatal(err)
 	}
 	called := false
-	prepared := &preparedCommand{CLI: cli, Project: project,
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Project: project,
 		Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{Action: "project.sync", Changed: true, Effect: domain.ActionMutation}},
 		refresh: func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 			called = true
@@ -105,6 +105,7 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 			return domain.AdapterResult{Status: "ok"}, nil
 		},
 	}
+	authorizePreparedFixture(prepared)
 	if _, err := prepared.Execute(ctx, &application.Orchestrator{}, io.Discard); err == nil || called {
 		t.Fatalf("removed owner reached project execution: called=%v err=%v", called, err)
 	}
@@ -190,7 +191,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			cli.env = map[string]string{"PATH": fakeBin, "SSH_INVOCATION_LOG": sshLog}
 			called := false
-			prepared := &preparedCommand{CLI: cli, Project: project,
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Project: project,
 				Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{
 					Action: "project.sync", Changed: true, Effect: domain.ActionMutation}},
 				refresh: func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
@@ -202,6 +203,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 					return domain.AdapterResult{Status: "ok"}, nil
 				},
 			}
+			authorizePreparedFixture(prepared)
 			if _, err := prepared.Execute(ctx, &application.Orchestrator{}, io.Discard); !errors.Is(err, domain.ErrPlanStale) || called {
 				t.Fatalf("changed owner reached project execution: called=%v err=%v", called, err)
 			}

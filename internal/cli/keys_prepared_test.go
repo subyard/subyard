@@ -32,7 +32,7 @@ func TestPreparedKeysRetainsNativeMetadataAssessment(t *testing.T) {
 	input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
 	program, loaded, definition, root := credentialCLIFixture(t, input, &testkit.Prompt{}, true)
 	writeCLICredentialRecord(t, root, "active")
-	prepared := &preparedCommand{CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"revoke", "cred-0123456789abcdef0123456789abcdef"}}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"revoke", "cred-0123456789abcdef0123456789abcdef"}}
 	if err := prepared.prepareKeys(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}

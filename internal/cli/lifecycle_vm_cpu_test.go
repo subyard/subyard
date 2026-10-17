@@ -145,6 +145,10 @@ func TestLifecycleVMCPUPlanRejectsNewWorkBeforeExecution(t *testing.T) {
 			// Production privilege preparation must remain behind the stale guard.
 			program.options.AdapterRunner = nil
 			var diagnostics bytes.Buffer
+			_, err = prepared.Confirm(context.Background(), orchestrator, true)
+			if err != nil {
+				t.Fatal(err)
+			}
 			_, err = prepared.Execute(context.Background(), orchestrator, &diagnostics)
 			if !errors.Is(err, domain.ErrPlanStale) || diagnostics.Len() != 0 {
 				t.Fatalf("new %s work accepted: err=%v diagnostics=%q", drift, err, diagnostics.String())

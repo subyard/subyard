@@ -187,7 +187,7 @@ func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
 			}
 			defer prepared.Close()
 			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, loaded, nil, &definition)
-			prepared.Plan, err = orchestrator.Confirm(context.Background(), prepared.Plan, true)
+			_, err = prepared.Confirm(context.Background(), orchestrator, true)
 			if err != nil {
 				t.Fatal(err)
 			}

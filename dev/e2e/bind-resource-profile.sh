@@ -12,6 +12,8 @@ for command in go incus jq sudo sg; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
+[ ! -e "$ROOT/.subyard-acceptance/candidate.json" ] && [ ! -L "$ROOT/.subyard-acceptance/candidate.json" ] \
+  || die 'this synthetic-profile fixture requires a plain source bundle'
 
 incus() {
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
@@ -83,15 +85,47 @@ YARD_NAME="bind-e2e-$token"
 export SUBYARD_OPERATOR_HOME="$HOME"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
 export MIN_DISK_GIB=1
-install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
-
-YARD_BUILD_VERSION=0.7.2 "$ROOT/dev/build-engine.sh" --force
+"$ROOT/dev/build-engine.sh"
 # Init binds every shipped integration package, including deselected native assets.
 "$ROOT/dev/build-profiles.sh"
+[ -x "$ROOT/.build/yard" ] || die 'source engine is unavailable'
+# Stage the unselected synthetic catalog before packaging.
+profile=fixture-provision
+[ ! -e "$ROOT/config/profiles/$profile" ] || die 'provision fixture already exists'
+mkdir "$ROOT/config/profiles/$profile"
+printf 'PROFILE_NAME=%s\nYARD_MOUNTS=provision-prerequisite:/mnt/provision-prerequisite:ro:0755\n' \
+  "$profile" > "$ROOT/config/profiles/$profile/profile.conf"
+cat > "$ROOT/config/profiles/$profile/provision.sh" <<'HOOK'
+#!/usr/bin/env bash
+# subyard-provision-check-v1
+set -euo pipefail
+marker=/var/lib/subyard-fixture-provision
+if [ "${1:-}" = --check ]; then
+  [ -f /mnt/provision-prerequisite/ready ] && [ -f "$marker" ] && exit 0
+  exit 10
+fi
+[ "$(cat /mnt/provision-prerequisite/ready)" = ready ]
+[ ! -e "$marker" ]
+printf 'installed\n' > "$marker"
+chmod 0600 "$marker"
+HOOK
+chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
+# Commit the isolated release baseline before creating any yard registration.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+fixture_launcher="$(release_candidate_install "$ROOT" "$STATE")"
+candidate_version="$("$fixture_launcher" --version)"
+candidate_version="${candidate_version#yard }"
+YARD_BUILD_VERSION="$candidate_version" "$ROOT/dev/build-engine.sh" --force
+cmp -s "$ROOT/.build/yard" "$YARD_RUNTIME_ROOT/current/bin/yard-engine" \
+  || die 'source and installed engines differ'
+printf 'bind-resource-profile-e2e: engine-identity-preflight=PASS\n'
+install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 port=$((35000 + ($$ % 15000)))
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 SSH_PORT=$port
@@ -107,7 +141,11 @@ source="$STATE/host/live-bind"
 mkdir -p "$source"
 printf 'host source must survive\n' > "$source/marker"
 
-yard init --yes
+yard init --yes || {
+  rc=$?
+  "$fixture_launcher" migrate --check --json | jq '{outcome, decisions}' >&2 || true
+  exit "$rc"
+}
 yard start --yes
 
 project="subyard-$YARD_NAME"
@@ -172,28 +210,8 @@ fi
 
 # A generic profile must be selected and its mount requirement reconciled before
 # its hook runs. This fixture is created only in the disposable runner checkout.
-profile=fixture-provision
-[ ! -e "$ROOT/config/profiles/$profile" ] || die 'provision fixture already exists'
-mkdir "$ROOT/config/profiles/$profile"
 mkdir -p "$STATE/host/provision-prerequisite"
 printf 'ready\n' > "$STATE/host/provision-prerequisite/ready"
-printf 'PROFILE_NAME=%s\nYARD_MOUNTS=provision-prerequisite:/mnt/provision-prerequisite:ro:0755\n' \
-  "$profile" > "$ROOT/config/profiles/$profile/profile.conf"
-cat > "$ROOT/config/profiles/$profile/provision.sh" <<'HOOK'
-#!/usr/bin/env bash
-# subyard-provision-check-v1
-set -euo pipefail
-marker=/var/lib/subyard-fixture-provision
-if [ "${1:-}" = --check ]; then
-  [ -f /mnt/provision-prerequisite/ready ] && [ -f "$marker" ] && exit 0
-  exit 10
-fi
-[ "$(cat /mnt/provision-prerequisite/ready)" = ready ]
-[ ! -e "$marker" ]
-printf 'installed\n' > "$marker"
-chmod 0600 "$marker"
-HOOK
-chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
 yard provision "$profile" --yes
 grep -Fxq "ENVIRONMENT_PROFILES='fixture-provision'" "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" \
   || die 'provision lost profile selection'

@@ -71,7 +71,11 @@ func TestRunAdapterCorrelatesAuditAndEvents(t *testing.T) {
 	orchestrator := &Orchestrator{Clock: clock, Runner: runner, Audit: audit, Events: events}
 	plan := domain.OperationPlan{
 		OperationID: "operation-1", Command: "fixture", Effect: domain.CommandMutate,
-		Confirmation: domain.ConfirmationPromptDefaultYes, Confirmed: true,
+		Confirmation: domain.ConfirmationPromptDefaultYes,
+	}
+	plan, err := orchestrator.Confirm(context.Background(), plan, true)
+	if err != nil {
+		t.Fatal(err)
 	}
 	request := domain.AdapterRequest{Schema: 1, OperationID: "operation-1", Adapter: "fixture", Action: "run"}
 	if _, _, err := orchestrator.RunAdapter(context.Background(), plan, request, strings.NewReader("protected")); err != nil {
@@ -208,6 +212,86 @@ func TestConfirmDeclineAndNonInteractiveErrorsPreventAdapterExecution(t *testing
 			}, nil)
 			if err == nil || len(runner.Requests) != 0 {
 				t.Fatalf("unconfirmed plan reached adapter: err=%v requests=%#v", err, runner.Requests)
+			}
+		})
+	}
+}
+
+func TestGenericPlanAuthorityAndOwnerProjectionStayBound(t *testing.T) {
+	ctx := context.Background()
+	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Status: "ok"}}, {Result: domain.AdapterResult{Status: "ok"}}}}
+	orchestrator := &Orchestrator{Clock: testkit.NewManualClock(time.Unix(100, 0)), Runner: runner}
+	plan := domain.OperationPlan{OperationID: "generic", Command: "fixture", Effect: domain.CommandMutate,
+		Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetLocalOwner, Consequences: []string{"bounded effect"},
+		Steps: []domain.OperationStep{{ID: "step", Target: "target", Observed: "old", Desired: "new", Decision: domain.StepApply, Verify: "check", Preconditions: []string{"owner"}}},
+	}
+	request := domain.AdapterRequest{OperationID: plan.OperationID}
+	forged := plan.Clone()
+	forged.Confirmed = true
+	if _, err := orchestrator.Confirm(ctx, forged, true); !errors.Is(err, domain.ErrActionPolicyInvalid) {
+		t.Fatalf("forged confirmation = %v", err)
+	}
+	if _, _, err := orchestrator.RunAdapter(ctx, forged, request, nil); !errors.Is(err, domain.ErrActionPolicyInvalid) {
+		t.Fatalf("forged adapter = %v", err)
+	}
+	// Owner-resolved metadata may differ from the controller's registry.
+	plan.Assessment = &domain.ActionAssessment{Action: "owner.action", Effect: domain.ActionMutation, Changed: true}
+	plan.ConfirmationRequest = &domain.ConfirmationRequest{Summary: "owner action", Default: domain.ConfirmationDefaultYes, Consequences: []string{"bounded effect"}}
+	approved, err := orchestrator.ConfirmResolved(ctx, plan, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := approved.Clone()
+	projection.Assessment = nil
+	projection.ConfirmationRequest = nil
+	for _, mutate := range []func(*domain.OperationPlan){
+		func(p *domain.OperationPlan) { p.Target = domain.TargetRemoteOwner },
+		func(p *domain.OperationPlan) { p.Confirmation = domain.ConfirmationNever },
+		func(p *domain.OperationPlan) { p.Steps[0].Preconditions[0] = "foreign owner" },
+		func(p *domain.OperationPlan) { p.Consequences[0] = "expanded effect" },
+	} {
+		changed := projection.Clone()
+		mutate(&changed)
+		if _, _, err := orchestrator.RunAdapter(ctx, changed, request, nil); !errors.Is(err, domain.ErrActionPolicyInvalid) {
+			t.Fatalf("changed projection = %v", err)
+		}
+	}
+	// Multiple adapter leaves share a single command approval.
+	for range 2 {
+		if _, _, err := orchestrator.RunAdapter(ctx, projection, request, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(runner.Requests) != 2 {
+		t.Fatalf("adapter calls = %d", len(runner.Requests))
+	}
+	approved.Steps[0].Preconditions[0] = "mutated returned snapshot"
+	if _, _, err := orchestrator.RunAdapter(ctx, approved, request, nil); err == nil {
+		t.Fatal("approval alias changed authorization")
+	}
+}
+
+func TestResolvedOwnerConfirmationRejectsContradictoryPromptPolicy(t *testing.T) {
+	for _, mismatch := range []string{"default", "consequences"} {
+		t.Run(mismatch, func(t *testing.T) {
+			prompt := &testkit.Prompt{Answers: []bool{true}}
+			orchestrator := &Orchestrator{Prompt: prompt}
+			plan := domain.OperationPlan{OperationID: "owner-confirmation", Command: "fixture", Effect: domain.CommandMutate,
+				Confirmation: domain.ConfirmationPromptDefaultNo, Target: domain.TargetLocalOwner, Consequences: []string{"bounded"},
+				Assessment:          &domain.ActionAssessment{Action: "owner.action", Effect: domain.ActionMutation, Changed: true},
+				ConfirmationRequest: &domain.ConfirmationRequest{Summary: "owner action", Default: domain.ConfirmationDefaultNo, Consequences: []string{"bounded"}},
+			}
+			invalid := plan.Clone()
+			if mismatch == "default" {
+				invalid.ConfirmationRequest.Default = domain.ConfirmationDefaultYes
+			} else {
+				invalid.ConfirmationRequest.Consequences[0] = "different effect"
+			}
+			if _, err := orchestrator.ConfirmResolved(context.Background(), invalid, false); !errors.Is(err, domain.ErrActionPolicyInvalid) || len(prompt.Seen) != 0 {
+				t.Fatalf("contradictory policy: err=%v prompts=%d", err, len(prompt.Seen))
+			}
+			if _, err := orchestrator.ConfirmResolved(context.Background(), plan, false); err != nil || len(prompt.Seen) != 1 || prompt.Requests[0].Default != domain.ConfirmationDefaultNo {
+				t.Fatalf("resolved consent: err=%v requests=%#v", err, prompt.Requests)
 			}
 		})
 	}

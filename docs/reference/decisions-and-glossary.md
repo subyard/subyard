@@ -316,6 +316,15 @@ answers only prompt, never stale/destructive guards or verification. Empty Enter
 only on interactive TTY; EOF/non-TTY without explicit consent rejects. Root reexec follows
 consent and never repeats it; profile handlers do not add child prompts.
 
+`OperationPlan` is a cloned preview/wire value; its `Confirmed` field does not grant execution.
+The prepared command owns a private approval snapshot and one shared lifecycle across Go copies.
+Confirmation, execution and close serialize; callers must not concurrently mutate preview/input
+values. Execution consumes approval before native admission, including a refused attempt; retry
+requires fresh preparation. Close waits for execution and cleans resources once. Nil/zero handles
+cannot execute. Adapter leaves require orchestrator-owned scope approval and may run multiple
+leaves within the consumed command. Controller transfer may omit an owner's assessment only while
+preserving every other approved scope field and step. Durable recovery retains its separate authority.
+
 Owner-built exact plans bind scope/digest/expiry in one SSH session. Human/RPC share immutable
 step projection; owning runners retain check/apply/verify and specialized recovery.
 Fresh/stopped targets may require bounded conditional steps: preview distinguishes observed

@@ -78,11 +78,11 @@ func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
 			t.Fatalf("%s error = %v", test.id, err)
 		}
 	}
-	if len(handler.plans) != 64 || handler.plans["plan-0"] != first || first.closed {
+	if len(handler.plans) != 64 || handler.plans["plan-0"] != first || (first.lifecycle.phase == commandClosed) {
 		t.Fatal("rejected plan changed ownership of an existing plan")
 	}
 	handler.closePlans()
-	if len(handler.plans) != 0 || !first.closed {
+	if len(handler.plans) != 0 || !(first.lifecycle.phase == commandClosed) {
 		t.Fatal("session cleanup retained a plan")
 	}
 }

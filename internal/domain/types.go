@@ -517,3 +517,19 @@ type OperationPlan struct {
 	Confirmed           bool                 `json:"confirmed"`
 	CreatedAt           time.Time            `json:"createdAt"`
 }
+
+// Clone returns an independent preview; confirmation remains a wire observation,
+// not execution authority.
+func (plan OperationPlan) Clone() OperationPlan {
+	plan.Consequences = slices.Clone(plan.Consequences)
+	plan.Steps = CloneOperationSteps(plan.Steps)
+	if plan.Assessment != nil {
+		value := plan.Assessment.Clone()
+		plan.Assessment = &value
+	}
+	if plan.ConfirmationRequest != nil {
+		value := plan.ConfirmationRequest.Clone()
+		plan.ConfirmationRequest = &value
+	}
+	return plan
+}

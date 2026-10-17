@@ -85,6 +85,7 @@ env -i "${SUBYARD_ELEVATED_ENV[@]}" /bin/bash -ec '
 			definition, _ := program.manifest.Lookup("teardown")
 			plan := domain.OperationPlan{OperationID: "teardown-shell-context", Confirmed: true}
 			orchestrator := program.operationOrchestrator(plan.OperationID, loaded, nil, &definition)
+			plan = confirmedAdapterFixture(t, orchestrator, plan)
 			// Use the production runner with a disposable leaf; no host privilege preparation.
 			program.options.AdapterRunner = orchestrator.Runner
 			execution, err := prepareTeardownExecution(mode.arguments)

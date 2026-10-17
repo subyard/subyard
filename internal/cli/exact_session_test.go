@@ -51,7 +51,7 @@ func TestExactSessionOwnerClockPrunesAndLiveInputsRemainGuarded(t *testing.T) {
 				if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "next", Params: request}, nil); err != nil {
 					t.Fatal(err)
 				}
-				if !prepared.closed || handler.plans["captured"] != nil || handler.exactPlans["captured"].Digest != "" {
+				if !(prepared.lifecycle.phase == commandClosed) || handler.plans["captured"] != nil || handler.exactPlans["captured"].Digest != "" {
 					t.Fatal("expired plan retained resources")
 				}
 				return
@@ -68,7 +68,7 @@ func TestExactSessionOwnerClockPrunesAndLiveInputsRemainGuarded(t *testing.T) {
 			if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "captured", Params: params}, nil); err == nil {
 				t.Fatal("real config drift accepted")
 			}
-			if runtime.applied != 0 || !prepared.closed {
+			if runtime.applied != 0 || !(prepared.lifecycle.phase == commandClosed) {
 				t.Fatal("real config drift reached native apply or leaked plan")
 			}
 			after, err := os.ReadFile(path)

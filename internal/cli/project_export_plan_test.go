@@ -208,6 +208,9 @@ func TestProjectExportOwnerRejectsLiveDriftBeforeTemporaryWrite(t *testing.T) {
 				testkit.WriteFile(t, filepath.Join(program.options.RepositoryRoot, "config", "host.env"), []byte("# native input changed\n"), 0o600)
 			}
 			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
+			if _, err := prepared.Confirm(context.Background(), orchestrator, true); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := prepared.Execute(context.Background(), orchestrator, io.Discard); !errors.Is(err, domain.ErrPlanStale) {
 				t.Fatalf("drift was not rejected: %v", err)
 			}
@@ -223,6 +226,9 @@ func TestProjectExportOwnerFinalizationVerifiesTransferredTreeAndCleanup(t *test
 		t.Run(failure, func(t *testing.T) {
 			program, prepared, facts := ownerProjectExportFixture(t)
 			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
+			if _, err := prepared.Confirm(context.Background(), orchestrator, true); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := prepared.Execute(context.Background(), orchestrator, io.Discard); err != nil {
 				t.Fatal(err)
 			}

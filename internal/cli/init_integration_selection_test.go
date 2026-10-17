@@ -155,7 +155,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	for _, stage := range application.InitStages(proposed.Context) {
 		planExecution.plan.Steps = append(planExecution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
 	}
-	prepared := &preparedCommand{CLI: program, Loaded: proposed, Definition: definition,
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: proposed, Definition: definition,
 		steps: planExecution.operationSteps, stepsComplete: true,
 		assess: func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() },
 		execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
