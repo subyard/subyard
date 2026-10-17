@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression coverage for remote project inventory and target-aware removal.
+# Process RPC coverage for target-aware remote project removal.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,12 +9,6 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" <<<"$1" || fail "output does not contain: $2"; }
 assert_not_contains() { ! grep -Fq -- "$2" <<<"$1" || fail "output unexpectedly contains: $2"; }
-assert_projects() {
-  local output="$1" expected="$2" actual
-  actual="$(awk '$1 == "owner-a/default" { print $6; exit }' <<<"$output")"
-  [ "$actual" = "$expected" ] || fail "remote PROJECTS is '$actual', expected '$expected'"
-}
-
 mkdir -p "$TMP/bin" "$TMP/config/yards" "$TMP/config/yards/remote/projects" \
   "$TMP/shipped" "$TMP/subyard" "$TMP/state"
 for f in agents.env host.env ports.env; do : > "$TMP/shipped/$f"; done
@@ -22,28 +16,6 @@ printf ': "${YARD_INSTANCE_NAME:=yard}"\n: "${INCUS_PROJECT:=subyard}"\n' > "$TM
 printf ': "${SSH_PORT:=2222}"\n' > "$TMP/shipped/subyard.env"
 printf '%s\n' 'subyard-remote-remote ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture' \
   > "$TMP/state/known_hosts"
-
-cat > "$TMP/bin/incus" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-case "${1:-}" in
-  info) exit 0 ;;
-  list) printf 'RUNNING\n' ;;
-  exec)
-    case "${YARD_META_MODE:-empty}" in
-      one)
-        printf '%s\n' \
-          '{"schema":1,"projectId":"demo-12345678","name":"demo","mode":"sync"}' \
-          '{"schema":1,"projectId":"demo-12345678","name":"duplicate","mode":"sync"}'
-        ;;
-      empty) exit 0 ;;
-      fail) exit 1 ;;
-    esac
-    ;;
-  *) exit 0 ;;
-esac
-MOCK
-chmod 755 "$TMP/bin/incus"
 
 cat > "$TMP/bin/ssh" <<'MOCK'
 #!/usr/bin/env bash
@@ -64,14 +36,6 @@ if [[ "$joined" == *yard* && "$joined" == *rpc* && "$joined" == *--stdio* ]]; th
     SUBYARD_NO_AUDIT=1 \
     ACCESS_KIND=local SSH_HOST=yard YARD_INSTANCE_NAME=yard \
     "$REMOTE_TEST_STATE/../bin/project-owner-fixture"
-fi
-if [[ "$joined" == *_info* ]]; then
-  case "$(cat "$REMOTE_TEST_STATE/info-mode" 2>/dev/null || printf fail)" in
-    one)  printf '%s\n' '{"state":"RUNNING","projects":1}' ;;
-    null) printf '%s\n' '{"state":"RUNNING","projects":null}' ;;
-    fail) exit 255 ;;
-  esac
-  exit 0
 fi
 if [[ "$joined" == *'_project-state'* ]];then
   printf 'unexpected legacy owner project mutation\n' >&2
@@ -106,13 +70,6 @@ install -d -m 0700 "$REMOTE_TEST_STATE/owner-home" "$REMOTE_TEST_STATE/owner-con
   "$REMOTE_TEST_STATE/owner-data"
 printf 'owner-a\n' > "$REMOTE_TEST_STATE/owner-config/host-id"
 chmod 0600 "$REMOTE_TEST_STATE/owner-config/host-id"
-jq -n '{
-  schema:1, projectId:"owner-demo-12345678", name:"owner-demo", hostPath:"/owner/demo",
-  yardPath:"/srv/workspaces/owner-demo-12345678/src", mode:"sync", sshHost:"yard",
-  importedAt:"test", target:"yard"
-}' > "$REMOTE_TEST_STATE/owner-config/projects/owner-demo-12345678.json"
-chmod 0600 "$REMOTE_TEST_STATE/owner-config/projects/owner-demo-12345678.json"
-
 cat > "$SUBYARD_CONFIG_HOME/yards/remote.env" <<'ENV'
 ACCESS_KIND=remote
 OWNER_ENDPOINT=owner
@@ -120,17 +77,7 @@ OWNER_YARD_NAME=
 SSH_PORT=2222
 ENV
 
-# Remote overview uses the HostID-keyed owner snapshot and a fresh cache avoids another SSH call.
-printf 'one\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($TMP/runtime/bin/yard yards)"
-assert_projects "$output" 1
-printf 'null\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($TMP/runtime/bin/yard yards)"
-assert_projects "$output" 1
-printf 'fail\n' > "$REMOTE_TEST_STATE/info-mode"
-output="$($TMP/runtime/bin/yard yards)"
-assert_projects "$output" 1
-
+# Cached read-only inventory belongs to TestReadOnlyProjectListHonorsFreshCacheAndLiveForce.
 state_file="$SUBYARD_CONFIG_HOME/yards/remote/projects/demo-12345678.json"
 write_state() {
   local target="$1"
@@ -188,4 +135,4 @@ assert_contains "$output" 'removed demo'
 [ ! -e "$state_file" ] || fail 'native L2 removal kept controller state'
 [ ! -e "$REMOTE_TEST_STATE/owner-config/projects/demo-12345678.json" ] || fail 'native removal did not converge owner registry state'
 
-printf 'ok: remote project counts are cached and native removal is target-aware\n'
+printf 'ok: remote native removal is target-aware\n'

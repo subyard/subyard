@@ -38,28 +38,28 @@ This focused lane does not replace release publication or external GitHub-accoun
 
 Logical matrices belong to their unit or local integration owner. Physical E2E keeps
 installed-runtime, real Incus/systemd, routing, reboot and retained-data evidence.
-The IDs below are the existing registry/check-set names in `tests/impact-map.json`;
-choose checks by the changed contract, rather than repeating its matrix in P0.
+Choose the owning packages, scripts and lanes below by the changed contract, rather
+than repeating their logical matrices in P0.
 
 | Contract | Owning unit checks | Local integration | Physical gate | Trigger |
 | --- | --- | --- | --- | --- |
-| Legacy config normalization and pure stdin/stdout | `go:migration`: `TestNormalizeLegacyYardConfigContent` | `go:cli`: `TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery` runs CLI stdin/stdout against a real filesystem fixture | `p0:source-upgrade`: authorized import, installed readiness/history and real host-to-guest materialization | Normalizer or source ingress changes (`migration-release`) |
-| Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: source bootstrap and pinned predecessor histories | Transition/installer changes (`migration-release`, `release-tools`) |
-| Config precedence, safe diagnostics and drift | `go:config`: `TestResolveIntegrationSelection` | `go:config`: precedence over persisted layers; `go:cli`: config paths/show/status/apply tests use persisted config fixtures and native materialization; `shell:engine-release`: installed process checks | `p0:source-upgrade`: config apply/status plus actual guest file hash | Config resolver/materializer changes (`materialized-config`) |
+| Legacy config normalization and pure stdin/stdout | `go:migration`: `TestNormalizeLegacyYardConfigContent` | `go:cli`: `TestNormalizeLegacyYardConfigDoesNotWritePathsDuringRecovery` runs CLI stdin/stdout against a real filesystem fixture | `p0:source-upgrade`: authorized import, installed readiness/history and real host-to-guest materialization | Normalizer or source ingress changes |
+| Source authorization, journal binding and recovery | `go:releasetransition`: journal codecs and in-memory source inspection normalization | `go:releasetransition`: source order/drift/recovery over filesystem fixtures; `go:cli`: candidate process/source ingress checks; `shell:engine-release`: installer/update/rollback | `p0:source-upgrade`: source bootstrap and pinned predecessor histories | Transition/installer changes |
+| Config precedence, safe diagnostics and drift | `go:config`: `TestResolveIntegrationSelection` | `go:config`: precedence over persisted layers; `go:cli`: config paths/show/status/apply tests use persisted config fixtures and native materialization; `shell:engine-release`: installed process checks | `p0:source-upgrade`: config apply/status plus actual guest file hash | Config resolver/materializer changes |
 | Status space cache freshness and selectors | `go:adapters/statusruntime`: `TestDescribeSpaceCache` uses fixed time and an injected refresh request | `go:adapters/statusruntime`: cache persistence and synchronous/asynchronous refresh contracts; `go:cli`: `TestStatusRoutesSummaryAndExplicitYardSelectors` and `TestSpace*` | `dev/e2e/status-fast-acceptance.sh`: real container refresh, separate `/srv` mount and verified same-inode storage allocation; `p0:real-incus` retains VM adapter compatibility | Status cache or space measurement changes |
 | Generic resource consent, exact plans and retained data | `go:resource`: `TestStructuredPrepareContract`; `go:cli`: stream prompt logic | `go:resource`: registry/assessment over descriptor files; `go:cli`: resource command/prepared tests execute handlers; `TestResourceExactTerminalConsentAndRetainedData` adds real files and PTY; shipped profile host-free checks own handler semantics | `p0:profile-resource`: bound-resource profile; shipped profile E2E gates own external services | Resource contract or profile changes (`profile-generic` and owning profile sets) |
-| RPC framing, skew, cancellation, EOF and ordered streams | `go:rpc`: in-memory framing/stream checks in `session_test.go` | `go:cli`: typed owner queries over config fixtures; `shell:engine-release`: packaged version negotiation; `e2e:ssh-rpc`: real loopback SSH and selected-yard native settings | `p0:peer`: deployed selected-yard project query and reconnect snapshot; `p0:transport`: real disconnect | RPC/SSH changes (`yard-rpc-contract`, `ssh-transport`) |
-| Exact owner plan binding, expiry and replay | `go:cli`: `TestExactOperationPlanExpiry` and `TestExactOperationPlanRejectsChangedBinding` use fixed time and in-memory plans | `go:cli`: `TestExactRPCPlanBindingAndSingleUse` retains handler refusal, no mutation and replay; `TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect` uses `net.Pipe` | `dev/e2e/integration-remote.sh`: successful negotiated plan/execute over real SSH, remote enable/disable/status and retained data | Exact plan or owner session changes (`yard-rpc-contract`) |
-| Project copies, owner inventory and offline recovery | `go:application`, `go:ownerinventory`: decisions with in-memory ports | `go:state`: file-backed persistence/recovery; `shell:project-registry-convergence`, `shell:remote-projects`: native owner/project fixture | `p0:peer`: real concurrent copies, remote shells, offline stale inventory and refresh/deletion | Project admission/routing changes (`project-runtime`, `ssh-transport`) |
+| RPC framing, skew, cancellation, EOF and ordered streams | `go:rpc`: in-memory framing/stream checks in `session_test.go` | `go:cli`: typed owner queries over config fixtures; `shell:engine-release`: packaged version negotiation; `e2e:ssh-rpc`: real loopback SSH and selected-yard native settings | `p0:peer`: deployed selected-yard project query and reconnect snapshot; `p0:transport`: real disconnect | RPC/SSH changes |
+| Exact owner plan binding, expiry and replay | `go:cli`: `TestExactOperationPlanExpiry` and `TestExactOperationPlanRejectsChangedBinding` use fixed time and in-memory plans | `go:cli`: `TestExactRPCPlanBindingAndSingleUse` retains handler refusal, no mutation and replay; `TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect` uses `net.Pipe` | `dev/e2e/integration-remote.sh`: successful negotiated plan/execute over real SSH, remote enable/disable/status and retained data | Exact plan or owner session changes |
+| Project copies, owner inventory and offline recovery | `go:application`, `go:ownerinventory`: decisions with in-memory ports | `go:state`: file-backed persistence/recovery; `go:cli`: `TestOwnerProjectStateConvergesWithoutLosingLocalSource`, `TestReadOnlyProjectListHonorsFreshCacheAndLiveForce`, copy/admission/consent matrices; `tests/project-registry-convergence.sh` and `tests/remote-projects.sh`: native RPC/transfer and removal boundaries | `p0:peer`: real concurrent copies, remote shells, offline stale inventory and refresh/deletion | Project admission/routing changes |
 | Owner inventory read freshness | `go:ownerinventory`: `TestSnapshotFresh` uses fixed time for default/custom TTL boundaries and clock skew | `go:ownerinventory`: service cache/fetch contracts; `go:cli`: trusted owner rename and stale inventory checks | `dev/e2e/entity-naming-lifecycle.sh`: real SSH rename, key rotation, offline refresh and removal; fixture timestamps expire caches without wall-clock sleeps | Owner inventory cache or refresh changes |
 | Host registration consent and trust | `go:cli`: `TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload` covers interactive and automated consent | `go:cli`: `TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether` checks one confirmation and atomic trust/inventory registration | `dev/e2e/entity-naming-lifecycle.sh`: direct, alias and proxy SSH registration uses explicit `--yes` | Host registration or SSH trust changes |
-| Crypto and SSH adapter compatibility | Owning crypto, trust and transport packages | `e2e:adapter-contracts`, `e2e:credential-tools`, `e2e:ssh-credential-peer`: pinned real tools and loopback SSH | `e2e:ssh-unknown-host`, `p0:peer`: separate host identities, routing and failure/reconnect | Adapter/tool/trust changes (`real-adapter-contract`, `real-credential-contract`, `real-ssh-credential-contract`) |
+| Crypto and SSH adapter compatibility | Owning crypto, trust and transport packages | `e2e:adapter-contracts`, `e2e:credential-tools`, `e2e:ssh-credential-peer`: pinned real tools and loopback SSH | `e2e:ssh-unknown-host`, `p0:peer`: separate host identities, routing and failure/reconnect | Adapter/tool/trust changes |
 
-Go package IDs can contain both unit and local integration checks; the fixture boundary
+Go packages can contain both unit and local integration checks; the fixture boundary
 determines their evidence, rather than the test language or package name.
 
-The four local adapter IDs retain their `e2e:` prefix for compatibility, but are T1 checks
-with local entrypoints; they require their documented tools and never acquire VM leases.
+Local adapter fixtures are T1 checks with local entrypoints; they require their
+documented tools and never acquire VM leases.
 A local native fixture does not establish systemd/cgroup, physical disk or Incus behavior.
 Frozen release smoke and peer fixtures already reuse collector candidate assets when present;
 source A/B, tagged owner histories and pinned predecessors retain distinct artifact identities.
@@ -375,8 +375,11 @@ The output also retains the transport archive, logs and `receipt.json`; the inte
 archive is removed after extraction. Neither the source copy nor the VM payload needs a Git
 repository or index. Every controller receives the same checksum-verified transport archive; profile fixtures
 execute the packaged engine and runtime assets. The core smoke installs those assets through the
-public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck,
-process coverage, real local adapters and updater compatibility precede physical checks.
+public updater, including reboot, rollback and roll-forward. Local verification, ShellCheck, real local adapters and updater compatibility precede physical checks.
+Process coverage is an optional diagnostic (`dev/process-coverage.sh`); ordinary core
+and profile process contracts remain in `make verify`. New receipts retain its inventory
+entry as `not-applicable`; older frozen receipts retain their original required status
+and command-bound evidence, including import and publication validation.
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
 attribution while executing controllers and guest payloads from the frozen candidate.
 
@@ -582,74 +585,13 @@ Use `--vm-count 1` for one standard VM; `--type android-test` retains the larger
 singleton. Commands and exact coverage are documented in
 [the VM guide](test-vms.md#agent-workflow).
 
-## Select additional checks
-
-Subyard's change-impact selector prints a conservative set of recommendations for a repository
-diff and never executes checks. Apply the skill's selection policy to these recommendations.
-
-## Select checks
-
-Run exactly one of these forms from a non-bare repository checkout:
-
-```sh
-dev/test-impact.sh --current-base REF [--format human|json]
-dev/test-impact.sh --base REF --head REF [--format human|json]
-dev/test-impact.sh --changes-from FILE|- [--format human|json]
-```
-
-`--current-base REF` is the normal local workflow. It compares the checkout with the base tree and
-includes tracked, staged, unstaged, and non-ignored untracked changes. It works in an ordinary Git
-checkout or Git worktree, including a detached or dirty checkout. It cannot inspect a bare
-repository because there is no working tree.
-
-`--base REF --head REF` compares two commits. The canonical head commit must be the current `HEAD`,
-and selector-owned paths must be clean: `internal/testimpact/**`, `cmd/test-impact/**`,
-`dev/test-impact.sh`, and `tests/impact-map.json`. These guards ensure that the checked-out selector
-and policy describe the analyzed head.
-
-`--changes-from FILE|-` reads a strict, versioned JSON change set from a file, or from standard input
-when the value is `-`. This form is intended for fixtures and callers that already have normalized
-Git changes. For example:
-
-```json
-{
-  "schema_version": 1,
-  "changes": [
-    {
-      "status": "M",
-      "similarity": null,
-      "old_path": "internal/example/example.go",
-      "new_path": "internal/example/example.go",
-      "old_mode": "100644",
-      "new_mode": "100644"
-    }
-  ]
-}
-```
-
-Human-readable output is the default. Add `--format json` for one machine-readable JSON document;
-`--format human` is accepted explicitly. Flag order does not matter.
-
-## Interpret the result
-
-| Status | Exit | Meaning |
-| --- | ---: | --- |
-| `selected` | 0 | Normal analysis. An empty diff can produce an empty recommendation. |
-| `fallback` | 0 | Analysis or bootstrap was unsafe or unavailable. The output contains expanded recommendations; `errors` explains the sanitized cause. |
-| `error` | 2 | Command-line misuse. No recommendations are available; correct the invocation and rerun it. |
-
-Exit 0 reports selector completion, not a passing test result. JSON results separate
-`host_free_checks` from `e2e_checks` and include check IDs, tiers, budgets, rationales and selection
-reasons. The existing `full_p0.required` field name represents the selector's conservative full-P0
-recommendation; it is not an execution mandate. See the skill for how to assess it.
-
 ## Evidence tiers
 
 | Tier | Evidence |
 | --- | --- |
-| T0 | An exact regression test for the defect or failure mode. The engineer or agent defines it; the selector cannot derive it from paths. Target: at most 60 seconds. |
-| T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; registry metadata identifies larger explicit budgets. |
-| T2 | The full host-free suite, `./tests/run.sh`. The `host-free:all` fallback composite also includes Veranda checks. |
+| T0 | An exact regression test for the defect or failure mode. The engineer or agent defines it from the observed failure. Target: at most 60 seconds. |
+| T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; broader owning checks may take longer. |
+| T2 | The full host-free suite, `./tests/run.sh`. Veranda retains its separate host-free checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
 | T4 | A fresh full P0: `dev/e2e/p0-acceptance.sh --slot N --lane full`. |
 

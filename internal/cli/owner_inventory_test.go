@@ -322,6 +322,7 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 		wantSSH   bool
 	}{
 		{name: "default uses fresh cache", arguments: []string{"list"}},
+		{name: "yard overview uses fresh cache", arguments: []string{"yards"}},
 		{name: "live forces refresh", arguments: []string{"list", "--live"}, wantSSH: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -385,6 +386,18 @@ func TestReadOnlyProjectListHonorsFreshCacheAndLiveForce(t *testing.T) {
 			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("list failed: code=%d stderr=%q", code, stderr.String())
+			}
+			if test.arguments[0] == "yards" {
+				found := false
+				for _, line := range strings.Split(stdout.String(), "\n") {
+					fields := strings.Fields(line)
+					if len(fields) >= 6 && fields[0] == "remote-owner/default" {
+						found = fields[5] == "1"
+					}
+				}
+				if !found {
+					t.Fatalf("yard overview lost cached project count: %s", stdout.String())
+				}
 			}
 			_, sshErr := os.Lstat(sshLog)
 			if test.wantSSH && sshErr != nil {
@@ -643,5 +656,76 @@ func TestCanonicalProjectSelectorKeepsProjectPrefix(t *testing.T) {
 		if !projectSelectorMatches(selector, "Demo", "dev", "owner-a", true) {
 			t.Fatalf("compatible selector %q did not match", selector)
 		}
+	}
+}
+
+// Own the registry-only matrix separately from the remote process/transfer fixture.
+func TestOwnerProjectStateConvergesWithoutLosingLocalSource(t *testing.T) {
+	for _, yard := range []string{"default", "inner"} {
+		t.Run(yard, func(t *testing.T) {
+			root, environment, directory := nativeFixture(t)
+			if yard != "default" {
+				if err := os.MkdirAll(filepath.Join(root, "state/yards"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, filepath.Join(root, "state/yards/inner.env"), "SSH_PORT=3333\n", 0600)
+				directory = filepath.Join(root, "state/yards/inner/projects")
+			}
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext(yard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := state.NewFileStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(args ...string) int {
+				return program.runOwnerProjectState(context.Background(), state.Service{Store: store}, loaded.Context, args)
+			}
+			id := "demo-12345678"
+			if call("upsert", id, "Demo", "sync", "sample") != 0 {
+				t.Fatal(stderr.String())
+			}
+			record, err := store.GetReadOnly(context.Background(), id)
+			if err != nil || record.HostPath != "" || record.RegistrySource != "yard" || record.Target != "sample" || record.Mode != domain.ProjectSync || record.YardPath != state.YardPath(id) || record.SSHHost != loaded.Context.SSHHost {
+				t.Fatalf("owner record=%#v %v", record, err)
+			}
+			record.HostPath = "/owner/Demo"
+			if err := store.Put(context.Background(), record); err != nil {
+				t.Fatal(err)
+			}
+			if call("upsert", id, "Demo", "git", "yard") != 0 || call("unregister", id) != 0 {
+				t.Fatal(stderr.String())
+			}
+			record, err = store.GetReadOnly(context.Background(), id)
+			if err != nil || record.HostPath != "/owner/Demo" || record.Mode != domain.ProjectGit || record.Target != "yard" || record.RegistrySource != "" {
+				t.Fatalf("refreshed owner=%#v %v", record, err)
+			}
+			before := nativeTreeSnapshot(t, directory)
+			if call("remove", id, state.SourceKey("/wrong/source")) == 0 || strings.Join(before, "\n") != strings.Join(nativeTreeSnapshot(t, directory), "\n") {
+				t.Fatal("mismatched removal changed owner registry")
+			}
+			if call("remove", id, state.SourceKey(record.HostPath)) != 0 {
+				t.Fatal(stderr.String())
+			}
+			if _, err := store.GetReadOnly(context.Background(), id); !errors.Is(err, state.ErrNotFound) {
+				t.Fatal("source-bound removal retained owner record", err)
+			}
+			if call("upsert", id, "Demo", "sync", "yard") != 0 || call("unregister", id) != 0 {
+				t.Fatal(stderr.String())
+			}
+			if _, err := store.GetReadOnly(context.Background(), id); !errors.Is(err, state.ErrNotFound) {
+				t.Fatal("unregister retained synthetic record", err)
+			}
+			before = nativeTreeSnapshot(t, root)
+			if call("upsert", "../escape", "Bad", "sync", "yard") == 0 || strings.Join(before, "\n") != strings.Join(nativeTreeSnapshot(t, root), "\n") {
+				t.Fatal("unsafe ID mutated filesystem")
+			}
+		})
 	}
 }

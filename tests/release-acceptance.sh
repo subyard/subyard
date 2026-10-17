@@ -74,6 +74,64 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_optional_process_coverage_preserves_frozen_required_evidence(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            output = directory / "candidate"
+            source, receipt = prepare_fixture(checkout, output)
+            self.assertEqual(receipt["checks"]["process-coverage"], m.PROCESS_COVERAGE_DIAGNOSTIC)
+            with patch.object(m, "execution_environment", return_value=receipt["environment"]), patch.object(m, "execute", side_effect=AssertionError("default diagnostic ran")):
+                m.run_checks(output, [], [], False, exclude=[name for name in m.commands(source, "test", receipt["profiles"]) if name != "process-coverage"])
+            # Historical pending remains required, and load is read-only.
+            receipt["checks"]["process-coverage"] = {"status": "pending"}
+            m.save(output, receipt)
+            frozen = (output / "receipt.json").read_bytes()
+            self.assertEqual(m.load_bound(output)[1]["checks"]["process-coverage"], {"status": "pending"})
+            self.assertEqual((output / "receipt.json").read_bytes(), frozen)
+            command = m.commands(source, "test", receipt["profiles"])["process-coverage"]
+            log = output / "legacy-coverage.log"
+            log.write_text("historical coverage evidence\n")
+            receipt["checks"]["process-coverage"] = {"status": "passed", "exit_code": 0, "command": command,
+                "log": log.name, "log_sha256": m.digest(log), "execution_environment": receipt["environment"]}
+            m.save(output, receipt)
+            m.load_bound(output)
+            original = (output / "receipt.json").read_bytes()
+            target = directory / "imported"
+            prepare_fixture(checkout, target)
+            m.import_evidence(target, output, ["process-coverage"])
+            imported = m.load_bound(target)[1]["checks"]["process-coverage"]
+            self.assertEqual(imported["status"], "passed")
+            self.assertTrue(imported["inherited"])
+            self.assertEqual((output / "receipt.json").read_bytes(), original)
+            receipt["checks"]["process-coverage"]["command"] = ["true"]
+            m.save(output, receipt)
+            with self.assertRaisesRegex(ValueError, "command provenance"):
+                m.load_bound(output)
+            for missing in ("process-coverage", "verify"):
+                broken = dict(receipt, checks={k: v for k, v in receipt["checks"].items() if k != missing})
+                m.save(output, broken)
+                with self.assertRaisesRegex(ValueError, "inventory"):
+                    m.load_bound(output)
+
+    def test_optional_coverage_skips_live_prerequisite_but_can_be_selected(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            receipt = {"version": "test", "source_fingerprint": "a" * 64, "candidate_bundle_sha256": "b" * 64, "profiles": {}, "external_obligations": {},
+                "environment": {}, "checks": {"verify": {"status": "passed"},
+                    "process-coverage": m.PROCESS_COVERAGE_DIAGNOSTIC.copy(), "p0-release-smoke": {"status": "pending"}}}
+            calls = []
+            def execute(name, *args):
+                calls.append(name)
+                return {"status": "passed", "exit_code": 0}
+            with patch.object(m, "load_bound", return_value=(output, receipt)), patch.object(m, "execution_environment", return_value={}), \
+                 patch.object(m, "commands", return_value={name: ["true"] for name in receipt["checks"]}), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), patch.object(m, "execute", side_effect=execute):
+                self.assertEqual(m.run_checks(output, [1], [], False), 0)
+                self.assertEqual(calls, ["p0-release-smoke"])
+                self.assertEqual(m.run_checks(output, [], ["process-coverage"], False), 0)
+                self.assertEqual(calls, ["p0-release-smoke", "process-coverage"])
+
     def transfer_fixture(self, directory, standalone=False):
         checkout = fixture_checkout(directory)
         first, second = directory / "old", directory / "new"

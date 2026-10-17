@@ -76,11 +76,6 @@ coordinator, and do not create or close shared task files or start another full 
   broader checks when shared behavior or actual coupling makes focused coverage insufficient.
   Run the full host-free suite (`./tests/run.sh`) for that reason, an explicit user request, or
   an applicable merge/release gate, not merely because a CLI or shell file changed.
-- Use the change-impact selector when it helps identify affected checks. Its entire output is
-  advisory, including `full_p0.required=true` and `fallback`. Inspect the reasons against the
-  actual diff; neither a flag nor the number of touched files/risk domains is a sufficient reason
-  for a full run. If selection fails, assess impact manually rather than treating it as no risk.
-  Briefly record the chosen checks and the reason for accepting or narrowing broad recommendations.
 - Use targeted VM/real-host checks when correctness depends on physical behavior that local tests
   cannot establish. Mocks do not prove external CLI/protocol or host compatibility. Run full P0
   only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted

@@ -100,8 +100,12 @@ offline and incomplete-download behavior, atomic upgrade/rollback layout, stdio 
 supported/unsupported protocol negotiation. On the E2E lane, install two versioned runtimes on VM1,
 connect from VM2 over SSH stdio, upgrade the owner while the controller stays on the previous
 version, and then run `yard update --rollback`. The upgrade path
-is covered by the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh): pre-0.1 and v0.1 paths,
-reboots, old-path removal, and rollback/roll-forward for default and named yards.
+also retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) for recognized
+source-install layouts (historically called pre-0.1/v0.1 paths) through supported V2
+source ingress: real import, reboots, old-path removal and rollback/roll-forward for
+default and named yards. These layout names do not extend published-release support:
+[the minimum published predecessor is v0.11.0, inclusive](reference/legacy-migration-support.md);
+earlier published releases require full uninstall and a separate clean installation.
 
 If guarded yard restoration fails during an owner-host boot, inspect the bounded host-side journal
 before running `yard init` or manually starting the yard:

@@ -246,6 +246,9 @@ def defer_external(output, obligations, reason, authorization_reference):
     return 0
 
 
+PROCESS_COVERAGE_DIAGNOSTIC = {"status": "not-applicable", "reason": "optional process coverage diagnostic; ordinary process contracts run in verify"}
+
+
 def commands(root, version, inventory):
     release = root / ".subyard-acceptance/release"
     result = {
@@ -450,6 +453,7 @@ def prepare(output, version, prepared=None):
         receipt["checks"][name] = {"status": "pending" if command else "not-applicable"}
         if command is None:
             receipt["checks"][name]["reason"] = inventory[name.split(":", 1)[1]]["reason"]
+    receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
     if prepared:
         assets = prepared / "assets"
         actual = {path.name: digest(path) for path in assets.iterdir() if path.is_file() and not path.is_symlink()}
@@ -512,6 +516,8 @@ def load_bound(output):
             validate_external_deferral(result, deferral_candidate_sha256(receipt))
     if set(receipt["checks"]) != set(commands(root, receipt["version"], receipt["profiles"])) | {"package"}:
         raise ValueError("required check inventory is incomplete")
+    if receipt["checks"]["process-coverage"]["status"] == "not-applicable" and receipt["checks"]["process-coverage"] != PROCESS_COVERAGE_DIAGNOSTIC:
+        raise ValueError("invalid optional process coverage diagnostic")
     if digest(output / "candidate-bundle.tar.gz") != receipt["candidate_bundle_sha256"]:
         raise ValueError("candidate transport checksum mismatch")
     if Path(receipt["runtime_file"]).name != receipt["runtime_file"]:
@@ -605,6 +611,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                    "checks": {name: {"status": "pending" if command else "not-applicable"}
                               for name, command in commands(root, "preflight", inventory).items()}}
         receipt["checks"]["package"] = {"status": "pending"}
+        receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
     checks = receipt["checks"]
     selected = select_checks(checks, only) if only else set(checks)
     excluded = select_checks(checks, exclude)
@@ -759,6 +766,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
     pending = [name for name in order if checks[name] and name in selected
+               and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
     live = [name for name in pending if is_live(name)]
     if live and not slots:
@@ -775,7 +783,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
         if receipt["checks"][name]["status"] != "passed":
             break
     local_names = [name for name in checks if not is_live(name)] + (["package"] if "package" in receipt["checks"] else [])
-    if live and any(receipt["checks"][name]["status"] != "passed" for name in local_names):
+    if live and any(receipt["checks"][name]["status"] != "passed"
+                    and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)
+                    for name in local_names):
         print("INCOMPLETE: live checks await successful local gates", flush=True)
         event(output, "run-result", status="interrupted" if STOP.is_set() else "incomplete")
         return 1

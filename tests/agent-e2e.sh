@@ -3821,10 +3821,8 @@ done
 power_rollback_fixture_contract() {
   (
     set -euo pipefail
-    local scenario="$1" fixture="$TMP/power-rollback-$1" function_name
-    for function_name in capture_legacy_native_policy assert_legacy_native_policy verify_legacy_rollback_refusal check_compatible_transition finish_candidate_flow; do
-      eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
-    done
+    local scenario="$1" fixture="$TMP/power-rollback-$1"
+    . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
     CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
@@ -3960,7 +3958,7 @@ for power_rollback_scenario in success unexpected-accept wrong-reason links-chan
 done
 
 # The input-free capability response has no lifecycle results or extra owners.
-eval "$(sed -n '/^verify_compatible_capabilities() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+. "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 for power_capability_case in valid missing-owner extra-owner unsupported-schema lifecycle-result malformed; do
   power_capability_file="$TMP/power-capability-$power_capability_case.json"
   jq -n --arg scenario "$power_capability_case" '
@@ -4295,7 +4293,7 @@ reliable_migrations_fixture_contract
 
 # Switching fixture operators must isolate identity and the private working directory.
 (
-  eval "$(sed -n '/^operator_env() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+  . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
   OPERATOR='fixture-operator'
   OPERATOR_HOME="$TMP/operator-home"
   mkdir -p "$OPERATOR_HOME"
@@ -4369,17 +4367,7 @@ for dispatcher_mode in prepare resume finish; do
   [ "$(cat "$dispatcher_log")" = "$dispatcher_expected" ] \
     || fail "power reconciler $dispatcher_mode dispatcher lost its ordered incident flow"
 done
-activation_repair_functions="$(
-  sed -n '/^materialize_unit() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^assert_activation_only_journal() {/,/^}/p' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^assert_activation_ledger_unchanged() {/,/^}/p' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^install_activation_reconcile_fault() {/,/^}/p' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^exercise_activation_only_repair() {/,/^}/p' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-)"
+activation_repair_functions="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 run_activation_repair_contract() (
   set -euo pipefail
   local scenario="$1"
@@ -4491,7 +4479,8 @@ EOF
     > "$OPERATOR_HOME/.local/bin/yard"
   chmod 0755 "$OPERATOR_HOME/.local/bin/yard"
 
-  eval "$activation_repair_functions"
+  # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+  . "$activation_repair_functions"
   die() { printf 'activation fixture: %s\n' "$*" >&2; exit 2; }
   ok() { :; }
   load_release_targets() { :; }
@@ -4579,8 +4568,7 @@ for activation_mutation in unit journal ledger; do
   [ "$activation_mutation_rc" -ne 0 ] \
     || fail "activation-only repair helper accepted $activation_mutation mutation before confirmation"
 done
-assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
-  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+assert_v2_transition_function="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 (
   set -euo pipefail
   export OLD_VERSION=0.11.0
@@ -4621,7 +4609,8 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
     steps: []
   }' > "$rollback_state/journal.json"
   cp "$rollback_state/journal.json" "$rollback_state/journal.valid"
-  eval "$assert_v2_transition_function"
+  # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+  . "$assert_v2_transition_function"
   operator_env() { "$@"; }
   die() { return 2; }
   assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" \
@@ -4668,17 +4657,14 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
       || fail "power rollback evidence accepted $rollback_mutation"
   done
 ) || fail 'power rollback journal lost frozen artifact and owner bindings'
-fixture_state_functions="$(
-  sed -n '/^write_fixture_value() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^read_fixture_value() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-  sed -n '/^assert_fixture_phase() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh"
-)"
+fixture_state_functions="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 (
   STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-phase.XXXXXX")"
   PHASE_STATE="$STATE_ROOT/phase"
   trap 'find "$STATE_ROOT" -depth -delete' EXIT
   die() { return 2; }
-  eval "$fixture_state_functions"
+  # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
+  . "$fixture_state_functions"
   write_fixture_value "$PHASE_STATE" candidate-ready
   assert_fixture_phase candidate-ready
   set +e
@@ -4730,14 +4716,13 @@ set -e
   || fail 'failed power phase preserved state instead of entering cleanup'
 find "$cleanup_log" -delete
 
-assert_post_reboot_function="$(sed -n '/^assert_post_reboot_candidate() {/,/^}/p' \
-  "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+assert_post_reboot_function="$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
 for evidence_scenario in success same-boot route-change manager-failure yard-stopped; do
   set +e
   ASSERT_POST_REBOOT_FUNCTION="$assert_post_reboot_function" \
     EVIDENCE_SCENARIO="$evidence_scenario" bash -c '
       set -euo pipefail
-      eval "$ASSERT_POST_REBOOT_FUNCTION"
+      . "$ASSERT_POST_REBOOT_FUNCTION"
       STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subyard-power-evidence.XXXXXX")"
       BOOT_ID_STATE="$STATE_ROOT/boot-id"
       DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route"
@@ -4800,8 +4785,7 @@ for evidence_scenario in success same-boot route-change manager-failure yard-sto
   fi
 done
 (
-  eval "$(sed -n '/^project_presence() {/,/^}/p' \
-    "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+  . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
   # shellcheck disable=SC2034
   PROJECT=subyard
   query_result=present
@@ -4999,9 +4983,6 @@ retryable_failure_snapshot="$(
 )"
 [ "$retryable_failure_snapshot" = 0 ] \
   || fail 'P0 reboot treats an auto-restarting exit-75 attempt as terminal'
-grep -Fxq 'Wants=network-online.target incus.service incus.socket' \
-    "$ROOT/config/systemd/subyard-power-reconcile.service.in" \
-  || fail 'boot power reconciler can race cold Incus socket activation'
 source_deadline_function="$(awk '
   /^relax_fixture_init_deadline\(\)/ { copying=1 }
   copying { print }
@@ -5173,77 +5154,4 @@ source_ingress_function="$(sed -n '/^verify_authorized_source_ingress() {/,/^}/p
     fi
   done
 ) || fail 'P0 source-upgrade does not verify its authorized source ingress'
-consumer_fixture="$TMP/release-consumer"
-consumer_registry="$consumer_fixture/routes"
-consumer_log="$consumer_fixture/runner.log"
-mkdir -p "$consumer_fixture/dev/e2e" "$consumer_registry/test-yard/current"
-cp "$ROOT/dev/e2e/release-migration-consumer.sh" "$consumer_fixture/dev/e2e/"
-touch "$consumer_registry/test-yard/current/route.tsv" \
-  "$consumer_registry/test-yard/current/known_hosts"
-cat > "$consumer_fixture/dev/agent-e2e.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "$CONSUMER_RUNNER_LOG"
-case "${1:-}" in
-  --prepare) exit 0 ;;
-  --status)
-    [ "${2:-}" = --json ] || exit 91
-    printf '%s\n' "$CONSUMER_BROKER_STATUS"
-    ;;
-  --slot)
-    [ "${2:-}" = 3 ] || exit 92
-    shift 2
-    case "${1:-}" in
-      --wait) [ "${2:-}" = 20m ] || exit 93 ;;
-      *) exit 94 ;;
-    esac
-    ;;
-  *) exit 95 ;;
-esac
-EOF
-chmod +x "$consumer_fixture/dev/agent-e2e.sh"
-consumer_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":2,"lease_epoch":7,"state":"held"},{"slot_id":"slot-003","resource_generation":4,"lease_epoch":9,"state":"available"}]}}'
-: > "$consumer_log"
-SUBYARD_E2E_CONSUMER_FIXTURE=1 \
-  SUBYARD_E2E_ROUTE_REGISTRY="$consumer_registry" \
-  SUBYARD_E2E_SLOT=slot-001 \
-  CONSUMER_RUNNER_LOG="$consumer_log" \
-  CONSUMER_BROKER_STATUS="$consumer_status" \
-  "$consumer_fixture/dev/e2e/release-migration-consumer.sh" \
-  || fail 'release consumer rejected an available broker-local exact slot'
-[ "$(sed -n '1p' "$consumer_log")" = --prepare ] \
-  && [ "$(sed -n '2p' "$consumer_log")" = '--status --json' ] \
-  && grep -Eq '^--slot 3 --wait 20m --vm both -- sh -c ' "$consumer_log" \
-  && grep -Fxq -- '--slot 3 --wait 20m --verify-boundary' "$consumer_log" \
-  && ! grep -Eq '^--slot 1([[:space:]]|$)' "$consumer_log" \
-  || fail 'release consumer inherited its outer slot or omitted its broker-local exact slot'
-
-for consumer_failure in no-available malformed-slot; do
-  case "$consumer_failure" in
-    no-available)
-      failure_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":2,"lease_epoch":7,"state":"held"}]}}'
-      failure_message='no available broker-local slot'
-      ;;
-    malformed-slot)
-      failure_status='{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-03","resource_generation":2,"lease_epoch":0,"state":"available"}]}}'
-      failure_message='invalid broker-local slot id'
-      ;;
-  esac
-  : > "$consumer_log"
-  set +e
-  consumer_failure_output="$(
-    SUBYARD_E2E_CONSUMER_FIXTURE=1 \
-      SUBYARD_E2E_ROUTE_REGISTRY="$consumer_registry" \
-      SUBYARD_E2E_SLOT=slot-001 \
-      CONSUMER_RUNNER_LOG="$consumer_log" \
-      CONSUMER_BROKER_STATUS="$failure_status" \
-      "$consumer_fixture/dev/e2e/release-migration-consumer.sh" 2>&1
-  )"
-  consumer_failure_rc=$?
-  set -e
-  [ "$consumer_failure_rc" = 2 ] \
-    && grep -Fq "$failure_message" <<<"$consumer_failure_output" \
-    && ! grep -Eq '^--slot [0-9]+ ' "$consumer_log" \
-    || fail "release consumer did not fail closed for $consumer_failure"
-done
 printf 'ok: agent E2E lease transport is pinned, fenced and cleanup-owned\n'

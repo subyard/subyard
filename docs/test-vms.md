@@ -482,9 +482,6 @@ SUBYARD_E2E_LEGACY_FIXTURE=1 \
 
 This fixture is restricted to disposable VM1 candidate yards.
 
-The [change-impact reference](testing.md) documents selector invocation and output.
-Test-selection policy, including how to interpret full-P0 recommendations, lives in the skill.
-
 The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
 capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
 preservation. It restores its marked systemd override and tears down its yard. Run it on a free
@@ -607,7 +604,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | full host-free suite |
-| `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | diagnostic coverage gate |
+| `dev/process-coverage.sh` | Go toolchain; selected host-free process contracts | `.build/coverage` and test-owned temporary roots | optional coverage diagnostic |
 | `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | publication smoke; see skill policy |
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |

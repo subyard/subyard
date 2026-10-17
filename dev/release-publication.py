@@ -572,7 +572,7 @@ def validate_attestation(document, identity, root):
         raise ValueError("acceptance attestation check inventory mismatch")
     for name, command in required.items():
         result = document["checks"][name]
-        if command is None:
+        if command is None or (name == "process-coverage" and result == {"status": "not-applicable"}):
             if result != {"status": "not-applicable"}:
                 raise ValueError("invalid not-applicable attestation")
         else:

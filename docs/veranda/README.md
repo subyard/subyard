@@ -38,10 +38,6 @@ acceptance still require their platform checks. A successful candidate build alo
 establish release readiness. Development and verification commands are documented in
 [`../../veranda/README.md`](../../veranda/README.md).
 
-The advisory [change-impact testing workflow](../testing.md) may recommend native Rust client,
-resource-probe and check-runner tests. It recommends these
-host-free checks without executing them.
-
 ## Product model
 
 The interface is object-centric:

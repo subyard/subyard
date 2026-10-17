@@ -214,7 +214,6 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 func TestShellTestsStayOutsideProductionTrees(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	productionCommands := map[string]bool{
-		filepath.Join(root, "dev", "test-impact.sh"):   true,
 		filepath.Join(root, "dev", "test-profiles.sh"): true,
 	}
 	for _, directory := range []string{"scripts", "config", "dev"} {

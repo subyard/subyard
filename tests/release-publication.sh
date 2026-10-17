@@ -217,6 +217,30 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source fingerprint"):
             m.attestation(self.output, self.identity)
 
+    def test_optional_coverage_and_historical_required_publication(self):
+        original = (self.output / "receipt.json").read_bytes()
+        root, receipt = m.a.load_bound(self.output)
+        receipt["checks"]["process-coverage"] = m.a.PROCESS_COVERAGE_DIAGNOSTIC.copy()
+        m.a.save(self.output, receipt)
+        optional = m.attestation(self.output, self.identity)
+        self.assertEqual(optional["checks"]["process-coverage"], {"status": "not-applicable"})
+        receipt["checks"]["process-coverage"] = {"status": "pending"}
+        m.a.save(self.output, receipt)
+        with self.assertRaisesRegex(ValueError, "complete passing"):
+            m.attestation(self.output, self.identity)
+        command = m.a.commands(root, receipt["version"], receipt["profiles"])["process-coverage"]
+        log = self.output / "historical-coverage.log"
+        log.write_text("historical process coverage evidence\n")
+        receipt["checks"]["process-coverage"] = {"status": "passed", "exit_code": 0, "command": command,
+            "log": log.name, "log_sha256": m.a.digest(log), "execution_environment": receipt["environment"]}
+        m.a.save(self.output, receipt)
+        legacy = m.attestation(self.output, self.identity)
+        m.validate_attestation(legacy, self.identity, root)
+        del legacy["checks"]["process-coverage"]
+        with self.assertRaisesRegex(ValueError, "inventory"):
+            m.validate_attestation(legacy, self.identity, root)
+        (self.output / "receipt.json").write_bytes(original)
+
     def test_success_same_bytes_full_inventory_immutable_and_repeat(self):
         self.assertTrue(self.publish()["immutable"])
         self.assertEqual(len(self.github.assets), len(self.identity["release_files"]))
@@ -288,6 +312,9 @@ class Contracts(unittest.TestCase):
         with patch.object(m.a, "execution_environment", return_value=source["environment"]):
             m.a.prepare(output, identity["version"], candidate / "prepared")
         root, receipt = m.a.load_bound(output)
+        # This fixture explicitly transfers diagnostic execution as historical evidence.
+        receipt["checks"]["process-coverage"] = {"status": "pending"}
+        m.a.save(output, receipt)
         names = sorted(set(source["checks"]) - {"package"})
         self.assertEqual(len(names), 10)
         for name in names:

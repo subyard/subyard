@@ -8,7 +8,6 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" <<<"$1" || fail "output does not contain: $2"; }
-assert_not_contains() { ! grep -Fq -- "$2" <<<"$1" || fail "output unexpectedly contains: $2"; }
 assert_json() { jq -e "$2" "$1" >/dev/null || fail "unexpected state in $1: $2"; }
 
 mkdir -p "$TMP/bin" "$TMP/config/yards" "$TMP/shipped" "$TMP/subyard" "$TMP/state" "$TMP/home"
@@ -67,8 +66,7 @@ if [[ "$joined" == *'.subyard-meta.json'* ]] && [[ "$joined" == *"'tee'"* || "$j
   exit 0
 fi
 if [[ "$joined" == *'.subyard-meta.json'* ]]; then
-  if [ -e "$REGISTRY_TEST_STATE/live-meta.json" ];then cat "$REGISTRY_TEST_STATE/live-meta.json"
-  elif [ -e "$REGISTRY_TEST_STATE/yard-meta.json" ];then cat "$REGISTRY_TEST_STATE/yard-meta.json";fi
+  if [ -e "$REGISTRY_TEST_STATE/yard-meta.json" ];then cat "$REGISTRY_TEST_STATE/yard-meta.json";fi
   exit 0
 fi
 if [[ "$joined" == *"'-xf' '-'"* ]]; then
@@ -112,67 +110,8 @@ printf 'owner-a\n' > "$REGISTRY_TEST_STATE/owner-config/host-id"
 chmod 0600 "$REGISTRY_TEST_STATE/owner-config/host-id"
 
 
-# The hidden owner endpoint creates a yard-originated record without importing a foreign path.
-owner_id='demo-12345678'
-owner_state="$SUBYARD_CONFIG_HOME/projects/$owner_id.json"
-"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo sync synthetic
-assert_json "$owner_state" \
-  '.projectId == "demo-12345678" and .name == "Demo" and .mode == "sync" and
-   .target == "synthetic" and .hostPath == "" and .yardPath == "/srv/workspaces/demo-12345678/src" and
-   .sshHost == "yard" and .registrySource == "yard"'
-output="$("$TMP/runtime/bin/yard" list)"
-assert_contains "$output" 'synthetic'
-assert_contains "$output" 'OWNER'
-
-# A later foreign upsert may refresh mode/target, but must not erase a real owner-host source path.
-jq '.hostPath="/owner/Demo"' "$owner_state" > "$owner_state.tmp" \
-  && chmod 600 "$owner_state.tmp" && mv "$owner_state.tmp" "$owner_state"
-"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo git yard
-assert_json "$owner_state" \
-  '.hostPath == "/owner/Demo" and .mode == "git" and .target == "yard" and
-   (has("registrySource") | not)'
-"$TMP/runtime/bin/yard" _project-state unregister "$owner_id"
-[ -e "$owner_state" ] || fail 'foreign unregister removed a full owner-local record'
-wrong_source_key="$(printf %s /wrong/source | sha256sum | cut -d' ' -f1)"
-if "$TMP/runtime/bin/yard" _project-state remove "$owner_id" "$wrong_source_key" >/dev/null 2>&1; then
-  fail 'owner removal accepted a mismatched source'
-fi
-[ -e "$owner_state" ] || fail 'mismatched owner removal changed project state'
-owner_source_key="$(printf %s /owner/Demo | sha256sum | cut -d' ' -f1)"
-"$TMP/runtime/bin/yard" _project-state remove "$owner_id" "$owner_source_key"
-[ ! -e "$owner_state" ] || fail 'matching owner removal retained project state'
-
-# Synthetic records are removed symmetrically, and validation cannot escape the state directory.
-"$TMP/runtime/bin/yard" _project-state upsert "$owner_id" Demo sync yard
-"$TMP/runtime/bin/yard" _project-state unregister "$owner_id"
-[ ! -e "$owner_state" ] || fail 'foreign unregister kept its synthetic owner record'
-if "$TMP/runtime/bin/yard" _project-state upsert ../escape Bad sync yard >/dev/null 2>&1; then
-  fail 'owner endpoint accepted an unsafe project id'
-fi
-
-# A forced refresh uses the authoritative owner registry and never imports L1 metadata.
-cat > "$REGISTRY_TEST_STATE/live-meta.json" <<'JSON'
-{"schema":1,"projectId":"legacy-12345678","name":"Legacy","mode":"sync"}
-{"schema":1,"projectId":"../escape","name":"Unsafe ID","mode":"sync","target":"yard"}
-{"schema":1,"projectId":"unsafe-target-12345678","name":"Unsafe target","mode":"sync","target":"../../tmp"}
-JSON
-output="$("$TMP/runtime/bin/yard" list --live 2>&1)"
-legacy_state="$SUBYARD_CONFIG_HOME/projects/legacy-12345678.json"
-[ ! -e "$legacy_state" ] || fail 'live list imported L1 metadata into the owner registry'
-assert_not_contains "$output" 'Legacy'
-[ ! -e "$SUBYARD_CONFIG_HOME/escape.json" ] || fail 'live metadata escaped the project state directory'
-[ ! -e "$SUBYARD_CONFIG_HOME/projects/unsafe-target-12345678.json" ] \
-  || fail 'live metadata persisted an unsafe target'
-rm -f "$REGISTRY_TEST_STATE/live-meta.json"
-
-# Named owner contexts write into their own registry and derive their local yard ssh alias.
-cat > "$SUBYARD_CONFIG_HOME/yards/inner.env" <<'ENV'
-SSH_PORT=3333
-ENV
-"$TMP/runtime/bin/yard" -Y inner _project-state upsert named-12345678 Named sync yard
-named_state="$SUBYARD_CONFIG_HOME/yards/inner/projects/named-12345678.json"
-assert_json "$named_state" '.sshHost == "yard-inner" and .hostPath == "" and .target == "yard"'
-
+# Registry convergence, source-key and named-yard matrices live in
+# TestOwnerProjectStateConvergesWithoutLosingLocalSource. Keep actual RPC and bytes here.
 # A remote controller maps to that named owner yard.
 cat > "$SUBYARD_CONFIG_HOME/yards/remote.env" <<'ENV'
 ACCESS_KIND=remote
