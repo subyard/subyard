@@ -1647,6 +1647,39 @@ def verify_migration_owner_replacement(release, version, baseline, source_baseli
     require(line, "standalone candidate was not staged")
     candidate = Path(line.split(" candidate=", 1)[1]) / "bin/yard"
     command = [str(candidate), "update", "--offline", "--version", version]
+    # Exercise inherited nonempty shipped defaults across separate sealed native
+    # processes; an explicit selection would hide process-owned source pins.
+    saved_host_settings = host_settings.read_bytes()
+    saved_host_mode = host_settings.stat().st_mode & 0o7777
+    try:
+        host_settings.write_text("ENVIRONMENT_PROFILES=\n")
+        host_settings.chmod(0o600)
+        observe("Running", False)
+        provenance_before = snapshot(fixture.config)
+        provenance_checks = [json.loads(fixture.run(command + ["--check", "--json"])) for _ in range(2)]
+        consequences = [value["assessment"].get("consequences", []) for value in provenance_checks]
+        provenance_after = snapshot(fixture.config)
+        stability = {
+            "samePlan": provenance_checks[0]["plan"] == provenance_checks[1]["plan"],
+            "sameConsequences": consequences[0] == consequences[1],
+            "nonemptyShippedOrigin": any("config/agents.env:" in line and "from shipped defaults" in line
+                                         and "requested coding integrations []" not in line for line in consequences[0]),
+            "protectedStateUnchanged": provenance_after == provenance_before,
+        }
+        snapshot_hashes = {name: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                           for name, value in (("before", provenance_before), ("after", provenance_after))}
+        with os.fdopen(os.open(fixture.root / "shipped-default-plan-stability.json",
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+            json.dump({"probeOnlyRunning": True, "checks": provenance_checks, "conditions": stability, "snapshotHashes": snapshot_hashes}, output, indent=2)
+            output.write("\n")
+        print("FIXTURE: Running read-only shipped-default plan stability " + json.dumps({"conditions": stability, "snapshotHashes": snapshot_hashes}), flush=True)
+        require(all(stability.values()), "same shipped-default source did not produce a stable exact native plan")
+    finally:
+        host_settings.write_bytes(saved_host_settings)
+        host_settings.chmod(saved_host_mode)
+        observe("Stopped", False)
+    # Ordinary consent/CAS/resume below retains the original fixture selection;
+    # the Running probe does not claim default integration installation coverage.
     previous_registry = fixture.runtime / official_release / "config/release-transition.json"
     previous_payload = previous_registry.read_bytes()
     before = snapshot(fixture.config)
@@ -1906,7 +1939,7 @@ def main():
                             evidence = args.migration_owner_evidence_dir.resolve()
                             evidence.mkdir(parents=True, exist_ok=True)
                             fixture_root = root / "migration-owner"
-                            for name in ("official-source-journal.json", "custom-source-journal.json", "source-history.json", "previous-asset-refusal.log",
+                            for name in ("official-source-journal.json", "custom-source-journal.json", "source-history.json", "shipped-default-plan-stability.json", "previous-asset-refusal.log",
                                          "predecessor.json", "released-owner-failure.log",
                                          "released-owner-inspection.log", "released-owner-unavailable-observation",
                                          "migration-owner-successor.json", "migration-owner-successor.json.stdout",
