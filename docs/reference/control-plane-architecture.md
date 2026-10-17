@@ -48,6 +48,10 @@ Architectural simplification should consolidate places that independently descri
 while preserving identity, confirmation, atomic state and recovery. A language change, daemon or
 general workflow framework does not by itself remove that duplication.
 
+The [Rust release-owner ADR](rust-release-owner-design.md) selects a complete release-transition
+boundary for gated evaluation and defines proposed authority/native-protocol contracts. It does
+not change the current Go implementation or establish production cutover readiness.
+
 ## 2. System topology
 
 The owner engine and CLI use the topology below. Veranda's local fleet is implemented; its remote
