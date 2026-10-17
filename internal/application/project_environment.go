@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -36,9 +37,12 @@ type ProjectEnvironmentRunner struct {
 	Rebuild             bool
 	HasSecret           bool
 	PreparedObservation string
+	developerGID        uint32
 }
 
 const projectEnvironmentOwnershipFormat = `{{.Id}}{{"\t"}}{{ index .Config.Labels "subyard.env" }}{{"\t"}}{{ index .Config.Labels "subyard.project" }}{{"\t"}}{{ index .Config.Labels "subyard.profile" }}`
+
+const projectEnvironmentIsolationFormat = `{"user":{{json .Config.User}},"privileged":{{json .HostConfig.Privileged}},"security_opt":{{json .HostConfig.SecurityOpt}}}`
 
 func (runner ProjectEnvironmentRunner) Run(
 	ctx context.Context,
@@ -126,6 +130,18 @@ func (runner ProjectEnvironmentRunner) up(
 	if err := runner.validateProfile(); err != nil {
 		return "", err
 	}
+	identity, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+		Command: []string{"id", "-g", fmt.Sprint(runner.Yard.DevUID)},
+	})
+	if err != nil || identity.ExitCode != 0 {
+		return "", errors.New("resolve project environment developer primary GID failed")
+	}
+	group := strings.TrimSpace(string(identity.Stdout))
+	gid, err := strconv.ParseUint(group, 10, 32)
+	if err != nil || gid == 0 || strconv.FormatUint(gid, 10) != group {
+		return "", errors.New("project environment requires a non-root numeric developer primary GID")
+	}
+	runner.developerGID = uint32(gid)
 	shareSessions := runner.probe(ctx, []string{"test", "-d", "/mnt/host/agent-sessions"})
 	if runner.probe(ctx, []string{"docker", "inspect", box}) {
 		containerID, err := runner.validateBoxOwnership(ctx, box)
@@ -133,6 +149,12 @@ func (runner ProjectEnvironmentRunner) up(
 			return "", err
 		}
 		if !runner.Rebuild {
+			if err := runner.validateBoxIsolation(ctx, containerID); err != nil {
+				return "", err
+			}
+			if err := runner.prepareProfileMounts(ctx); err != nil {
+				return "", err
+			}
 			if err := runner.execute(ctx, "start project environment", ports.InstanceExecRequest{
 				Command: []string{"docker", "start", containerID},
 			}); err != nil {
@@ -143,19 +165,16 @@ func (runner ProjectEnvironmentRunner) up(
 			}
 			return fmt.Sprintf("box %q already exists — started (profile %s)\n", runner.Project.Name, runner.Project.Target), nil
 		}
+		if err := runner.prepareProfileMounts(ctx); err != nil {
+			return "", err
+		}
 		if err := runner.execute(ctx, "remove project environment for rebuild", ports.InstanceExecRequest{
 			Command: []string{"docker", "rm", "-f", containerID},
 		}); err != nil {
 			return "", err
 		}
-	}
-	for _, cache := range runner.Profile.Caches {
-		uid := fmt.Sprint(runner.Yard.DevUID)
-		if err := runner.execute(ctx, "create profile cache", ports.InstanceExecRequest{
-			Command: []string{"install", "-d", "-o", uid, "-g", uid, "--", cache},
-		}); err != nil {
-			return "", err
-		}
+	} else if err := runner.prepareProfileMounts(ctx); err != nil {
+		return "", err
 	}
 
 	image := projectEnvironmentImage(runner.Project, runner.Profile)
@@ -192,6 +211,7 @@ func (runner ProjectEnvironmentRunner) up(
 	}
 
 	arguments := []string{"docker", "run", "-d", "--name", box,
+		"--user", fmt.Sprintf("%d:%d", runner.Yard.DevUID, runner.developerGID), "--security-opt", "no-new-privileges:true",
 		"--restart", "unless-stopped", "--label", "subyard.env=1", "--label", "subyard.project=" + runner.Project.ProjectID,
 		"--label", "subyard.profile=" + runner.Project.Target, "-v", runner.Project.YardPath + ":/workspace", "-w", "/workspace"}
 	for _, cache := range runner.Profile.Caches {
@@ -269,6 +289,9 @@ func projectEnvironmentContainerID(project domain.ProjectRecord, output []byte) 
 }
 
 func (runner ProjectEnvironmentRunner) validateProfile() error {
+	if runner.Yard.DevUID <= 0 {
+		return errors.New("project environment requires a non-root developer UID")
+	}
 	if runner.Profile.BaseImage == "" {
 		return fmt.Errorf("profile %q has no PROJECT_ENV_BASE_IMAGE", runner.Project.Target)
 	}
@@ -278,19 +301,76 @@ func (runner ProjectEnvironmentRunner) validateProfile() error {
 	if !projectRelative(runner.Profile.Context) {
 		return errors.New("IMAGE_CONTEXT must stay inside the project workspace")
 	}
-	for _, mount := range runner.Profile.Mounts {
-		lower := strings.ToLower(mount)
-		if strings.Contains(lower, "docker.sock") || strings.Contains(lower, "incus.sock") || strings.Contains(lower, "lxd.sock") {
-			return fmt.Errorf("ENV_MOUNTS %q exposes a control socket", mount)
+	for _, cache := range runner.Profile.Caches {
+		if err := domain.ValidateProjectCachePath(cache); err != nil {
+			return err
 		}
-		if strings.Contains(lower, ".claude/") || strings.Contains(lower, ".claude:") ||
-			strings.Contains(lower, ".codex/") || strings.Contains(lower, ".codex:") ||
-			strings.Contains(lower, ".pi/agent/") || strings.Contains(lower, ".pi/agent:") ||
-			strings.Contains(lower, "credentials") || strings.Contains(lower, "auth.json") {
-			return fmt.Errorf("ENV_MOUNTS %q exposes coding-agent credentials", mount)
+	}
+	for _, mount := range runner.Profile.Mounts {
+		if err := domain.ValidateProjectEnvironmentMount(mount); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (runner ProjectEnvironmentRunner) validateBoxIsolation(ctx context.Context, containerID string) error {
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{
+		"docker", "inspect", "-f", projectEnvironmentIsolationFormat, containerID,
+	}})
+	var observed struct {
+		User        string   `json:"user"`
+		Privileged  bool     `json:"privileged"`
+		SecurityOpt []string `json:"security_opt"`
+	}
+	if err != nil || result.ExitCode != 0 || json.Unmarshal(result.Stdout, &observed) != nil {
+		return errors.New("inspect project environment isolation failed; rebuild is required")
+	}
+	nonRoot := fmt.Sprintf("%d:%d", runner.Yard.DevUID, runner.developerGID)
+	noPrivilegeGain := false
+	for _, option := range observed.SecurityOpt {
+		noPrivilegeGain = noPrivilegeGain || option == "no-new-privileges" || option == "no-new-privileges:true"
+	}
+	if observed.User != nonRoot || observed.Privileged || !noPrivilegeGain {
+		return errors.New("project environment isolation changed; use --rebuild before starting it")
+	}
+	return nil
+}
+
+func (runner ProjectEnvironmentRunner) prepareProfileMounts(ctx context.Context) error {
+	for _, mount := range runner.Profile.Mounts {
+		source := strings.SplitN(mount, ":", 2)[0]
+		result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{
+			Command: []string{"readlink", "-e", "--", source},
+		})
+		if err != nil || result.ExitCode != 0 || !domain.ProjectEnvironmentDependencyPath(strings.TrimSpace(string(result.Stdout))) {
+			return errors.New("profile dependency source is unavailable or escapes toolchain roots")
+		}
+		if !runner.probe(ctx, []string{"test", "-f", source}) && !runner.probe(ctx, []string{"test", "-d", source}) {
+			return errors.New("profile dependency source must be a regular file or directory")
+		}
+	}
+	if len(runner.Profile.Caches) == 0 {
+		return nil
+	}
+	// Validate every existing directory before changing any. Each L2 uses the yard's
+	// same UID/GID; a foreign owner or symlink requires repair through provisioning.
+	arguments := []string{"sh", "-eu", "-c", `uid=$1; gid=$2; shift 2
+for path do
+  parent=$path
+  while [ "$parent" != / ]; do
+    [ ! -L "$parent" ] || { printf 'profile cache path must not contain symlinks\n' >&2; exit 1; }
+    parent=${parent%/*}; [ -n "$parent" ] || parent=/
+  done
+  if [ -e "$path" ]; then
+    [ -d "$path" ] && [ "$(stat -c %u:%g -- "$path")" = "$uid:$gid" ] || {
+      printf 'profile cache must be a directory owned by the yard developer UID/GID\n' >&2; exit 1;
+    }
+  fi
+done
+for path do install -d -m 0755 -o "$uid" -g "$gid" -- "$path"; done`, "subyard", fmt.Sprint(runner.Yard.DevUID), fmt.Sprint(runner.developerGID)}
+	arguments = append(arguments, runner.Profile.Caches...)
+	return runner.execute(ctx, "prepare profile dependency caches", ports.InstanceExecRequest{Command: arguments})
 }
 
 func projectRelative(path string) bool {
@@ -341,13 +421,13 @@ func ProjectEnvironmentManifest(
 func (runner ProjectEnvironmentRunner) writeFile(ctx context.Context, path, mode string, input io.Reader) error {
 	uid := fmt.Sprint(runner.Yard.DevUID)
 	if err := runner.execute(ctx, "create staged file directory", ports.InstanceExecRequest{
-		Command: []string{"install", "-d", "-m", "0700", "-o", uid, "-g", uid, "--", filepath.Dir(path)},
+		Command: []string{"install", "-d", "-m", "0700", "-o", uid, "-g", fmt.Sprint(runner.developerGID), "--", filepath.Dir(path)},
 	}); err != nil {
 		return err
 	}
 	result, err := runner.Data.Stream(ctx, runner.Yard, ports.InstanceExecRequest{
 		Command: []string{"sh", "-c", "umask 077; cat > \"$1\" && chmod \"$2\" \"$1\"", "_", path, mode},
-		User:    uint32(runner.Yard.DevUID), Group: uint32(runner.Yard.DevUID),
+		User:    uint32(runner.Yard.DevUID), Group: runner.developerGID,
 	}, input)
 	if err != nil {
 		return executionError("write staged file", result, err)
@@ -373,16 +453,16 @@ func (runner ProjectEnvironmentRunner) linkSessions(ctx context.Context, box str
 		_, _ = runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: []string{
 			"docker", "exec", "-u", "0", box, "sh", "-c",
 			`home="$(getent passwd "$3" | cut -d: -f6)"; home="${home:-/home/dev}"; link="$home/$1"; ` +
-				`[ -d "$(dirname "$2")" ] || exit 0; install -d -o "$3" -g "$3" "$2" "$(dirname "$link")"; ` +
-				`if [ -L "$link" ] || [ ! -e "$link" ]; then ln -sfn "$2" "$link"; chown -h "$3:$3" "$link"; fi`,
-			"_", name, target, fmt.Sprint(runner.Yard.DevUID),
+				`[ -d "$(dirname "$2")" ] || exit 0; install -d -o "$3" -g "$4" "$2" "$(dirname "$link")"; ` +
+				`if [ -L "$link" ] || [ ! -e "$link" ]; then ln -sfn "$2" "$link"; chown -h "$3:$4" "$link"; fi`,
+			"_", name, target, fmt.Sprint(runner.Yard.DevUID), fmt.Sprint(runner.developerGID),
 		}})
 	}
 }
 
 func (runner ProjectEnvironmentRunner) probe(ctx context.Context, command []string) bool {
-	_, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: command})
-	return err == nil
+	result, err := runner.Data.Execute(ctx, runner.Yard, ports.InstanceExecRequest{Command: command})
+	return err == nil && result.ExitCode == 0
 }
 
 func (runner ProjectEnvironmentRunner) execute(ctx context.Context, step string, request ports.InstanceExecRequest) error {

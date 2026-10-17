@@ -342,56 +342,48 @@ bounded_incus_exec 45 docker exec -u 1000:1000 "$box_b" bash -ceu '
 ' _ "$name_b" "$name_a" >> "$work/rebuild-check.log" 2>&1
 printf 'android-pool-projects rebuild=PASS source=preserved other-gradle=preserved rebuilt-gradle=fresh\n'
 
-# Reconstruct only the previous mount/device shape with the current engine. This is not a
-# published legacy release: its dedicated writable SDK/Gradle directories stay outside the
-# managed SDK and are removed by this marker-guarded fixture cleanup.
-runtime_root="$root"
-if [ -e "$root/.subyard-acceptance/candidate.json" ]; then
-  runtime_root="$(dirname "$(dirname "$YARD_BIN")")"
-fi
-legacy_source="$work/legacy-source"
-install -d -m 0700 "$legacy_source/bin"
-cp -a "$runtime_root/config" "$legacy_source/config"
-ln -s "$YARD_BIN" "$legacy_source/bin/yard-engine"
-ln -s "$runtime_root/scripts" "$legacy_source/scripts"
-cat > "$legacy_source/config/profiles/android/profile.conf" <<EOF
-PROFILE_NAME=android
-PROJECT_ENV_BASE_IMAGE=subyard-android-env:1
-ANDROID_HOME=/srv/cache/android-sdk
-ANDROID_SDK_ROOT=/srv/cache/android-sdk
-GRADLE_USER_HOME=/home/dev/.gradle
-JAVA_HOME=/opt/jdk-17
-ANDROID_PUBLIC_ROOT=/srv/cache/android-sdk/.subyard
-PATH=/srv/cache/android-sdk/platform-tools:/opt/jdk-17/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ENV_MOUNTS="$legacy_sdk:/srv/cache/android-sdk $legacy_gradle:/home/dev/.gradle"
-DEVICES="kvm"
-EOF
+# Reconstruct the old mount/device shape directly inside this disposable fixture.
+# The current engine must reject that unsafe profile shape; using it as a legacy
+# installer would bypass the new boundary instead of testing migration from it.
 bounded_incus_exec 30 sh -ceu '
   install -d -o dev -g dev -m 0755 "$1" "$2"
   printf reconstructed-legacy-l2-v1 > "$1/.subyard-legacy-l2-marker"
   printf reconstructed-legacy-l2-v1 > "$2/.subyard-legacy-l2-marker"
 ' _ "$legacy_sdk" "$legacy_gradle"
 legacy_fixture=1
-legacy_yard() {
-  local seconds="$1" command
-  shift
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
-    printf -v command '%q ' env "SUBYARD_REPOSITORY_ROOT=$legacy_source" "$YARD_BIN" -Y "$yard_name" "$@"
-    timeout --foreground "$(remaining "$seconds")" sg incus-admin -c "exec $command"
-  else
-    timeout --foreground "$(remaining "$seconds")" env "SUBYARD_REPOSITORY_ROOT=$legacy_source" \
-      "$YARD_BIN" -Y "$yard_name" "$@"
-  fi
-}
 printf 'android-pool-projects phase=legacy-l2-rebuild\n'
 diagnostic_logs=("$work/legacy-sync.log")
-legacy_yard 120 sync "$work/$name_a" --name "$name_legacy" --target android --yes \
+bounded_yard 120 sync "$work/$name_a" --name "$name_legacy" --target android --yes \
   > "$work/legacy-sync.log" 2>&1
 registered_legacy=1
 diagnostic_logs=("$work/legacy-up.log")
-legacy_yard 120 up "$name_legacy" --yes > "$work/legacy-up.log" 2>&1
+bounded_yard 120 up "$name_legacy" --yes > "$work/legacy-up.log" 2>&1
 up_legacy=1
+legacy_box="$(find_box "$name_legacy")"
+bounded_incus_exec 60 sh -ceu '
+  box=$1; sdk=$2; gradle=$3
+  box_name=$(docker inspect -f "{{.Name}}" "$box")
+  box_name=${box_name#/}
+  project_id=$(docker inspect -f "{{index .Config.Labels \"subyard.project\"}}" "$box")
+  workspace=$(docker inspect -f "{{range .Mounts}}{{if eq .Destination \"/workspace\"}}{{.Source}}{{end}}{{end}}" "$box")
+  [ "$workspace" = "/srv/workspaces/$project_id/src" ] || exit 2
+  [ "$(docker inspect -f "{{index .Config.Labels \"subyard.env\"}}" "$box")" = 1 ] || exit 2
+  [ "$(docker inspect -f "{{index .Config.Labels \"subyard.profile\"}}" "$box")" = android ] || exit 2
+  manifest="/srv/env-meta/$project_id/profile.json"
+  temporary=$(mktemp "$manifest.XXXXXX")
+  trap "rm -f \"$temporary\"" EXIT
+  jq ".devices=[\"kvm\"]" "$manifest" > "$temporary"
+  chown --reference="$manifest" "$temporary"
+  chmod --reference="$manifest" "$temporary"
+  mv "$temporary" "$manifest"
+  docker rm -f "$box" >/dev/null
+  docker run -d --name "$box_name" --user 1000:1000 \
+    --label subyard.env=1 --label "subyard.project=$project_id" --label subyard.profile=android \
+    -v "$workspace:/workspace" -w /workspace \
+    -v "$sdk:/srv/cache/android-sdk" -v "$gradle:/home/dev/.gradle" \
+    --device /dev/kvm -e ANDROID_HOME=/srv/cache/android-sdk -e GRADLE_USER_HOME=/home/dev/.gradle \
+    subyard-android-env:1 sleep infinity >/dev/null
+' _ "$legacy_box" "$legacy_sdk" "$legacy_gradle" >> "$work/legacy-up.log" 2>&1
 legacy_box="$(find_box "$name_legacy")"
 diagnostic_logs=("$work/legacy-check.log")
 bounded_incus_exec 45 docker exec -u 1000:1000 "$legacy_box" bash -ceu '

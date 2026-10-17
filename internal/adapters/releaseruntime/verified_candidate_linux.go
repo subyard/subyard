@@ -25,6 +25,8 @@ import (
 
 type verifiedPublishedCandidate struct {
 	commandManifestBound bool
+	projectCreatorDigest [sha256.Size]byte
+	producerEvidence     uninstall.ProducerEvidence
 	candidate            publishedCandidate
 	root                 *os.File
 	engine               *os.File
@@ -101,6 +103,7 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			return fail(errors.New("published runtime contains an unavailable manifest entry"))
 		}
 		if entry.path == "bin/yard-engine" {
+			verified.producerEvidence.EngineSHA256 = hex.EncodeToString(entry.digest[:])
 			info, statErr := file.Stat()
 			if statErr != nil || info.Mode().Perm()&0o111 == 0 {
 				file.Close()
@@ -109,8 +112,23 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			verified.engine, err = sealVerifiedEngine(file, entry.digest)
 		} else {
 			err = verifyCandidateFile(file, entry.digest)
+			if err == nil && entry.path == "scripts/02-create-project.sh" {
+				verified.projectCreatorDigest = entry.digest
+			}
 			if err == nil && entry.path == "config/commands.registry" {
 				verified.commandManifestBound = true
+			}
+			if err == nil && (entry.path == "config/systemd/subyard-power-reconcile.service.in" ||
+				entry.path == "config/systemd/subyard-keys-sync.service.in" || entry.path == "config/systemd/subyard-keys-sync.timer.in") {
+				body, readErr := io.ReadAll(io.NewSectionReader(file, 0, 1<<20+1))
+				if readErr != nil || len(body) > 1<<20 || sha256.Sum256(body) != entry.digest {
+					err = errors.New("published runtime producer template changed")
+				} else {
+					if verified.producerEvidence.Templates == nil {
+						verified.producerEvidence.Templates = map[string]string{}
+					}
+					verified.producerEvidence.Templates[filepath.Base(entry.path)] = string(body)
+				}
 			}
 			if err == nil && entry.path == "config/release-transition.json" {
 				verified.registryDigest = releasetransition.Fingerprint(

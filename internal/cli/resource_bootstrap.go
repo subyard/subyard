@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -68,7 +69,10 @@ func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loade
 	}
 	bootstrap := &profileBootstrap{loaded: loaded, initial: loaded, definition: definition, profile: profile, command: command}
 	bootstrap.loaded.Environment = maps.Clone(loaded.Environment)
-	profiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
+	profiles, err := cli.currentProfileSelection(loaded, nil)
+	if err != nil {
+		return nil, err
+	}
 	if !slices.Contains(profiles, profile) {
 		profiles = append(profiles, profile)
 		bootstrap.profiles = strings.Join(profiles, " ")
@@ -86,6 +90,9 @@ func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loade
 		if err != nil {
 			return nil, err
 		}
+	}
+	if !slices.Contains(strings.Fields(bootstrap.loaded.Environment["ENVIRONMENT_PROFILES"]), profile) {
+		return nil, errors.New("profile is disabled by the yard's capability constraints")
 	}
 	if err := bootstrap.checkSelectionSource(); err != nil {
 		return nil, err

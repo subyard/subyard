@@ -83,10 +83,16 @@ func validateProfileConstraints(configDir, yard string, values environment) erro
 func WithEnvironmentProfiles(loaded Loaded, profiles []string) (Loaded, error) {
 	loaded.Environment = cloneEnvironment(loaded.Environment)
 	loaded.Environment["ENVIRONMENT_PROFILES"] = strings.Join(profiles, " ")
-	if err := validateHostListenerCollisions(loaded.Environment, loaded.Catalog); err != nil {
+	if err := validateProfileConstraints(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment); err != nil {
 		return Loaded{}, err
 	}
-	if err := validateProfileConstraints(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment); err != nil {
+	selection, err := resolveEnvironmentProfiles(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, loaded.Environment, loaded.Catalog)
+	if err != nil {
+		return Loaded{}, err
+	}
+	loaded.EnvironmentProfiles = selection
+	loaded.Environment["ENVIRONMENT_PROFILES"] = strings.Join(selection.Effective, " ")
+	if err := validateHostListenerCollisions(loaded.Environment, loaded.Catalog); err != nil {
 		return Loaded{}, err
 	}
 	return loaded, nil

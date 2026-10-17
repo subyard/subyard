@@ -57,12 +57,13 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 		var value control
 		payload, err := os.ReadFile(path)
 		if err == nil && json.Unmarshal(payload, &value) == nil {
-			instances := make(map[string]map[string]any, len(value.Instances))
+			projects := make(map[string]map[string]any)
+			instances := make(map[string]map[string]any)
 			for _, instance := range value.Instances {
-				server.SetProject(instance.Project, map[string]any{"name": instance.Project, "config": map[string]string{}})
+				projects[instance.Project] = map[string]any{"name": instance.Project, "config": map[string]string{}}
 				instances[instance.Project+"/"+instance.Name] = instance.Info
 			}
-			server.ReplaceInstances(instances)
+			server.SetInventory(projects, instances)
 			_ = os.WriteFile(path+".applied", payload, 0o600)
 		}
 		return value

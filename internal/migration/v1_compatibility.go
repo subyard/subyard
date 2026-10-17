@@ -49,7 +49,7 @@ type v1RouteConsumerSnapshot struct {
 
 // InspectMutationGate is the only ordinary-command compatibility surface.
 // It classifies protected v1 metadata without locking, writing or resuming it;
-// yard update imports the same exact journal through V1ImportReader.
+// Accepted V2 histories retain their bound reader; fresh V1 recovery is retired.
 func InspectMutationGate(
 	ctx context.Context,
 	options ReleaseOptions,
@@ -92,14 +92,8 @@ func InspectMutationGate(
 	var candidate v1CompatibilityCandidate
 	if len(current) == 1 {
 		candidate = current[0]
-		registry, err := LoadRegistry(options.RegistryPath)
-		if err != nil || validateTransaction(options, registry, candidate.transaction) != nil {
-			return operatorAction(
-				releasetransition.CodeJournalInvalid,
-				"the current release transition is invalid or foreign",
-			)
-		}
-		outcome.Target = releasetransition.ReleaseID(candidate.transaction.ToRelease)
+		return operatorAction(releasetransition.CodeJournalInvalid,
+			"v1 transition metadata for the current release is unsupported or foreign")
 	} else {
 		candidate = legacy[0]
 		links, err := releasetransition.NewRuntimeLinkStore(options.RuntimeRoot)
@@ -151,10 +145,10 @@ func InspectMutationGate(
 			)
 		}
 	}
-	outcome.Status = releasetransition.StatusRecovering
-	outcome.Code = releasetransition.CodeRecoveryPending
-	outcome.Message = "an unfinished release transition is waiting for yard update"
-	outcome.Retry = "run yard update"
+	outcome.Status = releasetransition.StatusOperatorActionRequired
+	outcome.Code = releasetransition.CodePreconditionBlocked
+	outcome.Message = "sources before v0.11.0 are unsupported; full uninstall deletes this installation's owned data, then install a new version separately"
+	outcome.Retry = "stage verified current tooling with --publish-only, then run its bin/yard uninstall --full and review the removal plan"
 	outcome.Transaction = &candidate.id
 	return &outcome, nil
 }
@@ -229,10 +223,7 @@ func validatePublishedV1Candidate(
 	if err != nil || !knownV1ImportRegistry(candidate.transaction, registry) {
 		return errors.New("retained v1 registry is not the exact published contract")
 	}
-	return validateTransaction(ReleaseOptions{
-		ConfigHome: configHome, RuntimeRoot: runtimeRoot,
-		RegistryPath: registryPath, Version: candidate.transaction.ToRelease,
-	}, registry, candidate.transaction)
+	return nil
 }
 
 func discoverV1CompatibilityJournals(
@@ -484,11 +475,8 @@ func verifyV1CompatibilityCheckpoint(
 	registry Registry,
 	tx transaction,
 ) error {
-	path, err := transactionOperationDefinitionsForTransaction(registry, tx)
-	if err != nil {
-		return err
-	}
-	for _, definition := range path {
+	var err error
+	for _, definition := range registry.Migrations {
 		for _, expected := range definition.Operations {
 			index := transactionOperationIndex(tx, definition.ID, expected.ID)
 			if index < 0 {

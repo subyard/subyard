@@ -580,6 +580,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		return action, delta, err
 	}
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
+		if err := execution.legacyContinuation.check(ctx, cli, execution); err != nil {
+			return "", domain.ActionDelta{}, err
+		}
 		if err := execution.inputBaseline.check(ctx, cli); err != nil {
 			return "", domain.ActionDelta{}, err
 		}

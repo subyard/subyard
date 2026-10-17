@@ -97,6 +97,10 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		cli.errorf("release transition operation context is invalid")
 		return 2
 	}
+	if err := releaseruntime.CheckSourcePolicy(ctx, request); err != nil {
+		cli.errorf("release transition: %v", err)
+		return 1
+	}
 	reconcilers := cli.activationReconcilers(request)
 	ownerRegistration := cli.ownerRegistrationTransition(request)
 	ingressFactory := cli.releaseTransitionIngressFactory(request)

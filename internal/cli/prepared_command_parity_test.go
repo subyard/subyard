@@ -259,7 +259,7 @@ func preparationProject(
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
-	return environment, incus, preparationParityProbe{}, nil
+	return append(environment, "ENVIRONMENT_PROFILES=demo"), incus, preparationParityProbe{}, nil
 }
 
 func preparationHeldTestVMSlot(

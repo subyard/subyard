@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|diagnostics|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
   exit 2
 fi
-case "$lane" in full|diagnostics|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -180,7 +180,7 @@ yard init --yes
 project="$(yard config show INCUS_PROJECT | sed -n 's/^effective: //p')"
 instance="$(yard config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')"
 yard start --yes
-# Emulator diagnostics require the physical namespace boundary before downloading images.
+# Emulator lanes require the physical namespace boundary before downloading images.
 if [ "$lane" != full ]; then
 incus --project "$project" exec "$instance" -- bash -ceu '
   name="$1"
@@ -219,6 +219,22 @@ if [ "$lane" = full ]; then
     < "$root/config/profiles/android/tests/e2e/android-sdk-build.sh"
   android_phase_end 0
   printf 'android_sdk_build=passed\n'
+  exit 0
+fi
+if [ "$lane" = projects ]; then
+  incus --project "$project" exec "$instance" -- timeout 30 sh -c '
+    until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do
+      sleep 0.2
+    done
+  '
+  android_phase_begin images
+  yard emu cache prepare --api 35
+  yard emu cache prepare --api 36
+  android_phase_end 0
+  android_phase_begin projects
+  bash "$root/config/profiles/android/tests/e2e/android-pool-projects.sh" "$root" "$state" "$YARD_NAME" "$project" "$instance"
+  android_phase_end 0
+  printf 'android_projects=passed\n'
   exit 0
 fi
 incus --project "$project" exec "$instance" --user 1000 --group 1000 --env HOME=/home/dev -- bash -ceu '

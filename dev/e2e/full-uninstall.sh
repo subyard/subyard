@@ -10,7 +10,10 @@ state="/var/tmp/subyard-full-uninstall-$token"
 marker="subyard-full-uninstall-$token"
 operator="subyardfull${token:0:20}"
 home="/home/$operator"
-version="0.17.0-p0.full.$token"
+version="0.19.1-p0.full.$token"
+if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+fi
 pool="subyard-full-$token"
 bridge="syfull${token:0:8}"
 power="subyard-full-power-$token.service"
@@ -140,8 +143,66 @@ PY_PROCESSES
   operator_env env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -c '. "$1"; command -v foreign-control' _ "$state/shell.rc" | grep -Fxq "$state/bin/foreign-control"
   operator_env grep -Fq "Host $foreign" "$home/.ssh/config" || fail 'foreign SSH content removed'
   ! operator_env grep -Eq '^Include subyard(-[^ ]+)?\.config$' "$home/.ssh/config" || fail 'managed SSH Includes remain'
+  if [ -f "$state/legacy-result.log" ]; then
+    sudo -n test -d "$state/legacy-host/backups" || fail 'unproven old host backup namespace was removed'
+    operator_env grep -Fxq 'preserved old host content' "$state/legacy-host/foreign.control" || fail 'unproven old host content changed'
+    ! incus project show "subyard-legacy-$token" >/dev/null 2>&1 || fail 'retired old native project reappeared'
+  fi
   printf 'ok: approved artifacts absent; foreign workload, shared pool, user service, host project, SSH and shell controls preserved\n'
 }
+interrupt_full_removal() {
+  local runner="$1" data_root="$2" config_root="$3" launcher="$4" prefix="$5" wrapper caller
+  # Watch native config-directory loss and kill the original caller. Its
+    # retained engine/adapters must then complete from a fresh process.
+    "$runner" bash -c 'printf "%s\n" "$$" > "$1"; chmod 644 "$1"; shift; exec setsid "$@"' _ "$state/${prefix}full.pid" "$launcher" teardown --full --yes > "$state/${prefix}full.log" 2>&1 &
+    wrapper=$!
+    for _ in {1..100}; do [ -s "$state/${prefix}full.pid" ] && break; sleep 0.1; done
+    caller="$(cat "$state/${prefix}full.pid")"
+    sudo -n python3 - "$config_root" "$caller" <<'PY'
+import ctypes, os, pathlib, select, signal, sys, time
+libc=ctypes.CDLL(None,use_errno=True)
+fd=libc.inotify_init1(os.O_NONBLOCK|os.O_CLOEXEC)
+if fd<0 or libc.inotify_add_watch(fd,sys.argv[1].encode(),0x400|0x800)<0: raise SystemExit(1)
+ready=select.select([fd],[],[],120)[0]
+if not ready: raise SystemExit("config deletion checkpoint did not occur")
+caller=int(sys.argv[2])
+processes={}
+for path in pathlib.Path("/proc").glob("[0-9]*/stat"):
+ try:
+  fields=path.read_text().rsplit(")",1)[1].split();processes[int(path.parent.name)]=(int(fields[1]),fields[19])
+ except (FileNotFoundError,ProcessLookupError):pass
+owned={caller}
+while True:
+ extra={pid for pid,(parent,birth) in processes.items() if parent in owned}-owned
+ if not extra:break
+ owned.update(extra)
+os.kill(caller,signal.SIGKILL)
+os.close(fd)
+# A native child may safely retain the approved barrier after its caller dies.
+# Wait for that exact recorded process generation before starting fresh retry.
+deadline=time.monotonic()+30
+while time.monotonic()<deadline:
+ live=[]
+ for pid in owned-{caller}:
+  try:
+   fields=pathlib.Path("/proc",str(pid),"stat").read_text().rsplit(")",1)[1].split()
+   if fields[0]!="Z" and fields[19]==processes[pid][1]:live.append(pid)
+  except FileNotFoundError:pass
+ if not live:break
+ time.sleep(0.1)
+else:raise SystemExit("owned interrupted physical helpers did not settle within 30 seconds")
+PY
+    wait "$wrapper" 2>/dev/null || true
+    [ ! -e "$config_root" ] || fail 'interruption did not remove config'
+    for _ in {1..100}; do [ -x "$data_root.uninstall/runtime/bin/yard" ] && break; sleep 0.1; done
+    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" < /dev/null > "$state/${prefix}retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
+    "$runner" "$data_root.uninstall/runtime/bin/yard" _uninstall-resume "$data_root.uninstall" --yes > "$state/${prefix}retry.log" 2>&1
+
+}
+
+# shellcheck source=dev/e2e/full-uninstall-legacy.sh
+. "$ROOT/dev/e2e/full-uninstall-legacy.sh"
+
 case "$mode" in
   preflight)
     for tool in incus jq python3 git systemctl ss ssh ssh-keygen timeout setsid runuser findmnt; do
@@ -172,7 +233,7 @@ case "$mode" in
     sudo -n chmod 0750 "$state"
     sudo -n install -d -o dev -g dev -m 0700 "$state/release"
     sudo -n install -d -o root -g root -m 0755 "$state/host-helper"
-    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network; do
+    for file in direct-only.log bootstrap-only.log decline.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase baseline-pool baseline-network legacy-install.log legacy-context.log legacy-init.log legacy-refusal.log legacy-stage.log legacy-foreign-refusal.log legacy-full.log legacy-retry-preview.log legacy-retry.log legacy-clean-install.log legacy-clean-remove.log legacy-result.log; do
       sudo -n install -o dev -g dev -m 0600 /dev/null "$state/$file"
     done
     incus profile device get default root pool --project default > "$state/baseline-pool"
@@ -185,10 +246,15 @@ case "$mode" in
     sudo -n systemctl start "user@$(id -u "$operator").service"
     operator_env incus info >/dev/null
     userctl show-environment >/dev/null
-    bash "$ROOT/dev/package-engine.sh" --output-dir "$state/release" --version "$version" --arch amd64 >/dev/null
+    if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+      cp -a "$ROOT/.subyard-acceptance/release/." "$state/release/"
+    else
+      bash "$ROOT/dev/package-engine.sh" --output-dir "$state/release" --version "$version" --arch amd64 >/dev/null
+    fi
     sudo -n chown -R "$operator:$operator" "$state/release"
     bundle="$state/release/subyard-$version-linux-amd64.tar.gz"
     sudo -n install -o "$operator" -g "$operator" -m 0755 "$ROOT/scripts/install-runtime-release.sh" "$state/installer.sh"
+    legacy_full_uninstall
     operator_env env SUBYARD_HOME="$state/direct-data" SUBYARD_CONFIG_HOME="$state/direct-config" YARD_RELEASE_CACHE="$state/direct-cache" \
       bash "$state/installer.sh" --runtime-root "$state/direct-runtime" --bundle "$bundle" --checksum "$bundle.sha256" --manifest "$bundle.manifest.json" --provenance "$bundle.provenance.json" >/dev/null
     operator_env env SUBYARD_HOME="$state/direct-data" SUBYARD_CONFIG_HOME="$state/direct-config" YARD_RUNTIME_ROOT="$state/direct-runtime" YARD_RELEASE_CACHE="$state/direct-cache" \
@@ -423,51 +489,7 @@ PY_CAPTURE
     ;;
   apply)
     assert_fixture
-    # Watch native config-directory loss and kill the original caller. Its
-    # retained engine/adapters must then complete from a fresh process.
-    operator_env bash -c 'printf "%s\n" "$$" > "$1/full.pid"; chmod 644 "$1/full.pid"; exec setsid "$1/bin/yard" teardown --full --yes' _ "$state" > "$state/full.log" 2>&1 &
-    wrapper=$!
-    for _ in {1..100}; do [ -s "$state/full.pid" ] && break; sleep 0.1; done
-    caller="$(cat "$state/full.pid")"
-    sudo -n python3 - "$state/config" "$caller" <<'PY'
-import ctypes, os, pathlib, select, signal, sys, time
-libc=ctypes.CDLL(None,use_errno=True)
-fd=libc.inotify_init1(os.O_NONBLOCK|os.O_CLOEXEC)
-if fd<0 or libc.inotify_add_watch(fd,sys.argv[1].encode(),0x400|0x800)<0: raise SystemExit(1)
-ready=select.select([fd],[],[],120)[0]
-if not ready: raise SystemExit("config deletion checkpoint did not occur")
-caller=int(sys.argv[2])
-processes={}
-for path in pathlib.Path("/proc").glob("[0-9]*/stat"):
- try:
-  fields=path.read_text().rsplit(")",1)[1].split();processes[int(path.parent.name)]=(int(fields[1]),fields[19])
- except (FileNotFoundError,ProcessLookupError):pass
-owned={caller}
-while True:
- extra={pid for pid,(parent,birth) in processes.items() if parent in owned}-owned
- if not extra:break
- owned.update(extra)
-os.kill(caller,signal.SIGKILL)
-os.close(fd)
-# A native child may safely retain the approved barrier after its caller dies.
-# Wait for that exact recorded process generation before starting fresh retry.
-deadline=time.monotonic()+30
-while time.monotonic()<deadline:
- live=[]
- for pid in owned-{caller}:
-  try:
-   fields=pathlib.Path("/proc",str(pid),"stat").read_text().rsplit(")",1)[1].split()
-   if fields[0]!="Z" and fields[19]==processes[pid][1]:live.append(pid)
-  except FileNotFoundError:pass
- if not live:break
- time.sleep(0.1)
-else:raise SystemExit("owned interrupted physical helpers did not settle within 30 seconds")
-PY
-    wait "$wrapper" 2>/dev/null || true
-    [ ! -e "$state/config" ] || fail 'interruption did not remove config'
-    for _ in {1..100}; do [ -x "$state/data.uninstall/runtime/bin/yard" ] && break; sleep 0.1; done
-    operator_env "$state/data.uninstall/runtime/bin/yard" _uninstall-resume "$state/data.uninstall" < /dev/null > "$state/retry-preview.log" 2>&1 && fail 'unconfirmed retry executed'
-    operator_env "$state/data.uninstall/runtime/bin/yard" _uninstall-resume "$state/data.uninstall" --yes > "$state/retry.log" 2>&1
+    interrupt_full_removal operator_env "$state/data" "$state/config" "$state/bin/yard" ''
     verify_absence
     printf 'applied\n' > "$state/phase"
     ;;

@@ -283,6 +283,11 @@ class Leases(unittest.TestCase):
         public = json.dumps(self.pool.status())
         self.assertNotIn(first, public)
         self.assertNotIn('credential', public)
+        common = one['lease']
+        self.assertEqual(common, dict(contract='resource-lease/v1', resource_type='android-emulator',
+                                     resource_id='emulator', slot_id=one['slot_id'],
+                                     generation=one['generation'], state='held',
+                                     owner=self.owner, expires_at=one['expires_at']))
         self.assertEqual(one['request']['android_version'], '14')
         self.pool.release(first)
         self.pool.release(first)
@@ -389,6 +394,38 @@ class Leases(unittest.TestCase):
         self.runtime.fail_stop = False
         self.pool.release(token)
         self.assertEqual(self.pool.allocation(other)['state'], 'held')
+
+    def test_quarantined_capacity_is_unavailable_and_expiry_status_is_read_only(self):
+        first, _ = self.acquire()
+        second, _ = self.acquire()
+        self.now += 1201
+        before = self.pool.state_path.read_bytes()
+        self.assertTrue(all(s['lease']['state'] == 'draining' for s in self.pool.status()['slots']))
+        self.assertEqual(before, self.pool.state_path.read_bytes())
+        self.runtime.fail_stop = True
+        for token in (first, second):
+            with self.assertRaises(poolmod.PoolError):
+                self.pool.release(token)
+        with self.assertRaises(poolmod.PoolError) as failed:
+            self.acquire()
+        self.assertEqual(failed.exception.code, 'unavailable')
+        self.assertTrue(all(s['lease']['state'] == 'quarantined' for s in self.pool.status()['slots']))
+
+    def test_idle_resize_and_restart_preserve_removed_slot_generation(self):
+        first, _ = self.acquire()
+        second, old = self.acquire()
+        self.assertEqual(old['slot_id'], '002')
+        self.pool.release(first)
+        self.pool.release(second)
+        self.pool.shutdown()
+        self.pool = poolmod.Pool(dict(self.config, size=1), self.runtime, self.images, lambda: self.now)
+        self.assertEqual([s['slot_id'] for s in self.pool.status()['slots']], ['001'])
+        self.pool.shutdown()
+        self.pool = poolmod.Pool(self.config, self.runtime, self.images, lambda: self.now)
+        self.acquire()
+        _, replacement = self.acquire()
+        self.assertEqual(replacement['slot_id'], old['slot_id'])
+        self.assertGreater(replacement['generation'], old['generation'])
 
     def test_invalid_selection_and_shrink_do_not_mutate(self):
         before = self.pool.state_path.read_bytes()
@@ -1640,6 +1677,23 @@ os.write(1, result.stdout)
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_wait_retries_only_busy_and_requester_cancellation_stops_retry(self):
+        args = SimpleNamespace(wait=30)
+        with patch.object(client, 'attribution', return_value=self.owner), \
+             patch.object(client, 'rpc', side_effect=client.Error('unavailable', 'quarantined')) as rpc:
+            with self.assertRaises(client.Error) as failed:
+                client.acquire(args, secrets.token_hex(32))
+            self.assertEqual(failed.exception.code, 'unavailable')
+            self.assertEqual(rpc.call_count, 1)
+        alive = iter([True, False])
+        with patch.object(client, 'attribution', return_value=self.owner), \
+             patch.object(client.time, 'sleep'), \
+             patch.object(client, 'rpc', side_effect=client.Error('busy', 'occupied')) as rpc:
+            with self.assertRaises(client.Error) as failed:
+                client.acquire(args, secrets.token_hex(32), lambda: next(alive))
+            self.assertEqual(failed.exception.code, 'owner')
+            self.assertEqual(rpc.call_count, 1)
 
     def test_busy_wait_timeout_and_command_not_started(self):
         self.acquire()

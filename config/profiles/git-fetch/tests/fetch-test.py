@@ -143,8 +143,17 @@ class FetchTests(unittest.TestCase):
             self.assertIsNone(fetch.command(['python3', str(program)], self.base, 1, True))
         self.assertLess(time.monotonic()-started, 3)
         child = Path('/proc')/child_pid.read_text()/'stat'
-        with contextlib.suppress(FileNotFoundError, ProcessLookupError):
-            self.assertIn(child.read_text().rsplit(')', 1)[1].split()[0], ('Z', 'X'))
+        deadline = time.monotonic()+1
+        while True:
+            try:
+                state = child.read_text().rsplit(')', 1)[1].split()[0]
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            if state in ('Z', 'X'):
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f'descendant remained alive after timeout: {state}')
+            time.sleep(0.01)
         self.assertEqual(output.getvalue(), '')
 
 

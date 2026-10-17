@@ -366,12 +366,24 @@ standalone_ledger_before="$(sha256sum "$standalone_ledger")"
   export HOME="$state/home" SUBYARD_OPERATOR_HOME="$state/home"
   export SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
   export YARD_RUNTIME_ROOT="$state/runtime" SHELL=/bin/bash
+  export SUBYARD_NO_AUDIT=1
   unset YARD_ENGINE_PATH
+  [ ! -e "$SUBYARD_HOME" ] || fail 'fresh profile fixture data directory already exists'
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   launcher="$(release_candidate_install "$fixture" "$state")"
   [ "$launcher" = "$state/bin/yard" ] && [ -x "$launcher" ] \
     || fail 'profile fixture bootstrap did not publish its isolated launcher'
+  [ "$(stat -c '%a' "$SUBYARD_HOME")" = 700 ] \
+    && [ "$(stat -c '%a' "$SUBYARD_HOME/installation.json")" = 600 ] \
+    || fail 'profile fixture bootstrap did not publish private installation ownership'
+  jq -e --arg state "$state" --argjson uid "$(id -u)" \
+    '.schema == 1 and .operatorUid == $uid and .dataHome == ($state + "/data")
+      and .configHome == ($state + "/config") and .runtimeRoot == ($state + "/runtime")
+      and .cacheRoot == ($state + "/releases") and .binDir == ($state + "/bin")
+      and .shellFiles == [($state + "/bashrc"), ($state + "/profile")]' \
+    "$SUBYARD_HOME/installation.json" >/dev/null \
+    || fail 'profile fixture bootstrap installation ownership has incorrect path bindings'
   "$launcher" _publication-contracts >/dev/null \
     || fail 'profile fixture bootstrap left the protected publication reader uncommitted'
   [ -f "$state/bashrc" ] && [ -f "$state/profile" ] \
@@ -646,10 +658,12 @@ HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
   YARD_RUNTIME_ROOT="$legacy_bridge_runtime" YARD_BIN_DIR="$legacy_bridge_bin" \
   YARD_SHELL_RC="$legacy_bridge_home/.bashrc" YARD_LOGIN_RC="$legacy_bridge_home/.profile" \
   YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test \
-  "$release/subyard-install.sh" --yes >/dev/null
-[ "$("$legacy_bridge_runtime/current/bin/yard" --version | awk '{print $2}')" = 1.1.0-test ] \
-  && [ "$(readlink "$legacy_bridge_runtime/previous")" = "$legacy_bridge_initial" ] \
-  || fail 'standalone bootstrap did not bridge a pre-transition runtime through ReleaseTransition'
+  "$release/subyard-install.sh" --yes > "$TMP/legacy-refusal.log" 2>&1 \
+  && fail 'standalone bootstrap admitted a pre-v0.11.0 source'
+grep -Fq 'v0.11.0' "$TMP/legacy-refusal.log" \
+  && grep -Fq 'uninstall --full' "$TMP/legacy-refusal.log" \
+  && [ "$(readlink "$legacy_bridge_runtime/current")" = "$legacy_bridge_initial" ] \
+  || fail 'legacy refusal changed active state or omitted removal guidance'
 
 # Publication is intentionally separate from activation. The transition module
 # must be able to inspect an immutable verified candidate while the old runtime

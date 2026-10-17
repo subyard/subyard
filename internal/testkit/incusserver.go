@@ -182,6 +182,22 @@ func (fake *IncusServer) SetExtensions(extensions ...string) {
 	fake.serverInfo["api_extensions"] = append([]string(nil), extensions...)
 }
 
+// SetInventory replaces a complete canned observation without changing queued
+// execution responses, calls or operation history.
+func (fake *IncusServer) SetInventory(projects, instances map[string]map[string]any) {
+	projectSnapshot := make(map[string]map[string]any, len(projects))
+	instanceSnapshot := make(map[string]map[string]any, len(instances))
+	for name, value := range projects {
+		projectSnapshot[name] = cloneAnyMap(value)
+	}
+	for name, value := range instances {
+		instanceSnapshot[name] = cloneAnyMap(value)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.projects, fake.instances = projectSnapshot, instanceSnapshot
+}
+
 func (fake *IncusServer) SetInstance(project, name string, instance map[string]any) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()

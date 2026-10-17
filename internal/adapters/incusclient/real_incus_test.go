@@ -284,7 +284,7 @@ func TestRealIncusEffectiveConfigAndPowerWriterContract(t *testing.T) {
 		config["user.subyard.managed"] = "true"
 		config["user.subyard.name"] = "default"
 		config["user.subyard.bridge"] = "incusbr0"
-		config["user.subyard.desired_power"] = application.PowerStopped
+		config["user.subyard.desired_power"] = string(domain.PowerStopped)
 		config["user.subyard.initialized"] = "true"
 		config[unownedKey] = "keep"
 	})
@@ -295,10 +295,10 @@ func TestRealIncusEffectiveConfigAndPowerWriterContract(t *testing.T) {
 	if _, err := power.Ensure(ctx, yard); err != nil {
 		t.Fatal(err)
 	}
-	if err := power.Set(ctx, yard, application.PowerStopped, false); err != nil {
+	if err := power.Set(ctx, yard, domain.PowerStopped, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := power.Commit(ctx, yard, application.PowerRunning); err != nil {
+	if err := power.Commit(ctx, yard, domain.PowerRunning); err != nil {
 		t.Fatal(err)
 	}
 	info, err = client.Instance(ctx, project, instanceName)

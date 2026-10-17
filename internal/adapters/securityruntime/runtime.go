@@ -111,10 +111,16 @@ func (runtime Runtime) staticFindings() []finding {
 		for _, value := range strings.Fields(values["YARD_MOUNTS"]) {
 			result = append(result, mountFindings(entry.Name()+" YARD_MOUNTS", value)...)
 		}
-		for _, value := range strings.Fields(values["ENV_MOUNTS"]) {
-			if hostSocket(value) {
+		for _, value := range strings.Fields(values["CACHES"]) {
+			if err := domain.ValidateProjectCachePath(value); err != nil {
 				result = append(result, finding{"fail",
-					fmt.Sprintf("%s ENV_MOUNTS exposes a host-control socket: %s", entry.Name(), value)})
+					fmt.Sprintf("%s: %s", entry.Name(), err)})
+			}
+		}
+		for _, value := range strings.Fields(values["ENV_MOUNTS"]) {
+			if err := domain.ValidateProjectEnvironmentMount(value); err != nil {
+				result = append(result, finding{"fail",
+					fmt.Sprintf("%s: %s", entry.Name(), err)})
 			}
 		}
 	}

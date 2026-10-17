@@ -6,14 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 . "$ROOT/tests/helpers/profile-controller.sh"
 setup_profile_controller "$ROOT" config/profiles/android/tests/e2e/acceptance.sh
 assert_controller_missing_slot
-for lane in full diagnostics recovery viewer viewer-native-debug sdk-images memory-lease; do
+for lane in full diagnostics projects recovery viewer viewer-native-debug sdk-images memory-lease; do
   arguments=(--slot 7)
   [[ "$lane" = full ]] || arguments+=(--lane "$lane")
   bash "$tmp/$controller" "${arguments[@]}" > "$tmp/calls"
   grep -Fxq -- "--slot 7 --type android-test --vm-count 1 --purpose android-pool-runtime --vm 1 -- bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane $lane" "$tmp/calls"
   assert_controller_failure "${arguments[@]}"
 done
-for arguments in '--slot' '--slot 0' '--slot 7 --lane' '--slot 7 --lane unknown' '--slot 7 --unknown'; do
+for arguments in '--slot' '--slot 0' '--slot 7 --lane' '--slot 7 --lane unknown' '--slot 7 --unknown' '--slot 7 --lane projects extra'; do
   read -r -a argv <<< "$arguments"
   assert_controller_rejects 2 "${argv[@]}"
 done

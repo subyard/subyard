@@ -377,7 +377,17 @@ func (ingress *resourceIngress) probeReady(ctx context.Context, runner *resource
 		configureResourceProcess(probe)
 		probe.Dir = runner.cli.options.WorkingDir
 		probe.Env = runner.cli.resourceEnvironment(runner.loaded, runner.definition, "", "", "")
+		release := func() {}
+		if runner.effect != domain.ActionSession {
+			var err error
+			release, err = runner.cli.resourceOwnerBarrier(probeCtx, runner.loaded, probe)
+			if err != nil {
+				cancel()
+				return err
+			}
+		}
 		probeErr := probe.Run()
+		release()
 		cancel()
 		if probeErr == nil {
 			return nil
@@ -404,6 +414,13 @@ func (ingress *resourceIngress) rollback(runner *resourceApplyRunner, operationI
 	command.Dir = runner.cli.options.WorkingDir
 	command.Env = runner.cli.resourceApplyEnvironment(runner.loaded, runner.definition, runner.localAction,
 		operationID, runner.effect)
+	if runner.effect != domain.ActionSession {
+		release, err := runner.cli.resourceOwnerBarrier(ctx, runner.loaded, command)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	command.Stdout = runner.cli.options.Stdout
 	command.Stderr = runner.cli.options.Stderr
 	if err := command.Run(); err != nil {

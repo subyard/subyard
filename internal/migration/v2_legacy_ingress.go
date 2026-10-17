@@ -12,7 +12,6 @@ import (
 var ErrV1ImportStaticDrift = errors.New("legacy v1 import history changed")
 
 type V1ImportSource interface {
-	InspectFresh(context.Context, V1ImportRuntimePair) (V1Import, bool, error)
 	InspectBound(context.Context, V1ImportRuntimePair) (V1Import, error)
 	InspectBoundStatic(context.Context, V1ImportRuntimePair) (V1Import, error)
 }
@@ -43,11 +42,10 @@ func (ingress *V2LegacyIngress) Inspect(
 		return releasetransition.V2IngressInspection{}, errors.New("legacy v1 ingress is unavailable")
 	}
 	if binding == nil {
-		result, found, err := ingress.reader.InspectFresh(ctx, ingress.fresh)
-		if err != nil || !found {
-			return releasetransition.V2IngressInspection{}, err
+		if publishedV1CurrentRuntime(ingress.fresh.Current) {
+			return releasetransition.V2IngressInspection{}, errors.New("sources before v0.11.0 are unsupported; run verified current tooling's uninstall --full, confirm deletion of owned data, then perform a separate clean installation")
 		}
-		return v1ImportInspection(result, result.FactDigest, result.StaticDigest), nil
+		return releasetransition.V2IngressInspection{}, nil
 	}
 	step, err := legacyV1BoundStep(*binding)
 	if err != nil {

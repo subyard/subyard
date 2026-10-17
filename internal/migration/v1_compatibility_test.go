@@ -22,7 +22,7 @@ const (
 	testPublishedV1042Runtime      = "releases/0.4.2-17608894ab09"
 )
 
-func TestV1MutationGateIsReadOnlyAndRoutesPublishedRecoveryToUpdate(t *testing.T) {
+func TestV1MutationGateRefusesFreshRecoveryWithoutMutation(t *testing.T) {
 	options, journalPath, _ := publishedV1CompatibilityFixture(t, "0.4.1")
 	before, err := os.ReadFile(journalPath)
 	if err != nil {
@@ -32,9 +32,9 @@ func TestV1MutationGateIsReadOnlyAndRoutesPublishedRecoveryToUpdate(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome == nil || outcome.Status != "recovering" ||
-		outcome.Code != "recovery-pending" || outcome.Transaction == nil ||
-		outcome.Retry != "run yard update" {
+	if outcome == nil || outcome.Status != "operator-action-required" ||
+		outcome.Code != "precondition-blocked" || outcome.Transaction == nil ||
+		!strings.Contains(outcome.Retry, "uninstall --full") {
 		t.Fatalf("published v1 mutation gate = %#v", outcome)
 	}
 	after, err := os.ReadFile(journalPath)

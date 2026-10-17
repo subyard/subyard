@@ -349,6 +349,15 @@ verifies the SDK's owned `/srv` backing and volume, instance, project and state 
 preserving the reusable yard definition and an unrelated user file. It needs no Gradle download or emulator runtime.
 See [Android acceptance](android.md#release-acceptance).
 
+For L2 isolation and project lifecycle changes, use `--lane projects` with
+`config/profiles/android/tests/e2e/acceptance.sh --slot N`. This lane performs fresh yard setup,
+namespace preflight, broker readiness and public API 35/36 image preparation before running the
+existing two-project fixture. It checks parallel Gradle/APK builds, read-only SDK access,
+private project caches, absence of direct devices and display sockets, broker device/lease
+lifecycle, project rebuild and migration from the reconstructed legacy mount/device shape.
+It exits through normal project and yard cleanup before phone/viewer setup. Physical viewer
+and recovery coverage remains in the diagnostics lane.
+
 The optional `--lane diagnostics` retains the broader phone/API 36, native/remote viewers,
 recovery, APK installation, clean userdata, lease expiry and sequential API 35 phone/API 36
 tablet checks, including the two-project Gradle builds and legacy rebuild fixture. On the
@@ -610,7 +619,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | marked source-install/migration fixture | targeted diagnostic; required in full |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.8.0/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.11.0 upgrade, incompatible rollback refusal and authentic v0.21.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `release-smoke` | VM1, pinned v0.14.0 installer, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton targeted checkpoint/reboot evidence; also required in smoke and full |
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
@@ -941,7 +950,21 @@ Standalone `reboot-verify` prepares its own power reconciler through the same ma
 published-release upgrade fixture used by `power-systemd`. It works after the last test yard
 was torn down, when the power service may be absent. This adds release installation and migration
 to the two reboots; the fixture restores the previous host runtime afterward. It does not run the
-additional systemd parser fixtures from `power-systemd`.
+additional systemd parser fixtures from `power-systemd`. The exact published v0.11.0,
+the inclusive supported migration floor, remains the genuine legacy-upgrade baseline.
+After its verified update, explicit `yard init --continue-legacy --yes` establishes only
+bounded normal-reconcile authority; repeated plain init and both reboots must retain that
+grant without adding installation ownership. Its incompatible
+rollback must refuse without changing release links, protected V2 checkpoint/history,
+ledger, journal, native identity or grant, including retained V1 evidence or its absence.
+Fresh sources below v0.11.0 remain refused; accepted completed V2 history and recovery
+retain their separate supported contracts.
+The guest verifies checksum-pinned official v0.21.0 assets and compiled activation
+capabilities before creating the cold legacy baseline. Public update checks must identify
+the exact unblocked target before installing v0.21.0, restoring the candidate, then
+performing a real compatible rollback and candidate roll-forward. Both passages preserve
+the limited grant, native policy and absence of installation ownership; final normal init
+and full-removal refusal verify that the grant never acquires destructive authority.
 
 List or run one lane:
 
@@ -1253,6 +1276,13 @@ a delayed sink tick longer than one minute, guest reboot and repeated verificati
 ```sh
 dev/e2e/p0-acceptance.sh --slot "$slot" --lane full-uninstall
 ```
+
+Its released-source case installs checksum-pinned actual v0.10.0, lets that runtime create a yard,
+refuses upgrade without changing protected config or links, stages current cleanup tooling without
+activation, refuses an unrelated project profile, and interrupts full removal at config deletion.
+A fresh retained recovery process finishes the same plan; a separate clean installation does not
+reuse old configuration. Unproven legacy host namespaces and shared infrastructure remain explicitly
+preserved. The same lane retains its modern ownership, foreign-control and reboot checks.
 
 Its marker-owned fixture runs lifecycle commands as an ordinary isolated owner, with root helpers
 confined to the leased VM. It includes direct/custom installer-only and bootstrap-only cases,

@@ -175,6 +175,9 @@ func TestRetainedRuntimeBindingRejectsFalseCapabilitiesAndBindsReplacement(t *te
 	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, map[string]bool{"another-owner": true}); err == nil {
 		t.Fatal("descriptor accepted missing compiled activation owner")
 	}
+	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, map[string]bool{}); err == nil {
+		t.Fatal("unmarked retained runtime acquired a compiled activation owner")
+	}
 	first, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, map[string]bool{"sample-runtime": true})
 	if err != nil {
 		t.Fatal(err)

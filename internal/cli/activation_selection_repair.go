@@ -287,36 +287,7 @@ func (cli *CLI) selectionRepairContent(yard, path string, content []byte, reques
 func (cli *CLI) checkSelectionReduction(before, after config.Loaded, name string) error {
 	previous, next := before.Integrations.Effective, after.Integrations.Effective
 	if name == "ENVIRONMENT_PROFILES" {
-		definitions, err := profile.Load(cli.options.RepositoryRoot)
-		if err != nil {
-			return err
-		}
-		selection := func(loaded config.Loaded) ([]string, error) {
-			roots, err := cli.currentProfileSelection(loaded, definitions)
-			if err != nil {
-				return nil, err
-			}
-			provision, err := cli.prepareProvisionExecution(loaded, nil, nil)
-			if err != nil {
-				return nil, err
-			}
-			// Explicit empty roots still run eligible legacy provision hooks.
-			// Keep descriptor-only roots in the same affected-yard guard.
-			for _, id := range provision.profiles {
-				if !slices.Contains(roots, id) {
-					roots = append(roots, id)
-				}
-			}
-			return roots, nil
-		}
-		previous, err = selection(before)
-		if err != nil {
-			return err
-		}
-		next, err = selection(after)
-		if err != nil {
-			return err
-		}
+		previous, next = before.EnvironmentProfiles.Effective, after.EnvironmentProfiles.Effective
 	}
 	for _, id := range next {
 		if !slices.Contains(previous, id) {

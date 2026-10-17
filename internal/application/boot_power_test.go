@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
@@ -62,12 +63,12 @@ func allowBootNetworkPolicy(_ context.Context, _ yardnetwork.Yard, start func() 
 
 func ensureBootNetworkLock() error { return nil }
 
-func managedPowerInstance(project, name, status, desired string) ports.InstanceInfo {
+func managedPowerInstance(project, name, status string, desired domain.DesiredPower) ports.InstanceInfo {
 	return ports.InstanceInfo{
 		Project: project, Name: name, Status: status,
 		Config: map[string]string{
 			"user.subyard.managed": "true", "user.subyard.initialized": "true",
-			"user.subyard.desired_power": desired, "user.subyard.bridge": "incusbr0",
+			"user.subyard.desired_power": string(desired), "user.subyard.bridge": "incusbr0",
 			"user.subyard.name": name, "boot.autostart": "false",
 		},
 	}
@@ -100,7 +101,7 @@ func TestBootPowerMetadataPhaseMatrix(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			instance := managedPowerInstance("p", "yard", "Stopped", PowerStopped)
+			instance := managedPowerInstance("p", "yard", "Stopped", domain.PowerStopped)
 			if test.key != "" {
 				if test.delete {
 					delete(instance.Config, test.key)
@@ -119,9 +120,9 @@ func TestBootPowerMetadataPhaseMatrix(t *testing.T) {
 
 func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/already": managedPowerInstance("p", "already", "Running", PowerRunning),
-		"p/start":   managedPowerInstance("p", "start", "Stopped", PowerRunning),
-		"p/stop":    managedPowerInstance("p", "stop", "Running", PowerStopped),
+		"p/already": managedPowerInstance("p", "already", "Running", domain.PowerRunning),
+		"p/start":   managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
+		"p/stop":    managedPowerInstance("p", "stop", "Running", domain.PowerStopped),
 	}}
 	var checks [][]string
 	policyChecks := 0
@@ -168,8 +169,8 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 
 func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/running": managedPowerInstance("p", "running", "Running", PowerRunning),
-		"p/start":   managedPowerInstance("p", "start", "Stopped", PowerRunning),
+		"p/running": managedPowerInstance("p", "running", "Running", domain.PowerRunning),
+		"p/start":   managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
 	}}
 	locked, cleanups, reconciles := false, 0, 0
 	reconciler := BootPowerReconciler{
@@ -229,8 +230,8 @@ func TestBootRunningPolicyFailureStopsOnlyItsOwnedTarget(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-				"p/priority": managedPowerInstance("p", "priority", "Running", PowerRunning),
-				"p/ordinary": managedPowerInstance("p", "ordinary", "Running", PowerRunning),
+				"p/priority": managedPowerInstance("p", "priority", "Running", domain.PowerRunning),
+				"p/ordinary": managedPowerInstance("p", "ordinary", "Running", domain.PowerRunning),
 			}}
 			failure := errors.New("scheduling placement cannot preserve host ceilings")
 			if cancelled {
@@ -260,7 +261,7 @@ func TestBootRunningPolicyFailureStopsOnlyItsOwnedTarget(t *testing.T) {
 
 func TestBootPowerReconcilerPolicyFailurePreventsStart(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/yard": managedPowerInstance("p", "yard", "Stopped", PowerRunning),
+		"p/yard": managedPowerInstance("p", "yard", "Stopped", domain.PowerRunning),
 	}}
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
@@ -282,7 +283,7 @@ func TestBootPowerReconcilerPolicyFailurePreventsStart(t *testing.T) {
 }
 
 func TestBootPowerReconcilerRejectsInvalidMetadataBeforeMutation(t *testing.T) {
-	invalid := managedPowerInstance("p", "yard", "Stopped", PowerRunning)
+	invalid := managedPowerInstance("p", "yard", "Stopped", domain.PowerRunning)
 	invalid.Config["boot.autostart"] = "true"
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": invalid}}
 	reconciler := BootPowerReconciler{
@@ -302,8 +303,8 @@ func TestBootPowerReconcilerRejectsInvalidMetadataBeforeMutation(t *testing.T) {
 
 func TestBootPowerReconcilerStopsRunningYardsAfterGuardFailure(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/first":  managedPowerInstance("p", "first", "Running", PowerRunning),
-		"p/second": managedPowerInstance("p", "second", "Stopped", PowerRunning),
+		"p/first":  managedPowerInstance("p", "first", "Running", domain.PowerRunning),
+		"p/second": managedPowerInstance("p", "second", "Stopped", domain.PowerRunning),
 	}}
 	checks := 0
 	reconciler := BootPowerReconciler{
@@ -334,7 +335,7 @@ func TestBootPowerReconcilerStopsRunningYardsAfterGuardFailure(t *testing.T) {
 
 func TestBootPowerReconcilerReReadsIntentBeforeStart(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		"p/yard": managedPowerInstance("p", "yard", "Stopped", PowerRunning),
+		"p/yard": managedPowerInstance("p", "yard", "Stopped", domain.PowerRunning),
 	}}
 	reconciler := BootPowerReconciler{
 		Inventory: fake, Instances: fake, Power: fake,
@@ -342,7 +343,7 @@ func TestBootPowerReconcilerReReadsIntentBeforeStart(t *testing.T) {
 		EnsureNetworkLock: ensureBootNetworkLock,
 		Network: networkGuardFunc(func(context.Context, []string) error {
 			instance := fake.Instances["p/yard"]
-			instance.Config["user.subyard.desired_power"] = PowerStopped
+			instance.Config["user.subyard.desired_power"] = string(domain.PowerStopped)
 			fake.Instances["p/yard"] = instance
 			return nil
 		}),
@@ -365,7 +366,7 @@ func TestBootPowerReconcilerHasManaged(t *testing.T) {
 	if err != nil || managed {
 		t.Fatalf("unexpected unmanaged result: %v, %v", managed, err)
 	}
-	fake.Instances["p/yard"] = managedPowerInstance("p", "yard", "Stopped", PowerStopped)
+	fake.Instances["p/yard"] = managedPowerInstance("p", "yard", "Stopped", domain.PowerStopped)
 	managed, err = reconciler.HasManaged(context.Background())
 	if err != nil || !managed {
 		t.Fatalf("unexpected managed result: %v, %v", managed, err)
@@ -373,7 +374,7 @@ func TestBootPowerReconcilerHasManaged(t *testing.T) {
 }
 
 func TestBootPowerReconcilerWaitsForIncusInventory(t *testing.T) {
-	instance := managedPowerInstance("p", "yard", "Stopped", PowerRunning)
+	instance := managedPowerInstance("p", "yard", "Stopped", domain.PowerRunning)
 	attempts := 0
 	clock := &advancingClock{now: time.Unix(1_000, 0)}
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/yard": instance}}

@@ -316,10 +316,14 @@ winning and overridden sources. Component health is inspected only for selected 
 the top-level `observed` field describes yard convergence (`observed_scope: "yard"`). A ready
 yard does not establish that an unselected component is running. `profile list [--json]` lists
 all shipped environment profiles, including provision hooks, resources and role-forbidden
-profiles. Its selection reasons distinguish implicit provision defaults, explicit empty lists
-and inherited Git selection from local overrides. An explicit empty profile list
-still uses the established provision fallback for eligible hooks without a profile
-descriptor; these inventory entries report `legacy-provision-fallback`.
+profiles. Its selection reasons distinguish declared defaults, explicit empty lists
+and inherited Git selection from local overrides. When `ENVIRONMENT_PROFILES` is absent,
+only eligible profiles declaring this yard in `default_yards` are selected. An explicit
+empty list selects no profile, provision hook, resource or extras. A profile without a
+descriptor must be selected explicitly. The same resolved effective set governs provision,
+extras, resources and project target admission; project settings cannot silently expand it.
+Activate a profile before importing or starting a project that targets it. Existing projects
+can still be stopped or removed after their profile is deselected.
 
 The shipped `test-vms` role has `ALLOWS_CODING_TOOLS=false`. Its inherited tools are
 suppressed, explicit nonempty selections fail, and agent-only utilities such as
@@ -801,11 +805,18 @@ Retired shipped integrations are normalized only by their compatibility declarat
 rewriting their source files; other choices and explicit empty selections retain their authority.
 OpenLIT is not selected as a replacement automatically. See [retirement](openlit.md#predecessor-retirement).
 
+## Full uninstall
+
 `yard teardown` and its `uninstall` alias offer a scope menu in an interactive terminal.
 The default removes only the selected yard. The second option removes this installation and
 all its local yards on the owner host. Scope selection precedes the read-only inventory and
 one final `Proceed? [y/N]` confirmation. `--full` selects the full scope explicitly;
 `--yes` and `ASSUME_YES=1` never select it. Remote selectors cannot perform full removal.
+
+Full uninstall is available without running or completing migrations, for every source version.
+Pending or invalid V1/V2 migration metadata does not gate full removal. Its own ownership,
+cleanup inventory, session, stale-plan and confirmation checks still apply. Selected-yard
+teardown retains its ordinary release admission.
 
 ```sh
 yard teardown --full
@@ -824,6 +835,14 @@ SSH and user-service state remain preserved. PATH entries serving other commands
 Unknown ownership or changed native identities cause a nonzero refusal; a captured directory
 name alone does not establish ownership of all its contents.
 
+Legacy installations may lack creation receipts for host directories. Exact native association
+can establish a registered legacy yard's bounded project/instance/volume scope; unrelated native
+resources or conflicting ownership refuse that scope. Unrecorded legacy host namespaces, including
+backups, sessions and host mounts, and shared infrastructure without installation ownership remain
+preserved and are listed in the plan and final result. Full removal does not claim those paths
+were deleted. Modern receipt-owned namespaces retain their existing deletion and stale-plan guards.
+
+
 After consent, full removal saves the exact plan and a private recovery runtime beside the data
 root at `<data-root>.uninstall`. Producers stop synchronously before their data; yard resources
 and data precede runtime removal. If interrupted, retain that directory and run the exact recovery
@@ -840,3 +859,43 @@ coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-lo
 `/run/lock/subyard-network` remain: removing an active lock inode would let queued operations
 bypass serialization. Queued mutations and late audit/cache writers recheck their original
 installation generation before writing.
+
+### Continuing an existing legacy yard
+
+After upgrading through the supported release transition, a legacy project may
+lack installation creation ownership. Use the installed local launcher to run
+`yard init --continue-legacy` once. The read-only plan requires protected owner
+configuration, completed verified release history, an existing native instance
+UUID and the already-converged dedicated project policy. Review the exact plan;
+`--yes` accepts it only when `--continue-legacy` is explicitly selected.
+An implicit default yard may use its existing protected mode0600 host
+configuration when the local yard record is absent. Assessment binds that file
+and the absence of a yard record, then rechecks both after confirmation.
+
+The private continuation record permits normal reconciliation of that same
+owner and instance. Later plain `yard init` reuses it after checking the identity.
+The grant also binds the existing project, default-profile and instance security
+policy, including local devices, ID mappings, mount sources and permissions.
+Continuation supports the canonical non-nested unprivileged container setup;
+unknown instance configuration, local NIC overrides and additional devices are
+refused. Exact managed AppArmor compatibility and static-preview publication
+changes remain allowed, alongside normal power and runtime state changes.
+Shipped owners may declare a paired disabled-backend publication contract.
+Its schema and complete protected settings remain bound; only a validated
+release digest and an explicitly compatible older serialization may differ.
+An older disabled backend's missing budget fields do not prove historical
+budget enforcement. For legacy continuation admission, a declared source identity
+must equal the protected yard identity, even when explicitly supplied. This
+constraint does not change the backend's other supported source forms.
+Unknown permissions, unsupported profile configuration and later policy changes
+are refused, including on a new command or a repeated opt-in. Any pending native
+network-policy changes require their separate assessed operation before granting
+continuation. Runtime power, observed addresses and release links are not pinned.
+
+It grants no reset, project creation or full removal ownership; full removal
+refuses while this continuation-only authority remains. It cannot be combined
+with `--configs`, `--reset` or `--profile`. Unknown resources, conflicting or
+partial ownership, unsafe records and changed identities are refused without
+adoption. Configuration roots may be customized, but temporary scalar overrides
+must not redirect the persisted owner context. Do not add installation markers
+manually. Supported release rollback and roll-forward retain this narrow grant.

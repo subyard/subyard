@@ -130,48 +130,26 @@ func activationRepairHistory(t *testing.T, root, home string) map[string]string 
 	return state
 }
 
-func TestActivationProfileSelectionRepairRejectsLegacyFallbackExpansion(t *testing.T) {
-	assets := activationProfileRepairAssets()
-	for _, arguments := range [][]string{
-		{"config", "reduce-selection", "ENVIRONMENT_PROFILES", "", "--scope", "host", "--local", "--yes"},
-		{"config", "set", "ENVIRONMENT_PROFILES", "", "--scope", "host", "--yes"},
-		{"profile", "disable", "fixture-selected", "--yes"},
-	} {
-		t.Run(strings.Join(arguments[:2], "-"), func(t *testing.T) {
-			root, configHome, path, environment := activationSelectionRepairFixture(t, assets)
-			before := []byte("# preserve unrelated records\nENVIRONMENT_PROFILES='fixture-selected'\nSSH_PORT=2398\n")
-			testkit.WriteFile(t, path, before, 0o640)
-			journalPath := filepath.Join(configHome, "release-transition/v2/journal.json")
-			journal := mustReadConfigFixture(t, journalPath)
-			program, err := New(Options{RepositoryRoot: root, Environment: environment})
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := program.loadContext("default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			selected, err := program.prepareProvisionExecution(loaded, nil, nil)
-			if err != nil || !slices.Equal(selected.profiles, []string{"fixture-selected"}) {
-				t.Fatalf("fixture selection is not isolated: %#v %v", selected, err)
-			}
-			loaded.Environment["ENVIRONMENT_PROFILES"] = ""
-			fallback, err := program.prepareProvisionExecution(loaded, nil, nil)
-			if err != nil || !slices.Contains(fallback.profiles, "fixture-legacy") || slices.Contains(fallback.profiles, "fixture-dedicated") {
-				t.Fatalf("fixture fallback or dedicated role guard missing: %#v %v", fallback, err)
-			}
-			var stdout, stderr bytes.Buffer
-			code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: arguments, Stdout: &stdout, Stderr: &stderr})
-			if code == 0 {
-				t.Fatalf("empty profile selection accepted despite expanding legacy provision fallback: %s %s", stdout.String(), stderr.String())
-			}
-			if !bytes.Equal(before, mustReadConfigFixture(t, path)) || !bytes.Equal(journal, mustReadConfigFixture(t, journalPath)) {
-				t.Fatal("rejected profile expansion changed persistent selection or activation history")
-			}
-			if _, err := os.Lstat(filepath.Join(configHome, "yards/default/config.env")); !os.IsNotExist(err) {
-				t.Fatal("rejected profile expansion created a yard selection")
-			}
-		})
+func TestActivationProfileSelectionRepairEmptySelectionDoesNotExpand(t *testing.T) {
+	root, _, _, environment := activationSelectionRepairFixture(t, activationProfileRepairAssets())
+	program, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := config.WithEnvironmentProfiles(before, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provision, err := program.prepareProvisionExecution(after, nil, nil)
+	if err != nil || len(provision.profiles) != 0 {
+		t.Fatalf("empty selection provisions hooks: %#v %v", provision, err)
+	}
+	if err := program.checkSelectionReduction(before, after, "ENVIRONMENT_PROFILES"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -187,10 +165,14 @@ func TestActivationProfileSelectionRepairRejectsNamedDescriptorOnlyExpansion(t *
 	}
 	before.Context.YardName = "neighbor"
 	before.Environment = maps.Clone(before.Environment)
-	delete(before.Environment, "ENVIRONMENT_PROFILES")
-	after := before
-	after.Environment = maps.Clone(before.Environment)
-	after.Environment["ENVIRONMENT_PROFILES"] = "fixture-neighbor"
+	before, err = config.WithEnvironmentProfiles(before, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := config.WithEnvironmentProfiles(before, []string{"fixture-neighbor"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	provision, err := program.prepareProvisionExecution(after, nil, nil)
 	if err != nil || len(provision.profiles) != 0 {
 		t.Fatalf("fixture is not descriptor-only: %#v %v", provision, err)
@@ -607,6 +589,7 @@ func TestCompletedSelectionAuthoringPreservesHistoryAndDefersActivation(t *testi
 		{"config", "set", "CODING_TOOL_INTEGRATIONS", "", "--scope", "yard", "--local"},
 		{"integration", "disable", "codex"},
 		{"config", "set", "ENVIRONMENT_PROFILES", "fixture-neighbor", "--scope", "yard", "--local"},
+		{"config", "set", "ENVIRONMENT_PROFILES", "", "--scope", "yard", "--local"},
 		{"profile", "disable", "fixture-selected"},
 	} {
 		t.Run(strings.Join(arguments[:2], "-")+arguments[2], func(t *testing.T) {
@@ -691,6 +674,9 @@ func TestCompletedSelectionAuthoringPreservesHistoryAndDefersActivation(t *testi
 			desired := ""
 			if name == "ENVIRONMENT_PROFILES" {
 				desired = "fixture-neighbor"
+				if arguments[0] == "config" {
+					desired = arguments[3]
+				}
 			} else if arguments[0] == "integration" {
 				desired = "claude"
 			}
@@ -839,7 +825,7 @@ func TestCompletedScalarAuthoringUsesPreparedLocalSourceBoundary(t *testing.T) {
 }
 
 func TestCompletedSelectionAuthoringRejectsExpansionAndStaleAuthority(t *testing.T) {
-	for _, scenario := range []string{"expansion", "legacy fallback", "temporary", "permissions", "other activation", "unfinished", "source after consent", "history after consent", "checkpoint after consent", "tooling after consent"} {
+	for _, scenario := range []string{"expansion", "profile expansion", "temporary", "permissions", "other activation", "unfinished", "source after consent", "history after consent", "checkpoint after consent", "tooling after consent"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, _, home := completedSelectionAuthoringFixture(t)
 			path := filepath.Join(home, "yards/default/config.env")
@@ -857,8 +843,9 @@ func TestCompletedSelectionAuthoringRejectsExpansionAndStaleAuthority(t *testing
 			switch scenario {
 			case "expansion":
 				options.Arguments[3] = "codex claude"
-			case "legacy fallback":
+			case "profile expansion":
 				options.Arguments[2] = "ENVIRONMENT_PROFILES"
+				options.Arguments[3] = "fixture-selected fixture-neighbor"
 			case "temporary":
 				options.Environment = append(slices.Clone(options.Environment), "CODING_TOOL_INTEGRATIONS=codex")
 			case "permissions":

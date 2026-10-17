@@ -74,15 +74,15 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 						t.Fatalf("forbidden entry missing reason: %#v", entry)
 					}
 					if selection == "empty" {
-						if entry.Requested || entry.Effective != (entry.Name == "legacy") {
-							t.Fatalf("explicit empty provision fallback differs from inventory: %#v", entry)
+						if entry.Requested || entry.Effective {
+							t.Fatalf("explicit empty selection differs from inventory: %#v", entry)
 						}
-						if entry.Name == "legacy" && entry.Reason != "legacy-provision-fallback" {
-							t.Fatalf("legacy fallback unexplained: %#v", entry)
+						if entry.Name == "legacy" && entry.Reason != "excluded-by-replace-list" {
+							t.Fatalf("empty selection unexplained: %#v", entry)
 						}
 					}
-					if selection == "absent" && entry.Name == "legacy" && (!entry.Effective || entry.Reason != "implicit-provision-default") {
-						t.Fatalf("implicit default unexplained: %#v", entry)
+					if selection == "absent" && entry.Name == "legacy" && (entry.Effective || entry.Reason != "selection-absent") {
+						t.Fatalf("absent selection unexplained: %#v", entry)
 					}
 				}
 				if selection != "absent" && (list.Source.Path != filepath.Join(home, "config.env") || len(list.Overridden) == 0) {
@@ -98,11 +98,11 @@ func TestProfileListCLIIncludesImplicitEmptyAndForbiddenCatalogEntries(t *testin
 						t.Fatal(err)
 					}
 					execution, err := fresh.prepareProvisionExecution(loaded, nil, nil)
-					if err != nil || len(execution.profiles) != 1 || execution.profiles[0] != "legacy" {
-						t.Fatalf("legacy fallback execution differs: %#v %v", execution, err)
+					if err != nil || len(execution.profiles) != 0 {
+						t.Fatalf("empty selection execution differs: %#v %v", execution, err)
 					}
-					if !strings.Contains(loaded.EnvironmentProfileSelectionExplanation(), "legacy provision fallback") {
-						t.Fatal("empty-selection plan hides the legacy fallback")
+					if !strings.Contains(loaded.EnvironmentProfileSelectionExplanation(), "effective []") {
+						t.Fatal("empty-selection plan does not explain the effective selection")
 					}
 				}
 			}

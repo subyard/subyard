@@ -99,13 +99,10 @@ func (loaded Loaded) IntegrationSelectionExplanation() string {
 }
 
 func (loaded Loaded) EnvironmentProfileSelectionExplanation() string {
-	value, present := loaded.Environment["ENVIRONMENT_PROFILES"]
 	source, _, group := ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
-	if !present {
-		return fmt.Sprintf("yard %s: environment profiles use implicit shipped provision defaults", loaded.Context.YardName)
+	if !loaded.EnvironmentProfiles.Present {
+		return fmt.Sprintf("yard %s: environment profiles selection absent; effective declared defaults [%s]", loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Effective, " "))
 	}
-	if value == "" {
-		return fmt.Sprintf("yard %s: requested environment profiles [], from %s (%s scope, %s:%d); eligible descriptor-less provision hooks retain the legacy provision fallback", loaded.Context.YardName, group, source.Scope, source.Path, source.Line)
-	}
-	return fmt.Sprintf("yard %s: requested environment profiles [%s], from %s (%s scope, %s:%d)", loaded.Context.YardName, value, group, source.Scope, source.Path, source.Line)
+	return fmt.Sprintf("yard %s: requested environment profiles [%s], effective [%s], from %s (%s scope, %s:%d)",
+		loaded.Context.YardName, strings.Join(loaded.EnvironmentProfiles.Requested, " "), strings.Join(loaded.EnvironmentProfiles.Effective, " "), group, source.Scope, source.Path, source.Line)
 }

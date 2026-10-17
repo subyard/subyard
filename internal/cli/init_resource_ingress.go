@@ -255,9 +255,19 @@ func (plan *orphanIngressPlan) apply(ctx context.Context, cli *CLI, loaded confi
 			configureResourceProcess(command)
 			command.Dir = cli.options.WorkingDir
 			command.Env = cli.resourceApplyEnvironment(loaded, entry.definition, local, operationID, entry.shutdown.Effect)
+			release := func() {}
+			if entry.shutdown.Effect != domain.ActionSession {
+				var err error
+				release, err = cli.resourceOwnerBarrier(ctx, loaded, command)
+				if err != nil {
+					return err
+				}
+			}
 			command.Stdout = cli.options.Stdout
 			command.Stderr = cli.options.Stderr
-			if err := command.Run(); err != nil {
+			err := command.Run()
+			release()
+			if err != nil {
 				return fmt.Errorf("run deselected resource %s shutdown: %w", entry.definition.Command, err)
 			}
 		}

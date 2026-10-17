@@ -13,14 +13,15 @@ type TeardownInventoryReader interface {
 }
 
 type TeardownResource struct {
-	Kind     string                     `json:"kind"`
-	Name     string                     `json:"name"`
-	Pool     string                     `json:"pool,omitempty"`
-	Binding  string                     `json:"binding"`
-	Path     string                     `json:"path,omitempty"`
-	UsedBy   []string                   `json:"usedBy,omitempty"`
-	Bindings []string                   `json:"bindings,omitempty"`
-	Owner    *InstallationResourceOwner `json:"owner,omitempty"`
+	Kind          string                     `json:"kind"`
+	Name          string                     `json:"name"`
+	Pool          string                     `json:"pool,omitempty"`
+	Binding       string                     `json:"binding"`
+	SnapshotCount int                        `json:"snapshotCount,omitempty"`
+	Path          string                     `json:"path,omitempty"`
+	UsedBy        []string                   `json:"usedBy,omitempty"`
+	Bindings      []string                   `json:"bindings,omitempty"`
+	Owner         *InstallationResourceOwner `json:"owner,omitempty"`
 }
 
 type InstallationResourceOwner struct {

@@ -35,7 +35,7 @@ case "${SUBYARD_E2E_VM:-}" in
 esac
 [[ "$RUN_ID" =~ ^[0-9a-f]{8}$ ]] \
   || die 'the allocated run ID must be eight hexadecimal characters'
-for command in incus sed sudo tar; do
+for command in incus sed sudo tar jq sha256sum; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 INCUS_BINARY="$(command -v incus)"
@@ -240,7 +240,33 @@ sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$CANDIDATE_TEMPLATE" \
   > "$TEMPORARY/$CANDIDATE_UNIT"
 sed 's|@SUBYARD_POWER_RECONCILER@|/bin/true|g' "$OLD_TEMPLATE" \
   > "$TEMPORARY/$INSTALL_UNIT"
-tar -C "$ROOT" -czf "$TEMPORARY/product.tar.gz" scripts config/systemd
+if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  candidate_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
+  runtime_file="$(jq -er '.runtime_file' "$ROOT/.subyard-acceptance/candidate.json")"
+  [ "$runtime_file" = "${runtime_file##*/}" ] || die 'unsafe packaged runtime filename'
+  runtime_bundle="$ROOT/.subyard-acceptance/release/$runtime_file"
+  release_root="$ROOT/.subyard-acceptance/release"
+  [ -f "$runtime_bundle" ] && [ ! -L "$runtime_bundle" ] || die 'packaged runtime is unavailable'
+  [ "$(sha256sum "$runtime_bundle" | cut -d' ' -f1)" = "$(jq -er '.runtime_sha256' "$ROOT/.subyard-acceptance/candidate.json")" ] \
+    || die 'packaged runtime checksum changed'
+else
+  candidate_version=0.19.1-test.systemd255
+  release_root="$TEMPORARY/release"
+  bash "$ROOT/dev/package-engine.sh" --output-dir "$release_root" --version "$candidate_version" >/dev/null
+  runtime_bundle="$TEMPORARY/release/subyard-0.19.1-test.systemd255-linux-amd64.tar.gz"
+fi
+tar -C "$release_root" --exclude=.build.lock -czf "$TEMPORARY/product.tar.gz" .
+# This fixture proves unit parsing and boot execution with no managed yard.
+# Delegate installer protocols to the actual candidate; only boot is a no-op.
+cat > "$TEMPORARY/fixture-engine" <<FIXTURE_ENGINE
+#!/bin/sh
+set -eu
+case "\$#:\${1-}:\${2-}" in
+  1:_publication-contracts:|2:_network-lock:ensure) exec "$INSTALL_ROOT/runtime/current/bin/yard-engine" "\$@" ;;
+  1:_power-reconcile:) exit 0 ;;
+  *) exit 2 ;;
+esac
+FIXTURE_ENGINE
 bounded_incus file push "$TEMPORARY/$OLD_UNIT" \
   "$INSTANCE/run/systemd/system/$OLD_UNIT" --project "$PROJECT" >/dev/null
 bounded_incus file push "$TEMPORARY/$CANDIDATE_UNIT" \
@@ -251,11 +277,28 @@ bounded_incus file push "$TEMPORARY/product.tar.gz" \
   "$INSTANCE$INSTALL_ARCHIVE" \
   --project "$PROJECT" >/dev/null
 bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
-  install -d -m 0755 "$INSTALL_ROOT"
+  install -d -m 0755 "$INSTALL_ROOT/release"
 bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
-  tar -xzf "$INSTALL_ARCHIVE" -C "$INSTALL_ROOT"
+  tar -xzf "$INSTALL_ARCHIVE" -C "$INSTALL_ROOT/release"
+run_incus "$INCUS_IMAGE_TIMEOUT" exec "$INSTANCE" --project "$PROJECT" -- \
+  sh -ec 'command -v jq >/dev/null && exit 0; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y --no-install-recommends jq'
 bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
-  test -r "$INSTALL_ROOT/scripts/install-power-reconciler.sh" \
+  sh -ec 'getent group incus-admin >/dev/null || groupadd --system incus-admin'
+# Establish the publication reader through the ordinary clean installer. No
+# synthetic ledger or owner claim is created for this unit-only fixture.
+bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
+  SUBYARD_HOME="$INSTALL_ROOT/data" SUBYARD_CONFIG_HOME="$INSTALL_ROOT/config-home" \
+  SUBYARD_OPERATOR_HOME=/root SUBYARD_NO_AUDIT=1 \
+  YARD_RUNTIME_ROOT="$INSTALL_ROOT/runtime" YARD_RELEASE_CACHE="$INSTALL_ROOT/cache" \
+  YARD_RELEASE_BASE_URL="file://$INSTALL_ROOT/release" YARD_BIN_DIR="$INSTALL_ROOT/cli" \
+  YARD_SHELL_RC="$INSTALL_ROOT/fixture.rc" YARD_LOGIN_RC="$INSTALL_ROOT/fixture.login" \
+  bash "$INSTALL_ROOT/release/subyard-install.sh" --version "$candidate_version" --yes
+bounded_incus file push "$TEMPORARY/fixture-engine" \
+  "$INSTANCE$INSTALL_ROOT/fixture-engine" --project "$PROJECT" >/dev/null
+bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
+  chmod 0755 "$INSTALL_ROOT/fixture-engine"
+bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
+  test -r "$INSTALL_ROOT/runtime/current/scripts/install-power-reconciler.sh" \
   || die 'production installer was not unpacked into the systemd 255 fixture'
 
 set +e
@@ -291,7 +334,7 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
   SUBYARD_ENGINE_CONTEXT=1 \
   SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
   SUBYARD_OPERATOR_HOME=/root \
-  SUBYARD_CONFIG_DIR="$INSTALL_ROOT/config" \
+  SUBYARD_CONFIG_DIR="$INSTALL_ROOT/runtime/current/config" \
   SUBYARD_CONFIG_HOME="$INSTALL_ROOT/config-home" \
   SUBYARD_HOME="$INSTALL_ROOT/data" \
   STORAGE_PATH="$INSTALL_ROOT/data/incus/storage" \
@@ -308,11 +351,11 @@ bounded_incus exec "$INSTANCE" --project "$PROJECT" -- env \
   DEV_SUDO=1 \
   FORWARD_SSH_AGENT=1 \
   NESTED_E2E_VMS=0 \
-  SUBYARD_POWER_ENGINE_SOURCE=/bin/true \
+  SUBYARD_POWER_ENGINE_SOURCE="$INSTALL_ROOT/fixture-engine" \
   SUBYARD_POWER_LIBEXEC_DIR="$(dirname "$INSTALL_RECONCILER_PATH")" \
   SUBYARD_POWER_RECONCILER_PATH="$INSTALL_RECONCILER_PATH" \
   SUBYARD_POWER_UNIT_PATH="$INSTALL_UNIT_PATH" \
-  /bin/bash "$INSTALL_ROOT/scripts/install-power-reconciler.sh" --yes
+  /bin/bash "$INSTALL_ROOT/runtime/current/scripts/install-power-reconciler.sh" --yes
 manager_state="$(bounded_incus exec "$INSTANCE" --project "$PROJECT" -- \
   systemctl show "$INSTALL_UNIT" \
     --property=LoadState --property=NeedDaemonReload)"

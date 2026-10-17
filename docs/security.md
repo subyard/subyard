@@ -50,6 +50,42 @@ Subyard protects the owner-host boundary. It does not isolate credentials betwee
 processes operating as the same user inside one yard. Use separate yards when workloads must not
 share a delegated credential or other in-yard state.
 
+## Project environments
+
+A project targeting an active environment profile runs in its own L2 Docker container inside
+the yard. The runner uses the yard developer's non-root UID/GID and enables `no-new-privileges`;
+older containers need an explicit rebuild before they can start under this policy. Images must
+support that identity and provide any required toolchain and writable home. The profile's
+workspace and protected input file are mounted only into that project's container. The input
+file has mode `0600`, is read-only inside L2, and its contents do not enter environment variables
+or the public manifest.
+
+Writable `CACHES` entries must be clean directories below `/srv/cache/`. Existing paths with
+symlink ancestors or another UID/GID are refused before container creation or replacement.
+Installed dependencies such as `node_modules`, virtual environments and Docker runtime data
+remain private to the project. `ENV_MOUNTS` accepts only explicit read-only dependency/toolchain
+assets below `/srv/cache/`, `/opt/`, `/usr/local/` or `/usr/lib/`; resolved sources cannot escape
+those roots. Reserved project, runtime and credential paths cannot be replaced by these mounts.
+Declarations naming Docker, Incus or LXD control sockets are rejected through both mount paths.
+
+Choose the execution boundary to match the workload:
+
+- The fast lane uses project containers for cooperating builds and ordinary tests. Shared
+  dependency caches are disposable shared state. OpenClaw's supported wrappers and participating
+  images coordinate operations through the same lock; custom tools must use its `sy-cache`
+  helper or keep private caches. A writable shared cache is not protection from deliberate deletion.
+- Serialized operations use the owning cache lock or [resource lease](reference/resource-leases.md).
+  Destructive maintenance excludes installs, and stale leases cannot release or stop a successor.
+  SDK maintenance and emulator state remain under their owning profile's locks and lifecycle.
+- Tests requiring hostile-code, kernel, user-namespace or stronger network/credential isolation
+  use a separately leased [disposable VM](test-vms.md), with private state and explicit grants.
+
+L2 containers use the yard Docker bridge. There is no general L2-to-L1 egress firewall contract;
+the host NetworkManager guard and inter-yard network policy protect different boundaries.
+Session history is deliberately shared where configured and must not contain credential files.
+Neither a shared session store nor a cache is a secret store. These restrictions do not strengthen
+the same-user L1 credential boundary described above.
+
 Selected static staging and QA secrets belong in the [host-side encrypted credential ledger](keys.md).
 The ledger root stays outside repositories, `HOST_BASE`, and every managed yard mount. Its whole store
 is never mounted into a yard; only files authorized for the selected consumer context are

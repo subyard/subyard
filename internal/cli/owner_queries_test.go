@@ -57,7 +57,12 @@ func ownerQueryFixture(t *testing.T) (*rpcHandler, *testkit.ScriptedAdapter, *te
 
 func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T) {
 	handler, runner, _ := ownerQueryFixture(t)
-	handler.loaded.Environment["ENVIRONMENT_PROFILES"] = "selected resource-only"
+	initial := handler.loaded
+	var err error
+	handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"selected", "resource-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := handler.profileList(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -85,27 +90,26 @@ func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T
 			}
 		}
 	}
-	delete(handler.loaded.Environment, "ENVIRONMENT_PROFILES")
+	handler.loaded = initial
 	result, err = handler.profileList(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range result.Profiles {
-		if (entry.Name == "selected" || entry.Name == "legacy") && !entry.Selected {
+		if entry.Selected != (entry.Name == "selected") {
 			t.Fatalf("implicit selection=%#v", entry)
 		}
 	}
-	handler.loaded.Environment["ENVIRONMENT_PROFILES"] = ""
+	handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err = handler.profileList(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range result.Profiles {
-		if entry.Name == "legacy" {
-			if !entry.Selected || !entry.Effective || entry.Requested || entry.Reason != "legacy-provision-fallback" {
-				t.Fatalf("empty legacy fallback=%#v", entry)
-			}
-		} else if entry.Effective || entry.Requested {
+		if entry.Selected || entry.Effective || entry.Requested {
 			t.Fatalf("empty selection=%#v", entry)
 		}
 	}
@@ -117,7 +121,11 @@ func TestOwnerProfileQueriesPreserveCatalogSelectionAndStoppedState(t *testing.T
 
 func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
 	handler, runner, incus := ownerQueryFixture(t)
-	handler.loaded.Environment["ENVIRONMENT_PROFILES"] = "selected legacy dedicated resource-only"
+	var err error
+	handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"selected", "legacy", "resource-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	instance := incus.Instances["subyard/yard"]
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
@@ -425,11 +433,11 @@ func TestOwnerQueriesReloadPersistedSettingsWithoutChangingSession(t *testing.T)
 		}
 		switch profile.Name {
 		case "legacy":
-			if !profile.Selected || !profile.Effective || !profile.Eligible || profile.Reason != "legacy-provision-fallback" {
+			if profile.Selected || profile.Effective || !profile.Eligible || profile.Reason != "excluded-by-replace-list" {
 				t.Fatalf("fresh empty legacy fallback=%#v", profile)
 			}
 		case "dedicated":
-			if !profile.Selected || profile.Effective || profile.Eligible || profile.Reason != "role-restricted" || profile.Eligibility != "dedicated-role-required" {
+			if profile.Selected || profile.Effective || profile.Eligible || profile.Reason != "role-restricted" || profile.Eligibility != "dedicated-role-required" {
 				t.Fatalf("fresh empty role restriction=%#v", profile)
 			}
 		case "selected", "resource-only":
@@ -710,4 +718,44 @@ func TestYardRPCGoldenFrames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOwnerProfileInventoryExcludesRequestedLifecycleOnlyPackage(t *testing.T) {
+	handler, runner, _ := ownerQueryFixture(t)
+	root := handler.cli.options.RepositoryRoot
+	directory := filepath.Join(root, "config/profiles/cleanup")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(directory, "profile.json"), []byte(`{"schema_version":1,"lifecycle_only":true,"full_cleanup":"cleanup.sh"}`), 0644)
+	testkit.WriteFile(t, filepath.Join(directory, "cleanup.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	writeConfigCommandFile(t, filepath.Join(handler.loaded.Context.Paths.ConfigHome, "config.env"), "ENVIRONMENT_PROFILES=cleanup\n")
+	program, err := New(handler.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.loaded = loaded
+	result, err := handler.profileList(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Selection.Requested, []string{"cleanup"}) || len(result.Selection.Effective) != 0 {
+		t.Fatalf("selection=%#v", result.Selection)
+	}
+	for _, entry := range result.Profiles {
+		if entry.Name == "cleanup" {
+			if !entry.Requested || entry.Selected || entry.Effective || entry.Eligible || entry.Eligibility != "lifecycle-only" {
+				t.Fatalf("cleanup inventory=%#v", entry)
+			}
+			if len(runner.Requests) != 0 {
+				t.Fatal("inventory ran a hook")
+			}
+			return
+		}
+	}
+	t.Fatal("cleanup package missing from inventory")
 }

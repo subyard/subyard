@@ -83,7 +83,7 @@ func (cli *CLI) prepareOwnerProjectCopy(ctx context.Context, loaded config.Loade
 	if err := requireProjectRole(loaded); err != nil {
 		return nil, err
 	}
-	if err := validateProjectTarget(cli.options.RepositoryRoot, source.TargetProfile); err != nil {
+	if err := validateProjectTarget(cli.options.RepositoryRoot, loaded, source.TargetProfile); err != nil {
 		return nil, err
 	}
 	definition, ok := cli.manifest.Lookup("sync")
@@ -139,6 +139,9 @@ func (cli *CLI) beginOwnerProjectCopy(ctx context.Context, prepared *preparedCom
 		return domain.AdapterResult{}, fmt.Errorf("%w: owner yard context changed", domain.ErrPlanStale)
 	}
 	if err := requireProjectRole(fresh); err != nil {
+		return domain.AdapterResult{}, err
+	}
+	if err := validateProjectTarget(cli.options.RepositoryRoot, fresh, copy.source.TargetProfile); err != nil {
 		return domain.AdapterResult{}, err
 	}
 	admission, err := project.Store.Admit(ctx, project.OperationID, copy.source.Source, domain.ProjectSync, copy.source.RequestedName, copy.source.ExplicitName, project.WorkspaceNames...)

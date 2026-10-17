@@ -641,8 +641,8 @@ run_a="$(new_run_id)"
 run_b="$(new_run_id)"
 [[ "$run_a" =~ ^[0-9a-f]{8}$ && "$run_b" =~ ^[0-9a-f]{8}$ && "$run_a" != "$run_b" ]] \
   || fail "per-acquire run identities are invalid or reused"
-[ "$(derive_purpose run '' bash dev/e2e/release-migration-catch-up.sh auto)" = \
-    release-migration-catch-up ] \
+[ "$(derive_purpose run '' bash dev/e2e/full-uninstall.sh preflight 123)" = \
+    full-uninstall ] \
   || fail "runner did not derive a bounded script purpose"
 [ "$(derive_purpose ssh 'manual diagnostic')" = manual-diagnostic ] \
   || fail "explicit purpose was not normalized"
@@ -3816,6 +3816,168 @@ for release_smoke_failure in success prepare reboot finish; do
   fi
 done
 
+# Keep the authentic legacy predecessor refusal distinct from compatible rollback.
+# shellcheck disable=SC2034 # context globals are consumed by extracted owning helpers
+power_rollback_fixture_contract() {
+  (
+    set -euo pipefail
+    local scenario="$1" fixture="$TMP/power-rollback-$1" function_name
+    for function_name in capture_legacy_native_policy assert_legacy_native_policy verify_legacy_rollback_refusal check_compatible_transition finish_candidate_flow; do
+      eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+    done
+    STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
+    RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
+    CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
+    CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
+    OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
+    COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e
+    V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
+    V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
+    PROJECT=legacy INSTANCE=yard
+    local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+    install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT" "${grant%/*}" "$OPERATOR_HOME/.config/subyard/migrations"
+    printf 'retained grant\n' > "$grant"
+    chmod 0600 "$grant"
+    printf 'retained v1\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json"
+    printf 'retained ledger\n' > "$V2_LEDGER"
+    printf 'retained checkpoint\n' > "$V2_STATE_ROOT/history-checkpoint.json"
+    jq -n '{catalogDigest: ("c" * 64)}' > "$V2_JOURNAL"
+    printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
+    printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/previous"
+    printf '{"config":{"restricted":"true"}}\n' > "$STATE_ROOT/project"
+    printf '{"config":{},"devices":{"root":{"type":"disk","path":"/","pool":"default"}}}\n' > "$STATE_ROOT/profile"
+    printf '{"profiles":["default"],"config":{"volatile.uuid":"stable-uuid","security.nesting":"true"},"expanded_config":{"volatile.uuid":"stable-uuid","security.nesting":"true"},"devices":{},"expanded_devices":{}}\n' > "$STATE_ROOT/instance"
+    die() { printf '%s\n' "$*" >&2; exit 2; }
+    info() { :; }
+    ok() { case "$*" in 'authentic compatible rollback'*) touch "$STATE_ROOT/passed" ;; esac; }
+    load_release_targets() { :; }
+    assert_legacy_continuation() { [ "$(cat "$grant")" = 'retained grant' ] && [ "$(stat -c %a "$grant")" = 600 ] || die 'grant changed'; }
+    assert_published_v1_history_unchanged() { [ "$(cat "$OPERATOR_HOME/.config/subyard/migrations/state.json")" = 'retained v1' ] || die 'v1 changed'; }
+    assert_runtime_links() { [ "$(cat "$STATE_ROOT/current")" = "$1" ] && [ "$(cat "$STATE_ROOT/previous")" = "$2" ] || die 'wrong actual runtime links'; }
+    assert_runtime_state() { [ "$(cat "$STATE_ROOT/current")" = "$5" ] || die 'wrong runtime executable target'; }
+    assert_candidate_state() { [ "$(cat "$STATE_ROOT/current")" = "$CANDIDATE_RELEASE_TARGET" ] || die 'candidate not active'; }
+    assert_v2_transition() { [ "$1" = activate-previous ] && [ "$2" = "$COMPATIBLE_RELEASE_TARGET" ] || die 'wrong rollback journal target'; }
+    verify_legacy_full_removal_refusal() {
+      assert_legacy_continuation
+      if [ "$scenario" = full-removal-change ]; then
+        jq '.config["restricted.devices.gpu"]="allow"' "$STATE_ROOT/project" > "$STATE_ROOT/project.next"
+        mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
+      fi
+    }
+    incus() {
+      case "$*" in
+        "query /1.0/projects/$PROJECT") cat "$STATE_ROOT/project" ;;
+        "query /1.0/profiles/default?project=$PROJECT") cat "$STATE_ROOT/profile" ;;
+        "query /1.0/instances/$INSTANCE?project=$PROJECT") cat "$STATE_ROOT/instance" ;;
+        *) die 'unexpected native operation' ;;
+      esac
+    }
+    operator_env() {
+      if [ "$1" = env ]; then
+        local source="$2"
+        shift 3
+        case "$*" in
+          'update --version 0.21.0 '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] || die 'foreign compatible source' ;;
+          'update --version candidate '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] || die 'foreign candidate source' ;;
+          *) die 'unexpected public operation' ;;
+        esac
+        operator_yard "$@"
+      else
+        "$@"
+      fi
+    }
+    operator_yard() {
+      local current previous next=''
+      current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
+      case "$*" in
+        'update --rollback --yes')
+          if [ "$previous" = "$OLD_RELEASE_TARGET" ]; then
+            case "$scenario" in
+              unexpected-accept) return 0 ;;
+              wrong-reason) printf 'unavailable\n' >&2; return 1 ;;
+              links-change) printf 'foreign\n' > "$STATE_ROOT/previous" ;;
+              ledger-change) printf 'foreign\n' > "$V2_LEDGER" ;;
+              journal-change) printf 'foreign\n' > "$V2_JOURNAL" ;;
+              checkpoint-change) printf 'foreign\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
+              history-change) printf 'foreign\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json" ;;
+              grant-change) printf 'foreign\n' > "$grant" ;;
+              mode-change) chmod 0644 "$grant" ;;
+              native-change) jq '.config["security.privileged"]="true"' "$STATE_ROOT/instance" > "$STATE_ROOT/instance.next"; mv "$STATE_ROOT/instance.next" "$STATE_ROOT/instance" ;;
+            esac
+            printf 'operator-action-required: code=rollback-incompatible\n' >&2
+            return 1
+          fi
+          [ "$previous" = "$COMPATIBLE_RELEASE_TARGET" ] || die 'wrong compatible rollback'
+          [ "$scenario" != rollback-fail ] || return 45
+          next="$COMPATIBLE_RELEASE_TARGET" ;;
+        'update --version 0.21.0 --check --json'|'update --version candidate --check --json')
+          next="$CANDIDATE_RELEASE_TARGET"
+          [ "$3" != 0.21.0 ] || next="$COMPATIBLE_RELEASE_TARGET"
+          jq -n --arg target "${next#releases/}" --arg active "${current#releases/}" --arg scenario "$scenario" '
+            {plan:"plan-v1-fixture",assessment:{changed:true},blockers:[],outcome:{target:$target,active:$active,status:"migration-required",code:"transition-required",reachedGoal:false}} |
+            if $scenario == "blocked-check" then .blockers=[{code:"blocked"}] | .outcome.status="operator-action-required"
+            elif $scenario == "wrong-target" then .outcome.target="foreign"
+            elif $scenario == "noop-check" then .assessment.changed=false | .outcome.status="ready" | .outcome.reachedGoal=true
+            else . end'
+          return ;;
+        'update --version 0.21.0 --yes') next="$COMPATIBLE_RELEASE_TARGET" ;;
+        'update --version candidate --yes')
+          [ "$scenario" != rollforward-fail ] || return 45
+          next="$CANDIDATE_RELEASE_TARGET" ;;
+        'init --yes') assert_candidate_state; return ;;
+        *) die 'unexpected yard operation' ;;
+      esac
+      printf '%s\n' "$current" > "$STATE_ROOT/previous"
+      printf '%s\n' "$next" > "$STATE_ROOT/current"
+      printf '%s\n' "$*" >> "$STATE_ROOT/updates"
+      if [ "$scenario" = compatible-policy-change ]; then
+        jq '.config["restricted.devices.gpu"]="allow"' "$STATE_ROOT/project" > "$STATE_ROOT/project.next"
+        mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
+      fi
+    }
+    finish_candidate_flow
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+    [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] && [ -f "$STATE_ROOT/passed" ] || die 'compatible cycle incomplete'
+  )
+}
+for power_rollback_scenario in success unexpected-accept wrong-reason links-change ledger-change journal-change \
+  checkpoint-change history-change grant-change mode-change native-change blocked-check wrong-target noop-check \
+  compatible-policy-change full-removal-change rollback-fail rollforward-fail; do
+  power_rollback_log="$TMP/power-rollback-$power_rollback_scenario.log"
+  set +e
+  power_rollback_fixture_contract "$power_rollback_scenario" > "$power_rollback_log" 2>&1
+  power_rollback_rc=$?
+  set -e
+  if [ "$power_rollback_scenario" = success ]; then
+    if [ "$power_rollback_rc" != 0 ]; then
+      cat "$power_rollback_log" >&2
+      fail 'power fixture lost authentic incompatible refusal or compatible rollback/forward'
+    fi
+  else
+    [ "$power_rollback_rc" != 0 ] && [ ! -f "$TMP/power-rollback-$power_rollback_scenario/state/passed" ] \
+      || fail "power fixture concealed $power_rollback_scenario"
+  fi
+done
+
+# The input-free capability response has no lifecycle results or extra owners.
+eval "$(sed -n '/^verify_compatible_capabilities() {/,/^}/p' "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
+for power_capability_case in valid missing-owner extra-owner unsupported-schema lifecycle-result malformed; do
+  power_capability_file="$TMP/power-capability-$power_capability_case.json"
+  jq -n --arg scenario "$power_capability_case" '
+    {schemaVersion:2,activationReconciliationOwned:false,activationOwners:["core-guest-runtime","git-fetch-runtime","github-runtime","host-power","key-tools-runtime","openlit-runtime","orca-runtime","test-vm-broker","test-yard-route-consumers"]} |
+    if $scenario == "missing-owner" then .activationOwners |= .[1:]
+    elif $scenario == "extra-owner" then .activationOwners += ["foreign"]
+    elif $scenario == "unsupported-schema" then .schemaVersion=1
+    elif $scenario == "lifecycle-result" then .outcome={status:"ready"}
+    else . end' > "$power_capability_file"
+  [ "$power_capability_case" != malformed ] || printf 'invalid\n' > "$power_capability_file"
+  if (die() { exit 2; }; verify_compatible_capabilities "$power_capability_file") >/dev/null 2>&1; then
+    [ "$power_capability_case" = valid ] || fail 'power fixture accepted unsupported capability response'
+  else
+    [ "$power_capability_case" != valid ] || fail 'power fixture refused exact compiled capabilities'
+  fi
+done
+
 # Exercise the complete post-reboot smoke flow with a strict retained-runtime model.
 # shellcheck disable=SC2034 # context globals are consumed by extracted smoke functions
 smoke_rollback_fixture_contract() {
@@ -4176,12 +4338,14 @@ for dispatcher_mode in prepare resume finish; do
       info() { :; }
       prepare_candidate() { log prepare_candidate; }
       exercise_activation_only_repair() { log exercise_activation_only_repair; }
+      establish_legacy_continuation() { log establish_legacy_continuation; }
       record_reboot_baseline() { log record_reboot_baseline; }
       write_fixture_value() { log "write_fixture_value $*"; }
       finish_candidate_flow() { log finish_candidate_flow; }
       assert_state_root() { log assert_state_root; }
       assert_fixture_phase() { log "assert_fixture_phase $*"; }
       assert_post_reboot_candidate() { log assert_post_reboot_candidate; }
+      verify_historical_init_boundary() { log verify_historical_init_boundary; }
       operator_yard() { log "operator_yard $*"; }
       assert_candidate_state() { log assert_candidate_state; }
       trap '\''log "exit preserve=$PRESERVE_FIXTURE cleanup=$CLEANUP_ARMED"'\'' EXIT
@@ -4193,10 +4357,10 @@ for dispatcher_mode in prepare resume finish; do
     || fail "power reconciler $dispatcher_mode dispatcher rejected its valid phase"
   case "$dispatcher_mode" in
     prepare)
-      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
+      dispatcher_expected=$'incus image info subyard-e2e-debian-13-cloud-container --project default\nprepare_candidate\nexercise_activation_only_repair\nestablish_legacy_continuation\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-ready\nexit preserve=1 cleanup=0'
       ;;
     resume)
-      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\noperator_yard init --yes\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
+      dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-ready\nassert_post_reboot_candidate\nverify_historical_init_boundary\nassert_candidate_state\nrecord_reboot_baseline\nwrite_fixture_value /state/phase candidate-reconciled\nexit preserve=1 cleanup=1'
       ;;
     finish)
       dispatcher_expected=$'assert_state_root\nassert_fixture_phase candidate-reconciled\nassert_post_reboot_candidate\nfinish_candidate_flow\nexit preserve=0 cleanup=1'
@@ -4226,7 +4390,7 @@ run_activation_repair_contract() (
   RELEASE_ROOT="$fixture/release"
   RECONCILER="$fixture/yard-boot-reconcile"
   UNIT="$fixture/subyard-power-reconcile.service"
-  OLD_UNIT_FIXTURE="$fixture/v0.8.service.in"
+  OLD_UNIT_FIXTURE="$fixture/v0.11.service.in"
   ACTIVATION_LEDGER_BASELINE="$STATE_ROOT/activation-ledger.before"
   ACTIVATION_JOURNAL_BASELINE="$STATE_ROOT/activation-journal.before"
   ACTIVATION_FAULT_PROBE="$OPERATOR_HOME/activation-faults"
@@ -4237,12 +4401,11 @@ run_activation_repair_contract() (
   V2_JOURNAL="$V2_STATE_ROOT/journal.json"
   CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
   local candidate_runtime="$OPERATOR_HOME/.subyard/runtime/$CANDIDATE_RELEASE_TARGET"
-  OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
+  OLD_RELEASE_TARGET=releases/0.11.0-bbbbbbbbbbbb
   CANDIDATE_VERSION=candidate
   OPERATOR='fixture-operator'
   FAKE_YARD_CALLS="$fixture/yard-calls"
   DELEGATE_LOG="$fixture/systemctl-delegate"
-  V1_HISTORY_LOG="$fixture/v1-history"
   CANDIDATE_UNIT="$STATE_ROOT/candidate-activation.service"
   ACTIVATION_SCENARIO="$scenario"
   export ACTIVATION_FAULT_PROBE ACTIVATION_SCENARIO ACTIVATION_SYSTEMCTL_DELEGATE
@@ -4267,14 +4430,13 @@ printf 'eyJ2ZXJzaW9uIjoxLCJyZWFkZXJFcG9jaCI6MiwiY29udHJhY3RzIjpbXX0=\n'
 EOF
   chmod 0755 "$candidate_runtime/bin/yard-engine"
   export OPERATOR_HOME
-  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.8\n' > "$OLD_UNIT_FIXTURE"
+  printf 'ExecStart=@SUBYARD_POWER_RECONCILER@\nGeneration=v0.11\n' > "$OLD_UNIT_FIXTURE"
   printf '{"ledger":"stable"}\n' > "$V2_LEDGER"
   printf '%s\n' \
     '{"schemaVersion":2,"transaction":"completed-transaction","authorizationDigest":"completed-authorization","goal":{"target":"candidate-aaaaaaaaaaaa","direction":"activate-target"},"releases":{"from":"candidate-aaaaaaaaaaaa","target":"candidate-aaaaaaaaaaaa"},"checkpoint":"complete","steps":[]}' \
     > "$V2_JOURNAL"
   : > "$FAKE_YARD_CALLS"
   : > "$DELEGATE_LOG"
-  : > "$V1_HISTORY_LOG"
   printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
@@ -4355,7 +4517,6 @@ EOF
     fi
     command "$@"
   }
-  assert_published_v1_history_unchanged() { printf 'checked\n' >> "$V1_HISTORY_LOG"; }
   assert_candidate_state() { cmp "$CANDIDATE_UNIT" "$UNIT"; }
   assert_runtime_links() {
     [ "$1" = "$CANDIDATE_RELEASE_TARGET" ] && [ "$2" = "$OLD_RELEASE_TARGET" ]
@@ -4378,7 +4539,6 @@ EOF
   [ "$(wc -l < "$ACTIVATION_FAULT_PROBE")" = 1 ] || exit 76
   grep -Fxq 'show subyard-power-reconcile.service --property=LoadState' "$DELEGATE_LOG" \
     || exit 77
-  [ "$(wc -l < "$V1_HISTORY_LOG")" = 3 ] || exit 78
   jq -e '.transaction == "repair-transaction" and
     .authorizationDigest == "repair-authorization" and
     .checkpoint == "complete" and (.steps | length) == 0' \
@@ -4423,10 +4583,10 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
   "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
 (
   set -euo pipefail
-  export OLD_VERSION=0.8.0
+  export OLD_VERSION=0.11.0
   OPERATOR_HOME="$TMP/power-rollback/operator"
   rollback_state="$OPERATOR_HOME/.config/subyard/release-transition/v2"
-  rollback_target=0.8.0-bbbbbbbbbbbb
+  rollback_target=0.11.0-bbbbbbbbbbbb
   CANDIDATE_RELEASE_TARGET=releases/0.11.3-aaaaaaaaaaaa
   runtime="$OPERATOR_HOME/.subyard/runtime"
   mkdir -p "$rollback_state" "$runtime/releases/$rollback_target" \
@@ -4442,7 +4602,7 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
       "owner-registration": {epoch: 2, applied: ["canonicalize-test-yard-owner-v2"]},
       "power-metadata": {epoch: 2, applied: ["introduce-owner-publication-state-v1"]},
       "project-state": {epoch: 1, applied: []},
-      settings: {epoch: 2, applied: ["canonicalize-test-vms-settings-v2"]}
+      settings: {epoch: 3, applied: ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]}
     }
   }' > "$rollback_state/ledger.json"
   # Published V2 shape: authorization/intent tokens use the frozen complete
@@ -4466,6 +4626,23 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
   die() { return 2; }
   assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest" \
     || fail 'power rollback rejected a completed frozen V2 journal'
+  cp "$rollback_state/ledger.json" "$rollback_state/ledger.valid"
+  for ledger_filter in '.domains.settings.epoch = 2' \
+    '.domains.settings.applied |= reverse' \
+    '.domains.settings.applied |= .[:-1]' \
+    '.domains.settings.applied += ["foreign-migration"]'; do
+    jq "$ledger_filter" "$rollback_state/ledger.valid" > "$rollback_state/ledger.json"
+    set +e
+    (die() { exit 2; }; assert_v2_transition activate-previous "releases/$rollback_target" "$catalog_digest") \
+      > "$TMP/power-ledger-rejection.log" 2>&1
+    ledger_assert_rc=$?
+    set -e
+    [ "$ledger_assert_rc" = 2 ] \
+      || fail "power migration ledger accepted changed epoch or ordered migration history"
+    grep -Fq 'migration record=ledger.json' "$TMP/power-ledger-rejection.log" \
+      || fail 'power migration ledger rejection lost its pre-cleanup diagnostic'
+  done
+  cp "$rollback_state/ledger.valid" "$rollback_state/ledger.json"
   for rollback_mutation in wrong-target wrong-direction incomplete wrong-artifact wrong-registry \
     wrong-catalog missing-artifact missing-registry missing-catalog missing-steps unverified-step new-field; do
     case "$rollback_mutation" in
@@ -4480,7 +4657,7 @@ assert_v2_transition_function="$(sed -n '/^assert_v2_transition() {/,/^}/p' \
       missing-catalog) filter='del(.catalogDigest)' ;;
       missing-steps) filter='del(.steps)' ;;
       unverified-step) filter='.steps = [{checkpoint: "intent"}]' ;;
-      new-field) filter='.rollbackTarget = {version: "0.8.0"}' ;;
+      new-field) filter='.rollbackTarget = {version: "0.11.0"}' ;;
     esac
     jq "$filter" "$rollback_state/journal.valid" > "$rollback_state/journal.json"
     set +e

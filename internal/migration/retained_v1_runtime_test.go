@@ -1,7 +1,6 @@
 package migration
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,85 +113,6 @@ func TestPreviousRuntimeOptionsRequireRetainedRegularExecutable(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestPowerReconcilerVerificationRequiresFreshLoadedManagerState(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		loadState  string
-		needReload string
-		wantError  bool
-	}{
-		{name: "bad setting", loadState: "bad-setting", needReload: "no", wantError: true},
-		{name: "daemon reload pending", loadState: "loaded", needReload: "yes", wantError: true},
-		{name: "fresh loaded unit", loadState: "loaded", needReload: "no"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			options := powerReconcilerVerificationFixture(t, test.loadState, test.needReload)
-			err := verifyPowerReconciler(context.Background(), options, powerReconcilerInstalled)
-			if (err != nil) != test.wantError {
-				t.Fatalf("verify error = %v, want error %v", err, test.wantError)
-			}
-		})
-	}
-}
-
-func powerReconcilerVerificationFixture(t *testing.T, loadState, needReload string) ReleaseOptions {
-	t.Helper()
-	root := t.TempDir()
-	repository := filepath.Join(root, "release")
-	installed := filepath.Join(root, "installed")
-	bin := filepath.Join(root, "bin")
-	for _, directory := range []string{
-		filepath.Join(repository, "bin"),
-		filepath.Join(repository, "config", "systemd"),
-		installed,
-		bin,
-	} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	reconciler := filepath.Join(installed, "yard-boot-reconcile")
-	unit := filepath.Join(installed, "subyard-power-reconcile.service")
-	executable := filepath.Join(repository, "bin", "yard-engine")
-	writePowerMigrationFile(t, executable, "engine\n", 0o700)
-	writePowerMigrationFile(t, reconciler, "engine\n", 0o700)
-	templatePath := filepath.Join(repository, "config", "systemd", "subyard-power-reconcile.service.in")
-	writePowerMigrationFile(t, templatePath,
-		"[Service]\nExecStart=@SUBYARD_POWER_RECONCILER@ _power-reconcile\n", 0o600)
-	writePowerMigrationFile(t, unit, materializedPowerUnit(t, templatePath, reconciler), 0o600)
-	writePowerMigrationFile(t, filepath.Join(bin, "systemctl"), `#!/bin/sh
-set -eu
-case "$*" in
-  "show subyard-power-reconcile.service --property=LoadState --property=NeedDaemonReload")
-    printf 'LoadState=%s\nNeedDaemonReload=%s\n' "$POWER_LOAD_STATE" "$POWER_NEED_RELOAD"
-    ;;
-  "is-enabled --quiet subyard-power-reconcile.service") ;;
-  *) exit 2 ;;
-esac
-`, 0o700)
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	return ReleaseOptions{
-		RepositoryRoot: repository,
-		Executable:     executable,
-		Environment: []string{
-			"PATH=" + bin + ":" + os.Getenv("PATH"),
-			"SUBYARD_POWER_RECONCILER_PATH=" + reconciler,
-			"SUBYARD_POWER_UNIT_PATH=" + unit,
-			"POWER_LOAD_STATE=" + loadState,
-			"POWER_NEED_RELOAD=" + needReload,
-		},
-	}
-}
-
-func materializedPowerUnit(t *testing.T, templatePath, reconciler string) string {
-	t.Helper()
-	template, err := os.ReadFile(templatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.ReplaceAll(string(template), "@SUBYARD_POWER_RECONCILER@", reconciler)
 }
 
 func writePowerMigrationFile(t *testing.T, path, contents string, mode os.FileMode) {

@@ -147,7 +147,7 @@ func nativeArtifact(mode string, input, result any) error {
 				return fmt.Errorf("%w: native installation artifact guard", domain.ErrPlanStale)
 			}
 		}
-		return fmt.Errorf("native teardown artifact guard failed: %w", err)
+		return fmt.Errorf("native teardown artifact guard failed (%s): %w", mode, err)
 	}
 	if result != nil {
 		return json.Unmarshal(output, result)

@@ -309,3 +309,17 @@ func TestOfficialClientExecMapsStartOperationExitAndCancellation(t *testing.T) {
 		t.Fatal("cancelled exec did not stop")
 	}
 }
+
+func TestReconcileStateReadsDefaultProfileConfiguration(t *testing.T) {
+	fake := newNetworkIncusServer(t)
+	fake.projects["project-a"] = fakeProject{Config: map[string]string{"restricted": "true"}}
+	fake.profiles["project-a/default"] = fakeProfile{Config: map[string]string{"raw.lxc": "lxc.apparmor.profile=unconfined", "limits.cpu": "4"}, Devices: map[string]map[string]string{"root": {"type": "disk", "path": "/", "pool": "default"}}}
+	client := New(fake.socket, "projects")
+	observed, err := client.ReconcileState(context.Background(), "project-a", "absent-instance", "default", "srv", "incusbr0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.ProfileFound || observed.ProfileConfig["raw.lxc"] != "lxc.apparmor.profile=unconfined" || observed.ProfileConfig["limits.cpu"] != "4" {
+		t.Fatal("native profile configuration omitted", observed.ProfileConfig)
+	}
+}

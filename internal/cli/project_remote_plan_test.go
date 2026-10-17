@@ -163,3 +163,34 @@ func TestProjectOwnerCopyCloseAbortsAdmission(t *testing.T) {
 		t.Fatalf("aborted copy published project: %v", err)
 	}
 }
+
+func TestProjectOwnerCopyRechecksTargetAfterConsentBeforeAdmission(t *testing.T) {
+	program, initial, _ := ownerProjectCopyFixture(t)
+	root := program.options.RepositoryRoot
+	writeProvisionProfile(t, root, "sample")
+	configPath := filepath.Join(root, "state/yards/default/config.env")
+	writeProfileTestFile(t, configPath, []byte("ENVIRONMENT_PROFILES=sample\n"), 0600)
+	fresh, err := New(program.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := fresh.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := initial.Project.ownerCopy.source
+	source.TargetProfile = "sample"
+	prepared, err := fresh.prepareOwnerProjectCopy(context.Background(), loaded, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	prepared.Plan.Confirmed = true
+	testkit.WriteFile(t, configPath, []byte("ENVIRONMENT_PROFILES=\n"), 0600)
+	if _, err := fresh.beginOwnerProjectCopy(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("deselected owner copy admitted: %v", err)
+	}
+	if prepared.Project.ownerCopy.reservation != nil {
+		t.Fatal("target refusal reserved a project identity")
+	}
+}

@@ -110,6 +110,7 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 		if err := add("instance", instance.Name, "", map[string]any{"name": instance.Name, "type": instance.Type, "created_at": instance.CreatedAt.UTC().Format(time.RFC3339Nano), "config": instance.Config, "devices": instance.Devices, "profiles": instance.Profiles, "snapshots": snapshots}); err != nil {
 			return nil, err
 		}
+		result[len(result)-1].SnapshotCount = len(snapshots)
 	}
 	if config.Config["features.profiles"] != "false" {
 		profiles, err := scoped.GetProfiles()
@@ -160,6 +161,7 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 			if err := add("volume", volume.Name, pool.Name, map[string]any{"name": volume.Name, "type": volume.Type, "content_type": volume.ContentType, "config": volume.Config, "description": volume.Description, "snapshots": snapshots}); err != nil {
 				return nil, err
 			}
+			result[len(result)-1].SnapshotCount = len(snapshots)
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {

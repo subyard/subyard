@@ -19,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 const resourcePrepareTimeout = 30 * time.Second
@@ -347,6 +348,27 @@ func (cli *CLI) prepareResourceModeTimeout(
 	if len(nativeContext) != 0 {
 		command.Env = environmentList(environmentMap(command.Env), nativeContext[0])
 	}
+	// Session preparation belongs to the session transport, including verbs
+	// which have more than one declared local action.
+	session := false
+	if len(arguments) != 0 {
+		for _, action := range cli.resources.ActionDefinitions() {
+			local, ok := localResourceAction(definition, action.Action)
+			if !ok || action.Effect != domain.ActionSession {
+				continue
+			}
+			if _, ok := cli.resources.LookupAction(definition.Command, arguments[0], local); ok {
+				session = true
+			}
+		}
+	}
+	if !session {
+		release, err := cli.resourceOwnerBarrier(prepareContext, loaded, command)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	command.Stdin = nil
 	stdout := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
 	stderr := &boundedResourceBuffer{limit: resource.MaxPrepareOutputBytes}
@@ -581,6 +603,13 @@ func (runner *resourceApplyRunner) Run(
 				"SUBYARD_RESOURCE_STEPS":   string(steps),
 			})
 		}
+		if runner.effect != domain.ActionSession {
+			release, err := runner.cli.resourceOwnerBarrier(ctx, runner.loaded, command)
+			if err != nil {
+				return result, "", err
+			}
+			defer release()
+		}
 		var restoreForeground func() error
 		// The engine owns confirmation. Non-session handlers must not inherit the
 		// operator terminal: their separate process group can otherwise be stopped
@@ -660,6 +689,38 @@ func configureResourceProcess(command *exec.Cmd) {
 		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
 	command.WaitDelay = 2 * time.Second
+}
+
+// Bounded native handlers may invoke audited core readers while this CLI owns
+// the installation barrier. Delegate only that admitted OFD, never a caller FD.
+// Session/wire transports have independent lifetimes and receive no barrier.
+func (cli *CLI) resourceOwnerBarrier(ctx context.Context, loaded config.Loaded, command *exec.Cmd) (func(), error) {
+	if cli.ownerMutationLock == nil || cli.resourceWire != "" || cli.resourceSessionTransport != "" {
+		return func() {}, nil
+	}
+	admission, err := cli.originalOwnerWrite(loaded)
+	if err != nil {
+		return nil, err
+	}
+	// As with an audit inside the admitted transaction, its own root publication
+	// may have refined the original generation. The held inode and epoch remain
+	// mandatory; no independent installation authority is acquired here.
+	admission.generation = nil
+	release, err := cli.acquireOwnerMutation(ctx, admission, false, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	owner, err := uninstall.BorrowOwnerLock(admission.home)
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil {
+		return nil, errors.New("resource owner barrier is no longer held")
+	}
+	command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
+	command.ExtraFiles = append(command.ExtraFiles, owner)
+	return func() { _ = owner.Close() }, nil
 }
 
 type boundedResourceBuffer struct {

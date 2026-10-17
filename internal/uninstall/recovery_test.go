@@ -94,7 +94,7 @@ func TestCoreProducerCaptureRejectsDriftAndUsesOriginalArtifacts(t *testing.T) {
 			}
 			testkit.WriteFile(t, unit, body, mode)
 			plan := RecoveryPlan{Installation: Installation{OperatorUID: uint32(os.Getuid()), RuntimeRoot: filepath.Join(home, "runtime")}}
-			services, err := CaptureProducers(root, plan, map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_KEYS_SYSTEMD_DIR": directory}, []string{"keys"}, 0)
+			services, err := CaptureProducers(root, plan, map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_KEYS_SYSTEMD_DIR": directory}, []string{"keys"}, 0, ProducerEvidence{})
 			if kind != "owned" {
 				if err == nil {
 					t.Fatal("foreign producer was approved")
@@ -346,6 +346,91 @@ if not failed:assert len(result)==1 and result[0]["units"]==["subyard-ssh-relay-
 			command.Stdin = bytes.NewReader(body)
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("%s: %v %s", kind, err, output)
+			}
+		})
+	}
+}
+
+func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(filepath.Join(root, "internal/adapters/releaseruntime/testdata/historical-project-creators/power-0.10.0.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(filepath.Join(root, "config/systemd/subyard-power-reconcile.service.in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"original", "tampered-unit", "foreign-helper", "unbound-dispatcher", "mismatched-original-helper", "current-unit-retained-helper", "old-unit-current-helper", "unsafe-mode"} {
+		t.Run(kind, func(t *testing.T) {
+			home := testkit.TempDir(t)
+			runtimeRoot := filepath.Join(home, "runtime")
+			engine := filepath.Join(runtimeRoot, "releases", "old", "bin", "yard-engine")
+			if err := os.MkdirAll(filepath.Dir(engine), 0700); err != nil {
+				t.Fatal(err)
+			}
+			helperBody := []byte("sealed original helper\n")
+			testkit.WriteFile(t, engine, helperBody, 0700)
+			helper := filepath.Join(home, "helper")
+			dispatcher := filepath.Join(home, "candidate-engine")
+			testkit.WriteFile(t, dispatcher, []byte("current candidate helper\n"), 0700)
+			if kind == "old-unit-current-helper" {
+				helperBody = []byte("current candidate helper\n")
+			}
+			if kind == "foreign-helper" || kind == "unbound-dispatcher" {
+				helperBody = []byte("foreign helper\n")
+			}
+			testkit.WriteFile(t, helper, helperBody, 0755)
+			if kind == "unbound-dispatcher" {
+				dispatcher = helper
+			}
+			unit := filepath.Join(home, "subyard-power.service")
+			body := old
+			if kind == "current-unit-retained-helper" {
+				body = current
+			}
+			body = []byte(strings.ReplaceAll(string(body), "@SUBYARD_POWER_RECONCILER@", helper))
+			if kind == "tampered-unit" {
+				body = append(body, []byte("ExecStart=/foreign\n")...)
+			}
+			mode := os.FileMode(0644)
+			if kind == "unsafe-mode" {
+				mode = 0666
+			}
+			testkit.WriteFile(t, unit, body, mode)
+			original := ProducerEvidence{ExecutingEngineSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("current candidate helper\n"))), EngineSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("sealed original helper\n"))), Templates: map[string]string{"subyard-power-reconcile.service.in": string(old)}}
+			if kind == "mismatched-original-helper" {
+				original.EngineSHA256 = strings.Repeat("0", 64)
+			}
+			request := map[string]any{"Root": root, "Installation": Installation{RuntimeRoot: runtimeRoot}, "Environment": map[string]string{"SUBYARD_POWER_UNIT_PATH": unit, "SUBYARD_POWER_RECONCILER_PATH": helper, "SUBYARD_DISPATCHER_PATH": dispatcher}, "Owners": []string{"power"}, "Original": original}
+			payload, _ := json.Marshal(request)
+			// The actual guard is exercised with only its root-UID argument adapted to
+			// the private, unprivileged fixture. All other native predicates stay intact.
+			script := `import importlib.util,json,os,sys
+spec=importlib.util.spec_from_file_location('guard',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+capture=m.capture_service
+m.capture_service=lambda scope,units,files,helpers,uid:capture(scope,units,files,helpers,os.getuid())
+print(json.dumps(m.core_producers(json.load(sys.stdin))))`
+			command := exec.Command("python3", "-B", "-c", script, filepath.Join(root, "scripts/lib/teardown-plan.py"))
+			command.Stdin = bytes.NewReader(payload)
+			output, err := command.Output()
+			if (err == nil) != (kind == "original" || kind == "current-unit-retained-helper" || kind == "old-unit-current-helper") {
+				t.Fatalf("historical producer %s: %v", kind, err)
+			}
+			if err != nil {
+				return
+			}
+			var services []RecoveryService
+			if err := json.Unmarshal(output, &services); err != nil || len(services) != 1 || len(services[0].Artifacts) != 2 {
+				t.Fatalf("missing bound original producer: %v", err)
+			}
+			originalArtifact := Tree(services[0].Artifacts[0])
+			testkit.WriteFile(t, originalArtifact.Path, []byte("changed after capture"), 0644)
+			if originalArtifact.Check() == nil {
+				t.Fatal("original producer drift escaped stale check")
 			}
 		})
 	}

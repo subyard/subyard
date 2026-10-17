@@ -16,7 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -86,32 +85,11 @@ func (cli *CLI) prepareProvisionExecution(
 	for _, profile := range available {
 		byName[profile] = true
 	}
-	selected := make([]string, 0)
-	projectProfiles := ""
-	if project != nil {
-		projectProfiles = project.Environment["SUBYARD_PROJECT_PROFILES"]
+	selected := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
+	if want != "" {
+		selected = []string{want}
 	}
-	switch {
-	case want != "":
-		selected = append(selected, want)
-	case loaded.Environment["ENVIRONMENT_PROFILES"] != "":
-		selected = append(selected, strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])...)
-		selected = append(selected, strings.Fields(projectProfiles)...)
-	case projectProfiles != "":
-		selected = append(selected, strings.Fields(projectProfiles)...)
-	default:
-		selected = append(selected, available...)
-	}
-	declarations, err := profile.Load(cli.options.RepositoryRoot)
-	if err != nil {
-		return nil, err
-	}
-	selectionOnly := map[string]bool{}
-	for _, declaration := range declarations {
-		if declaration.SelectedProvisionOnly {
-			selectionOnly[declaration.Name] = !declaration.Selected(loaded.Context.YardName, loaded.Environment)
-		}
-	}
+	// Project inventory cannot expand the yard's active profile set.
 	seen := make(map[string]bool, len(selected))
 	profiles := make([]string, 0, len(selected))
 	for _, name := range selected {
@@ -124,9 +102,6 @@ func (cli *CLI) prepareProvisionExecution(
 			if want == name {
 				return nil, fmt.Errorf("profile %q requires the selected dedicated-yard preset", name)
 			}
-			continue
-		}
-		if want == "" && selectionOnly[name] {
 			continue
 		}
 		if seen[name] {

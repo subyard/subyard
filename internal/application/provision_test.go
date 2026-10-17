@@ -84,7 +84,7 @@ func (fixture *provisionFixture) Run(_ context.Context, request domain.AdapterRe
 
 func TestProvisionAppliesOnlyChangedProfilesAndVerifiesThem(t *testing.T) {
 	fixture := &provisionFixture{
-		instance: managedProvisionInstance("Running", PowerRunning),
+		instance: managedProvisionInstance("Running", domain.PowerRunning),
 		checkRuns: map[string][]string{
 			"sample-a": {"converged"},
 			"sample-b": {"changed", "converged"},
@@ -101,7 +101,7 @@ func TestProvisionAppliesOnlyChangedProfilesAndVerifiesThem(t *testing.T) {
 }
 
 func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerStopped)}
 	runner := provisionRunnerFixture(fixture, "sample-a", "sample-b")
 	result, _, err := runner.Run(context.Background(), provisionRequest(), nil)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestProvisionRestoresTemporarilyStartedYard(t *testing.T) {
 }
 
 func TestProvisionFailsClosedBeforeTemporaryStartWithoutGuard(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerRunning)}
 	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	runner.GuardStart = nil
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
@@ -133,7 +133,7 @@ func TestProvisionFailsClosedBeforeTemporaryStartWithoutGuard(t *testing.T) {
 }
 
 func TestProvisionPolicyFailurePreventsTemporaryStart(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerRunning)}
 	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	runner.GuardStart = func(context.Context, func() error) error { return errors.New("policy incomplete") }
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil ||
@@ -146,7 +146,7 @@ func TestProvisionPolicyFailurePreventsTemporaryStart(t *testing.T) {
 }
 
 func TestProvisionRestoresPowerAfterHookFailure(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped), fail: "sample-b"}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerStopped), fail: "sample-b"}
 	runner := provisionRunnerFixture(fixture, "sample-a", "sample-b")
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err == nil {
 		t.Fatal("expected hook failure")
@@ -157,7 +157,7 @@ func TestProvisionRestoresPowerAfterHookFailure(t *testing.T) {
 }
 
 func TestProvisionKeepsDesiredRunningYardStarted(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerRunning)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerRunning)}
 	runner := provisionRunnerFixture(fixture, "sample-runtime")
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {
 		t.Fatal(err)
@@ -184,9 +184,9 @@ func provisionRunnerFixture(fixture *provisionFixture, names ...string) Provisio
 	}
 }
 
-func managedProvisionInstance(status, desired string) ports.InstanceInfo {
+func managedProvisionInstance(status string, desired domain.DesiredPower) ports.InstanceInfo {
 	return ports.InstanceInfo{Status: status, Config: map[string]string{
-		"user.subyard.managed": "true", "user.subyard.desired_power": desired,
+		"user.subyard.managed": "true", "user.subyard.desired_power": string(desired),
 		"user.subyard.initialized": "true", "user.subyard.name": "test",
 		"user.subyard.bridge": "incusbr0", "boot.autostart": "false",
 	}}
@@ -197,7 +197,7 @@ func provisionRequest() domain.AdapterRequest {
 }
 
 func TestProvisionRejectsObservedSkipExpansionBeforeWrites(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Running", PowerRunning)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Running", domain.PowerRunning)}
 	runner := provisionRunnerFixture(fixture, "sample-a")
 	runner.ApprovedProfiles = []ProvisionProfileStep{{Profile: "sample-a", Converged: true}}
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); !errors.Is(err, domain.ErrPlanStale) {
@@ -209,7 +209,7 @@ func TestProvisionRejectsObservedSkipExpansionBeforeWrites(t *testing.T) {
 }
 
 func TestProvisionRejectsUnapprovedStartBeforeWrites(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", PowerStopped)}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Stopped", domain.PowerStopped)}
 	runner := provisionRunnerFixture(fixture, "sample-a")
 	runner.AllowTemporaryStart = false
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); !errors.Is(err, domain.ErrPlanStale) {
@@ -221,7 +221,7 @@ func TestProvisionRejectsUnapprovedStartBeforeWrites(t *testing.T) {
 }
 
 func TestProvisionAllowsApprovedProfileToBecomeSkip(t *testing.T) {
-	fixture := &provisionFixture{instance: managedProvisionInstance("Running", PowerRunning), profiles: []string{"sample-a"}}
+	fixture := &provisionFixture{instance: managedProvisionInstance("Running", domain.PowerRunning), profiles: []string{"sample-a"}}
 	runner := provisionRunnerFixture(fixture, "sample-a")
 	runner.ApprovedProfiles[0].Conditional = false
 	if _, _, err := runner.Run(context.Background(), provisionRequest(), nil); err != nil {

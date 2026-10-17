@@ -54,7 +54,8 @@ type IncusReader interface {
 }
 
 type Runtime struct {
-	RepositoryRoot string
+	LegacyContinuation *domain.LegacyContinuation
+	RepositoryRoot     string
 	// SourceReader is read-only prospective desired input; nil uses normal asset policy.
 	SourceReader func(config.MaterializedAsset) ([]byte, error)
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
@@ -127,7 +128,7 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		drift, routeErr := runtime.previewRouteDrift(ctx, runtime.previewHost(ctx))
 		return err == nil && !drift, routeErr
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
-		return runtime.powerConverged(ctx, true)
+		return runtime.powerReadyForFinalize(ctx)
 	case ports.ReconcileStageTestVMs:
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
@@ -183,8 +184,14 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if err := runtime.checkLegacyContinuation(ctx); err != nil {
+		return err
+	}
 	switch stage {
 	case ports.ReconcileStageProject:
+		if runtime.LegacyContinuation != nil {
+			return runtime.checkLegacyContinuation(ctx)
+		}
 		return runtime.runScript(ctx, runtime.Stderr, "02-create-project.sh", "--yes")
 	case ports.ReconcileStageInstance:
 		return runtime.applyInstanceStage(ctx)
@@ -310,9 +317,9 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 	case ports.ReconcileStageProvision:
 		return runtime.provisionConverged(ctx)
 	case ports.ReconcileStagePower:
-		return runtime.powerConverged(ctx, false)
+		return runtime.verifyPowerReconciler(ctx)
 	case ports.ReconcileStageFinalize:
-		return runtime.powerConverged(ctx, true)
+		return runtime.powerReadyForFinalize(ctx)
 	default:
 		return runtime.CheckStage(ctx, stage)
 	}
@@ -406,8 +413,17 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 		state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) ||
 		state.ProjectConfig["user.subyard.data_home"] != runtime.environmentValue("SUBYARD_HOME") ||
 		state.ProjectConfig["user.subyard.config_home"] != runtime.environmentValue("SUBYARD_CONFIG_HOME") {
-		return false, nil
+		if runtime.LegacyContinuation == nil {
+			return false, nil
+		}
+		if err := runtime.checkLegacyContinuation(ctx); err != nil {
+			return false, err
+		}
 	}
+	return runtime.projectPolicyConverged(state, reporting), nil
+}
+
+func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, reporting bool) bool {
 	wantInterception := "block"
 	if runtime.Yard.NestedE2EVMs {
 		wantInterception = "allow"
@@ -424,15 +440,15 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 	}
 	for key, value := range want {
 		if state.ProjectConfig[key] != value {
-			return false, nil
+			return false
 		}
 	}
 	if reporting && state.ProjectConfig["restricted.virtual-machines.lowlevel"] != "allow" {
-		return false, nil
+		return false
 	}
 	_, root := state.ProfileDevices["root"]
 	_, network := state.ProfileDevices["eth0"]
-	return state.ProfileFound && root && network, nil
+	return state.ProfileFound && root && network
 }
 
 func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
@@ -918,6 +934,9 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
+	if runtime.LegacyContinuation != nil {
+		return errors.New("legacy continuation cannot authorize reset or teardown")
+	}
 	if runtime.TeardownResources == nil || runtime.TeardownArtifacts == nil {
 		return errors.New("approved exact reset teardown inventory is required")
 	}
@@ -1102,7 +1121,7 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	}
 	if err := runtime.withNetworkStart(ctx, func() error {
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-			"SUBYARD_POWER_DESIRED":           desired,
+			"SUBYARD_POWER_DESIRED":           string(desired),
 			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
 			"VM_CPU_WEIGHT":                   vmWeight,
 		}, "03-create-subyard.sh", "--yes")
@@ -1234,7 +1253,7 @@ func (runtime Runtime) testVMHostSinkFailure(ctx context.Context) error {
 	return nil
 }
 
-func (runtime Runtime) testVMBackend(desired string) (*testvmsruntime.Backend, error) {
+func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsruntime.Backend, error) {
 	environment := runtimeEnvironment(runtime.Environment)
 	extras, err := runtime.extrasContext()
 	if err != nil {
@@ -1379,7 +1398,7 @@ func (runtime Runtime) runObservedPowerScript(
 		return err
 	}
 	return runtime.runScriptEnvironment(ctx, output, map[string]string{
-		"SUBYARD_POWER_DESIRED": intent.Desired,
+		"SUBYARD_POWER_DESIRED": string(intent.Desired),
 	}, name, arguments...)
 }
 
@@ -1400,7 +1419,7 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 		return err
 	}
 	action := "stop"
-	if intent.Desired == application.PowerRunning {
+	if intent.Desired == domain.PowerRunning {
 		action = "start"
 	}
 	run := func() error {
@@ -1420,7 +1439,7 @@ func (runtime Runtime) finalizePowerState(ctx context.Context) error {
 	if err := runtime.powerService().Commit(ctx, runtime.Yard, intent.Desired); err != nil {
 		return err
 	}
-	if intent.Desired == application.PowerRunning {
+	if intent.Desired == domain.PowerRunning {
 		instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
 		if err != nil {
 			return err
@@ -1999,17 +2018,14 @@ func safeCommand(command string) bool {
 }
 
 func instanceIntentionallyStopped(instance ports.InstanceInfo) bool {
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	return strings.EqualFold(instance.Status, "stopped") &&
-		managed == "true" && initialized == "true" && desired == "stopped"
+	return application.InstanceIntentionallyStopped(instance)
 }
 
-func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool) (bool, error) {
-	if !requireMetadata {
-		return runtime.powerReconcilerConverged(ctx), nil
-	}
+func (runtime Runtime) verifyPowerReconciler(ctx context.Context) (bool, error) {
+	return runtime.powerReconcilerConverged(ctx), nil
+}
+
+func (runtime Runtime) powerReadyForFinalize(ctx context.Context) (bool, error) {
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
@@ -2018,17 +2034,9 @@ func (runtime Runtime) powerConverged(ctx context.Context, requireMetadata bool)
 	if err != nil || !state.InstanceFound {
 		return false, err
 	}
-	instance := state.Instance
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	instanceBridge, _ := instance.EffectiveConfig("user.subyard.bridge")
-	autostart, _ := instance.EffectiveConfig("boot.autostart")
 	bridge := runtime.environmentDefault("INCUS_BRIDGE",
 		runtime.environmentDefault("INCUS_NETWORK", "incusbr0"))
-	if managed != "true" || initialized != "true" ||
-		(desired != "running" && desired != "stopped") ||
-		instanceBridge != bridge || autostart != "false" {
+	if !application.PowerMetadataReadyForFinalize(state.Instance, bridge) {
 		return false, nil
 	}
 	return runtime.powerReconcilerConverged(ctx), nil

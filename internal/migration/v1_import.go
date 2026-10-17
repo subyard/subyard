@@ -125,26 +125,6 @@ func NewV1ImportReader(options V1ImportOptions) (*V1ImportReader, error) {
 	return &V1ImportReader{options: options}, nil
 }
 
-// InspectFresh selects a v1 journal only while its exact published pair is
-// still live. A normal later update from the candidate therefore has no v1
-// import work even though the old journal remains immutable input on disk.
-func (reader *V1ImportReader) InspectFresh(
-	ctx context.Context,
-	pair V1ImportRuntimePair,
-) (V1Import, bool, error) {
-	if reader == nil {
-		return V1Import{}, false, errors.New("v1 import reader is required")
-	}
-	if !publishedV1CurrentRuntime(pair.Current) {
-		return V1Import{}, false, nil
-	}
-	result, err := reader.inspect(ctx, pair, true)
-	if err != nil {
-		return V1Import{}, false, err
-	}
-	return result, true, nil
-}
-
 // InspectBound reselects the journal using the pair frozen in a V2 journal.
 // It deliberately does not read live links, so resume remains possible after
 // V2 has switched the candidate runtime to current.
@@ -201,12 +181,7 @@ func (reader *V1ImportReader) inspect(
 	if !knownV1ImportRegistry(candidate.transaction, registry) {
 		return V1Import{}, errors.New("retained v1 registry is not the exact published contract")
 	}
-	if err := validateTransaction(ReleaseOptions{
-		ConfigHome: reader.options.ConfigHome, RuntimeRoot: reader.options.RuntimeRoot,
-		RegistryPath: candidate.registryPath, Version: candidate.transaction.ToRelease,
-	}, registry, candidate.transaction); err != nil {
-		return V1Import{}, fmt.Errorf("validate retained v1 registry: %w", err)
-	}
+
 	release, checkpoint, valid := v1ImportCheckpoint(candidate.transaction)
 	if !valid {
 		return V1Import{}, errors.New("v1 import journal has an unsupported published checkpoint")
@@ -307,9 +282,6 @@ func parseV1ImportRegistry(payload []byte) (Registry, error) {
 	}
 	if err := requireJSONEOF(decoder); err != nil {
 		return Registry{}, fmt.Errorf("decode retained v1 registry: %w", err)
-	}
-	if err := registry.Validate(); err != nil {
-		return Registry{}, fmt.Errorf("validate retained v1 registry: %w", err)
 	}
 	return registry, nil
 }

@@ -732,43 +732,42 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-Runtimes older than v0.11.0 use a legacy updater that cannot authorize the current release
-transition. Its rejected migration endpoint prints a standalone installer command pinned to the
-candidate version. The old invocation leaves runtime links and protected settings unchanged.
-Use that exact version in both the download URL and installer arguments. When piping the installer
-to Bash, pass `--yes` explicitly after reviewing the intended upgrade:
+The minimum supported source is **v0.11.0, inclusive**. Fresh upgrades/imports from earlier
+installations and new rollback targets below that boundary refuse before changing active runtime
+links or protected state. There is no V1 upgrade bridge. Existing accepted V2 history and exact
+unfinished V2 owners remain supported, including retained legacy evidence. Process V1, Ledger V2
+and V2 checkpoint-reader bridges have independent compatibility contracts.
+
+For an older installation, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash
-VERSION=<candidate-version>
+VERSION=<current-version>
 curl -fsSL "https://github.com/Subyard/Subyard/releases/download/v${VERSION}/subyard-install.sh" \
-  | bash -s -- --version "$VERSION" --yes
+  | bash -s -- --version "$VERSION" --publish-only
+"<printed-candidate-path>/bin/yard" uninstall --full
 ```
 
-Without explicit consent, a noninteractive pipe is rejected. Alternatively, download the same
-pinned installer to a file and run it from an interactive terminal. The standalone installer
-publishes and verifies the candidate before the candidate plans the transition. `--yes` does not
-bypass compatibility, configuration ownership or stale-plan checks.
+Keep the existing installation's configured data, config, runtime and cache roots when staging
+and running the printed candidate. Supply `--runtime-root <existing-runtime-root>` when it is
+custom. Staging publishes immutable tooling and its ownership inventory; it does not activate,
+upgrade or migrate the old installation. The full removal preview identifies owned resources and
+asks for destructive confirmation. Full uninstall removes the installation's owned yard data,
+settings, credentials, sessions, backups and runtime. Unknown or foreign ownership refuses the
+relevant deletion; names and an old version alone do not prove ownership.
 
-If both `yards/<name>/config.env` and `yards/<name>.env` exist, the transition names both paths and
-stops before changing configuration. Inspect them locally to confirm that the nested registration
-is the intended active configuration. Run the published candidate's `bin/yard` command using its
-exact path under the configured runtime root:
+Legacy installations may lack creation receipts for host directories. Exact native association
+can establish a registered legacy yard's bounded project/instance/volume scope; unrelated native
+resources or conflicting ownership refuse that scope. Unrecorded legacy host namespaces, including
+backups, sessions and host mounts, and shared infrastructure without installation ownership remain
+preserved and are listed in the plan and final result. Full removal does not claim those paths
+were deleted. Modern receipt-owned namespaces retain their existing deletion and stale-plan guards.
 
-```bash
-"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default config repair-registration <name> --check
-"<runtime-root>/releases/<candidate-release>/bin/yard" -Y default config repair-registration <name>
-```
 
-`-Y default` selects the local owner context even when the ambient yard uses a retired template.
-The repair shows its exact scope and asks once. It keeps the nested file unchanged and atomically
-moves the flat file to `recovery/yard-registrations/<name>.env` under the configuration root, without
-printing its contents or overwriting an existing archive. A changed registration invalidates the
-plan; an unfinished release transition blocks repair. Rerun the pinned installer afterward to
-inspect and authorize the now-unambiguous upgrade.
-
-`dev/verify-release-upgrades.py` also runs the unchanged, checksum-pinned v0.9.1 updater to verify
-the refusal instruction, noninteractive consent, duplicate registration repair and completed
-standalone transition.
+Full uninstall works independently of migration readiness, including pending or invalid V1/V2
+journals. If interrupted, follow its printed recovery command and review the retained plan before
+confirming continuation. After verified cleanup, stop. Install the desired version separately;
+cleanup does not preserve data or automatically reinstall. See [full removal](configuration.md#full-uninstall)
+and the [support inventory](reference/legacy-migration-support.md).
 
 ### Interrupted release recovery
 
@@ -1187,8 +1186,8 @@ invoked. Owner intent is separate from ingress ownership and pending ingress cle
 ### Dedicated profiles and VM capabilities
 
 Core code consumes profile declarations; it must not branch on a profile name or service port.
-A profile's `profile.conf` can declare `PROVISION_SCOPE=dedicated`. Such a hook is excluded from
-implicit all-profile provisioning and requires a named yard whose shipped role declares
+A profile's `profile.conf` can declare `PROVISION_SCOPE=dedicated`. Such a hook requires
+explicit selection and a named yard whose shipped role declares
 `EXCLUSIVE_ENVIRONMENT_PROFILE=<profile>`. An empty `ENVIRONMENT_PROFILES` excludes dedicated
 profile provisioning and selected-resource probing; discovering a descriptor never enables its service.
 
@@ -1385,6 +1384,21 @@ Choose validation for these changes using the skill's risk-based test-selection 
 
 ## Profile extensions
 
+Environment-profile selection resolves once during configuration loading. The authored request,
+presence and provenance remain available for authoring and inventory; the normalized effective
+`ENVIRONMENT_PROFILES` is the common input to extras, provisioning, resources and project admission.
+An absent setting uses eligible descriptor-declared defaults, and an explicitly empty setting
+selects nothing. Project-owned requests cannot expand the yard set. Import and `up` recheck
+membership before mutation; `down` and removal remain available after deselection.
+
+L2 profiles declare writable dependency directories in `CACHES` and read-only toolchain assets
+as `source:destination:ro` in `ENV_MOUNTS`. The runner and static security audit share the same
+path policy. Native startup also checks resolved asset sources, cache symlinks and UID/GID;
+existing containers must have the non-root/no-new-privileges policy or require `up --rebuild`.
+Profile images own their compatible tools and writable home. See the
+[project environment boundary](security.md#project-environments) and
+[stateful resource lease contract](reference/resource-leases.md).
+
 `yard profile enable|disable|setup|status <id>` operates on one shipped profile declaring
 `owner_service`. Enable and disable require a running, existing yard, preserve neighboring profile
 selections and invoke only the selected hook. They do not enter the general init reconciler. Setup
@@ -1410,7 +1424,10 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
 
 - `default_yards` supplies selection when `ENVIRONMENT_PROFILES` is absent. An explicit list,
   including an empty list, wins; matching `disabled_when` conditions disable selection.
-  `selected_provision_only` applies this selection to implicit provisioning.
+  Config resolves one effective set for all consumers, with requested values and presence kept
+  separately for authoring and diagnostics. Provision hooks without a descriptor are never
+  selected implicitly. `selected_provision_only` remains readable compatibility metadata;
+  every provision hook now uses the effective set.
 - `native` lists Go package directories and artifact paths relative to the profile. Development
   and release builds discover these declarations; installed profiles contain the native artifacts.
 - `consumers` declares credential ID, zone, relative materialization path and format (`file`,
@@ -1576,6 +1593,11 @@ runtime/data/config/cache/bin and shell integration paths; project and shared-re
 persist public installation contexts while setup is still partial. Host mount setup records
 which namespaces it created, retaining pre-existing content as foreign. Assessment performs
 no elevation and captures native metadata rather than credential or settings payloads.
+
+Full uninstall does not require migration readiness or execute a migration, regardless of source
+version or pending/invalid V1/V2 journals. CLI scope selection precedes teardown release admission;
+only selected-yard teardown uses that gate. Full removal retains its independent installation
+ownership, confirmation, session, stale inventory and saved-cleanup recovery checks.
 
 Shipped profiles may contribute a `full_cleanup` executable and a bounded
 `full_cleanup_environment` allowlist. The read-only `--assess` response declares exact artifact

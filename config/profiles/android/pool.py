@@ -926,12 +926,17 @@ class Pool:
                                       config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3)
         self.cancel, self.workers, self.connections, self.sdk_locks = {}, {}, {}, {}
         self.prepare_cancel = threading.Event()
+        data = {}
         if self.state_path.exists():
             data = json.loads(self.state_path.read_text())
             require(data.get('schema') == SCHEMA, 'state', 'unsupported Android pool state')
             self.slots = data['slots']
         else:
             self.slots = []
+        self.generation_floor = data.get('generation_floor', 0)
+        require(type(self.generation_floor) is int and self.generation_floor >= 0,
+                'state', 'invalid Android pool generation floor')
+        self.generation_floor = max([self.generation_floor] + [slot['generation'] for slot in self.slots])
         size = config.get('size', 2)
         require(type(size) is int and 1 <= size <= 32, 'config', 'pool size must be between 1 and 32')
         require(config.get('gpu', 'host') in ('host', 'software', 'software-gles'), 'config',
@@ -940,11 +945,13 @@ class Pool:
                 'busy', 'cannot shrink an occupied Android pool')
         self.slots = self.slots[:size]
         while len(self.slots) < size:
-            self.slots.append(dict(slot_id=f'{len(self.slots)+1:03}', generation=0, state='available'))
+            self.slots.append(dict(slot_id=f'{len(self.slots)+1:03}', generation=self.generation_floor, state='available'))
         self.save()
 
     def save(self):
-        atomic(self.state_path, dict(schema=SCHEMA, slots=self.slots))
+        # Retain removed slots' allocation fences through idle shrink/grow and restart.
+        self.generation_floor = max([self.generation_floor] + [slot['generation'] for slot in self.slots])
+        atomic(self.state_path, dict(schema=SCHEMA, generation_floor=self.generation_floor, slots=self.slots))
 
     def normalize(self, request):
         require(isinstance(request, dict) and set(request) <= {'device', 'api', 'variant', 'abi'},
@@ -966,6 +973,13 @@ class Pool:
                     result[key] = slot[key]
             for key in ('acquired_at', 'ready_at', 'last_heartbeat_at', 'expires_at'):
                 result[key] = utc(slot.get(key))
+        result['lease'] = dict(contract='resource-lease/v1', resource_type='android-emulator',
+                               resource_id='emulator', slot_id=slot['slot_id'],
+                               generation=slot['generation'], state=('draining' if slot['state'] in ('provisioning', 'held')
+                                   and slot.get('expires_at', 0) <= self.clock() else slot['state']),
+                               owner=slot.get('owner'), expires_at=utc(slot.get('expires_at')))
+        if slot.get('failure'):
+            result['lease']['failure'] = slot['failure']
         return result
 
     def status(self):
@@ -1020,6 +1034,9 @@ class Pool:
         require(all(isinstance(v, str) and re.fullmatch(r'[\w .:/-]{1,100}', v, re.ASCII)
                     for v in owner.values()), 'owner', 'invalid owner attribution')
         with self.lock:
+            require(not self.closed, 'unavailable', 'Android pool is stopping')
+            require(any(s['state'] != 'quarantined' for s in self.slots),
+                    'unavailable', 'all Android emulator slots are quarantined')
             require(any(s['state'] == 'available' and s['slot_id'] not in self.workers for s in self.slots),
                     'busy', 'all Android emulator slots are occupied')
         # Resolve outside the state lock; no image is removed/downloaded before reservation pins it.
@@ -1030,6 +1047,8 @@ class Pool:
             require(not self.closed, 'unavailable', 'Android pool is stopping')
             require(not any(s.get('credential') == digest for s in self.slots), 'credential', 'credential already used')
             slot = next((s for s in self.slots if s['state'] == 'available' and s['slot_id'] not in self.workers), None)
+            require(any(s['state'] != 'quarantined' for s in self.slots),
+                    'unavailable', 'all Android emulator slots are quarantined')
             require(slot is not None, 'busy', 'all Android emulator slots are occupied')
             self.runtime.preflight(request, [s for s in self.slots if 'request' in s], slot)
             sdk_lock = open(self.config.get('sdk_lock', '/run/lock/subyard-android/sdk.lock'), 'a')

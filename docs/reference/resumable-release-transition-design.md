@@ -296,6 +296,13 @@ steps; they do not gain independent runtime activation or a second rollback stat
 
 ## Supported compatibility and recovery
 
+The approved [legacy support boundary](legacy-migration-support.md) is v0.11.0, inclusive.
+Earlier source installations use full uninstall and a separate
+clean installation instead of V1 upgrade/import or unfinished source V1 recovery. No V1 upgrade
+bridge or notice window is required. Already accepted V2 history with legacy provenance remains
+readable, and supported V2 recovery retains its exact bindings. The source-version boundary is
+separate from domain epochs and V2 checkpoint-reader compatibility.
+
 Three independent policies determine support:
 
 - The **upgrade floor** is the minimum readable domain epoch declared by the registry, not a release
@@ -303,8 +310,8 @@ Three independent policies determine support:
 - **Rollback eligibility** requires an intact, verified retained `current`/`previous` runtime and
   compatibility with actual persisted state and completed capabilities. Passing the upgrade floor
   does not itself prove rollback eligibility.
-- An **in-flight transaction** pins its exact sealed owner, artifacts and protected evidence until
-  it reaches a terminal state, regardless of age or intervening releases. Raising the ordinary
+- A **supported in-flight transaction** pins its exact sealed owner, artifacts and protected evidence
+  until it reaches a terminal state, regardless of age or intervening releases. Raising the ordinary
   upgrade floor cannot revoke that recovery contract or permit deletion of its inputs.
 
 Released-binary acceptance retains a supported baseline for each distinct caller, producer or
@@ -325,10 +332,10 @@ drift does not authorize or resume completed migration history; apply still requ
 and creates a new repair transaction. The current caller validates the identity and actual links.
 The [implemented compatibility contract](../control-plane.md#release-migrations) describes this projection.
 
-Recognized legacy journals are imported through bounded compatibility ingress with the original
-protected evidence retained and actual postconditions verified. There is no supported manual phase
-edit. Exact supported older-engine failures retain dedicated recovery rules rather than a general
-permission to replace journals or links. Use the maintained [legacy upgrade](../control-plane.md#legacy-upgrades)
+Fresh V1 imports are retired. Accepted bound V2 history retains read-only compatibility ingress
+with its original protected evidence and required postcondition observations. There is no supported manual phase edit. Exact supported older-engine failures retain
+dedicated recovery rules rather than a general permission to replace journals or links. Use the maintained
+[legacy upgrade](../control-plane.md#legacy-upgrades)
 and [interrupted recovery](../control-plane.md#interrupted-release-recovery) guidance.
 
 Protocol evolution first ships readers/writers alongside the old version while continuing to send
@@ -391,11 +398,11 @@ announce or publish it. The compatibility harness also seals a synthetic future 
 the same bound source to test bridge-first refusal, successful advance and refusal of epoch-2 rollback.
 That synthetic owner is a contract fixture, not a released baseline.
 
-The main registry retains both one-time migration IDs and the current floor. Future removal needs an
-explicit retired-prefix digest matching completed history, a declared new readable floor, and release
-of recovery/rollback compatibility pins that still need the full projection or old handlers. The
-[legacy support policy](legacy-migration-support.md) governs bridge publication and the notice window;
-preparing a checkpoint-capable candidate does not publish that bridge.
+The main registry retains its live migration definitions and the current epoch floor. Future V2 prefix
+removal needs an explicit retired-prefix digest matching completed history, a declared new readable floor,
+and release of recovery/rollback compatibility pins that still need the full projection or old handlers. The
+[legacy support policy](legacy-migration-support.md) separately governs the pre-v0.11.0 uninstall
+boundary. Its removal of the V1 upgrade bridge does not retire V2 reader-bridge requirements.
 
 ## Public error taxonomy
 

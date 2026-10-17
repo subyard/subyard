@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ type projectExecution struct {
 	CopyObserved          bool
 	Removal               projectRemovalObservation
 	RequiresProjects      bool
+	RequiresActiveTarget  bool
 }
 
 type projectRemovalObservation struct {
@@ -506,6 +508,7 @@ func (cli *CLI) prepareProjectExecution(
 	defer func() {
 		if err == nil && execution != nil {
 			execution.RequiresProjects = projectCommandRequiresProjects(definition.Name)
+			execution.RequiresActiveTarget = slices.Contains([]string{"sync", "bind", "clone", "up"}, definition.Name)
 			err = cli.captureProjectOwner(ctx, execution)
 			if err == nil && execution.Loaded.Context.AccessKind == domain.AccessRemote {
 				err = cli.recheckProjectRole(ctx, execution)
@@ -626,7 +629,13 @@ func (cli *CLI) recheckProjectRole(ctx context.Context, execution *projectExecut
 	if err != nil {
 		return fmt.Errorf("recheck project yard role: %w", err)
 	}
-	return requireProjectRole(fresh)
+	if err := requireProjectRole(fresh); err != nil {
+		return err
+	}
+	if execution.RequiresActiveTarget && execution.Record.Target != "" {
+		return validateProjectTarget(cli.options.RepositoryRoot, fresh, execution.Record.Target)
+	}
+	return nil
 }
 
 func openProjectPreparationStore(ctx context.Context, yard domain.Context) (*state.FileStore, error) {
@@ -734,7 +743,12 @@ func (cli *CLI) prepareProjectImport(
 	if name == "bind" && selectedLoaded.Context.AccessKind == domain.AccessRemote {
 		return nil, errors.New("bind is host-local - use sync or clone")
 	}
-	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
+	if requestedTarget != "" {
+		if err := validateProjectTarget(cli.options.RepositoryRoot, selectedLoaded, requestedTarget); err != nil {
+			return nil, err
+		}
+	}
+	store, err := state.NewFileStore(selectedLoaded.Context.Paths.StateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -754,11 +768,34 @@ func (cli *CLI) prepareProjectImport(
 	if target == "" {
 		target = "yard"
 	}
-	if err := validateProjectTarget(cli.options.RepositoryRoot, target); err != nil {
+	if err := validateProjectTarget(cli.options.RepositoryRoot, selectedLoaded, target); err != nil {
 		if admission.Reservation != nil {
 			_ = store.AbortAdmission(ctx, admission.Reservation.OperationID)
 		}
 		return nil, err
+	}
+	store, err = openProjectPreparationStore(ctx, selectedLoaded.Context)
+	if err != nil {
+		return nil, err
+	}
+	if selectedLoaded.Context.AccessKind != domain.AccessRemote {
+		// Selection admission precedes legacy migration. Capture the authoritative
+		// consent baseline afterward so our own migration cannot make it stale.
+		admission, err = cli.previewProjectAdmission(ctx, selectedLoaded, store, hostPath, mode, projectName, explicitName)
+		if err != nil {
+			return nil, err
+		}
+		exists = admission.Existing != nil
+		target = requestedTarget
+		if target == "" && exists {
+			target = admission.Existing.Target
+		}
+		if target == "" {
+			target = "yard"
+		}
+		if err := validateProjectTarget(cli.options.RepositoryRoot, selectedLoaded, target); err != nil {
+			return nil, err
+		}
 	}
 	record := domain.ProjectRecord{
 		Schema: 1, IdentityVersion: 2, ProjectID: admission.ProjectID, Name: admission.Name,
@@ -811,11 +848,11 @@ func (cli *CLI) prepareProjectClone(
 	if err != nil {
 		return nil, err
 	}
-	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
-	if err != nil {
+	if err := validateProjectTarget(cli.options.RepositoryRoot, selectedLoaded, target); err != nil {
 		return nil, err
 	}
-	if err := validateProjectTarget(cli.options.RepositoryRoot, target); err != nil {
+	store, err := openProjectPreparationStore(ctx, selectedLoaded.Context)
+	if err != nil {
 		return nil, err
 	}
 	operationID := cli.projectOperationID()
@@ -930,6 +967,11 @@ func (cli *CLI) prepareExistingProject(
 	selectedLoaded, err := cli.activateProjectContext(match.Yard, loaded, projectCommandRequiresProjects(name))
 	if err != nil {
 		return nil, err
+	}
+	if name == "up" && match.Record.Target != "" {
+		if err := validateProjectTarget(cli.options.RepositoryRoot, selectedLoaded, match.Record.Target); err != nil {
+			return nil, err
+		}
 	}
 	yardIdentity := ""
 	if name == "code" {
@@ -1576,12 +1618,20 @@ func replaceProjectSelector(name string, arguments []string, id string) []string
 	return result
 }
 
-func validateProjectTarget(root, target string) error {
+func validateProjectTarget(root string, loaded config.Loaded, target string) error {
 	if target == "yard" {
 		return nil
 	}
 	if !domain.SafeName(target) {
 		return fmt.Errorf("invalid project target %q", target)
+	}
+	// Remote plans validate selection and package availability on the owner.
+	// Inventory routes carry controller configuration, not owner profile state.
+	if loaded.Context.AccessKind == domain.AccessRemote {
+		return nil
+	}
+	if !slices.Contains(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]), target) {
+		return fmt.Errorf("project target %q is not active on yard %q", target, loaded.Context.YardName)
 	}
 	path := filepath.Join(root, "config", "profiles", target, "profile.conf")
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {

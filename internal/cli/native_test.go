@@ -2738,11 +2738,10 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil {
 		t.Fatalf("mutation gate output is not structured JSON: %q: %v", stderr.String(), err)
 	}
-	if outcome.Status != "recovering" || outcome.Code != "recovery-pending" ||
+	if outcome.Status != "operator-action-required" || outcome.Code != "journal-invalid" ||
 		outcome.Active != "0.0.9" || outcome.Previous == nil || *outcome.Previous != "0.0.8" ||
-		outcome.Target != Version || outcome.Transaction == nil ||
-		!strings.HasPrefix(*outcome.Transaction, "v1-") ||
-		outcome.Action != "run yard update" {
+		outcome.Target != Version || outcome.Transaction != nil ||
+		outcome.Action != "run yard update --check" {
 		t.Fatalf("mutation gate outcome=%#v", outcome)
 	}
 	got, err := os.ReadFile(ownerJournalPath)
@@ -3014,6 +3013,12 @@ esac
 
 func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	manifestPath := filepath.Join(root, "config", "commands.registry")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, manifestPath, string(manifest)+"keys||@keys||forward|mutate|dynamic|public|lifecycle|keys|keys [command]|host credential ledger|--yes --help|add check-exclusive\n", 0o600)
 	runtimeRoot := filepath.Join(root, "runtime-v2")
 	capture := filepath.Join(root, "v2-candidate-inspections")
 	environment = append(environment,
@@ -3099,6 +3104,67 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		t.Fatalf("test-vms status during v2 recovery: code=%d requests=%#v stderr=%q",
 			code, testVMRunner.Requests, testVMStderr.String())
 	}
+	if err := os.Remove(capture); err != nil {
+		t.Fatal(err)
+	}
+	ownerPath := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory", "registration.json")
+	ownerBefore := "{invalid-recovery\n"
+	writeCLIFile(t, ownerPath, ownerBefore, 0o600)
+	ownerInfo, err := os.Lstat(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"keys", "check-exclusive", "canonical"},
+		{"keys", "--yes", "check-exclusive", "canonical"},
+	} {
+		var keyStderr bytes.Buffer
+		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
+		incus := lifecycleIncus()
+		query, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Stdin: input,
+			Stdout: &bytes.Buffer{}, Stderr: &keyStderr, Incus: incus, Executor: incus,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := query.Run(context.Background()); code != 0 || input.reads != 0 || len(incus.ExecCalls) != 0 {
+			t.Fatalf("exclusive read during recovery: code=%d input=%d native=%d stderr=%q",
+				code, input.reads, len(incus.ExecCalls), keyStderr.String())
+		}
+	}
+	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exclusive read inspected the transition candidate: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_HOME"), "keys")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exclusive read created a credential store: %v", err)
+	}
+	ownerAfter, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerAfterInfo, err := os.Lstat(ownerPath)
+	if err != nil || string(ownerAfter) != ownerBefore || !os.SameFile(ownerInfo, ownerAfterInfo) || ownerInfo.Mode() != ownerAfterInfo.Mode() {
+		t.Fatalf("exclusive read changed owner recovery state: %v", err)
+	}
+	for _, arguments := range [][]string{
+		{"keys", "add", "fixture", "--yes"},
+		{"keys", "check-exclusive-extra", "canonical"},
+	} {
+		var keyStderr bytes.Buffer
+		input := &credentialInputProbe{reader: strings.NewReader("protected-value")}
+		mutation, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Stdin: input, Stderr: &keyStderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := mutation.Run(context.Background()); code != 1 || input.reads != 0 || !strings.Contains(keyStderr.String(), "recovery-pending") {
+			t.Fatalf("key mutation bypassed recovery: code=%d input=%d stderr=%q", code, input.reads, keyStderr.String())
+		}
+	}
 	after, err := os.ReadFile(journalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -3111,7 +3177,7 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 		afterInfo.Mode() != beforeInfo.Mode() {
 		t.Fatal("mutation gate or read-only status changed the protected v2 journal")
 	}
-	if calls, err := os.ReadFile(capture); err != nil || string(calls) != "called" {
+	if calls, err := os.ReadFile(capture); err != nil || string(calls) != "calledcalled" {
 		t.Fatalf("candidate inspection calls=%q err=%v", calls, err)
 	}
 }
@@ -3428,7 +3494,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			Params: json.RawMessage(`{"command":"code","arguments":["Demo"]}`),
 		}, nil)
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "recovery-pending" {
+		if !ok || fault.Code != "journal-invalid" {
 			t.Fatalf("gated plan error=%#v", err)
 		}
 		got, readErr := os.ReadFile(projectJournalPath)
@@ -3470,7 +3536,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			Params: json.RawMessage(`{"confirmed":true}`),
 		}, func(string, any) (uint64, error) { return 1, nil })
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "recovery-pending" || len(runner.Requests) != 0 {
+		if !ok || fault.Code != "journal-invalid" || len(runner.Requests) != 0 {
 			t.Fatalf("execute gate error=%#v requests=%#v", err, runner.Requests)
 		}
 	})
@@ -3501,13 +3567,11 @@ func TestCurrentEngineRejectsSupersededMutatingMigrationVerbs(t *testing.T) {
 				t.Fatal(err)
 			}
 			if code := program.runMigration(context.Background(), "default", []string{verb}); code != 2 ||
-				!strings.Contains(stderr.String(), "superseded") {
+				!strings.Contains(stderr.String(), "before v0.11.0") {
 				t.Fatalf("_migrate %s result: code=%d stderr=%q", verb, code, stderr.String())
 			}
-			instruction := "curl -fsSL https://github.com/Subyard/Subyard/releases/download/v" + Version +
-				"/subyard-install.sh | bash -s -- --version " + Version + " --yes"
-			if !strings.Contains(stderr.String(), instruction) {
-				t.Fatalf("legacy updater lacks pinned standalone instruction: %s", stderr.String())
+			if !strings.Contains(stderr.String(), "uninstall --full") || !strings.Contains(stderr.String(), "owned data") {
+				t.Fatalf("legacy updater lacks full-uninstall guidance: %s", stderr.String())
 			}
 		})
 	}
@@ -3588,7 +3652,7 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
-		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering {
+		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusOperatorActionRequired {
 			t.Fatalf("caller-controlled child marker bypassed mutation gate: outcome=%#v err=%v",
 				outcome, err)
 		}

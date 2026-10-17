@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -118,19 +119,19 @@ func (cli *CLI) prepareProfileInitRepair(ctx context.Context, yard string, argum
 
 // Teardown grants new destructive authority only for the ordinarily assessed
 // local target. Completed release history remains immutable; reset stays gated.
-func (cli *CLI) prepareTeardownRepair(ctx context.Context, yard string, arguments []string, outcome releasetransition.Outcome) (*configApplyRepairPermit, error) {
+func (cli *CLI) prepareTeardownRepair(ctx context.Context, loaded config.Loaded, arguments []string, outcome releasetransition.Outcome) (*configApplyRepairPermit, error) {
 	execution, err := prepareTeardownExecution(arguments)
 	if err != nil || execution.resetConfig || !configApplyRepairGateShape(outcome) {
 		return nil, err
 	}
-	loaded, err := cli.loadContext(yard)
-	if err != nil || loaded.Context.AccessKind != domain.AccessLocal {
+	if loaded.Context.AccessKind != domain.AccessLocal {
 		return nil, errors.New("completed-history teardown requires the local source owner")
 	}
 	inputs, err := cli.captureOwnerInputs(loaded, "", nil)
 	if err != nil {
 		return nil, err
 	}
+	yard := loaded.Context.YardName
 	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, []string{yard}, false, "", inputs)
 }
 

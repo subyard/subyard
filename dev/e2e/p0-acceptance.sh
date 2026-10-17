@@ -1219,7 +1219,7 @@ full_uninstall_vm() {
  if [ "$mode" != cleanup ]; then
    local logs="$STATE_ROOT/evidence/full-uninstall-$LEASE_RUN/$mode" file
    install -d -m 0700 "$logs"
-   for file in direct-only.log bootstrap-only.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase; do
+   for file in direct-only.log bootstrap-only.log active-refusal.log active-ssh.log full.log retry-preview.log retry.log phase legacy-install.log legacy-context.log legacy-init.log legacy-refusal.log legacy-stage.log legacy-foreign-refusal.log legacy-full.log legacy-retry-preview.log legacy-retry.log legacy-clean-install.log legacy-clean-remove.log legacy-result.log; do
      guest 1 sh -c 'state=$1; marker=$2; file=$3; [ ! -d "$state" ] || { [ ! -L "$state" ] && [ "$(cat "$state/.marker")" = "$marker" ] && { [ ! -f "$state/$file" ] || cat "$state/$file"; }; }' \
        _ "/var/tmp/subyard-full-uninstall-$TOKEN" "subyard-full-uninstall-$TOKEN" "$file" > "$logs/$file" || rc=3
      chmod 0600 "$logs/$file"

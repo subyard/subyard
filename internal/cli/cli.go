@@ -498,11 +498,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 		resourceReadOnly = parseErr == nil && (invocation.help ||
 			cli.resources.VerbReadOnly(resourceDefinition.Command, invocation.verb))
 	}
+	keysReadOnly := false
+	if core && definition.Name == "keys" && definition.Handler == "@keys" && definition.Arg0 == "" {
+		arguments := keysWithoutConsent(commandArguments)
+		keysReadOnly = len(arguments) == 2 && arguments[0] == "check-exclusive"
+	}
 	readOnlyInvocation := (core && commandHelpRequested(commandArguments)) ||
 		(core && definition.Handler == "@client-projects") ||
 		(core && definition.Effect == command.EffectRead) ||
 		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
-		resourceReadOnly ||
+		resourceReadOnly || keysReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
 		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
 		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
@@ -571,8 +576,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return cli.runHostLogs(commandArguments)
 	}
+	// Teardown checks release admission after scope selection: full uninstall
+	// uses its own ownership and cleanup guards without requiring migrations.
 	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
-		(!core || definition.Name != "update") {
+		(!core || definition.Name != "update" && definition.Handler != "@teardown") {
 		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
 		if gateErr != nil {
 			cli.errorf("inspect release transition: %v", gateErr)
@@ -609,17 +616,6 @@ func (cli *CLI) Run(ctx context.Context) int {
 				return 1
 			}
 			cli.integrationCleanupRepair = permit
-			if permit != nil {
-				outcome = nil
-			}
-		}
-		if outcome != nil && core && definition.Handler == "@teardown" {
-			permit, err := cli.prepareTeardownRepair(ctx, yard, commandArguments, *outcome)
-			if err != nil {
-				cli.errorf("teardown release admission: %v", err)
-				return 1
-			}
-			cli.teardownRepair = permit
 			if permit != nil {
 				outcome = nil
 			}
@@ -746,7 +742,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
-			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile"))
+			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown"))
 			var results []ownerInventoryResult
 			if readOnlyInvocation && !commandHelpRequested(commandArguments) {
 				results = cli.allOwnerInventoriesForQueries(ctx, base, false)
@@ -824,6 +820,26 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
+		} else if !cli.releaseTransitionChild {
+			outcome, gateErr := cli.inspectMutationGate(ctx, yard)
+			if gateErr != nil {
+				cli.errorf("inspect release transition: %v", gateErr)
+				return 1
+			}
+			if outcome != nil {
+				permit, err := cli.prepareTeardownRepair(ctx, loaded, commandArguments, *outcome)
+				if err != nil {
+					cli.errorf("teardown release admission: %v", err)
+					return 1
+				}
+				cli.teardownRepair = permit
+				if permit == nil {
+					if err := json.NewEncoder(cli.options.Stderr).Encode(publicMutationGateOutcome(*outcome)); err != nil {
+						cli.errorf("write release transition outcome: %v", err)
+					}
+					return 1
+				}
+			}
 		}
 	}
 	cli.ensureOperationID()
@@ -1055,8 +1071,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
 		return 0
 	case "@init":
-		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name>] [--yes]\n", cli.options.Program)
-		fmt.Fprintln(cli.options.Stdout, "\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s init [--configs | --reset | --profile <name> | --continue-legacy] [--yes]\n", cli.options.Program)
+		fmt.Fprintln(cli.options.Stdout, "\n--continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.\nInteractive init offers initial setup declared by selected profiles.\nLeave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.")
 		return 0
 	case "@lifecycle":
 		fmt.Fprintf(cli.options.Stdout, "Usage: %s %s\n", cli.options.Program, definition.Display)
@@ -2520,12 +2536,7 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 	}
 	switch arguments[0] {
 	case "apply", "finalize", "rollback", "cleanup":
-		cli.errorf(
-			"state migration %s: superseded mutation endpoint; use yard update from a supported runtime. "+
-				"For a legacy updater, run the pinned standalone installer:\n"+
-				"curl -fsSL https://github.com/Subyard/Subyard/releases/download/v%s/subyard-install.sh | bash -s -- --version %s --yes",
-			arguments[0], Version, Version,
-		)
+		cli.errorf("state migration %s: %s", arguments[0], releaseruntime.LegacyReinstallGuidance)
 		return 2
 	}
 	repositoryRoot := cli.options.RepositoryRoot

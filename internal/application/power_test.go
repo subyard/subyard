@@ -17,7 +17,7 @@ func validPowerMetadata() map[string]string {
 		"user.subyard.managed":       "true",
 		"user.subyard.name":          "default",
 		"user.subyard.bridge":        "incusbr0",
-		"user.subyard.desired_power": PowerRunning,
+		"user.subyard.desired_power": string(domain.PowerRunning),
 		"user.subyard.initialized":   "true",
 	}
 }
@@ -90,7 +90,7 @@ func TestPowerServiceImportTreatsMissingAndEmptyManagedAsUnmanaged(t *testing.T)
 			intent, err := service.Ensure(context.Background(), domain.Context{
 				YardName: "default", IncusProject: "subyard", YardInstanceName: "yard",
 			})
-			if err != nil || !intent.Imported || intent.Desired != PowerStopped {
+			if err != nil || !intent.Imported || intent.Desired != domain.PowerStopped {
 				t.Fatalf("intent=%#v error=%v", intent, err)
 			}
 		})
@@ -116,7 +116,7 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 	}
 	service := PowerService{Instances: incus, Config: incus}
 	intent, err := service.Ensure(context.Background(), yard)
-	if err != nil || intent.Imported || intent.Desired != PowerRunning {
+	if err != nil || intent.Imported || intent.Desired != domain.PowerRunning {
 		t.Fatalf("managed ensure failed: intent=%#v error=%v", intent, err)
 	}
 	wantPatch := map[string]string{
@@ -127,7 +127,7 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 	if len(incus.ConfigUpdates) != 1 || !maps.Equal(incus.ConfigUpdates[0].Values, wantPatch) {
 		t.Fatalf("managed ensure writer shape = %#v, want %#v", incus.ConfigUpdates, wantPatch)
 	}
-	if err := service.Set(context.Background(), yard, PowerStopped, false); err != nil {
+	if err := service.Set(context.Background(), yard, domain.PowerStopped, false); err != nil {
 		t.Fatal(err)
 	}
 	wantFull := map[string]string{
@@ -135,7 +135,7 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 		"user.subyard.managed":       "true",
 		"user.subyard.name":          "default",
 		"user.subyard.bridge":        "incusbr0",
-		"user.subyard.desired_power": PowerStopped,
+		"user.subyard.desired_power": string(domain.PowerStopped),
 		"user.subyard.initialized":   "false",
 	}
 	if len(incus.ConfigUpdates) != 2 || !maps.Equal(incus.ConfigUpdates[1].Values, wantFull) {
@@ -156,14 +156,14 @@ func TestPowerServiceImportsAndCommitsAtomically(t *testing.T) {
 	}
 	service := PowerService{Instances: incus, Config: incus}
 	intent, err := service.Ensure(context.Background(), yard)
-	if err != nil || !intent.Imported || intent.Desired != PowerStopped {
+	if err != nil || !intent.Imported || intent.Desired != domain.PowerStopped {
 		t.Fatalf("power import failed: intent=%#v err=%v", intent, err)
 	}
-	if err := service.Commit(context.Background(), yard, PowerRunning); err != nil {
+	if err := service.Commit(context.Background(), yard, domain.PowerRunning); err != nil {
 		t.Fatal(err)
 	}
 	instance := incus.Instances["subyard/yard"]
-	if instance.Config["user.subyard.desired_power"] != PowerRunning ||
+	if instance.Config["user.subyard.desired_power"] != string(domain.PowerRunning) ||
 		instance.Config["user.subyard.initialized"] != "true" ||
 		instance.Config["boot.autostart"] != "false" {
 		t.Fatalf("power commit did not converge metadata: %#v", instance.Config)
@@ -171,9 +171,9 @@ func TestPowerServiceImportsAndCommitsAtomically(t *testing.T) {
 }
 
 func TestInitialPowerAndInitFence(t *testing.T) {
-	if InitialPower(domain.Context{}) != PowerRunning ||
-		InitialPower(domain.Context{YardName: "build"}) != PowerStopped ||
-		InitialPower(domain.Context{YardName: "test-lab", NestedE2EVMs: true}) != PowerRunning {
+	if InitialPower(domain.Context{}) != domain.PowerRunning ||
+		InitialPower(domain.Context{YardName: "build"}) != domain.PowerStopped ||
+		InitialPower(domain.Context{YardName: "test-lab", NestedE2EVMs: true}) != domain.PowerRunning {
 		t.Fatal("initial power policy drifted")
 	}
 	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
@@ -183,11 +183,11 @@ func TestInitialPowerAndInitFence(t *testing.T) {
 		YardName: "build", IncusProject: "subyard-build", YardInstanceName: "yard-build",
 	}
 	service := PowerService{Instances: incus, Config: incus}
-	if err := service.Set(context.Background(), yard, PowerStopped, false); err != nil {
+	if err := service.Set(context.Background(), yard, domain.PowerStopped, false); err != nil {
 		t.Fatal(err)
 	}
 	config := incus.Instances["subyard-build/yard-build"].Config
-	if config["user.subyard.desired_power"] != PowerStopped ||
+	if config["user.subyard.desired_power"] != string(domain.PowerStopped) ||
 		config["user.subyard.initialized"] != "false" {
 		t.Fatalf("init fence did not preserve named-yard intent: %#v", config)
 	}
@@ -199,7 +199,7 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 		return &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {
 			Name: "yard", Project: "subyard", Status: "Stopped", Config: map[string]string{
 				"user.subyard.managed": "true", "user.subyard.initialized": "true",
-				"user.subyard.desired_power": PowerStopped, "user.subyard.name": "default",
+				"user.subyard.desired_power": string(domain.PowerStopped), "user.subyard.name": "default",
 				"user.subyard.bridge": "incusbr0", "boot.autostart": "false",
 			},
 		}}}
@@ -216,7 +216,7 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 	if _, _, err := runner.Run(context.Background(), request, nil); err == nil {
 		t.Fatal("failed physical start committed desired power")
 	}
-	if got := failedIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != PowerStopped {
+	if got := failedIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != string(domain.PowerStopped) {
 		t.Fatalf("failed start changed desired power to %q", got)
 	}
 
@@ -226,7 +226,7 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 	if _, _, err := runner.Run(context.Background(), request, nil); err == nil {
 		t.Fatal("adapter ok without actual running state committed desired power")
 	}
-	if got := falseSuccessIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != PowerStopped {
+	if got := falseSuccessIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != string(domain.PowerStopped) {
 		t.Fatal("unverified power result changed desired power")
 	}
 	okIncus := newIncus()
@@ -240,10 +240,10 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 		Power: PowerService{Instances: okIncus, Config: okIncus}, Physical: physical, Yard: yard,
 	}
 	result, _, err := runner.Run(context.Background(), request, nil)
-	if err != nil || result.Output["desiredPower"] != PowerRunning {
+	if err != nil || result.Output["desiredPower"] != string(domain.PowerRunning) {
 		t.Fatalf("successful lifecycle failed: result=%#v err=%v", result, err)
 	}
-	if got := okIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != PowerRunning {
+	if got := okIncus.Instances["subyard/yard"].Config["user.subyard.desired_power"]; got != string(domain.PowerRunning) {
 		t.Fatalf("successful start did not commit desired power: %q", got)
 	}
 	if len(physical.Requests) != 1 || len(physical.Requests[0].Arguments) != 1 ||

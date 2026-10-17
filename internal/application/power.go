@@ -11,15 +11,10 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
-const (
-	PowerRunning = "running"
-	PowerStopped = "stopped"
-)
-
 var ErrPowerUnmanaged = errors.New("power intent is unmanaged")
 
 type PowerIntent struct {
-	Desired  string
+	Desired  domain.DesiredPower
 	Imported bool
 }
 
@@ -76,7 +71,8 @@ func (service PowerService) Intent(
 	if err != nil {
 		return PowerIntent{}, err
 	}
-	converged, err := powerMetadataConverged(instance, yard)
+	metadata := parsePowerMetadata(instance)
+	converged, err := managedPowerMetadataConverged(metadata, yard)
 	if err != nil {
 		return PowerIntent{}, err
 	}
@@ -84,44 +80,43 @@ func (service PowerService) Intent(
 		return PowerIntent{}, fmt.Errorf("%w: %s/%s", ErrPowerUnmanaged,
 			yard.IncusProject, yard.YardInstanceName)
 	}
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	return PowerIntent{Desired: desired}, nil
+	return PowerIntent{Desired: metadata.Desired.Value}, nil
 }
 
-func InitialPower(yard domain.Context) string {
+func InitialPower(yard domain.Context) domain.DesiredPower {
 	if yard.YardName == "" || yard.YardName == "default" || yard.NestedE2EVMs {
-		return PowerRunning
+		return domain.PowerRunning
 	}
-	return PowerStopped
+	return domain.PowerStopped
 }
 
 func (service PowerService) Set(
 	ctx context.Context,
 	yard domain.Context,
-	desired string,
+	desired domain.DesiredPower,
 	initialized bool,
 ) error {
 	if service.Config == nil {
 		return errors.New("Incus instance config writer is required")
 	}
-	if desired != PowerRunning && desired != PowerStopped {
+	if desired != domain.PowerRunning && desired != domain.PowerStopped {
 		return fmt.Errorf("invalid desired power %q", desired)
 	}
 	name, bridge := powerIdentity(yard)
 	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, map[string]string{
-		"boot.autostart":             "false",
-		"user.subyard.managed":       "true",
-		"user.subyard.name":          name,
-		"user.subyard.bridge":        bridge,
-		"user.subyard.desired_power": desired,
-		"user.subyard.initialized":   fmt.Sprint(initialized),
+		powerAutostartKey:   "false",
+		powerManagedKey:     "true",
+		powerYardNameKey:    name,
+		powerBridgeKey:      bridge,
+		powerDesiredKey:     string(desired),
+		powerInitializedKey: fmt.Sprint(initialized),
 	})
 }
 
 func (service PowerService) Commit(
 	ctx context.Context,
 	yard domain.Context,
-	desired string,
+	desired domain.DesiredPower,
 ) error {
 	return service.Set(ctx, yard, desired, true)
 }
@@ -153,15 +148,15 @@ func (runner LifecycleRunner) Run(
 	if err != nil || result.Status != "ok" {
 		return result, diagnostics, err
 	}
-	desired := PowerStopped
+	desired := domain.PowerStopped
 	if request.Action == "start" {
-		desired = PowerRunning
+		desired = domain.PowerRunning
 	}
 	observed, verifyErr := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
 	if verifyErr != nil {
 		return result, diagnostics, fmt.Errorf("verify physical power: %w", verifyErr)
 	}
-	if !strings.EqualFold(observed.Status, desired) {
+	if !strings.EqualFold(observed.Status, string(desired)) {
 		return result, diagnostics, fmt.Errorf("physical %s did not establish %s before desired power commit", request.Action, desired)
 	}
 	if err := runner.Power.Commit(ctx, runner.Yard, desired); err != nil {
@@ -176,34 +171,34 @@ func (runner LifecycleRunner) Run(
 	if result.Output == nil {
 		result.Output = make(map[string]any)
 	}
-	result.Output["desiredPower"] = desired
+	result.Output["desiredPower"] = string(desired)
 	return result, diagnostics, nil
 }
 
 func powerMetadataConverged(instance ports.InstanceInfo, yard domain.Context) (bool, error) {
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	if managed == "" {
+	metadata := parsePowerMetadata(instance)
+	return managedPowerMetadataConverged(metadata, yard)
+}
+
+func managedPowerMetadataConverged(metadata powerMetadata, yard domain.Context) (bool, error) {
+	if metadata.Managed.State == fieldAbsent || metadata.Managed.State == fieldEmpty {
 		return false, nil
 	}
-	if managed != "true" {
+	if metadata.Managed.State != fieldValid || !metadata.Managed.Value {
 		return false, fmt.Errorf("%s/%s has invalid managed power metadata %q",
-			yard.IncusProject, yard.YardInstanceName, managed)
+			yard.IncusProject, yard.YardInstanceName, metadata.Managed.Raw)
 	}
-	desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-	if desired != PowerRunning && desired != PowerStopped {
+	if metadata.Desired.State != fieldValid {
 		return false, fmt.Errorf("%s/%s has invalid desired power %q",
-			yard.IncusProject, yard.YardInstanceName, desired)
+			yard.IncusProject, yard.YardInstanceName, metadata.Desired.Raw)
 	}
-	initialized, _ := instance.EffectiveConfig("user.subyard.initialized")
-	if initialized != "true" && initialized != "false" {
+	if metadata.Initialized.State != fieldValid {
 		return false, fmt.Errorf("%s/%s has invalid initialized power metadata %q",
-			yard.IncusProject, yard.YardInstanceName, initialized)
+			yard.IncusProject, yard.YardInstanceName, metadata.Initialized.Raw)
 	}
 	name, bridge := powerIdentity(yard)
-	metadataName, _ := instance.EffectiveConfig("user.subyard.name")
-	metadataBridge, _ := instance.EffectiveConfig("user.subyard.bridge")
-	autostart, _ := instance.EffectiveConfig("boot.autostart")
-	return metadataName == name && metadataBridge == bridge && autostart == "false", nil
+	return metadata.YardName.Raw == name && metadata.Bridge.Raw == bridge &&
+		metadata.Autostart.State == fieldValid && !metadata.Autostart.Value, nil
 }
 
 func powerMetadataUpdate(
@@ -212,33 +207,32 @@ func powerMetadataUpdate(
 ) (map[string]string, PowerIntent, error) {
 	name, bridge := powerIdentity(yard)
 	values := map[string]string{
-		"user.subyard.name": name, "user.subyard.bridge": bridge, "boot.autostart": "false",
+		powerYardNameKey: name, powerBridgeKey: bridge, powerAutostartKey: "false",
 	}
-	managed, _ := instance.EffectiveConfig("user.subyard.managed")
-	if managed == "true" {
-		if _, err := powerMetadataConverged(instance, yard); err != nil {
+	metadata := parsePowerMetadata(instance)
+	if metadata.Managed.State == fieldValid && metadata.Managed.Value {
+		if _, err := managedPowerMetadataConverged(metadata, yard); err != nil {
 			return nil, PowerIntent{}, err
 		}
-		desired, _ := instance.EffectiveConfig("user.subyard.desired_power")
-		return values, PowerIntent{Desired: desired}, nil
+		return values, PowerIntent{Desired: metadata.Desired.Value}, nil
 	}
-	if managed != "" {
+	if metadata.Managed.State != fieldAbsent && metadata.Managed.State != fieldEmpty {
 		return nil, PowerIntent{}, fmt.Errorf("%s/%s has invalid managed power metadata %q",
-			yard.IncusProject, yard.YardInstanceName, managed)
+			yard.IncusProject, yard.YardInstanceName, metadata.Managed.Raw)
 	}
-	desired := ""
+	var desired domain.DesiredPower
 	switch strings.ToLower(instance.Status) {
 	case "running":
-		desired = PowerRunning
+		desired = domain.PowerRunning
 	case "stopped":
-		desired = PowerStopped
+		desired = domain.PowerStopped
 	default:
 		return nil, PowerIntent{}, fmt.Errorf("cannot import %s/%s power state from %q",
 			yard.IncusProject, yard.YardInstanceName, instance.Status)
 	}
-	values["user.subyard.managed"] = "true"
-	values["user.subyard.desired_power"] = desired
-	values["user.subyard.initialized"] = "true"
+	values[powerManagedKey] = "true"
+	values[powerDesiredKey] = string(desired)
+	values[powerInitializedKey] = "true"
 	return values, PowerIntent{Desired: desired, Imported: true}, nil
 }
 

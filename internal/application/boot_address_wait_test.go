@@ -7,18 +7,19 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestBootPowerWaitsWithoutStartingAndRestoresAfterAddressAppears(t *testing.T) {
-	waiting := managedPowerInstance("p", "a-waiting", "Stopped", PowerRunning)
+	waiting := managedPowerInstance("p", "a-waiting", "Stopped", domain.PowerRunning)
 	waiting.Devices = map[string]map[string]string{"synthetic": {
 		"type": "proxy", "listen": "tcp:192.0.2.12:8080", "bind": "host",
 	}}
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"p/a-waiting": waiting,
-		"p/z-ready":   managedPowerInstance("p", "z-ready", "Stopped", PowerRunning),
+		"p/z-ready":   managedPowerInstance("p", "z-ready", "Stopped", domain.PowerRunning),
 	}}
 	var addresses []netip.Addr
 	observations := 0
@@ -43,7 +44,7 @@ func TestBootPowerWaitsWithoutStartingAndRestoresAfterAddressAppears(t *testing.
 	addresses = []netip.Addr{netip.MustParseAddr("192.0.2.12")}
 	result, err := reconciler.Run(context.Background())
 	if err != nil || len(result.Waiting) != 0 || !reflect.DeepEqual(result.Started, []string{"p/a-waiting"}) ||
-		fake.Instances["p/a-waiting"].Config["user.subyard.desired_power"] != PowerRunning || len(fake.PowerUpdates) != 2 {
+		fake.Instances["p/a-waiting"].Config["user.subyard.desired_power"] != string(domain.PowerRunning) || len(fake.PowerUpdates) != 2 {
 		t.Fatalf("address appearance did not restore desired power once: %+v %v %+v", result, err, fake.PowerUpdates)
 	}
 }

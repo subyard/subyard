@@ -44,25 +44,26 @@ type Setup struct {
 	SyncFields       bool     `json:"sync_fields,omitempty"`
 }
 type Definition struct {
-	SchemaVersion              int                   `json:"schema_version"`
-	Name                       string                `json:"-"`
-	Root                       string                `json:"-"`
-	DefaultYards               []string              `json:"default_yards,omitempty"`
-	DisabledWhen               map[string]string     `json:"disabled_when,omitempty"`
-	SelectedProvisionOnly      bool                  `json:"selected_provision_only,omitempty"`
-	OwnerService               string                `json:"owner_service,omitempty"`
-	LifecycleOnly              bool                  `json:"lifecycle_only,omitempty"`
-	FullCleanup                string                `json:"full_cleanup,omitempty"`
-	FullCleanupEnvironment     []string              `json:"full_cleanup_environment,omitempty"`
-	Native                     []Native              `json:"native,omitempty"`
-	Consumers                  []Consumer            `json:"consumers,omitempty"`
-	CredentialImportExclusions [][]string            `json:"credential_import_exclusions,omitempty"`
-	ManagedPaths               []ManagedPath         `json:"managed_paths,omitempty"`
-	Setup                      *Setup                `json:"setup,omitempty"`
-	Dashboard                  *IntegrationDashboard `json:"dashboard,omitempty"`
-	Settings                   []Setting             `json:"settings,omitempty"`
-	Runtime                    *RuntimeHook          `json:"runtime,omitempty"`
-	GuestEnvironment           *GuestEnvironmentHook `json:"guest_environment,omitempty"`
+	SchemaVersion              int                            `json:"schema_version"`
+	Name                       string                         `json:"-"`
+	Root                       string                         `json:"-"`
+	DefaultYards               []string                       `json:"default_yards,omitempty"`
+	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
+	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
+	OwnerService               string                         `json:"owner_service,omitempty"`
+	InstancePublication        *RevisionedSettingsPublication `json:"instance_publication,omitempty"`
+	LifecycleOnly              bool                           `json:"lifecycle_only,omitempty"`
+	FullCleanup                string                         `json:"full_cleanup,omitempty"`
+	FullCleanupEnvironment     []string                       `json:"full_cleanup_environment,omitempty"`
+	Native                     []Native                       `json:"native,omitempty"`
+	Consumers                  []Consumer                     `json:"consumers,omitempty"`
+	CredentialImportExclusions [][]string                     `json:"credential_import_exclusions,omitempty"`
+	ManagedPaths               []ManagedPath                  `json:"managed_paths,omitempty"`
+	Setup                      *Setup                         `json:"setup,omitempty"`
+	Dashboard                  *IntegrationDashboard          `json:"dashboard,omitempty"`
+	Settings                   []Setting                      `json:"settings,omitempty"`
+	Runtime                    *RuntimeHook                   `json:"runtime,omitempty"`
+	GuestEnvironment           *GuestEnvironmentHook          `json:"guest_environment,omitempty"`
 	validationInputs           []string
 }
 

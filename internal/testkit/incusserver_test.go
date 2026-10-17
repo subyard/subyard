@@ -128,3 +128,25 @@ func TestIncusExecOutputWaitsForStdin(t *testing.T) {
 		}
 	}
 }
+
+func TestIncusInventorySnapshotRemovesStaleResourcesAndPreservesExecution(t *testing.T) {
+	fake := &IncusServer{execSteps: []IncusServerExecStep{{Stdout: []byte("queued")}}, execCalls: []IncusServerExecCall{{Name: "prior-call"}}}
+	fake.SetInventory(map[string]map[string]any{"prior-project": {"name": "prior-project"}},
+		map[string]map[string]any{"prior-project/prior-yard": {"name": "prior-yard", "status": "Stopped"}})
+	check := func(path string, expected int) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		fake.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != expected {
+			t.Fatalf("%s: status=%d, want %d", path, response.Code, expected)
+		}
+	}
+	check("/1.0/projects/prior-project", http.StatusOK)
+	check("/1.0/instances/prior-yard?project=prior-project", http.StatusOK)
+	fake.SetInventory(nil, nil)
+	check("/1.0/projects/prior-project", http.StatusNotFound)
+	check("/1.0/instances/prior-yard?project=prior-project", http.StatusNotFound)
+	if len(fake.execSteps) != 1 || string(fake.execSteps[0].Stdout) != "queued" || len(fake.execCalls) != 1 || fake.execCalls[0].Name != "prior-call" {
+		t.Fatal("replacing inventory changed queued execution or history")
+	}
+}

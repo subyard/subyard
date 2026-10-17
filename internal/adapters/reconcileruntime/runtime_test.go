@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
-	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -239,7 +238,7 @@ func TestTestVMBackendStartUsesNetworkPolicy(t *testing.T) {
 			YardInstanceName: "yard", IncusBridge: "incusbr0",
 		},
 	}
-	backend, err := runtime.testVMBackend(application.PowerRunning)
+	backend, err := runtime.testVMBackend(domain.PowerRunning)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1689,6 +1688,13 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	}
 	writeProfile("a", "YARD_MOUNTS='cache:/srv/cache:rw:0755'\nYARD_CAPS='fuse'\n")
 	writeProfile("b", "YARD_CAPS='rootless-docker fuse host-memory'\nYARD_DEVICES='gpu'\n")
+	for _, environment := range [][]string{nil, {"ENVIRONMENT_PROFILES="}} {
+		runtime := Runtime{RepositoryRoot: root, Environment: environment}
+		values, err := runtime.extrasContext()
+		if err != nil || values["SUBYARD_EXTRAS_MOUNTS"] != "" || values["SUBYARD_EXTRAS_CAPABILITIES"] != "" || values["SUBYARD_EXTRAS_DEVICES"] != "" || values["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
+			t.Fatalf("unselected packages supplied extras: %#v %v", values, err)
+		}
+	}
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"ENVIRONMENT_PROFILES=a"}}
 	values, err := runtime.extrasContext()
 	if err != nil {

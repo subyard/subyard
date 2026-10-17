@@ -101,22 +101,12 @@ func profileYardBinding(instance ports.InstanceInfo) string {
 	}{instance.Name, instance.Project, instance.Type, instance.Config["volatile.uuid"]})
 }
 
-// Preserve implicit provision defaults when authoring the first explicit list.
-func (cli *CLI) currentProfileSelection(loaded config.Loaded, definitions []profile.Definition) ([]string, error) {
-	if value, explicit := loaded.Environment["ENVIRONMENT_PROFILES"]; explicit {
-		return strings.Fields(value), nil
+// Preserve authored selections, or resolved declared defaults on the first edit.
+func (cli *CLI) currentProfileSelection(loaded config.Loaded, _ []profile.Definition) ([]string, error) {
+	if loaded.EnvironmentProfiles.Present {
+		return slices.Clone(loaded.EnvironmentProfiles.Requested), nil
 	}
-	provision, err := cli.prepareProvisionExecution(loaded, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	result := slices.Clone(provision.profiles)
-	for _, definition := range definitions {
-		if definition.Selected(loaded.Context.YardName, loaded.Environment) && !slices.Contains(result, definition.Name) {
-			result = append(result, definition.Name)
-		}
-	}
-	return result, nil
+	return slices.Clone(loaded.EnvironmentProfiles.Effective), nil
 }
 
 // Validate an existing connection without printing its contents. The binding

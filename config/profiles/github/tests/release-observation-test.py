@@ -36,7 +36,6 @@ class ReleaseObservationTest(unittest.TestCase):
             control, rejected = root / 'control.json', root / 'rejected'
             control.write_text(json.dumps({'instances': [{'info': {'status': 'Running'}}]}))
             harness['write_observation_incus'](shims, control, rejected)
-            harness['write_observation_systemctl'](shims, rejected)
             environment = {
                 'PATH': str(shims) + ':/usr/bin:/bin', 'HOME': str(root),
                 'SUBYARD_ENGINE_CONTEXT': '1', 'SUBYARD_ENGINE_CONTEXT_SCHEMA': '1',
@@ -60,8 +59,9 @@ class ReleaseObservationTest(unittest.TestCase):
             self.assertTrue(observed['ownership_absent'])
             self.assertEqual(observed['actual'], observed['desired'])
             self.assertFalse(rejected.exists())
-            for arguments, response in provider['read_only_commands'](PROFILE):
-                output, status = (response, 0) if isinstance(response, str) else response
+            for entry in provider['read_only_commands'](PROFILE):
+                arguments, output, *status = entry
+                status = status[0] if status else 0
                 result = subprocess.run([str(shims / 'incus'), *arguments], input=b'\xff' * 131072,
                                         capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, status)
@@ -78,9 +78,10 @@ class ReleaseObservationTest(unittest.TestCase):
                 result = subprocess.run([str(shims / 'incus'), *changed], capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 99)
                 rejected.unlink()
-            arguments, response = provider['read_only_systemctl_commands'](PROFILE)[0]
-            result = subprocess.run([str(shims / 'systemctl'), *arguments], capture_output=True, timeout=10)
-            self.assertEqual((result.stdout.decode(), result.returncode), response)
+            program, arguments, output, status = provider['read_only_host_commands'](PROFILE)[0]
+            self.assertEqual(program, 'systemctl')
+            result = subprocess.run([str(shims / program), *arguments], capture_output=True, timeout=10)
+            self.assertEqual((result.stdout.decode(), result.returncode), (output, status))
             for changed in (
                 ['--user', 'start', arguments[2]], ['--user', 'stop', arguments[2]],
                 ['--user', 'restart', arguments[2]], arguments + ['unexpected'],
