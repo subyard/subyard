@@ -16,4 +16,6 @@ dependent cleanup without printing records.
 
 Run its host-free ownership checks with config/profiles/test-vms/tests/run.sh.
 Installed-runtime, delayed sink and reboot checks belong to the full-uninstall
-disposable-VM acceptance lane.
+disposable-VM acceptance lane. The profile
+[`tests/e2e/acceptance.sh`](tests/e2e/acceptance.sh) entrypoint forwards to that
+lane and uses the collector's exact frozen release assets when present.

@@ -12,11 +12,12 @@ const ProcessRecoverySchemaV2 = 2
 type RecoveryProcessMode string
 
 const (
-	RecoveryProcessCapabilities          RecoveryProcessMode = "capabilities"
-	RecoveryProcessLifecycleCapabilities RecoveryProcessMode = "lifecycle-capabilities"
-	RecoveryProcessRuntimeCapabilities   RecoveryProcessMode = "runtime-activation-capabilities"
-	RecoveryProcessInspect               RecoveryProcessMode = "inspect"
-	RecoveryProcessConverge              RecoveryProcessMode = "converge"
+	RecoveryProcessCapabilities               RecoveryProcessMode = "capabilities"
+	RecoveryProcessLifecycleCapabilities      RecoveryProcessMode = "lifecycle-capabilities"
+	RecoveryProcessRuntimeCapabilities        RecoveryProcessMode = "runtime-activation-capabilities"
+	RecoveryProcessMigrationOwnerCapabilities RecoveryProcessMode = "migration-owner-capabilities"
+	RecoveryProcessInspect                    RecoveryProcessMode = "inspect"
+	RecoveryProcessConverge                   RecoveryProcessMode = "converge"
 )
 
 // RecoveryCapabilities is explicitly negotiated with the sealed owner before
@@ -36,8 +37,12 @@ func ActivationRecoveryLifecycleCapabilities() RecoveryCapabilities {
 	return RecoveryCapabilities{ActivationOnlyRecoveryContractV2, ProcessRecoverySchemaV2, JournalSchemaV2, RecoveryReceiptSchemaV2}
 }
 
+func MigrationOwnerReplacementCapabilities() RecoveryCapabilities {
+	return RecoveryCapabilities{MigrationOwnerReplacementContractV1, ProcessRecoverySchemaV2, JournalSchemaV2, MigrationOwnerReceiptSchemaV1}
+}
+
 func (capabilities RecoveryCapabilities) Validate() error {
-	if capabilities != ActivationOnlyRecoveryCapabilities() && capabilities != ActivationRecoveryLifecycleCapabilities() {
+	if capabilities != ActivationOnlyRecoveryCapabilities() && capabilities != ActivationRecoveryLifecycleCapabilities() && capabilities != MigrationOwnerReplacementCapabilities() {
 		return invalid("unsupported activation recovery capabilities")
 	}
 	return nil
@@ -46,25 +51,26 @@ func (capabilities RecoveryCapabilities) Validate() error {
 // RecoveryProcessRequest lives beside the frozen ordinary V1 process request.
 // It cannot select rollback, ingress, a replacement reason or arbitrary policy.
 type RecoveryProcessRequest struct {
-	SchemaVersion       int                            `json:"schemaVersion"`
-	Mode                RecoveryProcessMode            `json:"mode"`
-	Contract            string                         `json:"contract,omitempty"`
-	RuntimeRoot         string                         `json:"runtimeRoot,omitempty"`
-	ConfigHome          string                         `json:"configHome,omitempty"`
-	Yard                string                         `json:"yard,omitempty"`
-	Target              ReleaseID                      `json:"target,omitempty"`
-	Direction           Direction                      `json:"direction,omitempty"`
-	ArtifactDigest      Fingerprint                    `json:"artifactDigest,omitempty"`
-	RegistryDigest      Fingerprint                    `json:"registryDigest,omitempty"`
-	InheritedSettingIDs []string                       `json:"inheritedSettingIds,omitempty"`
-	Recovery            *ActivationOnlyRecoveryRequest `json:"recovery,omitempty"`
-	Execution           *Execution                     `json:"execution,omitempty"`
+	MigrationOwner      *MigrationOwnerReplacementRequest `json:"migrationOwner,omitempty"`
+	SchemaVersion       int                               `json:"schemaVersion"`
+	Mode                RecoveryProcessMode               `json:"mode"`
+	Contract            string                            `json:"contract,omitempty"`
+	RuntimeRoot         string                            `json:"runtimeRoot,omitempty"`
+	ConfigHome          string                            `json:"configHome,omitempty"`
+	Yard                string                            `json:"yard,omitempty"`
+	Target              ReleaseID                         `json:"target,omitempty"`
+	Direction           Direction                         `json:"direction,omitempty"`
+	ArtifactDigest      Fingerprint                       `json:"artifactDigest,omitempty"`
+	RegistryDigest      Fingerprint                       `json:"registryDigest,omitempty"`
+	InheritedSettingIDs []string                          `json:"inheritedSettingIds,omitempty"`
+	Recovery            *ActivationOnlyRecoveryRequest    `json:"recovery,omitempty"`
+	Execution           *Execution                        `json:"execution,omitempty"`
 }
 
 func (request RecoveryProcessRequest) TransitionRequest() ProcessRequest {
 	return ProcessRequest{SchemaVersion: ProcessProtocolSchemaV1, Mode: ProcessMode(request.Mode),
-		RecoveryContract: request.Contract,
-		RuntimeRoot:      request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard,
+		RecoveryContract: request.Contract, MigrationOwnerReplacement: request.MigrationOwner,
+		RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard,
 		Target: request.Target, Direction: request.Direction, ArtifactDigest: request.ArtifactDigest,
 		RegistryDigest: request.RegistryDigest, InheritedSettingIDs: slices.Clone(request.InheritedSettingIDs),
 		Execution: request.Execution}
@@ -74,10 +80,10 @@ func (request RecoveryProcessRequest) Validate() error {
 	if request.SchemaVersion != ProcessRecoverySchemaV2 {
 		return invalid("unsupported recovery process schema")
 	}
-	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities || request.Mode == RecoveryProcessRuntimeCapabilities {
+	if request.Mode == RecoveryProcessCapabilities || request.Mode == RecoveryProcessLifecycleCapabilities || request.Mode == RecoveryProcessRuntimeCapabilities || request.Mode == RecoveryProcessMigrationOwnerCapabilities {
 		if request.RuntimeRoot != "" || request.ConfigHome != "" || request.Yard != "" || request.Target != "" ||
 			request.Direction != "" || request.ArtifactDigest != "" || request.RegistryDigest != "" ||
-			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil || request.Contract != "" {
+			len(request.InheritedSettingIDs) != 0 || request.Recovery != nil || request.Execution != nil || request.Contract != "" || request.MigrationOwner != nil {
 			return invalid("recovery capability probe carries transition inputs")
 		}
 		return nil
@@ -85,10 +91,10 @@ func (request RecoveryProcessRequest) Validate() error {
 	if request.Mode != RecoveryProcessInspect && request.Mode != RecoveryProcessConverge {
 		return invalid("unknown recovery process mode")
 	}
-	if request.Contract != "" && request.Contract != ActivationOnlyRecoveryContractV1 && request.Contract != ActivationOnlyRecoveryContractV2 {
+	if request.Contract != "" && request.Contract != ActivationOnlyRecoveryContractV1 && request.Contract != ActivationOnlyRecoveryContractV2 && request.Contract != MigrationOwnerReplacementContractV1 {
 		return invalid("unsupported recovery process contract")
 	}
-	if request.Direction != DirectionActivateTarget || request.Recovery == nil {
+	if request.Direction != DirectionActivateTarget || (request.Contract == MigrationOwnerReplacementContractV1 && (request.MigrationOwner == nil || request.Recovery != nil)) || (request.Contract != MigrationOwnerReplacementContractV1 && (request.Recovery == nil || request.MigrationOwner != nil)) {
 		return invalid("recovery process requires a selected forward activation-only journal")
 	}
 	for _, root := range []string{request.RuntimeRoot, request.ConfigHome} {
@@ -96,7 +102,11 @@ func (request RecoveryProcessRequest) Validate() error {
 			return invalid("recovery roots must be absolute non-root paths")
 		}
 	}
-	if err := request.Recovery.Validate(); err != nil {
+	if request.MigrationOwner != nil {
+		if err := request.MigrationOwner.Validate(); err != nil {
+			return err
+		}
+	} else if err := request.Recovery.Validate(); err != nil {
 		return err
 	}
 	if err := validateFingerprint(request.RegistryDigest, "recovery registry digest"); err != nil {

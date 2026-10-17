@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,31 @@ spec.loader.exec_module(runtime)
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_release_fixture_proves_unselected_native_absence_without_apply(self):
+        profile = Path(__file__).parents[1]
+        fixture = runpy.run_path(str(profile/'tests/release-observation.py'))
+        commands = [(['incus', *argv], output, code) for argv, output, code in
+                    [(entry[0], entry[1], entry[2] if len(entry) == 3 else 0)
+                     for entry in fixture['read_only_commands'](profile, project='project')]]
+        commands += [([program, *arguments], output, code) for program, arguments, output, code in
+                     fixture['read_only_host_commands'](profile, yard='test')]
+        responses = {tuple(argv): (output, code) for argv, output, code in commands}
+        observed = []
+        def exact_read(argv, **kwargs):
+            if argv == [str(self.source/'owner.sh'), '--check']:
+                return subprocess.CompletedProcess(argv, 0)
+            self.assertIn(tuple(argv), responses)
+            observed.append(argv)
+            output, code = responses[tuple(argv)]
+            return subprocess.CompletedProcess(argv, code, output.encode())
+        os.environ['ENVIRONMENT_PROFILES'] = ''
+        with patch.object(subprocess, 'run', exact_read):
+            observation, _ = runtime.observe()
+        self.assertEqual(observation['state'], 'current')
+        self.assertEqual(observation['actual'], observation['desired'])
+        self.assertTrue(observation['ownership_absent'])
+        self.assertEqual(len(observed), 3)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir='/tmp')
         self.addCleanup(self.temporary.cleanup)

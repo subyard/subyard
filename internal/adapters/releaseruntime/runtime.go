@@ -507,6 +507,9 @@ func (runtime *Runtime) PrepareTransition(
 		return Prepared{}, errors.New("release transition config home must be absolute")
 	}
 	runtime.progress(parsed, "Inspecting the installed release...")
+	if prepared, selected, err := runtime.prepareMigrationOwnerReplacement(ctx, parsed, configHome, yard, inheritedSettingIDs); selected {
+		return prepared, err
+	}
 	protected, err := runtime.inspectProtectedTransition(
 		ctx, parsed.root, configHome, yard, inheritedSettingIDs,
 	)

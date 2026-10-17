@@ -314,6 +314,31 @@ Three independent policies determine support:
   until it reaches a terminal state, regardless of age or intervening releases. Raising the ordinary
   upgrade floor cannot revoke that recovery contract or permit deletion of its inputs.
 
+A proved defective migration-ledger owner has one typed exception to exact-owner continuation:
+`migration-ledger-owner-replacement-v1`. This separately negotiated process-schema-2 contract
+initially recognizes only the exact supported official Linux amd64 v0.21.0 manifest and registry.
+Version comparison alone never establishes eligibility. An explicitly selected newer standalone
+candidate with checkpoint support independently proves the canonical reconciling predecessor,
+sealed owner/source/candidate assets, actual links, projection/checkpoint prefixes and dependencies,
+and the captured/applied/verified evidence for the two completed ledger-only power and SSH steps.
+Retained terminal migration artifacts may belong only to the exact source or previous release
+named by that predecessor journal. Admission independently seals the previous release and requires
+its registry to equal the verified source registry, then validates every retained evidence triple
+against the frozen projection. The receipt records these asset identities and transaction references;
+cleanup preserves the referenced artifacts. An ordinary zero-step source update needs no fabricated
+transaction directory. Other earlier releases and arbitrary same-registry targets remain unsupported.
+Unrecognized state, pending publication, ingress and recovery chains refuse supersession.
+
+A fresh candidate assessment and grant bind these facts and current activation consequences.
+Under the update lock, the candidate revalidates the proof, publishes an immutable receipt in
+`release-transition/migration-owner/v1/transactions`, then CASes the protected journal to an ordinary
+V2 successor. Receipt-only crashes reuse the exact reserved successor after fresh consent; selected
+successors resume normally. The receipt preserves the unfinished predecessor as superseded evidence,
+without declaring its activation ready or replaying completed migrations. Cleanup retains its
+predecessor artifacts and captures successor completion before later journals replace it. This
+exception changes no frozen process/journal/activation-recovery/v0.11.1 archive meaning and confers
+no rollback promise to the defective owner; existing rollback eligibility checks still apply.
+
 Released-binary acceptance retains a supported baseline for each distinct caller, producer or
 compatibility-bridge contract. Checks use the actual published binaries; rebuilding current source
 does not prove their compatibility. This is a contract matrix, not every pair of released versions.
