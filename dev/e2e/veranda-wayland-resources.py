@@ -2,6 +2,7 @@
 """Measure one frozen Veranda on an owned disposable Debian VM with composed Wayland."""
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -113,7 +114,8 @@ def recorded_state(observer=None):
         # The observer redirects complete evidence privately; never echo it in chat.
         logs = {name: (state / name).read_text(errors='replace')
                 for name in ('apt-update.log', 'apt-install.log', 'platform-stop-check.log', 'platform-prepare.log', 'platform-remove.log',
-                             'platform-cleanup.log', 'weston.log', 'probe.log', 'probe-gdk.log')
+                             'platform-cleanup.log', 'platform-release-package.log', 'platform-release-install.log',
+                             'platform-release-config.log', 'platform-release-migrate.log', 'platform-release-check.log', 'weston.log', 'probe.log', 'probe-gdk.log')
                 if (state / name).is_file()}
         print('VERANDA_WAYLAND_LOGS ' + json.dumps(logs), flush=True)
     with cleanup_on_exit(lambda: cleanup_state(state, identity), 'fixture', observer):
@@ -191,9 +193,42 @@ time.sleep(60)
     print('VERANDA_ROOT_STATE_CLEANED', flush=True)
 
 
-@contextlib.contextmanager
-def prepared_platform(state, engine, observer=None):
-    """Use the product reconciler; keep the temporary yard outside the measured fleet."""
+def prepare_release(state, engine, env):
+    """Commit fresh capabilities through the same-candidate installed release owner."""
+    version = subprocess.check_output([str(engine), '--version'], env=env, text=True, timeout=5).strip()
+    if not re.fullmatch(r'yard [A-Za-z0-9][A-Za-z0-9._+-]*', version):
+        raise RuntimeError('platform engine version is invalid')
+    release = state / 'prepare-release'
+    runtime = Path(env['SUBYARD_HOME']) / 'runtime'
+    env['YARD_RUNTIME_ROOT'] = str(runtime)
+    def command(argv, name):
+        with private_log(state / ('platform-release-' + name + '.log')) as log:
+            if run_probe(argv, env, log, privileged=True):
+                raise RuntimeError('platform release ' + name + ' failed')
+    command(['bash', str(ROOT / 'dev/package-engine.sh'), '--version', version.removeprefix('yard '),
+             '--output-dir', str(release)], 'package')
+    bundles = list(release.glob('subyard-*-linux-*.tar.gz'))
+    if len(bundles) != 1:
+        raise RuntimeError('platform release bundle is ambiguous')
+    bundle = bundles[0]
+    command(['bash', str(ROOT / 'scripts/install-runtime-release.sh'), '--runtime-root', str(runtime),
+             '--bundle', str(bundle), '--checksum', str(bundle) + '.sha256',
+             '--manifest', str(bundle) + '.manifest.json', '--provenance', str(bundle) + '.provenance.json'], 'install')
+    installed = runtime / 'current/bin/yard-engine'
+    if hashlib.sha256(installed.read_bytes()).digest() != hashlib.sha256(engine.read_bytes()).digest():
+        raise RuntimeError('platform installed engine differs from the candidate')
+    launcher = runtime / 'current/bin/yard'
+    # Keep the concrete source diagnostic before migration renders its public
+    # dependency-unavailable summary. This is a read-only prerequisite.
+    command([str(launcher), 'config', 'status'], 'config')
+    command([str(launcher), 'migrate', '--yes'], 'migrate')
+    command([str(launcher), 'migrate', '--check', '--json'], 'check')
+    if json.loads((state / 'platform-release-check.log').read_text())['outcome']['status'] != 'ready':
+        raise RuntimeError('platform release is not ready')
+
+
+def platform_environment(state):
+    """One isolated configuration for platform preparation and its preflight."""
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     platform = home / '.cache/subyard-e2e-platform'
     if any(path.is_symlink() for path in (home / '.cache', platform)):
@@ -217,7 +252,15 @@ def prepared_platform(state, engine, observer=None):
            'SUBYARD_REPOSITORY_ROOT': str(ROOT), 'STORAGE_PATH': str(platform / 'incus/incus/storage'),
            'SUBYARD_NO_AUDIT': '1', 'SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE': '1', 'MIN_DISK_GIB': '1'}
     probe.isolated_defaults(state, env)
+    return platform, name, env
+
+
+@contextlib.contextmanager
+def prepared_platform(state, engine, observer=None):
+    """Use the product reconciler; keep the temporary yard outside the measured fleet."""
+    platform, name, env = platform_environment(state)
     product_stop_check(state, env)
+    prepare_release(state, engine, env)
 
     def product(command, log_name):
         with private_log(state / log_name) as log:

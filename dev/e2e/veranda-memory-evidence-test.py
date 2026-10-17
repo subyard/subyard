@@ -23,6 +23,97 @@ fixture = memory.fixture
 
 
 class EvidenceChecks(unittest.TestCase):
+    def test_failed_diagnostics_preserve_original_failure_and_remove_partial_image(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        original = {'original_exit_code': 1, 'failure_type': 'TimeoutError', 'failure_stage': 'local-connected'}
+        result = dict(original)
+        def failed():
+            raise subprocess.TimeoutExpired(['diagnostic'], 5)
+        driver.retain_failure_diagnostics(result, failed)
+        self.assertEqual({key: result[key] for key in original}, original)
+        self.assertEqual(result['diagnostic_failure_type'], 'TimeoutExpired')
+        with tempfile.TemporaryDirectory(prefix='veranda-diagnostic-', dir='/tmp') as temporary:
+            capture = Path(temporary) / 'failure.png'
+            with patch.dict(os.environ, DISPLAY=':99'), \
+                    patch.object(driver.subprocess, 'run', side_effect=subprocess.TimeoutExpired(['capture'], 5)):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    driver.capture_view('x11', capture)
+            self.assertFalse(capture.exists())
+
+    def test_x11_physical_input_refuses_foreign_or_ambiguous_windows(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        for windows, owner in ((b'12\n13\n', b'77\n'), (b'12\n', b'88\n')):
+            with self.subTest(windows=windows, owner=owner), \
+                    patch.object(driver.subprocess, 'check_output', side_effect=[windows, owner]), \
+                    patch.object(driver.subprocess, 'run') as physical:
+                with self.assertRaises(AssertionError):
+                    driver.x11_key(77, 'alt+r')
+                physical.assert_not_called()
+        with patch.object(driver.subprocess, 'check_output') as windows, \
+                patch.object(driver.subprocess, 'run') as physical:
+            with self.assertRaises(ValueError):
+                driver.x11_key(77, 'Return')
+            windows.assert_not_called()
+            physical.assert_not_called()
+        with patch.object(driver.subprocess, 'check_output', side_effect=[b'12\n', b'77\n']), \
+                patch.object(driver.subprocess, 'run') as physical:
+            driver.x11_key(77, 'alt+F4')
+            self.assertEqual(physical.call_args_list[-1].args[0],
+                             ['xdotool', 'key', '--clearmodifiers', 'alt+F4'])
+
+    def test_x11_remote_and_ui_are_rejected_before_any_vm_work(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(short)
+        for flag in ('--remote', '--ui'):
+            with self.subTest(flag=flag), patch.object(sys, 'argv', ['short', 'gui', 'engine', '--x11', flag]), \
+                    patch.object(short.subprocess, 'run') as native, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    short.main()
+                self.assertEqual(error.exception.code, 2)
+                native.assert_not_called()
+
+    def test_fresh_release_uses_installed_owner_and_refuses_a_different_engine(self):
+        for same_engine in (False, True):
+            with self.subTest(same_engine=same_engine), \
+                    tempfile.TemporaryDirectory(prefix='veranda-release-', dir='/tmp') as temporary:
+                state = Path(temporary)
+                engine = state / 'yard'
+                engine.write_bytes(b'candidate')
+                env = {'SUBYARD_CONFIG_HOME': str(state / 'config'), 'SUBYARD_HOME': str(state / 'data')}
+                commands = []
+                def native(argv, current, log, **options):
+                    commands.append(argv)
+                    self.assertIs(current, env)
+                    self.assertIs(options['privileged'], True)
+                    if '--output-dir' in argv:
+                        release = Path(argv[-1])
+                        release.mkdir()
+                        (release / 'subyard-0.1.1-linux-amd64.tar.gz').touch()
+                    elif '--bundle' in argv:
+                        installed = Path(env['YARD_RUNTIME_ROOT']) / 'current/bin/yard-engine'
+                        installed.parent.mkdir(parents=True)
+                        installed.write_bytes(b'candidate' if same_engine else b'other')
+                    elif '--check' in argv:
+                        log.write('{"outcome":{"status":"ready"}}\n')
+                    return 0
+                with patch.object(fixture.subprocess, 'check_output', return_value='yard 0.1.1\n'), \
+                        patch.object(fixture, 'run_probe', side_effect=native):
+                    if same_engine:
+                        fixture.prepare_release(state, engine, env)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'differs from the candidate'):
+                            fixture.prepare_release(state, engine, env)
+                self.assertEqual(len(commands), 5 if same_engine else 2)
+                if same_engine:
+                    launcher = str(state / 'data/runtime/current/bin/yard')
+                    self.assertEqual(commands[-2:], [[launcher, 'migrate', '--yes'],
+                                                    [launcher, 'migrate', '--check', '--json']])
+
     def test_only_documented_singleton_vm1_reaches_artifact_validation(self):
         class ReachedArtifactValidation(Exception):
             pass
@@ -100,6 +191,7 @@ class EvidenceChecks(unittest.TestCase):
                             patch.object(fixture.subprocess, 'run', side_effect=host_command), \
                             patch.object(fixture, 'run_probe', side_effect=product), \
                             patch.object(fixture, 'product_stop_check'), \
+                            patch.object(fixture, 'prepare_release') as release, \
                             patch.object(fixture.probe, 'isolated_defaults'):
                         if fail_body:
                             with self.assertRaises(subprocess.CalledProcessError) as caught:
@@ -109,6 +201,9 @@ class EvidenceChecks(unittest.TestCase):
                         else:
                             with fixture.prepared_platform(state, engine, lambda *event: events.append(event)):
                                 pass
+                    release.assert_called_once()
+                    self.assertEqual(release.call_args.args[2]['SUBYARD_CONFIG_HOME'], str(state / 'prepare-config'))
+                    self.assertEqual(release.call_args.args[2]['SUBYARD_HOME'], str(state / 'prepare-data'))
                     self.assertEqual([argv[3:-1] for argv in commands],
                                      [['init'], ['teardown', '--keep-data'], ['teardown']])
                     names = {argv[2] for argv in commands}

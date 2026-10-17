@@ -100,7 +100,7 @@ For a source-development launch, build the matching engine, then put the source
 launcher on PATH. Both debug defaults identify the same development version:
 
 ```sh
-dev/build-engine.sh
+make build
 PATH="$PWD/bin:$PATH" .build/veranda-desktop/debug/veranda
 ```
 
@@ -110,41 +110,85 @@ the shell does not parse CLI output or provide a compatibility bypass. App data
 uses `$XDG_DATA_HOME/subyard/veranda`, falling back to
 `$HOME/.local/share/subyard/veranda`.
 
-## Disposable Wayland SHORT
+## Disposable X11 and Wayland SHORT
 
 `wayland-short.py GUI_ELF ENGINE_ELF` runs only as the unprivileged user inside an
 allocated disposable VM. It reuses public lease-fixture, typed owner-inventory,
 process-identity and cleanup helpers. It installs VM-only dependencies, prepares
 20 configured **NOT_CREATED** yards with 200 actual project records, then runs a
-same-build GUI lifetime on labwc headless/Pixman. AT-SPI only reads accessibility;
-`wtype` delivers physical Refresh, Projects selection and close. A new inventory
+same-build GUI lifetime. X11 is the primary operating scenario: add `--x11` for a
+private Xvfb display with Openbox and XTEST input through `xdotool`. The existing
+default runs Wayland on labwc headless/Pixman with `wtype`; both backends require
+their own native result. AT-SPI only reads accessibility. Physical Refresh,
+Projects selection and close are checked. A new inventory
 observation and ten visible project names are checked before natural GUI close,
 observed child death and fixture cleanup. Configured records do not establish
 container start/provision lifecycle. A captured screenshot is separate from any
 latency or resource measurement.
+The X11 driver verifies that its one visible window belongs to the exact owned
+GUI PID before activation and each of its four supported keys. It does not use
+accessibility actions or synthetic window-directed key events. X11 currently
+supports only the local SHORT; combining `--x11` with `--remote` or `--ui` fails
+before VM preparation. Each result identifies its backend, screenshot, original
+GUI exit and observed process identities.
 
 Use the existing [candidate-bundle transport](../../docs/test-vms.md) to include
-prebuilt ELFs with the current public source. For example, after the builds above:
+prebuilt ELFs with the current public source. This example uses synthetic product
+version `0.99.1`, which satisfies the installed-source version floor; it does not
+publish a release. Stage independent executable copies for the fixture:
 
 ```sh
+VERANDA_PRODUCT_VERSION=0.99.1 CARGO_TARGET_DIR=.build/veranda-desktop \
+  cargo +stable build --manifest-path veranda/desktop/Cargo.toml --locked
+YARD_BUILD_VERSION=0.99.1 dev/build-engine.sh --force
+install -D -m0755 .build/veranda-desktop/debug/veranda .build/veranda-short-inputs/veranda
+install -D -m0755 .build/yard .build/veranda-short-inputs/yard
 python3 - <<'PY'
 import subprocess, tarfile
 paths = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard']).decode().split('\0')
 with tarfile.open('.build/veranda-gtk-short.tar.gz', 'w:gz') as archive:
     for path in sorted(set(paths) - {''}):
         archive.add(path, arcname=path, recursive=False)
-    archive.add('.build/veranda-desktop/debug/veranda', arcname='.subyard-acceptance/veranda', recursive=False)
-    archive.add('.build/yard', arcname='.subyard-acceptance/yard', recursive=False)
+    archive.add('.build/veranda-short-inputs/veranda', arcname='.subyard-acceptance/veranda', recursive=False)
+    archive.add('.build/veranda-short-inputs/yard', arcname='.subyard-acceptance/yard', recursive=False)
 PY
 SUBYARD_E2E_CANDIDATE_BUNDLE="$PWD/.build/veranda-gtk-short.tar.gz" \
 SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum .build/veranda-gtk-short.tar.gz | cut -d' ' -f1)" \
 dev/agent-e2e.sh --slot 1 --vm-count 1 --purpose veranda-gtk-short -- \
-  python3 veranda/desktop/wayland-short.py .subyard-acceptance/veranda .subyard-acceptance/yard
+  bash -euc '
+root="$PWD"
+operator="$(id -un)"
+operator_home="$(getent passwd "$operator" | cut -d: -f6)"
+bash dev/build-profiles.sh
+. tests/helpers/test-context.sh
+setup_test_context "$root/.build/incus-bootstrap"
+export SUBYARD_USER="$operator" SUBYARD_OPERATOR_HOME="$operator_home"
+export STORAGE_PATH="$operator_home/.cache/subyard-e2e-platform/incus/incus/storage"
+SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
+export SUBYARD_INSTALLATION_CONTEXT
+bash scripts/01-install-incus.sh --yes --zabbly
+sudo -n runuser -u "$operator" -- env -i \
+  HOME="$operator_home" USER="$operator" LOGNAME="$operator" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp \
+  SUBYARD_E2E_VM=1 SUBYARD_E2E_RUN_ID="${SUBYARD_E2E_RUN_ID:-}" SUBYARD_E2E_SLOT="${SUBYARD_E2E_SLOT:-}" \
+  python3 "$root/veranda/desktop/wayland-short.py" \
+    "$root/.subyard-acceptance/veranda" "$root/.subyard-acceptance/yard" --x11
+'
 ```
 
 Choose an available owned slot using the VM guide; the example does not authorize
 another holder's slot. Keep the original exit, full logs, cleanup and exact release
-outcomes. Add `--remote` to run three same-build lifetimes against an isolated real loopback
+outcomes. In the disposable guest, the product Phase 1 installer prepares Incus
+and enrolls the operator before the whole helper starts in a fresh group session.
+This follows the [existing Phase 1 caller](../../dev/e2e/entity-naming-acceptance.sh)
+and [VM guide](../../docs/test-vms.md); running the helper directly on the raw base
+can fail with Incus socket permission denied. Remove `--x11` to run the separate
+Wayland SHORT with the same input ELFs. Platform preparation packages the same
+candidate Yard, installs it under
+the disposable fixture state and runs its supported `migrate --yes` boundary before
+source `init`; Go and the source packaging prerequisites must be available in the VM.
+The installed engine must match the supplied engine bytes. The fixture removes its
+isolated runtime with the rest of its owned state.
+Add `--remote` to run three same-build lifetimes against an isolated real loopback
 SSH server and system SSH agent with synthetic keys on the disposable VM. This
 checks first-key decline/accept, compatible owner discovery, cancellation during
 an authenticated but blocked RPC negotiation, remote Refresh, saved owner/yard/tab

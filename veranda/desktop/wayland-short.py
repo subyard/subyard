@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One same-build GTK read/Refresh/close on a leased disposable Linux VM.
+"""One same-build GTK read/Refresh/close on owned Wayland or X11 in a disposable VM.
 
 Inputs are independently staged GUI/engine ELFs. This is not a resource benchmark.
 The existing lease runner owns allocation, renewal, source transfer and release.
@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
+import selectors
 import shlex
 import stat
 import subprocess
@@ -39,9 +41,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gui", type=Path)
     parser.add_argument("engine", type=Path)
+    parser.add_argument("--x11", action="store_true", help="run the local SHORT on a private Xvfb display instead of Wayland")
     parser.add_argument("--remote", action="store_true", help="include real loopback SSH onboarding, cancellation and saved selection lifetimes")
     parser.add_argument("--ui", action="store_true", help="include focused typed GTK pages, plan/discard and Unicode draft restoration")
     args = parser.parse_args()
+    if args.x11 and (args.remote or args.ui):
+        parser.error("--x11 supports only the local SHORT; --remote and --ui require Wayland")
     if args.ui and not args.remote:
         parser.error("--ui currently requires the three --remote lifetimes")
     if os.environ.get("SUBYARD_E2E_VM") != "1" or os.getuid() == 0:
@@ -53,20 +58,21 @@ def main():
     started = time.monotonic()
     result = {"schema_version": 1, "original_exit_code": 1, "stage": "packages",
               "run": os.environ.get("SUBYARD_E2E_RUN_ID"), "slot": os.environ.get("SUBYARD_E2E_SLOT"),
-              "scope": "GTK Linux Wayland local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux Wayland read-only shell SHORT; no resource acceptance",
+              "backend": "x11" if args.x11 else "wayland",
+              "scope": "GTK Linux Wayland local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
               "gui_sha256": hashlib.sha256(args.gui.read_bytes()).hexdigest(),
               "engine_sha256": hashlib.sha256(args.engine.read_bytes()).hexdigest()}
     try:
         with fixture.recorded_state() as state, contextlib.ExitStack() as stack:
             def retain_evidence():
                 result['private_logs'] = {}
-                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log'):
+                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
                     path = state / name
                     if path.exists():
                         assert path.stat().st_nlink == 1 and path.stat().st_size <= 2 * 1024 * 1024
                         result['private_logs'][name] = base64.b64encode(path.read_bytes()).decode('ascii')
                 result['screenshots'] = {}
-                for name in ('useful.png', 'trust.png', 'remote-restore.png', 'local-restore.png'):
+                for name in ('useful.png', 'failure.png', 'trust.png', 'remote-restore.png', 'local-restore.png'):
                     capture = state / name
                     if capture.exists():
                         assert capture.stat().st_size <= 2 * 1024 * 1024
@@ -74,8 +80,9 @@ def main():
             stack.callback(retain_evidence)
             env = dict(os.environ, DEBIAN_FRONTEND= "noninteractive")
             run(["sudo", "-n", "apt-get", "update", "-qq"], env, state / "apt-update.log", 180)
-            run(["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends",
-                 "libgtk-4-1", "labwc", "wlrctl", "wlr-randr", "wayland-utils", "wtype", "grim",
+            display_packages = ["xvfb", "openbox", "xdotool", "libx11-6"] if args.x11 else ["labwc", "wlrctl", "wlr-randr", "wayland-utils", "wtype", "grim"]
+            run(["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", *display_packages,
+                 "libgtk-4-1",
                  "dbus", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0", "openssh-server"], env, state / "apt-install.log", 300)
             result["stage"] = "platform"
             stack.enter_context(fixture.prepared_platform(state, args.engine))
@@ -86,7 +93,7 @@ def main():
             env = {"PATH": str(state / "bin") + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
                    "HOME": str(state / "home"), "XDG_RUNTIME_DIR": str(state / "runtime"),
                    "XDG_CONFIG_HOME": str(state / "xdg-config"), "XDG_CACHE_HOME": str(state / "xdg-cache"),
-                   "XDG_DATA_HOME": str(state / "xdg-data"), "XDG_SESSION_TYPE": "wayland",
+                   "XDG_DATA_HOME": str(state / "xdg-data"), "XDG_SESSION_TYPE": "x11" if args.x11 else "wayland",
                    "SUBYARD_OPERATOR_HOME": str(operator), "SUBYARD_CONFIG_HOME": str(state / "owner-config"),
                    "SUBYARD_HOME": str(state / "owner-data"), "SUBYARD_REPOSITORY_ROOT": str(ROOT),
                    "YARD_ENGINE_PATH": str(args.engine.resolve()), "SUBYARD_NO_AUDIT": "1",
@@ -96,14 +103,16 @@ def main():
             with fixture.private_log(state / "fleet.log") as output, contextlib.redirect_stdout(output):
                 result["fleet"] = probe.configured_fleet(state / "fleet", env)
             probe.private_file(state / "compositor/rc.xml", "<labwc_config><core><xwayland>no</xwayland></core></labwc_config>\n")
-            env.update(WLR_BACKENDS="headless", WLR_HEADLESS_OUTPUTS="1", WLR_RENDERER="pixman",
-                       WLR_LIBINPUT_NO_DEVICES="1", LABWC_UPDATE_ACTIVATION_ENV="0",
-                       XDG_CONFIG_DIRS=str(state / "compositor"), GDK_BACKEND="wayland", GSK_RENDERER="cairo",
+            env.update(GDK_BACKEND="x11" if args.x11 else "wayland", GSK_RENDERER="cairo",
                        GTK_A11Y="atspi", DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(state / "session-bus"))
+            if not args.x11:
+                env.update(WLR_BACKENDS="headless", WLR_HEADLESS_OUTPUTS="1", WLR_RENDERER="pixman",
+                           WLR_LIBINPUT_NO_DEVICES="1", LABWC_UPDATE_ACTIVATION_ENV="0",
+                           XDG_CONFIG_DIRS=str(state / "compositor"))
 
-            def service(name, command):
+            def service(name, command, **options):
                 log = stack.enter_context(fixture.private_log(state / (name + ".log")))
-                process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, **options)
                 tree = probe.Tree(process.pid)
                 stack.enter_context(fixture.cleanup_on_exit(lambda: tree.stop(process), name))
                 return process, tree
@@ -179,19 +188,36 @@ def main():
                     finally: owner.close()
                 result['authenticated_ssh_preflight'] = True
 
-            result["stage"] = "compositor"
-            compositor, _ = service("compositor", ["labwc", "-V", "-C", str(state / "compositor")])
-            deadline = time.monotonic() + 15
-            while True:
-                assert compositor.poll() is None and time.monotonic() < deadline
-                sockets = [path for path in (state / "runtime").glob("wayland-*") if stat.S_ISSOCK(path.lstat().st_mode)]
-                if len(sockets) == 1:
-                    env["WAYLAND_DISPLAY"] = str(sockets[0])
-                    break
-                time.sleep(.05)
-            assert "pixman" in (state / "compositor.log").read_text().lower()
-            run(["wlr-randr", "--output", "HEADLESS-1", "--custom-mode", "1920x1080@60Hz", "--scale", "1"], env, state / "geometry.log", 5)
-            result["display"] = fixture.output_geometry(subprocess.check_output(["wayland-info", "--interface", "wl_output"], env=env, text=True, stderr=subprocess.DEVNULL, timeout=5))
+            result["stage"] = "display"
+            if args.x11:
+                read_fd, write_fd = os.pipe()
+                try:
+                    try:
+                        display, _ = service("xvfb", ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x800x24", "-nolisten", "tcp"], pass_fds=(write_fd,))
+                    finally:
+                        os.close(write_fd)
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(read_fd, selectors.EVENT_READ)
+                        assert selector.select(5), 'x11_display_readiness_timeout'
+                    number = os.read(read_fd, 32).decode().strip()
+                    assert re.fullmatch(r'[0-9]{1,5}', number) and display.poll() is None
+                    env['DISPLAY'] = ':' + number
+                finally:
+                    os.close(read_fd)
+                result['display'] = {'server': 'Xvfb', 'screen': '1280x800x24', 'rendering': 'cairo'}
+            else:
+                compositor, _ = service("compositor", ["labwc", "-V", "-C", str(state / "compositor")])
+                deadline = time.monotonic() + 15
+                while True:
+                    assert compositor.poll() is None and time.monotonic() < deadline
+                    sockets = [path for path in (state / "runtime").glob("wayland-*") if stat.S_ISSOCK(path.lstat().st_mode)]
+                    if len(sockets) == 1:
+                        env["WAYLAND_DISPLAY"] = str(sockets[0])
+                        break
+                    time.sleep(.05)
+                assert "pixman" in (state / "compositor.log").read_text().lower()
+                run(["wlr-randr", "--output", "HEADLESS-1", "--custom-mode", "1920x1080@60Hz", "--scale", "1"], env, state / "geometry.log", 5)
+                result["display"] = fixture.output_geometry(subprocess.check_output(["wayland-info", "--interface", "wl_output"], env=env, text=True, stderr=subprocess.DEVNULL, timeout=5))
             service("session-bus", ["dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=" + env["DBUS_SESSION_BUS_ADDRESS"]])
             deadline = time.monotonic() + 10
             while not (state / "session-bus").exists():
@@ -200,7 +226,10 @@ def main():
             launchers = [Path(path) for path in subprocess.check_output(["dpkg-query", "-L", "at-spi2-core"], text=True).splitlines() if path.endswith("/at-spi-bus-launcher")]
             assert len(launchers) == 1
             service("accessibility", [str(launchers[0]), "--launch-immediately"])
-            service("keyboard", ["wtype", "-s", "120000"])
+            if args.x11:
+                service("window-manager", ["openbox"])
+            else:
+                service("keyboard", ["wtype", "-s", "120000"])
             result['lifetimes'] = []
             scenarios = ['connect', 'remote-restore', 'local-restore'] if args.remote else ['local']
             for scenario in scenarios:
@@ -212,7 +241,7 @@ def main():
                 stack.enter_context(fixture.cleanup_on_exit(lambda app=app, tree=tree: tree.stop(app), "app-" + scenario))
                 driver = ROOT / "veranda/desktop/wayland-input.py"
                 capture = state / ('useful.png' if not suffix else scenario + '.png')
-                driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0")
+                driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0", VERANDA_GTK_BACKEND=result['backend'])
                 if args.remote:
                     driver_env.update(VERANDA_GTK_DESTINATION=destination, VERANDA_GTK_FINGERPRINT=fingerprints[0],
                                       VERANDA_GTK_REPLACEMENT=fingerprints[1], VERANDA_GTK_BLOCK=str(state / 'block'))

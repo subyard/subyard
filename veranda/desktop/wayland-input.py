@@ -1,24 +1,74 @@
 #!/usr/bin/env python3
-"""Read GTK accessibility, send actual Wayland keys, then close naturally."""
+"""Read GTK accessibility, send actual Wayland/XTEST keys, then close naturally."""
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
-import gi
 
-gi.require_version("Atspi", "2.0")
-from gi.repository import Atspi, Gio, GLib
+
+def x11_key(pid, key):
+    # Only the four local SHORT keys; no remote/UI key translation.
+    if key not in ('alt+r', 'Tab', 'space', 'alt+F4'):
+        raise ValueError('unsupported local X11 key')
+    windows = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--pid', str(pid)], timeout=3).splitlines()
+    assert len(windows) == 1 and windows[0].isdigit(), 'owned_x11_window_unavailable'
+    window = windows[0].decode()
+    assert int(subprocess.check_output(['xdotool', 'getwindowpid', window], timeout=3)) == pid, 'owned_x11_window_changed'
+    subprocess.run(['xdotool', 'windowactivate', '--sync', window], check=True, timeout=3)
+    # Omitting --window asks XTEST to deliver physical input to the focused window.
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', key], check=True, timeout=3)
+
+
+def retain_failure_diagnostics(result, collect):
+    try:
+        result['failure_diagnostics'] = collect()
+    except BaseException as error:
+        result['diagnostic_failure_type'] = type(error).__name__
+
+
+def capture_view(backend, capture):
+    assert capture.parent.resolve() == capture.parent and not capture.exists()
+    fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    original = os.fstat(fd)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            if backend == 'wayland':
+                subprocess.run(['grim', '-'], check=True, env=os.environ,
+                               stdout=output, stderr=subprocess.DEVNULL, timeout=5)
+        if backend == 'x11':
+            code = ('import importlib.util,pathlib,sys\n'
+                    'spec=importlib.util.spec_from_file_location("probe",sys.argv[1])\n'
+                    'probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)\n'
+                    'assert probe.screenshot(sys.argv[2],pathlib.Path(sys.argv[3]))\n')
+            subprocess.run([sys.executable, '-c', code,
+                str(Path(__file__).resolve().parents[2] / 'dev/measure-veranda.py'),
+                os.environ['DISPLAY'], str(capture)], check=True, timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert capture.stat().st_nlink == 1 and capture.stat().st_size <= 2 * 1024 * 1024
+    except BaseException:
+        # A partial diagnostic image must not break the parent's evidence retention.
+        if capture.exists() and os.path.samestat(original, capture.lstat()):
+            capture.unlink()
+        raise
 
 
 def main():
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi, Gio, GLib
     pid = int(os.environ["VERANDA_GTK_PID"])
+    backend = os.environ.get('VERANDA_GTK_BACKEND', 'wayland')
+    assert backend in ('x11', 'wayland')
+    assert backend != 'x11' or (os.environ.get('VERANDA_GTK_SCENARIO', 'local') == 'local' and os.environ.get('VERANDA_GTK_UI') != '1')
     started = time.monotonic()
     stage = "accessibility"
     result = {"original_exit_code": 1, "physical_key_commands": 0,
-              "accessibility_actions_used": False}
+              "accessibility_actions_used": False, "backend": backend}
     def identity():
         process = Path('/proc') / str(pid)
         fields = (process / 'stat').read_text().rsplit(')', 1)[1].split()
@@ -27,6 +77,8 @@ def main():
         return process.stat().st_uid, int(fields[19]), exe.st_dev, exe.st_ino
     original_identity = identity()
     assert original_identity[0] == os.getuid()
+    last_tree, last_accessibility = [], {}
+    snapshot_state = {'next': 0, 'truncated': False}
     try:
         connection = Gio.DBusConnection.new_for_address_sync(os.environ["DBUS_SESSION_BUS_ADDRESS"],
             Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
@@ -48,8 +100,11 @@ def main():
             desktop = Atspi.get_desktop(0)
             applications = [desktop.get_child_at_index(i) for i in range(desktop.get_child_count())]
             apps = [app for app in applications if app and app.get_process_id() == pid]
+            last_accessibility.update(desktop_applications=len(applications), matching_applications=len(apps))
             assert len(apps) <= 1, 'duplicate_owned_accessible_application'
-            if not apps: return []
+            if not apps:
+                last_tree.clear()
+                return []
             app = apps[0]
             app.clear_cache()
             queue, items = [(app, 0)], []
@@ -64,6 +119,27 @@ def main():
                 assert count >= 0, 'accessible_children_unavailable'
                 assert count <= 512, 'accessible_child_limit_exceeded'
                 queue.extend((node.get_child_at_index(i), depth + 1) for i in range(count))
+            if (os.environ.get('VERANDA_GTK_SCENARIO', 'local') == 'local'
+                    and os.environ.get('VERANDA_GTK_UI') != '1' and time.monotonic() >= snapshot_state['next']):
+                # Cache diagnostics during normal reads, at most once per second.
+                # The failure path never makes another AT-SPI RPC.
+                snapshot_state['next'] = time.monotonic() + 1
+                snapshot_state.pop('error', None)
+                deadline, snapshot = time.monotonic() + .25, []
+                for node in items:
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        states = node.get_state_set()
+                        snapshot.append({'pid': node.get_process_id(), 'role': int(node.get_role()),
+                            'name': (node.get_name() or '').encode()[:128].decode(errors='ignore'),
+                            'states': [name for name in ('SHOWING', 'FOCUSED', 'ENABLED', 'SELECTED')
+                                       if states.contains(getattr(Atspi.StateType, name))]})
+                    except BaseException as diagnostic_error:
+                        snapshot_state['error'] = type(diagnostic_error).__name__
+                        break
+                last_tree[:] = snapshot
+                snapshot_state['truncated'] = len(snapshot) != len(items)
             return items
 
         def wait(predicate, seconds=20):
@@ -75,10 +151,21 @@ def main():
             raise TimeoutError(stage)
 
         def keys(*arguments):
+            assert backend == 'wayland'
             owned()
             subprocess.run(["wtype", "-s", "100", *arguments, "-s", "100"], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             result["physical_key_commands"] += 1
+
+        def local_key(key):
+            if backend == 'x11':
+                owned()
+                x11_key(pid, key)
+                result['physical_key_commands'] += 1
+            else:
+                keys(*{'alt+r': ('-M', 'alt', '-k', 'r', '-m', 'alt'),
+                       'Tab': ('-k', 'Tab'), 'space': ('-k', 'space'),
+                       'alt+F4': ('-M', 'alt', '-k', 'F4', '-m', 'alt')}[key])
 
         def observed():
             for node in nodes():
@@ -193,14 +280,16 @@ def main():
             assert current['fingerprint'] == os.environ['VERANDA_GTK_REPLACEMENT'], 'repair_missing_replacement'
             result['separate_replacement_repair_preserved_owner'] = True
         else:
-            stage = "initial-local-fleet"
+            stage = "local-connected"
             wait(lambda: any(node.get_name() == "Connected" for node in nodes()))
+            stage = "local-yard-summary"
             wait(lambda: any("Yard state: NOT_CREATED" in node.get_name() and "10 projects" in node.get_name() for node in nodes()))
+            stage = "local-observed"
             before = wait(observed)
             result["local_default_selected"] = True
             stage = "physical-refresh"
             time.sleep(1.1)
-            keys("-M", "alt", "-k", "r", "-m", "alt")
+            local_key('alt+r')
             after = wait(lambda: (value if (value := observed()) and value != before else None))
             result["refresh_observation_changed"] = after != before
             stage = "physical-projects-tab"
@@ -208,8 +297,8 @@ def main():
                 buttons = [node for node in nodes() if node.get_name() == "Projects" and node.get_state_set().contains(Atspi.StateType.FOCUSED)]
                 if buttons: break
                 assert count < 64
-                keys("-k", "Tab")
-            keys("-k", "space")
+                local_key('Tab')
+            local_key('space')
             expected = {f"project-00-{index:02}" for index in range(10)}
             wait(lambda: expected <= {node.get_name() for node in nodes() if node.get_state_set().contains(Atspi.StateType.SHOWING)})
             result["visible_real_project_names"] = 10
@@ -276,16 +365,10 @@ def main():
                 assert node.get_text_iface().get_text(0, -1) == unicode_draft, 'draft_restart_missing'
                 result['draft_restart_rendered'] = True
         capture = Path(os.environ['VERANDA_GTK_CAPTURE'])
-        assert capture.parent.resolve() == capture.parent and not capture.exists()
-        fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'wb') as output:
-            subprocess.run(['grim', '-'], check=True, env=os.environ,
-                           stdout=output, stderr=subprocess.DEVNULL, timeout=5)
-        assert capture.stat().st_nlink == 1 and capture.stat().st_size <= 2 * 1024 * 1024
+        capture_view(backend, capture)
         result['useful_view_capture_sha256'] = hashlib.sha256(capture.read_bytes()).hexdigest()
         stage = "physical-close"
-        keys("-M", "alt", "-k", "F4", "-m", "alt")
+        local_key('alt+F4')
         result["original_exit_code"] = 0
         result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1"
         result["owner_mutation_executed"] = False
@@ -294,9 +377,39 @@ def main():
         reasons = {'owned_process_terminated', 'owned_process_identity_changed',
                    'duplicate_owned_accessible_application', 'accessible_depth_exceeded',
                    'accessible_node_limit_exceeded', 'accessible_children_unavailable',
-                   'accessible_child_limit_exceeded', 'focus_target_unavailable', 'decline_registered_host', 'cancel_changed_store', 'repair_changed_owner', 'repair_missing_replacement', 'unicode_gtk_text_mismatch', 'draft_restart_missing', 'refresh_replaced_editor', 'refresh_reset_caret', 'refresh_reset_selection'}
+                   'accessible_child_limit_exceeded', 'focus_target_unavailable', 'decline_registered_host', 'cancel_changed_store', 'repair_changed_owner', 'repair_missing_replacement', 'unicode_gtk_text_mismatch', 'draft_restart_missing', 'refresh_replaced_editor', 'refresh_reset_caret', 'refresh_reset_selection', 'owned_x11_window_unavailable', 'owned_x11_window_changed', 'x11_capture_failed'}
         if isinstance(error, AssertionError) and str(error) in reasons:
             result['failure_reason'] = str(error)
+        if os.environ.get('VERANDA_GTK_SCENARIO', 'local') == 'local' and os.environ.get('VERANDA_GTK_UI') != '1':
+            def collect():
+                diagnostic = {'atspi': dict(last_accessibility), 'tree': list(last_tree),
+                              'snapshot': dict(snapshot_state)}
+                try:
+                    current = identity()
+                    assert current == original_identity
+                    diagnostic['process'] = {'pid': pid, 'uid': current[0], 'start': current[1],
+                        'exe_device': current[2], 'exe_inode': current[3], 'same_owned_identity': True}
+                    if backend == 'x11':
+                        windows = subprocess.run(['xdotool', 'search', '--onlyvisible', '--pid', str(pid)],
+                            capture_output=True, timeout=3)
+                        diagnostic['windows'] = {'search_exit_code': windows.returncode, 'items': []}
+                        deadline = time.monotonic() + 3
+                        for window in windows.stdout[:4096].splitlines()[:16]:
+                            if not window.isdigit() or time.monotonic() >= deadline:
+                                break
+                            owner = subprocess.check_output(['xdotool', 'getwindowpid', window.decode()], timeout=1)
+                            diagnostic['windows']['items'].append({'id': window.decode(), 'pid': int(owner)})
+                except BaseException as diagnostic_error:
+                    diagnostic['process_window_error'] = type(diagnostic_error).__name__
+                if backend == 'x11':
+                    try:
+                        capture = Path(os.environ['VERANDA_GTK_CAPTURE']).with_name('failure.png')
+                        capture_view(backend, capture)
+                        diagnostic['screenshot_sha256'] = hashlib.sha256(capture.read_bytes()).hexdigest()
+                    except BaseException as diagnostic_error:
+                        diagnostic['screenshot_error'] = type(diagnostic_error).__name__
+                return diagnostic
+            retain_failure_diagnostics(result, collect)
     result["duration_seconds"] = time.monotonic() - started
     print("VERANDA_GTK_INPUT " + json.dumps(result), flush=True)
     return result["original_exit_code"]
