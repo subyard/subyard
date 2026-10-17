@@ -256,6 +256,7 @@ func ingressStep(
 		return V2IngressStep{}, err
 	}
 	binding.Steps = slices.Clone(binding.Steps)
+	binding.Releases.Previous = cloneReleaseID(binding.Releases.Previous)
 	return V2IngressStep{
 		Binding: binding, Kind: operation.Kind,
 		Expected: operation.Expected, Desired: operation.Desired, Static: operation.Static,

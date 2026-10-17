@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/blang/semver/v4"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -69,6 +70,45 @@ type MigrationOwnerReceiptV1 struct {
 	ProtectedInputs      Fingerprint                      `json:"protectedInputs"`
 	Assets               Fingerprint                      `json:"assets"`
 	Links                ReleaseLinks                     `json:"links"`
+}
+
+func (proof MigrationOwnerAssetsProof) cloneMigrationOwnerAssets() MigrationOwnerAssetsProof {
+	proof.SourceRegistry = slices.Clone(proof.SourceRegistry)
+	if proof.PreviousSource != nil {
+		previous := *proof.PreviousSource
+		proof.PreviousSource = &previous
+	}
+	return proof
+}
+
+func cloneMigrationOwnerJournal(journal JournalRecord) JournalRecord {
+	journal.Releases.Previous = cloneReleaseID(journal.Releases.Previous)
+	journal.SourceIngress = cloneSourceIngressRequest(journal.SourceIngress)
+	journal.Steps = slices.Clone(journal.Steps)
+	for i := range journal.Steps {
+		if journal.Steps[i].Evidence != nil {
+			evidence := *journal.Steps[i].Evidence
+			evidence.Releases.Previous = cloneReleaseID(evidence.Releases.Previous)
+			journal.Steps[i].Evidence = &evidence
+		}
+	}
+	return journal
+}
+
+func (receipt MigrationOwnerReceiptV1) cloneMigrationOwnerReceipt() MigrationOwnerReceiptV1 {
+	receipt.Registry = slices.Clone(receipt.Registry)
+	receipt.SourceRegistry = slices.Clone(receipt.SourceRegistry)
+	receipt.ProjectionPayload = slices.Clone(receipt.ProjectionPayload)
+	receipt.CheckpointPayload = slices.Clone(receipt.CheckpointPayload)
+	receipt.RetainedTransactions = slices.Clone(receipt.RetainedTransactions)
+	if receipt.PreviousSource != nil {
+		previous := *receipt.PreviousSource
+		receipt.PreviousSource = &previous
+	}
+	receipt.Predecessor = cloneMigrationOwnerJournal(receipt.Predecessor)
+	receipt.Successor = cloneMigrationOwnerJournal(receipt.Successor)
+	receipt.Links.Previous = cloneReleaseID(receipt.Links.Previous)
+	return receipt
 }
 
 func (receipt MigrationOwnerReceiptV1) Validate() error {
@@ -149,7 +189,7 @@ func ParseMigrationOwnerReceipt(payload []byte) (MigrationOwnerReceiptV1, error)
 	if err := decodeBoundedRecord(payload, MaxProtectedRecordBytes, &receipt); err != nil {
 		return receipt, err
 	}
-	return receipt, receipt.Validate()
+	return receipt.cloneMigrationOwnerReceipt(), receipt.Validate()
 }
 
 // The proof reads the canonical predecessor and every durable evidence triple.
@@ -203,6 +243,7 @@ func (transition *V2Transition) observeMigrationOwnerReplacement(ctx context.Con
 	if err != nil {
 		return false, err
 	}
+	assets = assets.cloneMigrationOwnerAssets()
 	if err := validateFingerprint(assets.Binding, "migration owner assets"); err != nil {
 		return false, err
 	}
@@ -215,6 +256,8 @@ func (transition *V2Transition) observeMigrationOwnerReplacement(ctx context.Con
 		PreviousSource: assets.PreviousSource, RetainedTransactions: retained,
 		Replacement: *request, Predecessor: *journal, Projection: projection.Fingerprint, Authority: observation.migrationLedgerSnapshot.AuthoritySnapshot.Fingerprint,
 		ProtectedInputs: inputs, Assets: assets.Binding, Links: observation.links}
+	ownedReceipt := receipt.cloneMigrationOwnerReceipt()
+	receipt = &ownedReceipt
 	candidate := v2Observation{goal: observation.goal, links: observation.links, ledger: observation.ledger, ledgerSnapshot: observation.ledgerSnapshot,
 		migrationLedgerSnapshot: observation.migrationLedgerSnapshot, checkpointSnapshot: observation.checkpointSnapshot, checkpointAuthority: true,
 		journalSnapshot: observation.journalSnapshot, migrationOwnerReceipt: receipt}
@@ -281,32 +324,29 @@ func validateMigrationOwnerLedger(journal JournalRecord, registryPayload, projec
 	if len(journal.Steps) != 2 {
 		return state, invalid("unsupported migration owner steps")
 	}
-	reconstructed := projection
+	owner, authority, err := registry.historyAuthority(state.Ledger)
+	if err != nil {
+		return state, err
+	}
+	if _, err := owner.Complete(authority); err != nil {
+		return state, invalid("migration owner authority is incomplete: %v", err)
+	}
+	edges, err := ledgerTrace(registry, state.Ledger, journal.Steps)
+	if err != nil {
+		return state, err
+	}
+	reconstructed := projection.Payload
 	for index, id := range []string{"introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"} {
 		step := journal.Steps[index]
-		var migration MigrationDefinitionV2
-		for _, definition := range registry.Migrations {
-			if definition.ID == id {
-				migration = definition
-			}
-		}
-		if migration.ID == "" || step.Migration != id || step.ID != id+".ledger" || step.Resource != "ledger."+migration.Domain || step.Decision != DecisionTransform || step.Checkpoint != StepVerified || step.Expected != reconstructed.Fingerprint || step.Evidence == nil || !postActivationEvidenceMatches(journal, step, EvidenceVerified, *step.Evidence) {
+		edge, exists := edges[id]
+		if !exists || step.Migration != id || step.ID != id+".ledger" || step.Resource != "ledger."+edge.migration.Domain || step.Decision != DecisionTransform || step.Checkpoint != StepVerified || !bytes.Equal(edge.from.Payload, reconstructed) || step.Evidence == nil || !postActivationEvidenceMatches(journal, step, EvidenceVerified, *step.Evidence) {
 			return state, invalid("unsupported completed migration owner ledger step")
 		}
-		advanced, err := ledger.Advance(registry, migration)
-		if err != nil {
-			return state, err
-		}
-		payload, desired, err := MarshalLedgerV2(advanced, registry)
-		if err != nil || desired != step.Desired {
-			return state, invalid("migration owner ledger replay differs")
-		}
-		ledger, reconstructed = advanced, protectedSnapshotFromPayload(payload)
+		reconstructed = edge.to
 	}
-	pending, err := registry.PendingPath(ledger)
-	authority, _, marshalErr := MarshalLedgerV2(state.Ledger, registry)
-	if err != nil || marshalErr != nil || len(pending) != 0 || !bytes.Equal(reconstructed.Payload, authority) {
-		return state, invalid("migration owner authority does not match complete replay")
+	canonicalAuthority, _, err := MarshalLedgerV2(state.Ledger, registry)
+	if err != nil || !bytes.Equal(reconstructed, canonicalAuthority) {
+		return state, invalid("migration owner authority does not match complete trace")
 	}
 	return state, nil
 }
@@ -332,23 +372,22 @@ func (store *POSIXV2Store) migrationOwnerEvidence(journal JournalRecord) error {
 	return nil
 }
 
-// Bind the finite existing protected graph, excluding only this contract's
-// immutable reservation. Its contents are independently validated on every read.
+// Validate the retained source against its frozen complete projection.
 func migrationOwnerSourceRegistry(sourceRegistry []byte, projection ProtectedSnapshot) (RegistryV2, error) {
 	original, _, err := ParseRegistryV2(sourceRegistry, BuiltinCapabilityCatalog())
 	if err != nil {
 		return RegistryV2{}, err
 	}
-	historical := BaselineLedgerV2(original)
-	path, err := original.PendingPath(historical)
+	historical, _, err := ParseLedgerV2(projection.Payload, original)
 	if err != nil {
 		return RegistryV2{}, err
 	}
-	for _, migration := range path {
-		historical, err = historical.Advance(original, migration)
-		if err != nil {
-			return RegistryV2{}, err
-		}
+	owner, authority, err := original.historyAuthority(historical)
+	if err != nil {
+		return RegistryV2{}, err
+	}
+	if _, err := owner.Complete(authority); err != nil {
+		return RegistryV2{}, invalid("retained source registry does not prove complete projection: %v", err)
 	}
 	payload, _, err := MarshalLedgerV2(historical, original)
 	if err != nil || !bytes.Equal(payload, projection.Payload) {
@@ -587,16 +626,16 @@ func (transition *V2Transition) publishMigrationOwnerReceipt(observation v2Obser
 	if existing, found := receipts[created.Transaction]; found {
 		// Resume the exact initial successor and its original durable grant after a
 		// receipt-only crash. A newly confirmed grant authorizes this same plan.
-		receipt.Successor = existing.Successor
-		*created = existing.Successor
+		receipt.Successor = cloneMigrationOwnerJournal(existing.Successor)
+		*created = cloneMigrationOwnerJournal(existing.Successor)
 	} else {
-		receipt.Successor = *created
+		receipt.Successor = cloneMigrationOwnerJournal(*created)
 	}
 	payload, err := MarshalMigrationOwnerReceipt(receipt)
 	if err != nil {
 		return err
 	}
-	return transition.store.createImmutable(migrationOwnerReceiptParts, string(created.Transaction)+".json", payload)
+	return transition.store.createOwnerImmutable(migrationOwnerReceiptParts, string(created.Transaction)+".json", payload)
 }
 
 func migrationOwnerProtectedTransactions(receipts map[TransactionID]MigrationOwnerReceiptV1) []TransactionID {
@@ -648,7 +687,7 @@ func (store *POSIXV2Store) recordCompletedMigrationOwner(current JournalRecord) 
 	if err != nil {
 		return err
 	}
-	return store.createImmutable(migrationOwnerCompletedParts, string(current.Transaction)+".json", payload)
+	return store.createOwnerImmutable(migrationOwnerCompletedParts, string(current.Transaction)+".json", payload)
 }
 
 func (store *POSIXV2Store) migrationOwnerCompletion(receipt MigrationOwnerReceiptV1, current *JournalRecord) (JournalRecord, error) {
@@ -674,12 +713,12 @@ func (store *POSIXV2Store) migrationOwnerCompletion(receipt MigrationOwnerReceip
 		terminal = &journal
 	}
 	if current != nil && current.Checkpoint == JournalComplete && migrationOwnerSuccessorMatches(receipt.Successor, *current) {
-		return *current, nil
+		return cloneMigrationOwnerJournal(*current), nil
 	}
 	if terminal == nil {
 		return JournalRecord{}, invalid("migration owner supersession has no terminal successor evidence")
 	}
-	return *terminal, nil
+	return cloneMigrationOwnerJournal(*terminal), nil
 }
 
 func (store *POSIXV2Store) validateMigrationOwnerPreparedJournal() error {
@@ -687,7 +726,12 @@ func (store *POSIXV2Store) validateMigrationOwnerPreparedJournal() error {
 	if err != nil || len(receipts) != 1 {
 		return invalid("unbound prepared migration owner journal")
 	}
-	pending, err := store.readRecord([]string{"release-transition", "v2"}, ".journal.json.pending")
+	parent, present, err := store.openParent([]string{"release-transition", "v2"}, false)
+	if err != nil || !present {
+		return invalid("prepared migration owner journal parent is unavailable")
+	}
+	defer unix.Close(parent)
+	pending, err := readStagingAt(parent, ".journal.json.pending")
 	if err != nil || !pending.Exists {
 		return invalid("prepared migration owner journal is unavailable")
 	}
@@ -698,7 +742,10 @@ func (store *POSIXV2Store) validateMigrationOwnerPreparedJournal() error {
 	for _, receipt := range receipts {
 		expected, _ := MarshalJournal(receipt.Successor)
 		predecessor, _ := MarshalJournal(receipt.Predecessor)
-		if !bytes.Equal(pending.Payload, expected) || !bytes.Equal(current.Payload, predecessor) {
+		// Staging carries no authority. Only the immutable receipt supplies the
+		// exact intended successor; the unchanged canonical predecessor guards
+		// completing or replacing this CAS staging file under the update lock.
+		if !bytes.HasPrefix(expected, pending.Payload) || !bytes.Equal(current.Payload, predecessor) {
 			return invalid("prepared migration owner journal conflicts with its immutable receipt")
 		}
 	}

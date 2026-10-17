@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migrationhistory"
 	"golang.org/x/sys/unix"
 )
 
@@ -68,8 +68,12 @@ func (store *POSIXV2Store) InspectSourceMetadata(registry RegistryV2, digest Fin
 		if err := store.sourceTransactionArtifacts(*proof.Journal); err != nil {
 			return proof, err
 		}
-		pending, err := registry.PendingPath(proof.Ledger.Ledger)
-		if err != nil || len(pending) != 0 || !proof.Ledger.AuthoritySnapshot.Exists {
+		owner, authority, err := registry.historyAuthority(proof.Ledger.Ledger)
+		if err != nil {
+			return proof, err
+		}
+		_, completionErr := owner.Complete(authority)
+		if completionErr != nil || !proof.Ledger.AuthoritySnapshot.Exists {
 			return proof, errors.New("source repair requires the complete original migration ledger")
 		}
 		if proof.Journal.Checkpoint == JournalComplete {
@@ -235,46 +239,21 @@ func (store *POSIXV2Store) sourceTerminalEvidence(journal JournalRecord, registr
 type sourceLedgerEdge struct {
 	migration     MigrationDefinitionV2
 	before, after Fingerprint
+	witness       migrationhistory.Edge
+	from          ProtectedSnapshot
+	to            []byte
 }
 
 func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registry RegistryV2, projection Fingerprint, state MigrationLedgerSnapshot) error {
 	if err := store.sourceTransactionArtifacts(journal); err != nil {
 		return err
 	}
-	ledger := BaselineLedgerV2(registry)
-	path, err := registry.PendingPath(ledger)
+	edges, err := canonicalLedgerTrace(registry, journal.Steps)
 	if err != nil {
-		return err
-	}
-	edges := map[string]sourceLedgerEdge{}
-	_, prior, err := MarshalLedgerV2(ledger, registry)
-	if err != nil {
-		return err
-	}
-	for _, migration := range path {
-		next, err := ledger.Advance(registry, migration)
+		// Noncanonical completed domains require an authenticated historical anchor.
+		edges, err = sourceHistoricalLedgerEdges(journal, registry, state)
 		if err != nil {
 			return err
-		}
-		_, desired, err := MarshalLedgerV2(next, registry)
-		if err != nil {
-			return err
-		}
-		edges[migration.ID] = sourceLedgerEdge{migration, prior, desired}
-		ledger, prior = next, desired
-	}
-	for _, step := range journal.Steps {
-		edge, known := edges[step.Migration]
-		if known && step.ID == step.Migration+".ledger" &&
-			(step.Desired != edge.after || step.Expected != edge.before && step.Expected != absentProtectedSnapshot().Fingerprint) {
-			// A released owner may already have completed another domain before
-			// a new migration was inserted into the current registry's total order.
-			// Recover that exact history only from an authenticated terminal ledger.
-			edges, err = sourceHistoricalLedgerEdges(journal, registry, state)
-			if err != nil {
-				return err
-			}
-			break
 		}
 	}
 	last := Fingerprint("")
@@ -293,38 +272,56 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 			if step.Evidence.Recovery != "" {
 				return errors.New("terminal ledger evidence cannot carry a recovery payload")
 			}
-			initialAbsent := len(path) != 0 && edge.migration.ID == path[0].ID && step.Expected == absentProtectedSnapshot().Fingerprint
+			initialAbsent := !edge.from.Exists && step.Expected == absentProtectedSnapshot().Fingerprint
 			if step.Resource != "ledger."+edge.migration.Domain || step.Decision != DecisionTransform || step.Desired != edge.after || (!initialAbsent && step.Expected != edge.before) || (last != "" && last != step.Expected) {
 				return errors.New("terminal ledger evidence does not bind the original registry prefix")
 			}
 			last = step.Desired
-		} else {
-			supported := edge.migration.Kind == "test-vms-settings-v1-to-v2" && domain.SafeName(step.Resource) && step.ID == edge.migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
-			supported = supported || edge.migration.Kind == localSSHPortMigration && domain.SafeName(step.Resource) && step.ID == edge.migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
-			supported = supported || edge.migration.Kind == "test-yard-owner-v1-to-v2" && step.Resource == ownerRegistrationResource && step.ID == edge.migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
-			if !supported {
-				return errors.New("source repair requires a supported original terminal step grammar")
-			}
-			if err := store.sourceTypedRecovery(journal, step, edge.migration); err != nil {
-				return err
-			}
+
 		}
-		for _, checkpoint := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
-			snapshot, err := store.ReadCheckpointEvidence(journal.Transaction, step.ID, checkpoint)
-			if err != nil || !snapshot.Exists {
-				return errors.New("terminal checkpoint evidence is missing or unavailable")
-			}
-			evidence, err := ParseEvidence(snapshot.Payload)
-			canonical, marshalErr := MarshalEvidence(evidence)
-			redacted := evidence
-			redacted.Recovery = ""
-			if err != nil || marshalErr != nil || !bytes.Equal(canonical, snapshot.Payload) || evidence.Recovery != step.Evidence.Recovery || !postActivationEvidenceMatches(journal, step, checkpoint, redacted) || checkpoint == EvidenceVerified && !evidenceRecordsEqual(evidence, *step.Evidence) {
-				return errors.New("terminal checkpoint evidence does not match the original journal")
-			}
+		if err := store.terminalStepArtifacts(journal, step, edge.migration); err != nil {
+			return err
 		}
 	}
 	if projection != "" && last != "" && last != projection {
 		return errors.New("terminal ledger evidence differs from the authoritative projection")
+	}
+	return nil
+}
+
+// terminalStepArtifacts proves exact closed bytes only. It supplies no ledger
+// authority, execution grant, or runtime readiness.
+func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step JournalStep, migration MigrationDefinitionV2) error {
+	if step.Checkpoint != StepVerified || step.Evidence == nil {
+		return errors.New("terminal step is not verified")
+	}
+	if step.ID == migration.ID+".ledger" {
+		if step.Resource != "ledger."+migration.Domain || step.Decision != DecisionTransform || step.Evidence.Recovery != "" {
+			return errors.New("terminal ledger step grammar is unsupported")
+		}
+	} else {
+		supported := migration.Kind == "test-vms-settings-v1-to-v2" && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
+		supported = supported || migration.Kind == localSSHPortMigration && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
+		supported = supported || migration.Kind == "test-yard-owner-v1-to-v2" && step.Resource == ownerRegistrationResource && step.ID == migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
+		if !supported {
+			return errors.New("source repair requires a supported original terminal step grammar")
+		}
+		if err := store.sourceTypedRecovery(journal, step, migration); err != nil {
+			return err
+		}
+	}
+	for _, checkpoint := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
+		snapshot, err := store.ReadCheckpointEvidence(journal.Transaction, step.ID, checkpoint)
+		if err != nil || !snapshot.Exists {
+			return errors.New("terminal checkpoint evidence is missing or unavailable")
+		}
+		evidence, err := ParseEvidence(snapshot.Payload)
+		canonical, marshalErr := MarshalEvidence(evidence)
+		redacted := evidence
+		redacted.Recovery = ""
+		if err != nil || marshalErr != nil || !bytes.Equal(canonical, snapshot.Payload) || evidence.Recovery != step.Evidence.Recovery || !postActivationEvidenceMatches(journal, step, checkpoint, redacted) || checkpoint == EvidenceVerified && !evidenceRecordsEqual(evidence, *step.Evidence) {
+			return errors.New("terminal checkpoint evidence does not match the original journal")
+		}
 	}
 	return nil
 }
@@ -335,6 +332,9 @@ func sourceHistoricalLedgerEdges(journal JournalRecord, registry RegistryV2, sta
 		if step.ID == step.Migration+".ledger" {
 			last = step.Desired
 		}
+	}
+	if last == "" {
+		return ledgerTrace(registry, state.Ledger, journal.Steps)
 	}
 	ledger := state.Ledger
 	_, terminal, err := MarshalLedgerV2(ledger, registry)
@@ -347,47 +347,12 @@ func sourceHistoricalLedgerEdges(journal JournalRecord, registry RegistryV2, sta
 		if !state.Checkpointed || !state.ProjectionSnapshot.Exists || state.ProjectionSnapshot.Fingerprint != last {
 			return nil, errors.New("terminal ledger evidence has no authenticated historical anchor")
 		}
-		ledger, _, err = ParseLedgerV2(state.ProjectionSnapshot.Payload, registry)
+		ledger, err = historicalProjectionLedger(registry, compatibilityProjectionRevision{state.ProjectionSnapshot})
 		if err != nil {
 			return nil, err
 		}
 	}
-	migrations := map[string]MigrationDefinitionV2{}
-	for _, migration := range registry.Migrations {
-		migrations[migration.ID] = migration
-	}
-	edges := map[string]sourceLedgerEdge{}
-	for _, step := range slices.Backward(journal.Steps) {
-		if step.ID != step.Migration+".ledger" {
-			continue
-		}
-		migration, known := migrations[step.Migration]
-		domain := ledger.Domains[migration.Domain]
-		if !known || domain.Epoch != migration.ToEpoch || len(domain.Applied) == 0 || domain.Applied[len(domain.Applied)-1] != migration.ID {
-			return nil, errors.New("terminal ledger evidence is not the exact historical domain prefix")
-		}
-		_, after, err := MarshalLedgerV2(ledger, registry)
-		if err != nil {
-			return nil, err
-		}
-		before := LedgerV2{SchemaVersion: ledger.SchemaVersion, Domains: maps.Clone(ledger.Domains)}
-		before.Domains[migration.Domain] = DomainLedgerV2{Epoch: migration.FromEpoch, Applied: nonNilIDs(slices.Clone(domain.Applied[:len(domain.Applied)-1]))}
-		_, fingerprint, err := MarshalLedgerV2(before, registry)
-		if err != nil {
-			return nil, err
-		}
-		advanced, err := before.Advance(registry, migration)
-		if err != nil || !sameLedgerV2(advanced, ledger) || step.Desired != after {
-			return nil, errors.New("terminal ledger evidence does not bind the historical transition")
-		}
-		initialAbsent := sameLedgerV2(before, BaselineLedgerV2(registry)) && step.Expected == absentProtectedSnapshot().Fingerprint
-		if step.Expected != fingerprint && !initialAbsent {
-			return nil, errors.New("terminal ledger evidence does not bind the historical before state")
-		}
-		edges[migration.ID] = sourceLedgerEdge{migration, fingerprint, after}
-		ledger = before
-	}
-	return edges, nil
+	return ledgerTrace(registry, ledger, journal.Steps)
 }
 
 // Older ordinary publication can replace a completed journal without archiving

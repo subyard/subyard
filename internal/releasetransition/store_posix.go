@@ -357,6 +357,10 @@ func (store *POSIXV2Store) postActivationJournalArtifactsMatch(
 // compatibility horizon. Cleanup is deliberately separate from correctness:
 // callers run it only after publishing a verified terminal journal.
 func (store *POSIXV2Store) CleanupTransactions(current TransactionID) error {
+	return store.cleanupTransactions(current, nil)
+}
+
+func (store *POSIXV2Store) cleanupTransactions(current TransactionID, retain func(*v2TransactionGraph) error) error {
 	if store == nil {
 		return errors.New("release transition store is required")
 	}
@@ -381,6 +385,11 @@ func (store *POSIXV2Store) CleanupTransactions(current TransactionID) error {
 	graph, err := store.inspectTransactionGraph(current, currentJournal)
 	if err != nil || graph == nil {
 		return err
+	}
+	if retain != nil {
+		if err := retain(graph); err != nil {
+			return err
+		}
 	}
 	parent, present, err := store.openParent(
 		[]string{"release-transition", "v2", "transactions"}, false,
@@ -746,7 +755,7 @@ func discardOrphanedCASPendingAt(
 	payload []byte,
 ) error {
 	pendingName := "." + name + ".pending"
-	pending, err := readProtectedAt(parent, pendingName)
+	pending, err := readStagingAt(parent, pendingName)
 	if err != nil || !pending.Exists || bytes.Equal(pending.Payload, payload) {
 		return err
 	}
@@ -980,48 +989,73 @@ func (store *POSIXV2Store) inject(point string) error {
 }
 
 func preparePendingAt(parent int, name string, payload []byte) error {
-	fd, err := unix.Openat(
-		parent, name,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0o600,
-	)
-	if errors.Is(err, unix.EEXIST) {
-		current, readErr := readProtectedAt(parent, name)
-		if readErr != nil {
-			return readErr
-		}
-		if current.Exists && bytes.Equal(current.Payload, payload) {
-			return nil
-		}
-		return ErrProtectedStoreExists
+	fd, err := unix.Openat(parent, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	existing := errors.Is(err, unix.EEXIST)
+	if existing {
+		fd, err = unix.Openat(parent, name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	}
 	if err != nil {
 		return err
 	}
-	closeOnError := true
-	defer func() {
-		if closeOnError {
-			_ = unix.Close(fd)
-		}
-	}()
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	// Only a private staging file may be empty. Published-record validation
+	// remains strict, including ownership, mode, links and the size bound.
 	if err := validateProtectedFileFD(fd, false); err != nil {
 		return err
 	}
-	for remaining := payload; len(remaining) > 0; {
-		written, writeErr := unix.Write(fd, remaining)
-		if writeErr != nil {
-			return writeErr
+	remaining := payload
+	if existing {
+		current, err := io.ReadAll(io.LimitReader(file, MaxProtectedRecordBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(current) > MaxProtectedRecordBytes || !bytes.HasPrefix(payload, current) {
+			return ErrProtectedStoreExists
+		}
+		// Staging carries no authority. Resume only an exact byte prefix of the
+		// caller's independently reconstructed intended record, without truncation.
+		remaining = payload[len(current):]
+	}
+	for len(remaining) > 0 {
+		written, err := file.Write(remaining)
+		if err != nil {
+			return err
 		}
 		remaining = remaining[written:]
 	}
-	if err := unix.Fsync(fd); err != nil {
+	if err := file.Sync(); err != nil {
 		return err
 	}
-	if err := unix.Close(fd); err != nil {
+	if err := file.Close(); err != nil {
 		return err
 	}
-	closeOnError = false
 	return unix.Fsync(parent)
+}
+
+// readStagingAt permits an interrupted empty staging file; it never reads a
+// published authority or evidence record.
+func readStagingAt(parent int, name string) (ProtectedSnapshot, error) {
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return absentProtectedSnapshot(), nil
+	}
+	if err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	if err := validateProtectedFileFD(fd, false); err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, MaxProtectedRecordBytes+1))
+	if err != nil {
+		return ProtectedSnapshot{}, err
+	}
+	if len(payload) > MaxProtectedRecordBytes {
+		return ProtectedSnapshot{}, errors.New("protected release transition staging size is outside the allowed bound")
+	}
+	return protectedSnapshotFromPayload(payload), nil
 }
 
 func readProtectedAt(parent int, name string) (ProtectedSnapshot, error) {

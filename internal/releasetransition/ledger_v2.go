@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+
+	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
 
 const (
@@ -16,10 +18,7 @@ type LedgerV2 struct {
 	Domains       map[string]DomainLedgerV2 `json:"domains"`
 }
 
-type DomainLedgerV2 struct {
-	Epoch   int      `json:"epoch"`
-	Applied []string `json:"applied"`
-}
+type DomainLedgerV2 = migrationhistory.DomainState
 
 func ParseLedgerV2(payload []byte, registry RegistryV2) (LedgerV2, Fingerprint, error) {
 	var ledger LedgerV2
@@ -55,132 +54,67 @@ func BaselineLedgerV2(registry RegistryV2) LedgerV2 {
 	return ledger
 }
 
-func (registry RegistryV2) ValidateLedger(ledger LedgerV2) error {
+func (registry RegistryV2) historyAuthority(ledger LedgerV2) (migrationhistory.Registry, migrationhistory.Authority, error) {
+	owner, err := registry.historyRegistry()
+	if err != nil {
+		return owner, migrationhistory.Authority{}, err
+	}
 	if ledger.SchemaVersion != LedgerSchemaV2 {
-		return invalid("unsupported ledger schema %d", ledger.SchemaVersion)
+		return owner, migrationhistory.Authority{}, invalid("unsupported ledger schema %d", ledger.SchemaVersion)
 	}
-	if ledger.Domains == nil {
-		return invalid("ledger domains are required")
+	authority, err := owner.History(ledger.Domains)
+	if err != nil {
+		return owner, authority, invalid("%v", err)
 	}
-	if len(ledger.Domains) != len(registry.MinimumEpochs) {
-		return invalid("ledger domains do not exactly match registry domains")
-	}
-	for domain := range ledger.Domains {
-		if _, exists := registry.MinimumEpochs[domain]; !exists {
-			return invalid("ledger contains unknown domain %q", domain)
-		}
-	}
-	for domain, state := range ledger.Domains {
-		minimum := registry.MinimumEpochs[domain]
-		current := registry.CurrentEpochs[domain]
-		if state.Epoch < minimum || state.Epoch > current {
-			return invalid("ledger domain %q epoch %d is outside supported range", domain, state.Epoch)
-		}
-		expected := registry.appliedPrefix(domain, state.Epoch)
-		if !slices.Equal(state.Applied, expected) {
-			return invalid("ledger domain %q applied history is not the exact registry prefix", domain)
-		}
-	}
-	applied := ledgerAppliedIDs(ledger)
-	for _, migration := range registry.Migrations {
-		if _, completed := applied[migration.ID]; !completed {
-			continue
-		}
-		for _, dependency := range migration.DependsOn {
-			if _, completed := applied[dependency]; !completed {
-				return invalid(
-					"ledger migration %q is applied before dependency %q",
-					migration.ID, dependency,
-				)
-			}
-		}
-	}
-	return nil
+	return owner, authority, nil
 }
-
+func ledgerFromAuthority(authority migrationhistory.Authority) LedgerV2 {
+	return LedgerV2{SchemaVersion: LedgerSchemaV2, Domains: authority.Domains()}
+}
+func (registry RegistryV2) ValidateLedger(ledger LedgerV2) error {
+	_, _, err := registry.historyAuthority(ledger)
+	return err
+}
 func (registry RegistryV2) PendingPath(ledger LedgerV2) ([]MigrationDefinitionV2, error) {
-	if err := registry.ValidateLedger(ledger); err != nil {
+	owner, authority, err := registry.historyAuthority(ledger)
+	if err != nil {
 		return nil, err
 	}
-	applied := ledgerAppliedIDs(ledger)
-	path := make([]MigrationDefinitionV2, 0, len(registry.Migrations)-len(applied))
-	for _, migration := range registry.Migrations {
-		if _, completed := applied[migration.ID]; completed {
-			continue
-		}
-		migration.DependsOn = slices.Clone(migration.DependsOn)
-		path = append(path, migration)
+	path, err := owner.Pending(authority)
+	if err != nil {
+		return nil, invalid("%v", err)
 	}
 	return path, nil
 }
-
 func (ledger LedgerV2) DomainState(registry RegistryV2, domain string) (DomainLedgerV2, error) {
-	_, exists := registry.MinimumEpochs[domain]
-	if !exists {
-		return DomainLedgerV2{}, invalid("unknown migration domain %q", domain)
-	}
-	if err := registry.ValidateLedger(ledger); err != nil {
+	_, authority, err := registry.historyAuthority(ledger)
+	if err != nil {
 		return DomainLedgerV2{}, err
 	}
-	state, exists := ledger.Domains[domain]
-	if !exists {
-		return DomainLedgerV2{}, invalid("ledger is missing domain %q", domain)
+	state, ok := authority.Domains()[domain]
+	if !ok {
+		return DomainLedgerV2{}, invalid("unknown migration domain %q", domain)
 	}
-	state.Applied = slices.Clone(state.Applied)
 	return state, nil
 }
 
-// Advance returns a new ledger with exactly the next registry migration
-// applied. It never mutates the caller's maps or histories.
-func (ledger LedgerV2) Advance(
-	registry RegistryV2,
-	migration MigrationDefinitionV2,
-) (LedgerV2, error) {
-	pending, err := registry.PendingPath(ledger)
+// Advance selects the canonical next edge from validated authority. It never
+// mutates the caller's maps, definition dependencies or applied histories.
+func (ledger LedgerV2) Advance(registry RegistryV2, migration MigrationDefinitionV2) (LedgerV2, error) {
+	edge, err := nextLedgerEdge(registry, ledger, migration)
 	if err != nil {
 		return LedgerV2{}, err
 	}
-	if len(pending) == 0 || pending[0].ID != migration.ID ||
-		pending[0].Domain != migration.Domain ||
-		pending[0].FromEpoch != migration.FromEpoch || pending[0].ToEpoch != migration.ToEpoch ||
-		pending[0].Kind != migration.Kind || !slices.Equal(pending[0].DependsOn, migration.DependsOn) {
-		return LedgerV2{}, invalid("migration %q is not the exact next ledger transition", migration.ID)
-	}
-	advanced := LedgerV2{
-		SchemaVersion: ledger.SchemaVersion,
-		Domains:       make(map[string]DomainLedgerV2, len(ledger.Domains)),
-	}
-	for domain, state := range ledger.Domains {
-		advanced.Domains[domain] = DomainLedgerV2{
-			Epoch: state.Epoch, Applied: slices.Clone(state.Applied),
-		}
-	}
-	state := advanced.Domains[migration.Domain]
-	state.Epoch = migration.ToEpoch
-	state.Applied = append(state.Applied, migration.ID)
-	advanced.Domains[migration.Domain] = state
-	if err := registry.ValidateLedger(advanced); err != nil {
-		return LedgerV2{}, err
-	}
-	return advanced, nil
+	return ledgerFromAuthority(edge.After()), nil
 }
-
+func sameMigrationDefinition(left, right MigrationDefinitionV2) bool {
+	return left.ID == right.ID && left.Domain == right.Domain && left.FromEpoch == right.FromEpoch && left.ToEpoch == right.ToEpoch && left.Kind == right.Kind && slices.Equal(left.DependsOn, right.DependsOn)
+}
 func (registry RegistryV2) appliedPrefix(domain string, epoch int) []string {
-	var applied []string
-	for _, migration := range registry.Migrations {
-		if migration.Domain == domain && migration.ToEpoch <= epoch {
-			applied = append(applied, migration.ID)
-		}
+	owner, err := registry.historyRegistry()
+	if err != nil {
+		return nil
 	}
-	return applied
-}
-
-func ledgerAppliedIDs(ledger LedgerV2) map[string]struct{} {
-	applied := make(map[string]struct{})
-	for _, state := range ledger.Domains {
-		for _, migration := range state.Applied {
-			applied[migration] = struct{}{}
-		}
-	}
+	applied, _ := owner.Applied(domain, registry.MinimumEpochs[domain], epoch)
 	return applied
 }

@@ -3982,28 +3982,41 @@ smoke_rollback_fixture_contract() {
   (
     set -euo pipefail
     local scenario="$1" fixture="$TMP/smoke-rollback-$1"
-    for function_name in verify_predecessor_rollback_refusal finish_smoke; do
+    for function_name in verify_smoke_state establish_smoke_continuation verify_predecessor_rollback_refusal finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
+    done
+    for function_name in assert_project_owned assert_legacy_continuation establish_legacy_continuation verify_legacy_full_removal_refusal; do
+      eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
     done
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
-    CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
+    OLD_VERSION=predecessor CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
     OLD_RELEASE_TARGET=releases/predecessor-bbbbbbbbbbbb
     V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
     V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
     PHASE_STATE="$STATE_ROOT/phase" BOOT_ID_STATE="$STATE_ROOT/boot-id"
-    DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route" SMOKE_PROJECT=ReleaseSmoke PROJECT=subyard
-    install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT"
-    printf 'smoke-ready\n' > "$PHASE_STATE"
+    DEFAULT_ROUTE_STATE="$STATE_ROOT/default-route" SMOKE_PROJECT=ReleaseSmoke PROJECT=subyard INSTANCE=yard MARKER=smoke-fixture-marker
+    install -d -m 0700 "$STATE_ROOT" "$V2_STATE_ROOT" "$OPERATOR_HOME/.subyard/runtime"
+    case "$scenario" in
+      checkpoint-*) printf 'smoke-checkpoint-interrupted\n' > "$PHASE_STATE" ;;
+      *) printf 'smoke-ready\n' > "$PHASE_STATE" ;;
+    esac
     printf 'before-reboot\n' > "$BOOT_ID_STATE"
     printf 'retained-route\n' > "$DEFAULT_ROUTE_STATE"
     printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
     printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/previous"
+    ln -s "$CANDIDATE_RELEASE_TARGET" "$OPERATOR_HOME/.subyard/runtime/current"
+    ln -s "$OLD_RELEASE_TARGET" "$OPERATOR_HOME/.subyard/runtime/previous"
     for record in history-checkpoint.json ledger.json journal.json; do
       printf 'retained %s\n' "$record" > "$V2_STATE_ROOT/$record"
       chmod 0600 "$V2_STATE_ROOT/$record"
     done
+    install -d -m 0700 "$V2_STATE_ROOT/evidence/retained"
+    printf 'retained evidence\n' > "$V2_STATE_ROOT/evidence/retained/verified.json"
+    chmod 0600 "$V2_STATE_ROOT/evidence/retained/verified.json"
+    printf '# Release smoke retained operator setting\n' > "$OPERATOR_HOME/.config/subyard/config.env"
+    : > "$STATE_ROOT/installation"
     die() { printf '%s\n' "$*" >&2; exit 2; }
     info() { :; }
     ok() { case "$*" in *'and teardown passed') printf '%s\n' "$*" > "$STATE_ROOT/passed" ;; esac; }
@@ -4014,22 +4027,52 @@ smoke_rollback_fixture_contract() {
       [ "$(cat "$STATE_ROOT/current")" = "$1" ] \
         && [ "$(cat "$STATE_ROOT/previous")" = "$2" ] || die 'unexpected runtime links'
     }
-    verify_smoke_state() {
-      [ "$(operator_yard --version)" = "yard $1" ] || die 'incorrect active smoke version'
-    }
+    operator_uid() { printf '2000\n'; }
+    write_fixture_value() { printf '%s\n' "$2" > "$1"; chmod 0600 "$1"; }
+    resume_checkpoint_update() { : > "$STATE_ROOT/resumed"; }
     sudo() { [ "$1" = -n ] || die 'unexpected sudo arguments'; shift; "$@"; }
     ip() { printf 'retained-route\n'; }
-    incus() { [ "$*" = "project show $PROJECT" ] || die 'unexpected Incus call'; return 1; }
+    incus() {
+      case "$*" in
+        "project get $PROJECT user.subyard.installation") cat "$STATE_ROOT/installation" ;;
+        "project get $PROJECT user.subyard.p0-power-systemd") printf '%s\n' "$MARKER" ;;
+        "info $INSTANCE --project $PROJECT") return 0 ;;
+        "list $INSTANCE --project $PROJECT --format csv -c s") printf 'RUNNING\n' ;;
+        "project show $PROJECT") return 1 ;;
+        *) die 'unexpected Incus call' ;;
+      esac
+    }
     operator_env() {
       case "$1" in
         readlink) cat "$STATE_ROOT/current" ;;
-        grep) "$@" ;;
+        grep|jq|stat|sha256sum) "$@" ;;
         env)
           [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] \
             || [ "$2" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] \
             || die 'unexpected release source'
-          shift 3
-          operator_yard "$@"
+          if [ "$3" = "$RELEASE_ROOT/subyard-install.sh" ]; then
+            [ "$*" = "env YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT $RELEASE_ROOT/subyard-install.sh --version $CANDIDATE_VERSION --publish-only --yes" ] \
+              || die 'ownership enrollment did not use the exact public publish-only installer'
+            if [[ "$scenario" = checkpoint-* ]]; then
+              [ -f "$STATE_ROOT/resumed" ] || die 'ownership enrollment preceded completed checkpoint resume'
+            fi
+            [ ! -e "$STATE_ROOT/consents" ] || die 'ownership enrollment followed continuation consent'
+            [ "$scenario" != enrollment-fail ] || return 45
+            case "$scenario" in
+              enrollment-links-change) printf 'releases/foreign\n' > "$STATE_ROOT/previous" ;;
+              enrollment-symlink-change) ln -sfn releases/foreign "$OPERATOR_HOME/.subyard/runtime/previous" ;;
+              enrollment-checkpoint-change) printf 'changed\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
+              enrollment-ledger-change) printf 'changed\n' > "$V2_LEDGER" ;;
+              enrollment-journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
+              enrollment-evidence-change) printf 'changed\n' > "$V2_STATE_ROOT/evidence/retained/verified.json" ;;
+              enrollment-mode-change) chmod 0644 "$V2_LEDGER" ;;
+              enrollment-project-change) printf '1\n' > "$STATE_ROOT/installation" ;;
+            esac
+            printf 'enrolled\n' >> "$STATE_ROOT/enrollments"
+          else
+            shift 3
+            operator_yard "$@"
+          fi
           ;;
         *) die 'unexpected operator command' ;;
       esac
@@ -4039,6 +4082,28 @@ smoke_rollback_fixture_contract() {
       current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
       case "$*" in
         --version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
+        check|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
+        'init --continue-legacy --yes')
+          [ -f "$STATE_ROOT/enrollments" ] || die 'continuation consent preceded public inventory enrollment'
+          if [[ "$scenario" = checkpoint-* ]]; then
+            [ -f "$STATE_ROOT/resumed" ] || die 'continuation consent preceded completed checkpoint resume'
+          fi
+          [ "$scenario" != checkpoint-consent-fail ] || return 45
+          install -d -m 0700 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations"
+          printf '{"schema":1,"scope":"normal-reconcile","operatorUid":2000,"instanceUuid":"fixture-uuid"}\n' \
+            > "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+          chmod 0600 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+          printf 'consent\n' >> "$STATE_ROOT/consents"
+          ;;
+        'init --yes')
+          assert_legacy_continuation
+          printf 'plain-init\n' >> "$STATE_ROOT/plain-inits"
+          ;;
+        'teardown --full --yes')
+          [ "$scenario" != full-removal-accept ] || return 0
+          printf 'legacy continuation grants no full removal ownership\n' >&2
+          return 1
+          ;;
         "export $SMOKE_PROJECT --yes")
           install -d -m 0700 "$OPERATOR_HOME/.subyard/exports"
           printf 'guest-change\n' > "$OPERATOR_HOME/.subyard/exports/retained.patch"
@@ -4077,25 +4142,46 @@ smoke_rollback_fixture_contract() {
         *) die 'unexpected yard operation' ;;
       esac
       if [ -n "${next:-}" ]; then
+        if [ "$scenario" = grant-change ]; then
+          printf 'changed\n' >> "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+        elif [ "$scenario" = installation-change ]; then
+          printf '1\n' > "$STATE_ROOT/installation"
+        fi
         printf '%s\n' "$*" >> "$STATE_ROOT/updates"
         printf '%s\n' "$current" > "$STATE_ROOT/previous"
         printf '%s\n' "$next" > "$STATE_ROOT/current"
       fi
     }
+    # The authentic predecessor is verified without a grant; modern passages
+    # must retain explicit limited consent, never a product installation label.
+    printf '%s\n' "$OLD_RELEASE_TARGET" > "$STATE_ROOT/current"
+    verify_smoke_state "$OLD_VERSION"
+    printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
+    if [[ "$scenario" != checkpoint-* ]]; then
+      establish_smoke_continuation
+      operator_yard init --yes
+    fi
     finish_smoke
+    [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
+      && [ "$(wc -l < "$STATE_ROOT/consents")" = 1 ] \
+      && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = 2 ] || die 'smoke lost explicit consent or repeated plain init'
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
     [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
   )
 }
-for smoke_rollback_scenario in success wrong-reason unexpected-accept links-change \
+for smoke_rollback_scenario in success checkpoint-success checkpoint-consent-fail full-removal-accept \
+  enrollment-fail enrollment-links-change enrollment-symlink-change \
+  enrollment-checkpoint-change enrollment-ledger-change enrollment-journal-change \
+  enrollment-evidence-change enrollment-mode-change enrollment-project-change \
+  grant-change installation-change wrong-reason unexpected-accept links-change \
   checkpoint-change ledger-change journal-change rollback-fail rollforward-fail; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [ "$smoke_rollback_scenario" = success ]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
@@ -4107,7 +4193,11 @@ for smoke_rollback_scenario in success wrong-reason unexpected-accept links-chan
       || fail "release smoke concealed $smoke_rollback_scenario failure"
     [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/passed" ] \
       || fail 'release smoke reported success after a rollback contract failure'
-    if [[ "$smoke_rollback_scenario" != *-fail ]]; then
+    if [[ "$smoke_rollback_scenario" = enrollment-* ]]; then
+      [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/consents" ] \
+        || fail 'release smoke granted continuation after failed inventory enrollment'
+    fi
+    if [[ "$smoke_rollback_scenario" != *-fail && "$smoke_rollback_scenario" != grant-change && "$smoke_rollback_scenario" != installation-change ]]; then
       [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/updates" ] \
         || fail 'release smoke continued after an invalid predecessor refusal'
     fi

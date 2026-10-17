@@ -188,7 +188,7 @@ func TestSourceStableActivationScopeExcludesActualSourceMutations(t *testing.T) 
 			t.Run(name, func(t *testing.T) {
 				owner := &sourceScopeReconciler{}
 				transition := sourceScopeTransitionFixture(t, owner)
-				observation := v2Observation{work: []v2Work{{kind: v2LedgerWork}, {kind: kind}}}
+				observation := v2Observation{work: []v2Work{{recipe: &ledgerWorkRecipe{}}, {recipe: testWorkRecipe(kind)}}}
 				if durable {
 					observation.work = nil
 					observation.journal = &JournalRecord{
@@ -232,13 +232,13 @@ func TestSSHPinSourceStabilityRequiresCompiledTypedWork(t *testing.T) {
 			file := settingsV2FilePlan{LocalSSHPort: true, Yard: "default", Path: filepath.Join(transition.options.ConfigHome, "yards/default/config.env"),
 				Expected: config.PersistentFileSnapshot{Exists: true}, Desired: []byte("SSH_PORT=2224\n"), Inheritance: digestC,
 				ExpectedFingerprint: digestA, DesiredFingerprint: digestB, Decision: DecisionCanonicalize}
-			work := v2Work{kind: v2SettingsWork, migration: migration, file: &file, intent: settingsIntent(migration, file)}
-			observation := v2Observation{work: []v2Work{{kind: v2LedgerWork}, work}}
+			work := settingsMigrationWork(settingsIntent(migration, file), migration, file)
+			observation := v2Observation{work: []v2Work{{recipe: &ledgerWorkRecipe{}}, work}}
 			switch scenario {
 			case "non-pin":
-				file.LocalSSHPort = false
+				observation.work[1].settingsFile().LocalSSHPort = false
 			case "invalid-file":
-				file.Desired = nil
+				observation.work[1].settingsFile().Desired = nil
 			case "unknown-migration":
 				observation.work[1].intent.Migration = "uncompiled-pin"
 			case "wrong-epoch":
@@ -252,13 +252,13 @@ func TestSSHPinSourceStabilityRequiresCompiledTypedWork(t *testing.T) {
 			case "resource-spelling":
 				observation.work[1].intent.Resource = "ledger.settings"
 			case "fresh-without-file":
-				observation.work[1].file = nil
+				observation.work[1].recipe = &recordedSettingsWork{}
 			case "mixed-settings":
-				observation.work = append(observation.work, v2Work{kind: v2SettingsWork})
+				observation.work = append(observation.work, v2Work{recipe: &settingsWorkRecipe{}})
 			case "mixed-owner":
-				observation.work = append(observation.work, v2Work{kind: v2OwnerWork})
+				observation.work = append(observation.work, v2Work{recipe: &ownerWorkRecipe{}})
 			case "mixed-ingress":
-				observation.work = append(observation.work, v2Work{kind: v2IngressWork})
+				observation.work = append(observation.work, v2Work{recipe: &ingressWorkRecipe{}})
 			case "source-ingress":
 				transition.options.SourceIngress = &SourceIngressRequest{}
 			}
@@ -382,5 +382,53 @@ func TestSourceStableActivationScopeRejectsChangedWideDesired(t *testing.T) {
 	links, err := fresh.options.ObserveLinks(context.Background())
 	if err != nil || links.Active != "release-b" || links.Previous == nil || *links.Previous != "release-a" {
 		t.Fatalf("changed desired scope mutated links: links=%#v err=%v", links, err)
+	}
+}
+
+func testWorkRecipe(kind v2WorkKind) v2WorkRecipe {
+	switch kind {
+	case v2SettingsWork:
+		return &settingsWorkRecipe{}
+	case v2OwnerWork:
+		return &ownerWorkRecipe{}
+	case v2IngressWork:
+		return &ingressWorkRecipe{}
+	default:
+		return &ledgerWorkRecipe{}
+	}
+}
+
+// A new grant after an unrelated completed transaction binds today's source
+// frontier. Reusing the old transaction's first before-pin makes the new grant
+// disagree with itself immediately after its first ledger CAS.
+func TestNewMigrationGrantUsesCurrentSourceAfterCompletedHistory(t *testing.T) {
+	owner := &sourceScopeReconciler{}
+	transition := sourceScopeTransitionFixture(t, owner)
+	transition.options.MigrationCheckpoint = true
+	observation := v2Observation{
+		ledgerSnapshot: ProtectedSnapshot{Fingerprint: digestB},
+		journal: &JournalRecord{Checkpoint: JournalComplete, ObservationScope: digestD,
+			Steps: []JournalStep{{Resource: "ledger.settings", Expected: digestA}}},
+		work: []v2Work{{recipe: &ledgerWorkRecipe{}}},
+	}
+	if err := transition.observeActivationScope(context.Background(), &observation); err != nil {
+		t.Fatal(err)
+	}
+	want, _, err := transition.currentObservationScope(observation.activationScope, nil, true, digestB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.observationScope != want {
+		t.Fatalf("new source scope=%s want current frontier=%s (historical before-pin=%s)", observation.observationScope, want, digestA)
+	}
+	original := observation.observationScope
+	observation = v2Observation{journal: &JournalRecord{Checkpoint: JournalMigrating, ObservationScope: original,
+		Steps: []JournalStep{{Resource: "ledger.power-metadata", Expected: digestB}}},
+		ledgerSnapshot: ProtectedSnapshot{Fingerprint: digestC}}
+	if err := transition.observeActivationScope(context.Background(), &observation); err != nil {
+		t.Fatal(err)
+	}
+	if observation.observationScope != original {
+		t.Fatal("own ledger CAS changed the approved source scope")
 	}
 }

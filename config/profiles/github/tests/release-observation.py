@@ -4,6 +4,8 @@ import shlex
 
 
 def read_only_commands(package, *, project="subyard", instance="yard", user="dev"):
+    if not (package / "runtime.py").is_file():
+        return []
     tree = ast.parse((package / 'runtime.py').read_text())
     probe = next(ast.literal_eval(node.value) for node in ast.walk(tree)
                  if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
@@ -25,6 +27,8 @@ def read_only_commands(package, *, project="subyard", instance="yard", user="dev
 
 
 def read_only_host_commands(package, *, yard="default"):
+    if not (package / "runtime.py").is_file():
+        return []
     tree = ast.parse((package / 'runtime.py').read_text())
     unit = next(node.value.right for node in ast.walk(tree) if isinstance(node, ast.Assign)
                 and any(isinstance(target, ast.Name) and target.id == 'unit' for target in node.targets))

@@ -34,8 +34,8 @@ func (transition *V2Transition) retainSourceActivationView(observation *v2Observ
 	}
 	view := &V2SourceActivationView{Settings: settings}
 	for _, work := range observation.work {
-		if work.owner != nil {
-			before := work.owner.Before
+		if work.ownerPlan() != nil {
+			before := work.ownerPlan().Before
 			view.OwnerRegistration = &before
 		}
 	}
@@ -47,7 +47,7 @@ func pendingSourceActivationWork(observation v2Observation) bool {
 		return false
 	}
 	for _, work := range observation.work {
-		if work.kind != v2SettingsWork && work.kind != v2OwnerWork && work.kind != v2IngressWork {
+		if work.kind() != v2SettingsWork && work.kind() != v2OwnerWork && work.kind() != v2IngressWork {
 			continue
 		}
 		verified := false

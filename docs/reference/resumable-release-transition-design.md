@@ -132,6 +132,46 @@ replace the growing applied list in the authoritative record. Frozen Ledger V2 r
 compatibility projection, validated on every checkpoint read. Native migrations advance authoritative
 history once; existing journal/evidence bindings keep their meaning. See [Migration retirement](#migration-retirement).
 
+`internal/migrationhistory` owns the validated registry, per-domain frontiers,
+canonical next edges and historical journal traces. Completed domains need not form a
+prefix of the registry's total order: each domain must have its exact prefix and all
+completed migrations must satisfy their dependencies. Fresh planning selects the first
+pending migration in registry order. Recovery reconstructs the journal's exact edges
+from a validated observed frontier at a durable cut, preserving completed independent
+domains when a pending migration was inserted earlier in that order. The not-yet-applied
+suffix still follows the current registry's canonical next order.
+
+The release-transition adapter retains the V1/V2 codecs, byte fingerprints, protected
+storage, evidence grammar, capability/support policy and CAS. Interrupted private staging files
+may be completed only when their bytes are an exact prefix of the independently reconstructed
+intended record. A journal CAS may discard stale staging only while the selected record still
+matches its expected snapshot. Published records retain strict nonempty size, ownership, mode
+and link validation; staging supplies no authority. Unsafe or conflicting immutable staging
+refuses without overwriting it. It checks journal pins
+against encoded edge endpoints before effects. Opaque authority and compatibility
+projection values have different types; a hash alone cannot supply authority. Ledger
+work binds the complete semantic registry, including ordered definitions, epoch floors,
+current epochs and retired-prefix pins. Matching one selected migration is insufficient.
+The adapter's authoritative ledger revision and historical compatibility revision are
+distinct inputs to its work and source-history consumers.
+
+Work carries one settings, recorded-settings, owner, ingress or ledger recipe variant.
+Constructors own nested inputs; reconstruction and per-step guards reject missing,
+foreign and typed-nil recipes before effects. The effect boundary consumes a private
+bound work step that ties its recipe to the exact transaction, intent and evidence
+phase. Recorded settings results can be observed and verified without supplying a
+mutation recipe. Frozen journal/evidence DTOs still pass their existing codec,
+transaction, phase and physical freshness checks.
+
+A private transition readiness proof combines validated migration completion with exact
+active links and activation fixed-point observation. Journaled completion also binds
+validated completed journal facts. Successful V2 convergence results, including no-op
+results, and checkpoint publication consume that proof. Migration
+completion alone cannot call either consumer. The proof describes observed readiness;
+it does not replace the existing lock, reobservation, authorization or CAS guards, and
+it cannot guarantee that external resources remain unchanged afterward. The closed
+historical v0.11.1 recovery policy keeps its existing eligibility checks.
+
 Derived runtime artifacts are outside migration epochs. Owner/registration schema changes are
 one-time migrations; broker engine/facade and installed power executable/unit convergence are
 activation responsibilities, including systemd reload and verification. A resource's persisted
@@ -327,7 +367,7 @@ its registry to equal the verified source registry, then validates every retaine
 against the frozen projection. The receipt records these asset identities and transaction references;
 cleanup preserves the referenced artifacts. An ordinary zero-step source update needs no fabricated
 transaction directory. Other earlier releases and arbitrary same-registry targets remain unsupported.
-Unrecognized state, pending publication, ingress and recovery chains refuse supersession.
+Unrecognized state, conflicting publication, ingress and recovery chains refuse supersession.
 
 A fresh candidate assessment and grant bind these facts and current activation consequences.
 Under the update lock, the candidate revalidates the proof, publishes an immutable receipt in
@@ -338,6 +378,21 @@ without declaring its activation ready or replaying completed migrations. Cleanu
 predecessor artifacts and captures successor completion before later journals replace it. This
 exception changes no frozen process/journal/activation-recovery/v0.11.1 archive meaning and confers
 no rollback promise to the defective owner; existing rollback eligibility checks still apply.
+
+The shared history trace validates the completed ledger edges; exact artifact eligibility and
+canonical evidence policy remain in the replacement adapter. A canonical immutable receipt can
+also prove the exact intended successor bytes when its journal staging file is empty or truncated,
+provided the selected predecessor is unchanged. Staging supplies no authority. New owner receipts
+and owner-completion records are written into an unnamed inode on the target Linux filesystem.
+The writer sets and checks exact private permissions, ownership and link count, verifies the complete
+canonical bytes, and fsyncs the file before a no-replace link through its held procfd makes it visible.
+The parent directory is then fsynced. A process killed during any private prefix write leaves no
+named partial receipt; a process killed after publication leaves the complete canonical record.
+Filesystems or procfd environments without this mechanism refuse the owner-replacement feature
+before publishing a receipt or successor journal; ordinary migration publication is unchanged.
+Full canonical pending records from the previous writer remain resumable. Partial legacy receipt
+staging, unsafe files and conflicting records remain untouched and refuse admission; the writer
+never appends a fresh grant to visible legacy staging or treats staging as authority.
 
 Released-binary acceptance retains a supported baseline for each distinct caller, producer or
 compatibility-bridge contract. Checks use the actual published binaries; rebuilding current source
@@ -379,6 +434,19 @@ resurrect cancelled successors. V1 receipts retire only with exact terminal clos
 checks; V1 cancellation and replacement chains remain excluded. Modern live/archive/frontier
 namespaces have independent 512-record and 32 MiB budgets; the frozen ordinary graph and V1 live
 namespace retain their 256-record limits.
+Successful update cleanup validates supported closed migration artifact sets from ordinary
+predecessors. Exact canonical evidence triples and typed recovery bytes prove closure only;
+they do not supply an execution grant, ledger authority, or runtime readiness. Source admission
+still requires its historical ledger or checkpoint anchor. Unknown, incomplete, or conflicting
+artifacts leave cleanup pending without deletion. A closed component remains retained when its
+release is a verified current or previous runtime endpoint, its terminal ledger pin matches the
+validated frozen compatibility projection, or selected/prepared journal, pending archive or live
+recovery grant references it. Closed components without these references can be collected.
+Older archive-only components without a supported terminal closure witness remain cleanup-pending;
+archive presence alone does not establish completion. Retention protects whole graph components;
+the existing successor-first deletion order, 32-transaction batch and 256-entry graph ceiling
+remain in force. A new grant binds the current source frontier, while an interrupted grant
+keeps its original source pin across its own ledger progress.
 Detailed cancellation, publication and storage rules belong to the
 [recovery contract](../control-plane.md#release-migrations).
 

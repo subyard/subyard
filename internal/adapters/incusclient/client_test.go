@@ -323,3 +323,31 @@ func TestReconcileStateReadsDefaultProfileConfiguration(t *testing.T) {
 		t.Fatal("native profile configuration omitted", observed.ProfileConfig)
 	}
 }
+
+func TestFixtureExecResponderChoosesExitFromExactCapturedInput(t *testing.T) {
+	server, err := testkit.NewIncusServer(testkit.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	server.SetExecResponder(func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+		if call.Project != "subyard" || call.Name != "yard" || len(call.Command) != 1 || call.Command[0] != "fixture" {
+			return testkit.IncusServerExecStep{ExitCode: 99}
+		}
+		return testkit.IncusServerExecStep{AfterInput: func(actual testkit.IncusServerExecCall) int {
+			if bytes.Equal(actual.Stdin, []byte("expected\n")) {
+				return 37
+			}
+			return 99
+		}}
+	})
+	for _, value := range []struct {
+		input string
+		exit  int
+	}{{"expected\n", 37}, {"foreign\n", 99}} {
+		result, err := New(server.SocketPath).Exec(context.Background(), "subyard", "yard", ports.InstanceExecRequest{Command: []string{"fixture"}, Stdin: []byte(value.input)})
+		if err == nil || result.ExitCode != value.exit {
+			t.Fatalf("captured-input response: %+v %v", result, err)
+		}
+	}
+}

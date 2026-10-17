@@ -38,15 +38,15 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 		}
 	}
 	for _, work := range observation.work {
-		if work.kind == v2LedgerWork {
+		if work.kind() == v2LedgerWork {
 			continue
 		}
-		if work.kind != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
+		if work.kind() != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
 			!transition.localSSHPortScopeStable(work.intent) {
 			return false
 		}
-		if work.file != nil {
-			if !work.file.LocalSSHPort || work.file.validate() != nil || settingsIntent(work.migration, *work.file) != work.intent {
+		if work.settingsFile() != nil {
+			if !work.settingsFile().LocalSSHPort || work.settingsFile().validate() != nil || settingsIntent(work.migration, *work.settingsFile()) != work.intent {
 				return false
 			}
 		} else if observation.journal == nil || !slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool {
@@ -100,8 +100,11 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 		baseScope, scopeErr := transition.bindObservationScope(observation.activationScope)
 		oldScope := scopeErr == nil && journal.ObservationScope == baseScope
 		// Bound activation-scope replay does not make a completed unmarked
-		// journal authorize checkpoint conversion against its old ledger.
-		if journal.Checkpoint != JournalComplete || !oldScope {
+		// journal authorize checkpoint conversion against its old ledger. New
+		// grants start from the current frontier. Only the matching, converged
+		// terminal journal may retain its own pre-migration publication scope.
+		selectedTerminal := transition.completedJournalMatches(*observation) && observation.activationFixed
+		if journal.Checkpoint != JournalComplete || (!oldScope && selectedTerminal) {
 			for _, step := range journal.Steps {
 				if strings.HasPrefix(step.Resource, "ledger.") {
 					checkpointSource = step.Expected
@@ -115,7 +118,7 @@ func (transition *V2Transition) observeActivationScope(ctx context.Context, obse
 		hasLedgerWork := false
 		hasCurrentLedgerWork := false
 		for _, work := range observation.work {
-			if work.kind == v2LedgerWork {
+			if work.kind() == v2LedgerWork {
 				hasLedgerWork = true
 				hasCurrentLedgerWork = true
 			}

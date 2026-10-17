@@ -38,6 +38,9 @@ func ParseMigrationLedger(
 	registry RegistryV2,
 	registryDigest Fingerprint,
 ) (MigrationLedgerSnapshot, error) {
+	if _, err := registry.historyRegistry(); err != nil {
+		return MigrationLedgerSnapshot{}, err
+	}
 	if !validProtectedSnapshot(projection) || !validProtectedSnapshot(checkpointSnapshot) {
 		return MigrationLedgerSnapshot{}, invalid("migration ledger snapshots are malformed")
 	}

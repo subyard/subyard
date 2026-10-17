@@ -4,6 +4,7 @@
 import argparse
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import select
@@ -33,7 +34,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-transaction", required=True)
     parser.add_argument("--candidate-target", required=True)
     parser.add_argument("--marker", required=True)
-    parser.add_argument("--checkpoint", help="observe this new migration checkpoint instead of current")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--checkpoint", help="observe this new migration checkpoint instead of current")
+    modes.add_argument("--ledger", help="observe a legacy ledger CAS matching the journaled migration")
+    parser.add_argument("--migration", help="exact migration ID for --ledger")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -96,6 +100,23 @@ def observe_checkpoint(args: argparse.Namespace) -> dict | None:
         return None
     return {"transaction": journal["transaction"],
             "checkpoint": journal["checkpoint"], "migrationCheckpoint": checkpoint}
+
+
+def observe_ledger(args: argparse.Namespace) -> dict | None:
+    ledger = read_journal(args.ledger)
+    journal = read_journal(args.journal)
+    if (ledger.get("schemaVersion") != 2 or not ledger.get("domains")
+            or journal.get("transaction") == args.source_transaction
+            or journal.get("goal", {}).get("target") != args.candidate_target):
+        return None
+    fingerprint = hashlib.sha256(open(args.ledger, "rb").read()).hexdigest()
+    for step in journal.get("steps", []):
+        if (step.get("migration") == args.migration and step.get("id") == args.migration + ".ledger"
+                and step.get("desiredFingerprint") == fingerprint
+                and step.get("checkpoint") in {"evidence", "applied", "verified"}):
+            return {"transaction": journal["transaction"], "checkpoint": journal["checkpoint"],
+                    "ledgerFingerprint": fingerprint, "stepCheckpoint": step["checkpoint"]}
+    return None
 
 
 def write_marker(path: str, observation: dict) -> None:
@@ -175,6 +196,7 @@ def main() -> int:
     global checkpoint_child_group
     args = parse_args()
     child: subprocess.Popen[bytes] | None = None
+    observed_file = args.checkpoint or args.ledger
     if (
         not args.command
         or args.timeout <= 0
@@ -184,8 +206,9 @@ def main() -> int:
         or args.runtime_root == os.path.sep
         or not args.candidate_target
         or "/" in args.candidate_target
-        or (args.checkpoint and (not os.path.isabs(args.checkpoint)
-                               or os.path.dirname(args.checkpoint) != os.path.dirname(args.journal)))
+        or (observed_file and (not os.path.isabs(observed_file)
+                               or os.path.dirname(observed_file) != os.path.dirname(args.journal)))
+        or bool(args.ledger) != bool(args.migration)
     ):
         return fail("invalid arguments")
     if os.getpid() != os.getpgrp():
@@ -207,7 +230,7 @@ def main() -> int:
     try:
         watch = libc.inotify_add_watch(
             descriptor,
-            os.fsencode(os.path.dirname(args.checkpoint) if args.checkpoint else args.runtime_root),
+            os.fsencode(os.path.dirname(observed_file) if observed_file else args.runtime_root),
             IN_CREATE | IN_MOVED_TO,
         )
         if watch < 0:
@@ -217,10 +240,10 @@ def main() -> int:
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, forward_signal)
         child = subprocess.Popen(args.command, stdin=subprocess.DEVNULL,
-                                 start_new_session=bool(args.checkpoint))
-        if args.checkpoint:
+                                 start_new_session=bool(observed_file))
+        if observed_file:
             checkpoint_child_group = child.pid
-        expected_group = child.pid if args.checkpoint else os.getpgrp()
+        expected_group = child.pid if observed_file else os.getpgrp()
         if os.getpgid(child.pid) != expected_group:
             child.kill()
             child.wait()
@@ -240,21 +263,21 @@ def main() -> int:
                     offset += EVENT_HEADER.size
                     name = events[offset : offset + length].split(b"\0", 1)[0]
                     offset += length
-                    expected = os.fsencode(os.path.basename(args.checkpoint)) if args.checkpoint else b"current"
+                    expected = os.fsencode(os.path.basename(observed_file)) if observed_file else b"current"
                     if name != expected or not mask & IN_MOVED_TO:
                         continue
-                    if args.checkpoint:
+                    if observed_file:
                         # Freeze the updater and any delegated writer at the
                         # rename event before reading its final records.
                         os.killpg(child.pid, signal.SIGSTOP)
-                        observation = observe_checkpoint(args)
+                        observation = observe_checkpoint(args) if args.checkpoint else observe_ledger(args)
                     else:
                         observation = observe_activation(args)
                     if observation is None:
-                        if args.checkpoint:
+                        if observed_file:
                             os.killpg(child.pid, signal.SIGCONT)
                         continue
-                    interrupt_live_child(child, separate_group=bool(args.checkpoint))
+                    interrupt_live_child(child, separate_group=bool(observed_file))
                     write_marker(args.marker, observation)
                     kill_isolated_group(signal.SIGKILL)
             status = child_status(child)

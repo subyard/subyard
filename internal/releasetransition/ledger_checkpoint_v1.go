@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+
+	"github.com/Subyard/Subyard/internal/migrationhistory"
 )
 
 const (
@@ -86,6 +88,9 @@ func (checkpoint LedgerCheckpointV1) Validate(
 	registryDigest Fingerprint,
 	projection ProtectedSnapshot,
 ) error {
+	if _, err := registry.historyRegistry(); err != nil {
+		return err
+	}
 	if checkpoint.SchemaVersion != LedgerCheckpointSchemaV1 {
 		return invalid("unsupported migration ledger checkpoint schema %d", checkpoint.SchemaVersion)
 	}
@@ -120,7 +125,11 @@ func (checkpoint LedgerCheckpointV1) Validate(
 		if err != nil {
 			return err
 		}
-		if !sameEpochs(epochs, checkpoint.LegacyProjection.Epochs) {
+		pinned, err := migrationhistory.NewCompatibilityProjection(epochs, string(projection.Fingerprint))
+		if err != nil {
+			return invalid("%v", err)
+		}
+		if !sameEpochs(pinned.Epochs(), checkpoint.LegacyProjection.Epochs) {
 			return invalid("legacy ledger projection epochs do not match its pinned bytes")
 		}
 	}
@@ -262,12 +271,11 @@ func newLedgerCheckpointV1(
 }
 
 func (registry RegistryV2) appliedSuffix(domain string, afterEpoch, throughEpoch int) []string {
-	var applied []string
-	for _, migration := range registry.Migrations {
-		if migration.Domain == domain && migration.FromEpoch >= afterEpoch && migration.ToEpoch <= throughEpoch {
-			applied = append(applied, migration.ID)
-		}
+	owner, err := registry.historyRegistry()
+	if err != nil {
+		return nil
 	}
+	applied, _ := owner.Applied(domain, afterEpoch, throughEpoch)
 	return applied
 }
 

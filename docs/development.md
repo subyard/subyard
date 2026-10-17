@@ -120,7 +120,7 @@ python3 dev/verify-release-upgrades.py --release-dir .build/release --version <c
 ```
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
-downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1 and v0.18.6 runtimes for the local architecture
+downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1, v0.18.6 and v0.19.0 runtimes for the local architecture
 and verifies retired-source refusal/full-uninstall, the inclusive v0.11.0 source boundary, frozen and
 published updater contracts, and activation-only recovery. It confines all state to a temporary directory and interrupts only its own update process
 group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-baseline-dir PATH`
@@ -158,6 +158,34 @@ an authentic retained predecessor. The fixture preserves both update generations
 evidence, reproduces the released reader failure, checks fresh consent, interrupts successor
 publication and resumes the ordinary V2 candidate journal. This local fixture uses observation-only
 Incus responses and does not establish installed Incus/systemd activation behavior.
+
+The default compatibility invocation also runs the migration-history process corpus.
+Checkpoint fixtures must pass supported source admission before and after repair; the legacy
+fixture must retain its exact known unsupported-history refusal. The controlled apply failure
+must preserve the public materialized-config diagnostic and retry, with one recorded exit37
+for the exact seeded command and stdin. Use
+`--only-migration-history` to isolate it and `--migration-history-baselines PATH` to reuse
+checksum-pinned `baseline-VERSION` directories. Add `--migration-history-case checkpoint`, `legacy`, or `cuts`
+with the focused flag to isolate a diagnostic; the default gate runs all cases. It retains authentic completed transactions
+from v0.18.6 → v0.19.0 and v0.11.2 → v0.18.1, then exercises the same packaged candidate's
+independent power and SSH-settings migrations, activation failure, fresh-process retry,
+ledger/checkpoint interruption, and refusal of changed evidence or stale consent. Runtime
+readiness must come from the ordinary update gate after migration completion.
+
+The synthetic integration uses a regular text source and the generic materialized-config
+contract. Its Incus API fixture accepts exact core command grammars and captured stdin;
+it never executes guest commands. Known simulated config drift is armed once only after the
+candidate is current, the journal is reconciling, and the migration steps are verified; this
+keeps the released predecessor ready before ordinary update. Profile observations remain in each profile's existing
+fixture provider. These process checks establish packaged caller, history and reducer
+behavior with simulated guest effects; physical file durability, Incus and systemd behavior
+still require the owning VM acceptance lanes. Evidence and pin mutants exercise unfinished
+verified recovery before further effects, including the journal's embedded evidence. Completed
+runtime readiness alone does not require every retained sidecar. The existing read-only
+`config repair-alias ... --check` source-admission route validates those separate artifact triples;
+unsupported admission is recorded explicitly and grants no repair authority.
+Run this corpus when migration history,
+source admission, recovery authorization or the activation readiness boundary changes.
 
 The packaged bootstrap supports pinned staging without loading broken configuration:
 

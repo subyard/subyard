@@ -39,7 +39,8 @@ func main() {
 }
 
 // The optional control file changes only canned API observations. Guest commands
-// are never executed; each receives the same read-only observation response.
+// are never executed. The history control selects exact canned command responses
+// and records simulated effects on fixture-owned files.
 func observeFixture(ctx context.Context, server *testkit.IncusServer, path string) {
 	type instance struct {
 		Project string         `json:"project"`
@@ -47,8 +48,9 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 		Info    map[string]any `json:"info"`
 	}
 	type control struct {
-		Instances []instance `json:"instances"`
-		Journal   string     `json:"holdJournal"`
+		Instances []instance      `json:"instances"`
+		Journal   string          `json:"holdJournal"`
+		History   *historyControl `json:"migrationHistory"`
 	}
 	var observationMu sync.Mutex
 	read := func() control {
@@ -64,6 +66,11 @@ func observeFixture(ctx context.Context, server *testkit.IncusServer, path strin
 				instances[instance.Project+"/"+instance.Name] = instance.Info
 			}
 			server.SetInventory(projects, instances)
+			if value.History != nil {
+				server.SetExecResponder(historyResponder(*value.History, path))
+			} else {
+				server.SetExecResponder(nil)
+			}
 			_ = os.WriteFile(path+".applied", payload, 0o600)
 		}
 		return value

@@ -19,6 +19,228 @@ func migrationOwnerFixture(t *testing.T) (*V2Transition, MigrationOwnerReplaceme
 	return migrationOwnerFixtureWithPrevious(t, false)
 }
 
+func TestMigrationOwnerJournalStagingRequiresReceiptAndUnchangedPredecessor(t *testing.T) {
+	for _, mutant := range []string{"zero", "truncated", "nonprefix", "unsafe", "foreign-predecessor", "missing-receipt"} {
+		t.Run(mutant, func(t *testing.T) {
+			candidate, request, links := migrationOwnerFixture(t)
+			ctx := context.Background()
+			goal := Goal{Target: "release-c", Direction: DirectionActivateTarget}
+			inspection, err := candidate.Inspect(ctx, goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate.options.fault = func(point string) error {
+				if point == "after-migration-owner-receipt" {
+					return errors.New("receipt committed before successor staging")
+				}
+				return nil
+			}
+			candidate.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			receipts, err := candidate.store.migrationOwnerReceipts()
+			if err != nil || len(receipts) != 1 {
+				t.Fatalf("committed receipt: %v %v", receipts, err)
+			}
+			var intended []byte
+			for _, receipt := range receipts {
+				intended, err = MarshalJournal(receipt.Successor)
+				if mutant == "missing-receipt" {
+					path := filepath.Join(candidate.options.ConfigHome, filepath.Join(migrationOwnerReceiptParts...), string(receipt.Successor.Transaction)+".json")
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := []byte{}
+			mode := os.FileMode(0600)
+			if mutant == "truncated" {
+				payload = intended[:len(intended)/2]
+			}
+			if mutant == "nonprefix" {
+				payload = []byte("foreign staging\n")
+			}
+			if mutant == "unsafe" {
+				mode = 0644
+			}
+			if mutant == "foreign-predecessor" {
+				snapshot, _ := candidate.store.ReadCurrentJournal()
+				journal, _ := ParseJournal(snapshot.Payload)
+				journal.ObservationScope = digestC
+				journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
+				changed, err := MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := candidate.store.CompareAndSwapCurrentJournal(snapshot, changed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pending := filepath.Join(candidate.options.ConfigHome, "release-transition", "v2", ".journal.json.pending")
+			testkit.WriteFile(t, pending, payload, mode)
+			before := snapshotStoreV2Tree(t, candidate.options.ConfigHome)
+			options := candidate.options
+			options.fault = nil
+			restarted, err := NewV2Transition(options)
+			if err == nil {
+				inspection, err = restarted.Inspect(ctx, goal)
+			}
+			if !bytes.Equal(before, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) {
+				t.Fatal("fresh inspection changed predecessor or staging")
+			}
+			if mutant != "zero" && mutant != "truncated" {
+				if err == nil && len(inspection.Blockers) == 0 {
+					t.Fatal("unsafe, conflicting or foreign staging admitted")
+				}
+				if links.Active != "release-b" {
+					t.Fatal("refusal changed runtime links")
+				}
+				return
+			}
+			if err != nil || len(inspection.Blockers) != 0 {
+				t.Fatalf("intended staging inspection: %+v %v", inspection, err)
+			}
+			outcome, err := restarted.Converge(ctx, Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			if err != nil || outcome.Status != StatusReady {
+				t.Fatalf("intended staging retry: %+v %v", outcome, err)
+			}
+			receipts, err = restarted.store.migrationOwnerReceipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, receipt := range receipts {
+				if receipt.Predecessor.Transaction != request.Transaction || receipt.Predecessor.Checkpoint != JournalReconciling {
+					t.Fatal("predecessor was promoted to readiness")
+				}
+				if err := restarted.store.migrationOwnerEvidence(receipt.Predecessor); err != nil {
+					t.Fatalf("completed migration evidence replayed or lost: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestMigrationOwnerLegacyReceiptStaging(t *testing.T) {
+	for _, size := range []int{0, 18, -1, -2} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			candidate, _, links := migrationOwnerFixture(t)
+			inspection, err := candidate.Inspect(context.Background(), Goal{Target: "release-c", Direction: DirectionActivateTarget})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate.options.fault = func(point string) error {
+				if point == "after-migration-owner-receipt" {
+					return errors.New("stop before journal")
+				}
+				return nil
+			}
+			candidate.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+			receipts, err := candidate.store.migrationOwnerReceipts()
+			if err != nil || len(receipts) != 1 {
+				t.Fatalf("receipt fixture: %v %v", receipts, err)
+			}
+			var final string
+			var payload []byte
+			for id, receipt := range receipts {
+				final = filepath.Join(candidate.options.ConfigHome, filepath.Join(migrationOwnerReceiptParts...), string(id)+".json")
+				payload, err = MarshalMigrationOwnerReceipt(receipt)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(final); err != nil {
+				t.Fatal(err)
+			}
+			canonical := size == -2
+			if canonical {
+				size = len(payload)
+			} else if size < 0 {
+				size = len(payload) / 2
+			}
+			pending := filepath.Join(filepath.Dir(final), "."+filepath.Base(final)+".pending")
+			testkit.WriteFile(t, pending, payload[:size], 0600)
+			before := snapshotStoreV2Tree(t, candidate.options.ConfigHome)
+			options := candidate.options
+			options.fault = nil
+			restarted, err := NewV2Transition(options)
+			if canonical {
+				if err != nil {
+					t.Fatal(err)
+				}
+				inspection, err = restarted.Inspect(context.Background(), Goal{Target: "release-c", Direction: DirectionActivateTarget})
+				if err != nil || len(inspection.Blockers) != 0 {
+					t.Fatalf("canonical legacy inspection: %+v %v", inspection, err)
+				}
+				if !bytes.Equal(before, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) {
+					t.Fatal("inspection changed predecessor")
+				}
+				outcome, err := restarted.Converge(context.Background(), Execution{Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan)})
+				if err != nil || outcome.Status != StatusReady {
+					t.Fatalf("canonical legacy retry: %+v %v", outcome, err)
+				}
+				if _, err := os.Lstat(pending); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("canonical staging not retired: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("legacy partial staging became receipt authority")
+			}
+			actual, _ := os.ReadFile(pending)
+			if !bytes.Equal(actual, payload[:size]) || !bytes.Equal(before, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) || links.Active != "release-b" {
+				t.Fatal("legacy refusal changed protected bytes")
+			}
+		})
+	}
+}
+
+func TestMigrationOwnerProofAndRequestOwnNestedInputs(t *testing.T) {
+	candidate, request, _ := migrationOwnerFixtureWithPrevious(t, true)
+	options := candidate.options
+	options.MigrationOwnerReplacement = &request
+	owned, err := NewV2Transition(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Fingerprint = digestC
+	if owned.options.MigrationOwnerReplacement.Fingerprint == digestC {
+		t.Fatal("constructor aliases recovery request")
+	}
+	proof, err := candidate.options.MigrationOwnerAssets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned.options.MigrationOwnerAssets = func(context.Context) (MigrationOwnerAssetsProof, error) { return proof, nil }
+	observation, err := owned.observe(context.Background(), Goal{Target: "release-c", Direction: DirectionActivateTarget})
+	if err != nil || observation.migrationOwnerReceipt == nil {
+		t.Fatalf("owned receipt observation: %v", err)
+	}
+	receipt := observation.migrationOwnerReceipt
+	receipt.RetainedTransactions = []TransactionID{"tx-retained-one", "tx-retained-two"}
+	before, _ := json.Marshal(receipt)
+	proof.SourceRegistry[0] ^= 1
+	proof.PreviousSource.Inputs = digestC
+	after, _ := json.Marshal(receipt)
+	if !bytes.Equal(before, after) {
+		t.Fatal("receipt aliases callback proof")
+	}
+	clone := receipt.cloneMigrationOwnerReceipt()
+	clone.Registry[0] ^= 1
+	clone.SourceRegistry[0] ^= 1
+	clone.ProjectionPayload[0] ^= 1
+	clone.CheckpointPayload[0] ^= 1
+	clone.PreviousSource.Release = "changed"
+	clone.RetainedTransactions[0] = "tx-changed"
+	clone.Predecessor.Steps[0].Evidence.Observed = digestC
+	*clone.Predecessor.Releases.Previous = "changed"
+	*clone.Links.Previous = "changed"
+	after, _ = json.Marshal(receipt)
+	if !bytes.Equal(before, after) {
+		t.Fatal("receipt clone aliases protected payload, graph or journal fields")
+	}
+}
+
 func migrationOwnerFixtureWithPrevious(t *testing.T, retainedPrevious bool) (*V2Transition, MigrationOwnerReplacementRequest, *ReleaseLinks) {
 	t.Helper()
 	ctx := context.Background()
@@ -478,6 +700,13 @@ func TestMigrationOwnerReplacementBindsRetainedTerminalHistory(t *testing.T) {
 			}
 			if err := candidate.store.migrationOwnerRetainedHistory(receipt); err != nil {
 				t.Fatal(err)
+			}
+			beforeCleanup := snapshotStoreV2Tree(t, candidate.options.ConfigHome)
+			if err := candidate.store.cleanupClosedMigrationTransactions(*outcome.Transaction, candidate.registry, candidate.registryDigest, ReleaseLinks{Active: "release-unrelated", Previous: releaseIDPointer("release-other")}); err != nil {
+				t.Fatalf("receipt graph roots must precede closed-history classification: %v", err)
+			}
+			if !bytes.Equal(beforeCleanup, snapshotStoreV2Tree(t, candidate.options.ConfigHome)) {
+				t.Fatal("later updater cleanup removed receipt-bound predecessor or retained history")
 			}
 			receipt.PreviousSource.Registry = digestB
 			if err := receipt.Validate(); err == nil {

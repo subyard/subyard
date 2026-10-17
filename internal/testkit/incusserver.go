@@ -25,20 +25,21 @@ type IncusServer struct {
 	listener net.Listener
 	server   *http.Server
 
-	mu          sync.Mutex
-	serverInfo  map[string]any
-	instances   map[string]map[string]any
-	projects    map[string]map[string]any
-	connections map[*websocket.Conn]struct{}
-	connected   chan struct{}
-	execStarted chan struct{}
-	execSteps   []IncusServerExecStep
-	execCalls   []IncusServerExecCall
-	powerCalls  []IncusServerPowerCall
-	powerErrors []string
-	operations  map[string]*incusOperation
-	eventQuery  string
-	nextOp      int
+	mu            sync.Mutex
+	serverInfo    map[string]any
+	instances     map[string]map[string]any
+	projects      map[string]map[string]any
+	connections   map[*websocket.Conn]struct{}
+	connected     chan struct{}
+	execStarted   chan struct{}
+	execSteps     []IncusServerExecStep
+	execResponder func(IncusServerExecCall) IncusServerExecStep
+	execCalls     []IncusServerExecCall
+	powerCalls    []IncusServerPowerCall
+	powerErrors   []string
+	operations    map[string]*incusOperation
+	eventQuery    string
+	nextOp        int
 }
 
 type IncusServerExecStep struct {
@@ -48,6 +49,7 @@ type IncusServerExecStep struct {
 	StartError     string
 	OperationError string
 	Release        <-chan struct{}
+	AfterInput     func(IncusServerExecCall) int
 }
 
 type IncusServerExecCall struct {
@@ -397,26 +399,30 @@ func (fake *IncusServer) startExec(writer http.ResponseWriter, request *http.Req
 		writeIncusError(writer, http.StatusBadRequest, "invalid exec request")
 		return
 	}
+	call := IncusServerExecCall{Project: request.URL.Query().Get("project"), Name: name, Command: append([]string(nil), input.Command...), Environment: cloneStringMap(input.Environment), User: input.User, Group: input.Group}
 	fake.mu.Lock()
-	if len(fake.execSteps) == 0 {
-		fake.mu.Unlock()
-		writeIncusError(writer, http.StatusInternalServerError, "fake exec steps exhausted")
-		return
+	responder := fake.execResponder
+	var step IncusServerExecStep
+	if responder == nil {
+		if len(fake.execSteps) == 0 {
+			fake.mu.Unlock()
+			writeIncusError(writer, http.StatusInternalServerError, "fake exec steps exhausted")
+			return
+		}
+		step = fake.execSteps[0]
+		fake.execSteps = fake.execSteps[1:]
 	}
-	step := fake.execSteps[0]
-	fake.execSteps = fake.execSteps[1:]
+	fake.mu.Unlock()
+	if responder != nil {
+		step = responder(call)
+	}
 	if step.StartError != "" {
-		fake.mu.Unlock()
 		writeIncusError(writer, http.StatusBadRequest, step.StartError)
 		return
 	}
+	fake.mu.Lock()
 	fake.nextOp++
 	id := fmt.Sprintf("operation-%d", fake.nextOp)
-	call := IncusServerExecCall{
-		Project: request.URL.Query().Get("project"), Name: name,
-		Command: append([]string(nil), input.Command...), Environment: cloneStringMap(input.Environment),
-		User: input.User, Group: input.Group,
-	}
 	fake.execCalls = append(fake.execCalls, call)
 	operation := &incusOperation{
 		id: id, step: step, callIndex: len(fake.execCalls) - 1,
@@ -490,7 +496,11 @@ func (fake *IncusServer) serveOperationWebsocket(
 		}
 		fake.mu.Lock()
 		fake.execCalls[operation.callIndex].Stdin = bytes.Clone(stdin.Bytes())
+		call := fake.execCalls[operation.callIndex]
 		fake.mu.Unlock()
+		if operation.step.AfterInput != nil {
+			operation.step.ExitCode = operation.step.AfterInput(call)
+		}
 		close(operation.stdinDone)
 	case "stdout", "stderr":
 		output := operation.step.Stdout
@@ -633,4 +643,12 @@ func cloneStringMap(source map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
+}
+
+// SetExecResponder selects canned responses from captured request metadata.
+// AfterInput may validate input and choose an exit; no guest command is run.
+func (fake *IncusServer) SetExecResponder(responder func(IncusServerExecCall) IncusServerExecStep) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.execResponder = responder
 }
