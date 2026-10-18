@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-install-incus.XXXXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -146,6 +146,9 @@ run_installer() (
   ASSUME_YES=1
   SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
   export SUBYARD_INSTALLATION_CONTEXT
+  if [ "${TEST_WITHOUT_INSTALLATION_CONTEXT:-0}" = 1 ]; then
+    unset SUBYARD_INSTALLATION_CONTEXT
+  fi
   "$installer_path" --yes "$@"
 )
 
@@ -247,6 +250,27 @@ else
   fail 'upgrade-only install failed'
 fi
 [ ! -e "$upgrade_home" ] || fail 'upgrade-only install touched the data home'
+
+# The immutable-base recipe upgrades the dependency without installation authority.
+# Normal installation must still require that authority before host operations.
+contextless_home="$TMP/contextless/.subyard"
+contextless_output="$TMP/contextless.out"
+if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
+  run_installer "$contextless_home" --upgrade-only >"$contextless_output" 2>&1; then
+  grep -Fq 'Incus is' "$contextless_output" \
+    || fail 'contextless dependency upgrade did not reach its success boundary'
+else
+  cat "$contextless_output" >&2
+  fail 'upgrade-only required an installation context'
+fi
+[ ! -e "$contextless_home" ] || fail 'contextless upgrade touched the data home'
+if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
+  run_installer "$contextless_home" >"$contextless_output" 2>&1; then
+  fail 'normal installation accepted missing installation authority'
+fi
+grep -Fq 'SUBYARD_INSTALLATION_CONTEXT' "$contextless_output" \
+  || fail 'normal installation did not reject missing installation authority'
+[ ! -e "$contextless_home" ] || fail 'rejected contextless installation touched the data home'
 
 # A successful package command must not let an Incus version below the required floor continue.
 cp -R "$ROOT/scripts" "$TMP/version-scripts"

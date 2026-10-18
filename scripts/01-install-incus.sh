@@ -44,7 +44,11 @@ OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
 [ -n "$OPERATOR_HOME" ] || die "cannot resolve home dir for user '$OPERATOR_USER'"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER")"
 operator_uid="$(id -u "$OPERATOR_USER")"
-context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
+# Dependency-only upgrades do not create installation-owned Incus state.
+# Full installation still requires its captured authority before host operations.
+if [ "$UPGRADE_ONLY" != 1 ]; then
+  : "${SUBYARD_INSTALLATION_CONTEXT:?}"
+fi
 [ -z "$APPROVED_OPERATOR_UID" ] || [ "$operator_uid" = "$APPROVED_OPERATOR_UID" ] \
   || die "operator numeric identity differs from the approved installer"
 
@@ -60,7 +64,6 @@ prepare_operator_data_home() {
 
   local operator_uid actual_owner
   operator_uid="$(id -u "$OPERATOR_USER")"
-context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
   if [ "$(id -u)" -ne 0 ] && [ ! -e "$SUBYARD_HOME" ]; then
     install -d -m 0700 -- "$SUBYARD_HOME" \
       || die "could not create operator data home: $SUBYARD_HOME"
