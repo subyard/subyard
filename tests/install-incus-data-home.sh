@@ -144,8 +144,12 @@ run_installer() (
   FORWARD_SSH_AGENT=0 \
   NESTED_E2E_VMS=0 \
   ASSUME_YES=1
-  SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
-  export SUBYARD_INSTALLATION_CONTEXT
+  if [ "${TEST_WITHOUT_INSTALLATION_CONTEXT:-0}" = 1 ]; then
+    unset SUBYARD_INSTALLATION_CONTEXT
+  else
+    SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
+    export SUBYARD_INSTALLATION_CONTEXT
+  fi
   "$installer_path" --yes "$@"
 )
 
@@ -247,6 +251,26 @@ else
   fail 'upgrade-only install failed'
 fi
 [ ! -e "$upgrade_home" ] || fail 'upgrade-only install touched the data home'
+
+# The cold VM base recipe upgrades Incus without creating installation-owned resources.
+for upgrade_uid in 0 1000; do
+  if TEST_UID="$upgrade_uid" TEST_SUDO_MODE=reexec TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
+    run_installer "$upgrade_home" --upgrade-only; then
+    :
+  else
+    fail 'base recipe upgrade-only install required installation ownership context'
+  fi
+done
+[ ! -e "$upgrade_home" ] || fail 'base recipe upgrade-only install touched the data home'
+
+# Ordinary installation must still require ownership context before host changes.
+if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
+  run_installer "$upgrade_home" >"$TMP/no-context.out" 2>&1; then
+  fail 'ordinary install accepted missing installation ownership context'
+fi
+grep -Fq 'SUBYARD_INSTALLATION_CONTEXT' "$TMP/no-context.out" \
+  || fail 'ordinary install did not refuse at its installation ownership boundary'
+[ ! -e "$upgrade_home" ] || fail 'ordinary install without context touched the data home'
 
 # A successful package command must not let an Incus version below the required floor continue.
 cp -R "$ROOT/scripts" "$TMP/version-scripts"

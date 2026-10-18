@@ -44,7 +44,10 @@ OPERATOR_HOME="$(getent passwd "$OPERATOR_USER" | cut -d: -f6)"
 [ -n "$OPERATOR_HOME" ] || die "cannot resolve home dir for user '$OPERATOR_USER'"
 OPERATOR_GROUP="$(id -gn "$OPERATOR_USER")"
 operator_uid="$(id -u "$OPERATOR_USER")"
-context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
+# Package-only upgrades do not create installation-owned pools or networks.
+if [ "$UPGRADE_ONLY" != 1 ]; then
+  context_preseed="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SUBYARD_INSTALLATION_CONTEXT:?}")"
+fi
 [ -z "$APPROVED_OPERATOR_UID" ] || [ "$operator_uid" = "$APPROVED_OPERATOR_UID" ] \
   || die "operator numeric identity differs from the approved installer"
 
