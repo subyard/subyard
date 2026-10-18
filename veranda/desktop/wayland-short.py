@@ -37,6 +37,30 @@ def run(command, env, log, timeout=30):
     return result.returncode
 
 
+def wait_x11_ready(display, manager, env, deadline, log):
+    command = ['xdotool', 'getdisplaygeometry' if manager is None else 'get_num_desktops']
+    with fixture.private_log(log) as output:
+        while True:
+            assert display.poll() is None, 'owned_x11_display_died'
+            assert manager is None or manager.poll() is None, 'owned_x11_window_manager_died'
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('x11_startup_readiness_timeout')
+            try:
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=min(1, remaining))
+                output.write(result.stdout[:1024] + result.stderr[:1024])
+                value = result.stdout.strip()
+                ready = (re.fullmatch(r'[1-9][0-9]* [1-9][0-9]*', value) if manager is None
+                         else re.fullmatch(r'[1-9][0-9]*', value))
+                assert display.poll() is None, 'owned_x11_display_died'
+                assert manager is None or manager.poll() is None, 'owned_x11_window_manager_died'
+                if result.returncode == 0 and ready and time.monotonic() < deadline:
+                    return
+            except subprocess.TimeoutExpired:
+                output.write('xdotool readiness probe timed out\n')
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gui", type=Path)
@@ -66,7 +90,7 @@ def main():
         with fixture.recorded_state() as state, contextlib.ExitStack() as stack:
             def retain_evidence():
                 result['private_logs'] = {}
-                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
+                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
                     path = state / name
                     if path.exists():
                         assert path.stat().st_nlink == 1 and path.stat().st_size <= 2 * 1024 * 1024
@@ -190,20 +214,23 @@ def main():
 
             result["stage"] = "display"
             if args.x11:
+                x11_deadline = time.monotonic() + 10
                 read_fd, write_fd = os.pipe()
                 try:
                     try:
-                        display, _ = service("xvfb", ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x800x24", "-nolisten", "tcp"], pass_fds=(write_fd,))
+                        # Keep our private display alive across short readiness clients.
+                        display, _ = service("xvfb", ["Xvfb", "-noreset", "-displayfd", str(write_fd), "-screen", "0", "1280x800x24", "-nolisten", "tcp"], pass_fds=(write_fd,))
                     finally:
                         os.close(write_fd)
                     with selectors.DefaultSelector() as selector:
                         selector.register(read_fd, selectors.EVENT_READ)
-                        assert selector.select(5), 'x11_display_readiness_timeout'
+                        assert selector.select(min(5, max(0, x11_deadline - time.monotonic()))), 'x11_display_readiness_timeout'
                     number = os.read(read_fd, 32).decode().strip()
                     assert re.fullmatch(r'[0-9]{1,5}', number) and display.poll() is None
                     env['DISPLAY'] = ':' + number
                 finally:
                     os.close(read_fd)
+                wait_x11_ready(display, None, env, x11_deadline, state / 'x11-display-ready.log')
                 result['display'] = {'server': 'Xvfb', 'screen': '1280x800x24', 'rendering': 'cairo'}
             else:
                 compositor, _ = service("compositor", ["labwc", "-V", "-C", str(state / "compositor")])
@@ -227,7 +254,9 @@ def main():
             assert len(launchers) == 1
             service("accessibility", [str(launchers[0]), "--launch-immediately"])
             if args.x11:
-                service("window-manager", ["openbox"])
+                manager, _ = service("window-manager", ["openbox"])
+                result['stage'] = 'x11-window-manager'
+                wait_x11_ready(display, manager, env, x11_deadline, state / 'x11-wm-ready.log')
             else:
                 service("keyboard", ["wtype", "-s", "120000"])
             result['lifetimes'] = []

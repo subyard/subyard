@@ -553,6 +553,11 @@ def configured_fleet(directory, env):
                 or any(len(item.get('projects', [])) != 10 or item.get('state') != 'NOT_CREATED' for item in yards)
                 or sum(len(item['projects']) for item in yards) != 200):
             raise RuntimeError('configured fleet inventory does not match 20 uncreated yards and 200 projects')
+        for method in ('profile.list', 'settings.list'):
+            response = owner.call(method)
+            print('VERANDA_FLEET_QUERY ' + json.dumps({'method': method, 'response': response}), flush=True)
+            if 'result' not in response or 'error' in response:
+                raise RuntimeError('configured fleet query failed: ' + method)
         return {**FLEET_COUNTS, 'yard_state': 'NOT_CREATED', 'engine_version': negotiated.get('engineVersion')}
     finally:
         owner.close()

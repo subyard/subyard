@@ -1268,6 +1268,24 @@ fn current_yard_details_share_the_fleet_owner_process() {
 }
 
 #[test]
+fn profile_details_preserve_owner_ineligibility_and_reject_unknown_reasons() {
+    for reason in ["lifecycle-only", "policy-disabled", "unknown-policy"] {
+        let manager = ManagerFixture::new(&format!("manager-profile-{reason}"));
+        let yard = manager.client.yard(None, "default".into());
+        let host = manager.client.host(None);
+        if reason == "unknown-policy" {
+            assert_eq!(yard.err().unwrap().code, "invalid_response");
+            assert_eq!(host.err().unwrap().code, "invalid_response");
+        } else {
+            for profiles in [yard.unwrap().profiles, host.unwrap().profiles] {
+                assert!(!profiles[0].eligible);
+                assert_eq!(profiles[0].eligibility, reason);
+            }
+        }
+    }
+}
+
+#[test]
 fn initial_inventory_is_used_once_and_invalidated_by_an_event_gap() {
     let manager = ManagerFixture::new("manager");
     let mut initial = decode::<OwnerInventory>(fixture("owner-inventory"))
