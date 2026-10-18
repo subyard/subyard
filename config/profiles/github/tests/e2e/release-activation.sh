@@ -87,6 +87,8 @@ export SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
 printf 'release_activation_composed_transport_sha256=%s\n' "$SUBYARD_E2E_CANDIDATE_SHA256"
 remaining=$((2700 - $(date +%s) + STARTED))
 [ "$remaining" -ge 300 ] || { printf 'release-activation: work deadline exhausted before VM allocation\n' >&2; exit 2; }
+printf 'release_activation_budget work_seconds=2700 controller_elapsed_seconds=%s guest_timeout_seconds=%s guest_kill_after_seconds=360 snapshot=before-allocation\n' \
+  "$((2700 - remaining))" "$remaining"
 bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --vm-count 1 --vm 1 \
   --purpose github-release-activation -- timeout --signal=TERM --kill-after=360 "$remaining" \
   bash config/profiles/github/tests/e2e/release-activation-guest.sh --baseline "$baseline"

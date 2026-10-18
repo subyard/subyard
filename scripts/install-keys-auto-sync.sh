@@ -34,7 +34,29 @@ fi
   || die "yard runtime is missing — run the Subyard release installer (or build the development candidate)"
 
 render_service() {
-  sed -e "s|@YARD_BIN@|$YARD_BIN|g" "$SERVICE_TEMPLATE"
+  if [ "${1:-}" = previous ]; then
+    # Only this exact previous public recipe can establish receiptless ownership.
+    cat <<'UNIT'
+[Unit]
+Description=Synchronize enrolled Subyard encrypted credential ledgers
+Documentation=man:systemd.service(5)
+
+[Service]
+Type=oneshot
+ExecStart=@YARD_BIN@ _keys-auto-sync --if-due
+
+# The service handles encrypted records only. Keep a conservative process sandbox while allowing
+# writes to the operator-owned Subyard config/state roots and outbound SSH to enrolled owner hosts.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+UNIT
+  else
+    cat "$SERVICE_TEMPLATE"
+  fi | sed -e "s|@YARD_BIN@|$YARD_BIN|g"
 }
 
 render_receipt() {
@@ -69,7 +91,8 @@ units_owned() {
   if [ -e "$RECEIPT" ]; then
     receipt_current
   else
-    { [ ! -e "$SERVICE" ] || cmp -s <(render_service) "$SERVICE"; } \
+    { [ ! -e "$SERVICE" ] || cmp -s <(render_service) "$SERVICE" \
+      || cmp -s <(render_service previous) "$SERVICE"; } \
       && { [ ! -e "$TIMER" ] || cmp -s "$TIMER_TEMPLATE" "$TIMER"; }
   fi
 }

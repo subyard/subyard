@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise actual Hermes capture and cleanup with disposable transport."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,73 @@ import time
 
 SOURCE = Path(__file__).resolve().parent / 'e2e'
 DIAGNOSTIC = b'controlled broker failure: connection refused; token=private-fixture\n'
+
+
+def check_repeat_init_diagnostic():
+    source = (SOURCE/'hermes-profile.sh').read_text()
+    start = source.index('yard "$YARD" start --yes\n')
+    repeat = source[start:source.index("\nprintf '  [ .. ] provisioning only", start)]
+    with tempfile.TemporaryDirectory(prefix='subyard-hermes-readiness-', dir='/tmp') as temporary:
+        root = Path(temporary)
+        engine = root/'yard'
+        engine.write_text('''#!/usr/bin/python3
+import os, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+assert sys.argv[1:] == ['migrate', '--check', '--json']
+(root/'called').touch()
+print('PRIVATE_SENTINEL', file=sys.stderr)
+if os.environ['READINESS_MODE'] == 'timeout': time.sleep(2)
+print((root/'response').read_text())
+raise SystemExit(17 if os.environ['READINESS_MODE'] == 'native-failure' else 0)
+''')
+        engine.chmod(0o700)
+        bound = root/'timeout'
+        bound.write_text('''#!/bin/sh
+test "$1 $2 $3" = '--signal=TERM --kill-after=2 15' || exit 99
+shift 3
+exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
+''')
+        bound.chmod(0o700)
+        report = {'schemaVersion': 1, 'outcome': {'status': 'migration-required',
+            'code': 'transition-required', 'reachedGoal': False, 'message': 'PRIVATE_SENTINEL'},
+            'plan': 'PRIVATE_SENTINEL', 'consequences': ['PRIVATE_SENTINEL'],
+            'decisions': [{'resource': 'activation.github-runtime', 'scope': 'activation',
+                          'decision': 'canonicalize', 'result': 'converged'},
+                         {'resource': 'activation.PRIVATE_SENTINEL', 'scope': 'activation',
+                          'decision': 'canonicalize', 'result': 'PRIVATE_SENTINEL'}],
+            'blockers': [{'code': 'dependency-unavailable', 'message': 'PRIVATE_SENTINEL'}]}
+        script = '''set -euo pipefail
+. "$1"
+YARD=fixture YARD_BIN="$2"
+yard() {
+  case "$*" in
+    'fixture start --yes') return 0 ;;
+    'fixture init --yes') return "$REPEAT_EXIT" ;;
+    *) exit 99 ;;
+  esac
+}
+''' + repeat
+        for mode, original, native, capture in (('report', 23, 0, 0), ('invalid', 23, 0, 2),
+                ('native-failure', 23, 17, 0), ('timeout', 23, 124, 2), ('success', 0, 0, 0)):
+            (root/'called').unlink(missing_ok=True)
+            (root/'response').write_text('PRIVATE_SENTINEL' if mode == 'invalid' else json.dumps(report))
+            result = subprocess.run(['bash', '-c', script, 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)],
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode,
+                         REPEAT_EXIT=str(original)), capture_output=True, text=True, timeout=5)
+            assert result.returncode == original, 'repeat-init failure was replaced'
+            assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr, 'private inspection bytes escaped'
+            assert (root/'called').exists() == bool(original), 'inspection ran outside repeat-init failure'
+            if not original:
+                assert result.stdout == '' and result.stderr == ''
+                continue
+            expected = f'HERMES_REPEAT_INIT_DIAGNOSTIC original_exit_code={original} native_exit_code={native} capture_exit_code={capture}'
+            assert expected in result.stdout, 'inspection native/capture exits were conflated'
+            if capture == 0:
+                line, = [line for line in result.stdout.splitlines() if line.startswith('HERMES_REPEAT_INIT_READINESS=')]
+                value = json.loads(line.split('=', 1)[1])
+                assert value['changed_activation_owners'] == ['activation.github-runtime']
+                assert value['other_changed_decisions'] == 1
+                assert value['blocker_codes'] == {'dependency-unavailable': 1}
 
 
 def check(original=23, cleanup=0, fault=''):
@@ -133,6 +201,7 @@ release_lease() { touch "$FIXTURE_ROOT/released"; return "$FIXTURE_CLEANUP"; }
             assert not archive_path.exists()
 
 
+check_repeat_init_diagnostic()
 for mask in (0o002, 0o077):
     previous = os.umask(mask)
     try:

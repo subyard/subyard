@@ -21,6 +21,21 @@ require_unclaimed_key_units() {
       || die 'credential unit path already exists'
   done
 }
+initialize_yard() {
+  if [ "$initialized" = 0 ]; then
+    [ "$(incus project get "$PROJECT" user.subyard.git-fetch-fixture)" = "$STATE" ] \
+      || die 'UID probe project ownership changed'
+    # Retire the empty probe; ordinary init must create its own installation.
+    incus project delete "$PROJECT" || return "$?"
+    claimed=0
+  fi
+  init_attempted=1
+  yard init --yes || return "$?"
+  initialized=1
+  incus project set "$PROJECT" user.subyard.git-fetch-fixture "$STATE" || return "$?"
+  claimed=1
+  incus config set "$INSTANCE" user.subyard.git-fetch-fixture "$STATE" --project "$PROJECT"
+}
 TOKEN="$(date +%s)$$"
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'allocation token must be numeric'
 if [ "${1:-}" = --preflight ]; then
@@ -59,6 +74,7 @@ printf '%s\n' git-fetch-activation-v1 > "$STATE/.marker"
 chmod 0600 "$STATE/.marker"
 claimed=0
 initialized=0
+init_attempted=0
 incus() { sudo -n /usr/bin/incus "$@"; }
 fresh() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
@@ -75,6 +91,10 @@ cleanup() {
   local original=$? failed=0 names instance
   trap - EXIT INT TERM
   set +e
+  if [ "$claimed" = 0 ] && [ "$init_attempted" = 1 ] && incus project show "$PROJECT" >/dev/null 2>&1; then
+    printf 'git-fetch-activation: preserving unclaimed partial init project\n' >&2
+    failed=1
+  fi
   if [ "$claimed" = 1 ]; then
     if [ "$(incus project get "$PROJECT" user.subyard.git-fetch-fixture 2>/dev/null)" = "$STATE" ]; then
       names="$(incus list --project "$PROJECT" --format=json | jq -er '[.[].name] | join(" ")')" || failed=1
@@ -130,8 +150,8 @@ FORWARD_SSH_AGENT=0
 HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
-BASE_IMAGE=subyard-e2e-debian-13-cloud-container
-BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container
+BASE_IMAGE=images:debian/13/cloud
+BASE_IMAGE_FALLBACK=images:debian/13/cloud
 EOF
 printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\nSSH_PORT=%s\n' "$PROJECT" "$INSTANCE" "$((35000 + $$ % 10000))" \
   > "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env"
@@ -139,7 +159,7 @@ chmod 0600 "$SUBYARD_CONFIG_HOME/config.env" "$SUBYARD_CONFIG_HOME/yards/$NAME/c
 ! incus project show "$PROJECT" >/dev/null 2>&1 || die 'fixture project already exists'
 incus project create "$PROJECT" -c features.images=false -c "user.subyard.git-fetch-fixture=$STATE"
 claimed=1
-incus launch subyard-e2e-debian-13-cloud-container uid-probe --project "$PROJECT" --storage default \
+incus launch images:debian/13/cloud uid-probe --project "$PROJECT" --storage default \
   -c "user.subyard.git-fetch-fixture=$STATE" -c limits.memory=512MiB -c limits.cpu=1
 incus exec uid-probe --project "$PROJECT" -- sh -eu -c '
   command -v getent >/dev/null
@@ -148,14 +168,12 @@ incus exec uid-probe --project "$PROJECT" -- sh -eu -c '
     if [ "$rc" = 0 ]; then
       [ "$(printf "%s" "$entry" | cut -d: -f1,3)" = dev:2000 ] || exit 1
     else [ "$rc" = 2 ] || exit 1; fi
-  done' || die 'cached image DEV_UID prerequisite is unavailable or occupied'
+  done' || die 'selected image DEV_UID prerequisite is unavailable or occupied'
 [ "$(incus config get uid-probe user.subyard.git-fetch-fixture --project "$PROJECT")" = "$STATE" ] || die 'UID probe ownership changed'
 incus delete uid-probe --force --project "$PROJECT"
 YARD_BIN="$(fresh bash -c '. "$1/tests/helpers/release-candidate.sh"; release_candidate_install "$1" "$2"' fixture "$ROOT" "$STATE")"
 printf 'git_fetch_activation_stage=normal-init-start\n'
-yard init --yes
-initialized=1
-incus config set "$INSTANCE" user.subyard.git-fetch-fixture "$STATE" --project "$PROJECT"
+initialize_yard
 yard start --yes
 [ "$(guest id -u dev)" = 2000 ] || die 'unexpected installed developer UID'
 worker=/var/lib/subyard/git-fetch/fetch.py

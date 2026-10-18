@@ -114,6 +114,7 @@ cleanup() {
   local original_rc=$rc
   trap - EXIT INT TERM
   set +e
+  printf 'openlit_e2e_cleanup_entry trigger=%s elapsed_seconds=%s exit_code=%s\n' "${1:-EXIT}" "$SECONDS" "$rc" >&2
   if [ "$rc" -ne 0 ] && [ -n "$YARD_NAME" ]; then
     printf 'openlit_e2e_failure_exit=%s kind=%s\n' "$rc" "$kind" >&2
     incus list "yard-$YARD_NAME" --project "subyard-$YARD_NAME" -f csv -c ns >&2
@@ -157,7 +158,9 @@ cleanup() {
   if [ "$auth_only" = pull-diagnostic ] && [ "$original_rc" -ne 0 ]; then rc=$original_rc; fi
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup INT' INT
+trap 'cleanup TERM' TERM
 
 ensure_owner_incus
 STATE="$(mktemp -d /var/tmp/subyard-openlit.XXXXXX)"
@@ -177,7 +180,7 @@ printf 'STORAGE_PATH=%s\n' "$STORAGE_PATH" > "$SUBYARD_CONFIG_HOME/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/config.env"
 unset YARD_ENGINE_PATH
 export YARD_RUNTIME_ROOT="$STATE/runtime"
-printf 'openlit_e2e_stage=candidate-release-transition\n'
+printf 'openlit_e2e_stage=candidate-release-transition elapsed_seconds=%s\n' "$SECONDS"
 CANDIDATE_ENGINE="$(openlit_candidate_install "$ROOT" "$STATE")"
 printf 'openlit_e2e_release_preflight=PASS\n'
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
@@ -208,7 +211,7 @@ if [ -n "$integration_selection" ]; then
   printf 'openlit_e2e_integration_contract=configuration-only native-package-convergence=not-tested\n'
 fi
 
-printf 'openlit_e2e_stage=default-off-init\n'
+printf 'openlit_e2e_stage=default-off-init elapsed_seconds=%s\n' "$SECONDS"
 yard init --yes
 instance="yard-$YARD_NAME"
 project="subyard-$YARD_NAME"
@@ -221,7 +224,7 @@ incus exec "$instance" --project "$project" -- test ! -e /var/lib/subyard/openli
 if [ "$auth_only" = network-only ]; then
   # Compare owner and this actual standard nested container in the same lease.
   # Five-second shutdown grace is included in the explicit 180-second bound.
-  printf 'openlit_e2e_stage=same-lease-network-only\n'
+  printf 'openlit_e2e_stage=same-lease-network-only elapsed_seconds=%s\n' "$SECONDS"
   timeout --signal=TERM --kill-after=5 175 bash \
     "$ROOT/config/profiles/openlit/tests/e2e/network-only.sh" "$ROOT" "$STATE" "$instance" "$project"
   exit 0
@@ -229,7 +232,7 @@ fi
 if [ "$auth_only" = dependency-only ]; then
   # Prove actual cold blob delivery in the owning guest before another acceptance
   # payload. This diagnostic lease is discarded; it never warms the next lease.
-  printf 'openlit_e2e_stage=pinned-image-delivery\n'
+  printf 'openlit_e2e_stage=pinned-image-delivery elapsed_seconds=%s\n' "$SECONDS"
   # The public recipe travels separately from the Python program on stdin.
   # Capture and allowlisted projection happen inside its root-private disposable
   # directory before cleanup; the helper preserves the actual native pull exit.
@@ -243,7 +246,7 @@ if [ "$auth_only" = dependency-only ]; then
   printf 'ok: all pinned OpenLIT image blobs delivered within native900s\n'
   exit 0
 fi
-printf 'openlit_e2e_stage=absent-native-clis\n'
+printf 'openlit_e2e_stage=absent-native-clis elapsed_seconds=%s\n' "$SECONDS"
 # Both selected configurations exist before either native CLI is installed.
 incus exec "$instance" --project "$project" -- bash -euo pipefail -c '
   install -d -m 0700 -o dev -g dev /home/dev/.local/bin
@@ -265,7 +268,7 @@ incus exec "$instance" --project "$project" -- bash -euo pipefail -c '
 # enable deadline. HTTP reachability alone does not prove image/blob downloads.
 incus exec "$instance" --project "$project" -- python3 - preflight "${diagnostic_images[@]}" \
   < "$ROOT/config/profiles/openlit/tests/e2e/failure-facts.py"
-printf 'openlit_e2e_stage=enable\n'
+printf 'openlit_e2e_stage=enable elapsed_seconds=%s\n' "$SECONDS"
 if [ "$auth_only" = pull-diagnostic ]; then
   # shellcheck source=config/profiles/openlit/tests/e2e/pull-diagnostic.sh
   . "$ROOT/config/profiles/openlit/tests/e2e/pull-diagnostic.sh"
@@ -293,7 +296,7 @@ PYCODE
 # Fresh random credentials stay within this marker-owned disposable fixture.
 incus file pull "$instance/var/lib/subyard/openlit/operator.json" "$STATE/operator.json" --project "$project" >/dev/null
 chmod 0600 "$STATE/operator.json"
-printf 'openlit_e2e_stage=published-dashboard-origin\n'
+printf 'openlit_e2e_stage=published-dashboard-origin elapsed_seconds=%s\n' "$SECONDS"
 dashboard_port=$((1024 + (port+20000-1024)%64512))
 origin="http://127.0.0.1:$dashboard_port"
 yard status > /dev/null
@@ -310,7 +313,7 @@ if [ "$kind" = vm ]; then
 else
 incus query "/1.0/instances/$instance?project=$project" | jq -e --arg listen "tcp:127.0.0.1:$dashboard_port"   '.devices["openlit-dashboard"] == {type:"proxy",bind:"host",listen:$listen,connect:"tcp:127.0.0.1:3000"}' >/dev/null   || die 'profile enable did not publish exactly the owned UI route'
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$origin" --state "$STATE/ui-cookies" --identity "$token"
-printf 'openlit_e2e_stage=private-owner-address-and-ssh-origin\n'
+printf 'openlit_e2e_stage=private-owner-address-and-ssh-origin elapsed_seconds=%s\n' "$SECONDS"
 synthetic_address=100.101.102.103
 sudo -n ip address add "$synthetic_address/32" dev lo
 synthetic_address_active=1
@@ -339,7 +342,7 @@ kill "$tunnel_pid"; wait "$tunnel_pid" 2>/dev/null || true
 tunnel_pid=''
 sudo -n ip address del "$synthetic_address/32" dev lo
 synthetic_address_active=''
-printf 'openlit_e2e_stage=deferred-publication-and-restoration\n'
+printf 'openlit_e2e_stage=deferred-publication-and-restoration elapsed_seconds=%s\n' "$SECONDS"
 candidate _publications "$project" "$instance" > "$STATE/deferred-publications"
 incus query "/1.0/instances/$instance?project=$project" | jq -e --arg marker "v2:$synthetic_address:$dashboard_port" \
   '.config["user.subyard.openlit_dashboard"] == $marker and .devices["openlit-dashboard"] == null
@@ -387,7 +390,7 @@ synthetic_address=''
 yard profile enable openlit --yes
 yard init --yes
 yard status | grep -Fq "$origin/" || die 'loopback fallback drift was not reconciled'
-printf 'openlit_e2e_stage=port-drift-and-refusal\n'
+printf 'openlit_e2e_stage=port-drift-and-refusal elapsed_seconds=%s\n' "$SECONDS"
 native_before="$(incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json)"
 alternate_port=$((1024 + (dashboard_port+2-1024)%64512))
 yard config set OPENLIT_HOST_PORT "$alternate_port" --scope yard --local --yes
@@ -426,7 +429,7 @@ yard status | grep -Fq "$origin/" || die 'owned missing-device recovery did not 
 
 fi
 if [ "$kind" = container ]; then
-  printf 'openlit_e2e_stage=two-live-yards-and-port-reservation\n'
+  printf 'openlit_e2e_stage=two-live-yards-and-port-reservation elapsed_seconds=%s\n' "$SECONDS"
   secondary_name="$YARD_NAME-second"
   secondary_instance="yard-$secondary_name"
   secondary_project="subyard-$secondary_name"
@@ -449,7 +452,7 @@ SECOND
   (YARD_NAME="$secondary_name"; yard init --yes; yard start --yes)
   if (YARD_NAME="$secondary_name"; yard profile enable openlit --yes) > "$STATE/second-collision.log" 2>&1; then die 'second yard claimed the first dashboard listener'; fi
   incus exec "$secondary_instance" --project "$secondary_project" -- test ! -e /var/lib/subyard/openlit
-  printf 'openlit_e2e_stage=stopped-peer-port-reservation\n'
+  printf 'openlit_e2e_stage=stopped-peer-port-reservation elapsed_seconds=%s\n' "$SECONDS"
   first_marker="$(incus config get "$instance" user.subyard.openlit_dashboard --project "$project")"
   yard stop --yes
   [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'first dashboard owner did not stop'
@@ -533,7 +536,7 @@ FREE_LISTENER
 fi
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$origin" --state "$STATE/operator-cookies" --identity "$token" \
   --credentials "$STATE/operator.json" --telemetry empty
-printf 'openlit_e2e_stage=remote-owner-rpc-and-browser-tunnel\n'
+printf 'openlit_e2e_stage=remote-owner-rpc-and-browser-tunnel elapsed_seconds=%s\n' "$SECONDS"
 if [ -n "$tunnel_pid" ]; then kill "$tunnel_pid"; wait "$tunnel_pid" 2>/dev/null || true; tunnel_pid=''; fi
 python3 "$ROOT/config/profiles/openlit/tests/e2e/remote-owner.py" "$STATE" "$CANDIDATE_ENGINE" "$YARD_NAME" "$dashboard_port" "$token"
 if [ "$kind" = vm ]; then
@@ -543,7 +546,7 @@ fi
 # Install the genuine native CLI only after the no-CLI service and empty UI
 # contracts. Keep its command and policy check in the developer's local bin;
 # the declared configuration-only integration still owns no native package.
-printf 'openlit_e2e_stage=user-local-codex-install\n'
+printf 'openlit_e2e_stage=user-local-codex-install elapsed_seconds=%s\n' "$SECONDS"
 incus exec "$instance" --project "$project" -- env \
   CODEX_BIN_LINK=/home/dev/.local/bin/codex \
   CODEX_CHECK_PATH=/home/dev/.local/bin/codex-policy-check \
@@ -571,13 +574,13 @@ tar -C "$ROOT/config/profiles/openlit/tests/e2e" -cf - native-signals.py runtime
   '
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$origin" --state "$STATE/operator-cookies" --identity "$token" \
   --credentials "$STATE/operator.json" --telemetry codex --resume
-printf 'openlit_e2e_stage=rendered-native-telemetry\n'
+printf 'openlit_e2e_stage=rendered-native-telemetry elapsed_seconds=%s\n' "$SECONDS"
 if ! command -v chromium >/dev/null; then
   sudo -n timeout --signal=TERM --kill-after=30 240 apt-get install -y -qq chromium
 fi
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-browser.py" --origin "$origin" \
   --credentials "$STATE/operator.json" --output "$STATE/browser" --timeout 120
-printf 'openlit_e2e_stage=late-native-cli-appearance\n'
+printf 'openlit_e2e_stage=late-native-cli-appearance elapsed_seconds=%s\n' "$SECONDS"
 # First accept no-Claude readiness and real user-local Codex data. Only then
 # install a user-local Claude to retain the independent native exporter contract
 # and prove late appearance uses the configuration prepared at enable.
@@ -603,13 +606,13 @@ tar -C "$ROOT/config/profiles/openlit/tests/e2e" -cf - native-signals.py | \
     fi
     python3 "$stage/native-signals.py" --agents claude
   '
-printf 'openlit_e2e_stage=repeat-init-and-configs\n'
+printf 'openlit_e2e_stage=repeat-init-and-configs elapsed_seconds=%s\n' "$SECONDS"
 yard init --yes
 yard config apply --yes
 yard profile status openlit --json >/dev/null
 retained_data > "$STATE/retained-before.json"
 chmod 0600 "$STATE/retained-before.json"
-printf 'openlit_e2e_stage=disable\n'
+printf 'openlit_e2e_stage=disable elapsed_seconds=%s\n' "$SECONDS"
 yard profile disable openlit --yes
 [ -z "$(incus config get "$instance" user.subyard.openlit_dashboard --project "$project")" ] || die 'disable retained dashboard receipt'
 ! incus config device list "$instance" --project "$project" | grep -Fxq openlit-dashboard || die 'disable retained dashboard publication'
@@ -637,7 +640,7 @@ assert claude["env"]["OPENLIT_E2E_CUSTOM"] == "preserved"
 PYCODE
 '
 yard init --yes
-printf 'openlit_e2e_stage=re-enable-retained-data\n'
+printf 'openlit_e2e_stage=re-enable-retained-data elapsed_seconds=%s\n' "$SECONDS"
 yard profile enable openlit --yes
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$origin" --state "$STATE/ui-cookies" --identity "$token" --resume
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$origin" --state "$STATE/operator-cookies" --identity "$token" \
@@ -653,5 +656,7 @@ assert after['logs'] >= before['logs'] > 0
 assert after['metrics'] >= before['metrics'] > 0
 assert after['traces'] >= before['traces'] > 0
 PYCODE
+printf 'openlit_e2e_stage=final-disable elapsed_seconds=%s\n' "$SECONDS"
 yard profile disable openlit --yes
+printf 'openlit_e2e_stage=final-disable-complete elapsed_seconds=%s\n' "$SECONDS"
 printf 'ok: OpenLIT default off, enable without root-visible CLIs, receiver CAS update/rollback, repeat init/config apply, native logs+metrics+traces ingestion, disable and retained data after re-enable\n'

@@ -172,4 +172,73 @@ for check_case in progress lock no-progress mixed; do
   esac
   ! grep -Fq 'private fixture' "$tmp/$check_case/output"
 done
+# Execute the public unlock PTY driver with synthetic stalled and stopped children.
+python3 -B - "$ROOT/config/profiles/orca/tests/e2e/ssh-agent.sh" <<'PY'
+import ast
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+source = Path(sys.argv[1]).read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+
+class HostFreeDeadline(ast.NodeTransformer):
+    def visit_Assign(self, node):
+        # Shorten only this test's waits; native group enrollment is not under test.
+        names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        if names & {'deadline', 'cleanup_deadline'}:
+            node.value.right = ast.Constant(0.7 if 'deadline' in names else 0.25)
+        elif 'group' in names:
+            node.value = ast.parse('os.getgid()', mode='eval').body
+        return node
+
+driver = ast.unparse(ast.fix_missing_locations(HostFreeDeadline().visit(ast.parse(source))))
+with tempfile.TemporaryDirectory(prefix='subyard-orca-pty-', dir='/tmp') as temporary:
+    root = Path(temporary)
+    for scenario in ('stalled', 'stopped'):
+        child = root / scenario
+        child.write_text('''#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import time
+print('Operation plan: fixture', flush=True)
+print('  [apply] ssh-agent.grant', flush=True)
+print('yard: PRIVATE-TRANSCRIPT-SENTINEL', flush=True)
+worker = None
+def stop(signum, frame):
+    if worker is not None:
+        worker.terminate()
+        worker.wait()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+if os.path.basename(__file__) == 'stopped':
+    os.kill(os.getpid(), signal.SIGSTOP)
+else:
+    worker = subprocess.Popen(['/bin/sleep', '60'])
+time.sleep(60)
+''')
+        child.chmod(0o700)
+        result = subprocess.run([sys.executable, '-c', driver, str(child),
+                                 'PRIVATE-KEY-PATH-SENTINEL', '2m', 'PRIVATE-PASSPHRASE-SENTINEL'],
+                                capture_output=True, text=True, timeout=5)
+        assert result.returncode == 1, (scenario, result.returncode)
+        assert 'public terminal unlock timed out; passphrase prompts=0' in result.stderr
+        assert 'PRIVATE-' not in result.stdout + result.stderr
+        prefix = 'ssh-agent-e2e: wait='
+        records = [json.loads(line[len(prefix):]) for line in result.stderr.splitlines()
+                   if line.startswith(prefix)]
+        assert len(records) == 1, (scenario, result.stderr)
+        record = records[0]
+        assert record['progress'] == dict(operation_plan=True, grant_step=True,
+                                         passphrase_sent=False, native_rejection=False), record
+        process = record['processes'][0]
+        assert process == dict(role='child', state='T' if scenario == 'stopped' else 'S',
+                               executable='python3'), record
+        assert not record['process_limit'], record
+        if scenario == 'stalled':
+            assert dict(role='descendant', state='S', executable='sleep') in record['processes'], record
+print('ok: Orca unlock timeout preserves bounded safe progress and process states')
+PY
 printf 'ok: complete and independent lane dispatch, argument rejection and failure propagation\n'

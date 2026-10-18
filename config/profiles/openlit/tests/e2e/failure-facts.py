@@ -2,6 +2,7 @@
 """Project bounded native pull and registry facts without private command output."""
 import json
 import base64
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import re
@@ -253,6 +254,38 @@ def pull_errors(text):
     return errors
 
 
+def health_execution(rows):
+    """Project the latest bounded native execution, never timestamps or output."""
+    unknown = {'category': 'unknown'}
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 5:
+        return unknown
+    row = rows[-1]
+    if (not isinstance(row, dict) or set(row) != {'start', 'end', 'exit_code'}
+            or type(row['exit_code']) is not int or not -1 <= row['exit_code'] <= 255):
+        return unknown
+    times = []
+    for field in ('start', 'end'):
+        stamp = row[field]
+        if not isinstance(stamp, str):
+            return unknown
+        match = re.fullmatch(
+            r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+            r'(?:\.([0-9]{1,9}))?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])', stamp)
+        if not match:
+            return unknown
+        try:
+            parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        except ValueError:
+            return unknown
+        if parsed.year < 1970:
+            return unknown
+        times.append((parsed.replace(microsecond=0), int((match[1] or '0').ljust(9, '0'))))
+    nanoseconds = ((times[1][0]-times[0][0]) // timedelta(seconds=1))*1000000000 + times[1][1]-times[0][1]
+    if not 0 <= nanoseconds <= 2147483647*1000000:
+        return unknown
+    return {'category': 'observed', 'exit_code': row['exit_code'], 'duration_ms': nanoseconds//1000000}
+
+
 def openlit_health(images):
     """Read only selected state and fixed loopback statuses, never logs/config."""
     deadline = time.monotonic()+12
@@ -287,10 +320,13 @@ def openlit_health(images):
                     '"oom_killed":{{.State.OOMKilled}},"exit_code":{{.State.ExitCode}},'
                     '"restart_count":{{.RestartCount}},'
                     '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"absent"{{end}},'
-                    '"failing_streak":{{if .State.Health}}{{.State.Health.FailingStreak}}{{else}}0{{end}}}')
+                    '"failing_streak":{{if .State.Health}}{{.State.Health.FailingStreak}}{{else}}0{{end}},'
+                    '"health_checks":[{{if .State.Health}}{{range $index,$entry := .State.Health.Log}}'
+                    '{{if $index}},{{end}}{"start":{{json $entry.Start}},"end":{{json $entry.End}},'
+                    '"exit_code":{{$entry.ExitCode}}}{{end}}{{end}}]}')
         value = json.loads(probe(['docker', 'inspect', '--format', template, containers[0]]))
         keys = {'project', 'service', 'image', 'state', 'running', 'restarting', 'oom_killed',
-                'exit_code', 'restart_count', 'health', 'failing_streak'}
+                'exit_code', 'restart_count', 'health', 'failing_streak', 'health_checks'}
         if (not isinstance(value, dict) or set(value) != keys
                 or (value['project'], value['service'], value['image']) != ('subyard-openlit', 'openlit', images[1])
                 or value['state'] not in ('created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead')
@@ -302,17 +338,18 @@ def openlit_health(images):
             raise ValueError('invalid health projection')
         for key in ('project', 'service', 'image'):
             del value[key]
+        value['latest_healthcheck'] = health_execution(value.pop('health_checks'))
         value['category'] = 'observed'
     except (OSError, subprocess.TimeoutExpired, ValueError, UnicodeError, RecursionError) as error:
         return {'category': category(error)}
     if value['running'] and value['health'] != 'healthy':
-        # Match the shipped healthcheck's four endpoints, without following
+        # Include the fixed login page beyond the UI's first redirect, without following
         # redirects, reading bodies, sending authentication or retrying.
-        script = """const urls={ui:'http://localhost:3000',logs:'http://localhost:4318/v1/logs',metrics:'http://localhost:4318/v1/metrics',traces:'http://localhost:4318/v1/traces'};
+        script = """const urls={ui:'http://localhost:3000',login:'http://localhost:3000/login',logs:'http://localhost:4318/v1/logs',metrics:'http://localhost:4318/v1/metrics',traces:'http://localhost:4318/v1/traces'};
 Promise.all(Object.entries(urls).map(async ([name,url])=>{try{const r=await fetch(url,{signal:AbortSignal.timeout(1500),redirect:'manual'});await r.body?.cancel();return [name,r.status]}catch{return [name,0]}})).then(rows=>console.log(JSON.stringify(Object.fromEntries(rows))));"""
         try:
             endpoints = json.loads(probe(['docker', 'exec', containers[0], 'node', '-e', script]))
-            if (not isinstance(endpoints, dict) or set(endpoints) != {'ui', 'logs', 'metrics', 'traces'}
+            if (not isinstance(endpoints, dict) or set(endpoints) != {'ui', 'login', 'logs', 'metrics', 'traces'}
                     or any(type(code) is not int or not (code == 0 or 100 <= code <= 599) for code in endpoints.values())):
                 raise ValueError('invalid endpoint projection')
             value['endpoints'] = endpoints

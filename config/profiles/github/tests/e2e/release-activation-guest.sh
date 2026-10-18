@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 cd "$ROOT"
 die() { printf 'release-activation: %s\n' "$*" >&2; exit 2; }
-stage() { printf 'release_activation_stage=%s\n' "$1"; }
+stage() { printf 'release_activation_stage=%s elapsed_seconds=%s\n' "$1" "$SECONDS"; }
 # Shared with the controller so both select the same authentic baseline and synthetic B.
 candidate_identity() {
   python3 - "$1" "$2" <<'PY'
@@ -72,6 +72,7 @@ UNITS_AUTHORIZED=0
 CREATION_GID="$(id -g)"
 CREATED_YARDS=()
 STARTED="$(date +%s)"
+READY_STATE=not-started READY_EXIT=unknown READY_STARTED=$SECONDS
 YARD_BIN=''
 unit_recipe_owned() {
   local path="$1" unit="$2" yard_name=default
@@ -133,6 +134,11 @@ cleanup() {
   local original=$? failed=0 yard project marker safe_units=1 unit path mutated_units=0
   trap - EXIT INT TERM
   set +e
+  if [ "$original" != 0 ]; then
+    # Fixed in-memory facts only; never repeat the command or print its private JSON.
+    printf 'release_activation_ready_failure elapsed_seconds=%s state=%s native_exit=%s trigger_exit=%s\n' \
+      "$SECONDS" "${READY_STATE:-not-started}" "${READY_EXIT:-unknown}" "$original" >&2 || :
+  fi
   # An interrupted update is a fixture-owned process group, never the user manager.
   if [ -f "$STATE/updater.json" ]; then
     python3 - "$STATE/updater.json" <<'PY'
@@ -233,9 +239,20 @@ fi
 SH
 setting() { yard config show "$1" | sed -n 's/^effective: //p'; }
 ready() {
-  yard migrate --check --json > "$STATE/readiness.json"
-  jq -e '.outcome.status == "ready"' "$STATE/readiness.json" >/dev/null
-  jq -c '.outcome | {status,code,warnings}' "$STATE/readiness.json"
+  READY_STATE=running READY_EXIT=unknown READY_STARTED=$SECONDS
+  printf 'release_activation_ready state=start elapsed_seconds=%s\n' "$SECONDS" || :
+  if yard migrate --check --json > "$STATE/readiness.json"; then
+    READY_EXIT=0
+  else
+    READY_EXIT=$?
+  fi
+  READY_STATE=returned
+  printf 'release_activation_ready state=returned elapsed_seconds=%s native_exit=%s operation_elapsed_seconds=%s\n' \
+    "$SECONDS" "$READY_EXIT" "$((SECONDS - READY_STARTED))" || :
+  [ "$READY_EXIT" = 0 ] || return "$READY_EXIT"
+  jq -e '.outcome.status == "ready"' "$STATE/readiness.json" >/dev/null || return $?
+  jq -c '.outcome | {status,code,warnings}' "$STATE/readiness.json" || return $?
+  READY_STATE=complete
 }
 update() {
   local version="$1" release="$2"; shift 2

@@ -25,7 +25,9 @@ class FailureFactsTest(unittest.TestCase):
         container = 'd'*64
         snapshot = {'project': 'subyard-openlit', 'service': 'openlit', 'image': images[1],
                     'state': 'running', 'running': True, 'restarting': False, 'oom_killed': False,
-                    'exit_code': 0, 'restart_count': 0, 'health': 'starting', 'failing_streak': 7}
+                    'exit_code': 0, 'restart_count': 0, 'health': 'starting', 'failing_streak': 7,
+                    'health_checks': [{'start': '2026-10-18T12:00:00.123456789Z',
+                                       'end': '2026-10-18T12:00:03.123456789Z', 'exit_code': -1}]}
         snapshot.update(changed or {})
         calls = []
         clock = 0
@@ -47,11 +49,12 @@ class FailureFactsTest(unittest.TestCase):
             elif argv[1] == 'inspect':
                 self.assertEqual(argv[-1], container)
                 self.assertNotIn('{{json .State}}', argv)
+                self.assertNotIn('.Output', argv[3])
                 output = 'PRIVATE_SENTINEL' if malformed else json.dumps(snapshot)
             else:
                 self.assertEqual(argv[:4], ['docker', 'exec', container, 'node'])
                 self.assertNotIn('logs', argv[:2])
-                output = json.dumps(endpoints if endpoints is not None else {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405})
+                output = json.dumps(endpoints if endpoints is not None else {'ui': 200, 'login': 200, 'logs': 0, 'metrics': 405, 'traces': 405})
             clock += cost
             return subprocess.CompletedProcess(argv, 0, output.encode(), None)
         with patch.object(facts.subprocess, 'run', side_effect=native), \
@@ -67,7 +70,10 @@ class FailureFactsTest(unittest.TestCase):
         self.assertEqual(result, {'category': 'observed', 'state': 'running', 'running': True,
             'restarting': False, 'oom_killed': False, 'exit_code': 0, 'restart_count': 0,
             'health': 'starting', 'failing_streak': 7,
-            'endpoints': {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405}})
+            'latest_healthcheck': {'category': 'observed', 'exit_code': -1, 'duration_ms': 3000},
+            'endpoints': {'ui': 200, 'login': 200, 'logs': 0, 'metrics': 405, 'traces': 405}})
+        self.assertNotIn('2026-10-18', json.dumps(result))
+        self.assertNotIn('health_checks', result)
         self.assertEqual(len(calls), 3)
         result, calls = self.health(changed={'health': 'healthy'})
         self.assertNotIn('endpoints', result)
@@ -79,14 +85,51 @@ class FailureFactsTest(unittest.TestCase):
         script = calls[-1][-1]
         fake = """globalThis.fetch=async(url,options)=>{
 if(options.redirect!=='manual')throw Error('PRIVATE_SENTINEL');
-const codes={'http://localhost:3000':200,'http://localhost:4318/v1/metrics':405,'http://localhost:4318/v1/traces':405};
+const codes={'http://localhost:3000':307,'http://localhost:3000/login':500,'http://localhost:4318/v1/metrics':405,'http://localhost:4318/v1/traces':405};
 if(!(url in codes))throw Error('PRIVATE_SENTINEL');
 return {status:codes[url],body:{cancel:async()=>{}}};};"""
         result = subprocess.run([NODE, '-e', fake+script], capture_output=True, timeout=3,
                                 text=True, env={'PATH': '/usr/bin:/bin'})
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(json.loads(result.stdout), {'ui': 200, 'logs': 0, 'metrics': 405, 'traces': 405})
+        self.assertEqual(json.loads(result.stdout), {'ui': 307, 'login': 500, 'logs': 0, 'metrics': 405, 'traces': 405})
         self.assertNotIn('PRIVATE_SENTINEL', result.stdout+result.stderr)
+
+    def test_latest_native_health_execution_stays_unknown_for_unusable_evidence(self):
+        row = {'start': '2026-10-18T12:00:00Z', 'end': '2026-10-18T12:00:03Z', 'exit_code': 1}
+        for rows in (None, [], {}, [row]*6, ['PRIVATE_SENTINEL'],
+                     [{**row, 'exit_code': True}], [{**row, 'exit_code': -2}],
+                     [{**row, 'exit_code': 256}], [{**row, 'start': 'PRIVATE_SENTINEL'}],
+                     [{**row, 'start': '0001-01-01T00:00:00Z'}],
+                     [{**row, 'start': '2026-10-18T12:00:00'}],
+                     [{**row, 'end': '2026-10-18T11:59:59Z'}],
+                     [{**row, 'start': '2026-10-18T12:00:00.1234567890Z'}],
+                     [{**row, 'end': '2026-10-18T12:00:00+99:00'}],
+                     [{**row, 'end': '2026-10-18T12:00:00+01:99'}],
+                     [{**row, 'end': '2026-11-18T12:00:00Z'}],
+                     [{key: value for key, value in row.items() if key != 'end'}],
+                     [{**row, 'output': 'PRIVATE_SENTINEL'}]):
+            with self.subTest(rows=rows):
+                result, calls = self.health(changed={'health_checks': rows})
+                self.assertEqual(result['latest_healthcheck'], {'category': 'unknown'})
+                self.assertEqual(len(calls), 3)
+        result, _ = self.health(changed={'health_checks': [row, {**row, 'exit_code': 0}]})
+        self.assertEqual(result['latest_healthcheck'],
+                         {'category': 'observed', 'exit_code': 0, 'duration_ms': 3000})
+        result, _ = self.health(changed={'health_checks': [{**row,
+            'start': '2026-10-18T12:00:00.000000999Z', 'end': '2026-10-18T12:00:00.001000001Z'}]})
+        self.assertEqual(result['latest_healthcheck']['duration_ms'], 0)
+
+    def test_oversized_or_truncated_health_inspection_cannot_be_observed(self):
+        for output in (b'x'*65537, b'{"project":'):
+            calls = 0
+            def native(argv, **options):
+                nonlocal calls
+                calls += 1
+                return subprocess.CompletedProcess(argv, 0, b'd'*64+b'\n' if calls == 1 else output, None)
+            with patch.object(facts.subprocess, 'run', side_effect=native):
+                images = [name+':1@sha256:'+character*64 for name, character in zip(facts.SERVICES, 'abc')]
+                self.assertEqual(facts.openlit_health(images), {'category': 'invalid-projection'})
+            self.assertEqual(calls, 2)
 
     def test_openlit_health_refuses_foreign_ambiguous_or_malformed_projection(self):
         for changed in ({'project': 'PRIVATE_SENTINEL'}, {'service': 'collector'}, {'image': 'foreign'},
@@ -100,7 +143,7 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
             result, calls = self.health(ids=ids)
             self.assertEqual(result['category'], 'absent' if not ids else 'invalid-projection')
             self.assertEqual(len(calls), 1)
-        result, _ = self.health(endpoints={'ui': 'PRIVATE_SENTINEL', 'logs': 405, 'metrics': 405, 'traces': 405})
+        result, _ = self.health(endpoints={'ui': 'PRIVATE_SENTINEL', 'login': 200, 'logs': 405, 'metrics': 405, 'traces': 405})
         self.assertEqual(result['endpoint_category'], 'invalid-projection')
         self.assertNotIn('endpoints', result)
         result, calls = self.health(malformed=True)

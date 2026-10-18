@@ -38,6 +38,14 @@ fi
 arguments=()
 [ -z "$kind" ] || arguments=("$kind")
 [ -z "$auth_only" ] || arguments=("${kind:-container}" "$auth_only")
+# Complete lifecycle acceptance includes cold provisioning, repeat initialization
+# and retained-data re-enable; reserve time for its owned cleanup as well.
+timeout_seconds=3600
+kill_after_seconds=30
+if [ -z "$auth_only" ]; then
+  timeout_seconds=4500
+  kill_after_seconds=180
+fi
 # The generic larger Linux singleton keeps two live stacks/nested VM routing in budget.
 bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- \
-  timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh "${arguments[@]}"
+  timeout --signal=TERM --kill-after="$kill_after_seconds" "$timeout_seconds" bash config/profiles/openlit/tests/e2e/owner.sh "${arguments[@]}"

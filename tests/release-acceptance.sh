@@ -27,7 +27,7 @@ spec.loader.exec_module(m)
 
 def fixture_checkout(directory):
     checkout = directory / "checkout"
-    for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
+    for name in ("dev/agent-e2e.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = checkout / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, target)
@@ -132,11 +132,11 @@ class TestAcceptance(unittest.TestCase):
                 self.assertEqual(m.run_checks(output, [], ["process-coverage"], False), 0)
                 self.assertEqual(calls, ["p0-release-smoke", "process-coverage"])
 
-    def transfer_fixture(self, directory, standalone=False):
+    def transfer_fixture(self, directory, standalone=False, core=False):
         checkout = fixture_checkout(directory)
         first, second = directory / "old", directory / "new"
         old_root, old = prepare_fixture(checkout, first)
-        name = "profile:sample/one" if standalone else "verify"
+        name = "p0-release-smoke" if core else "profile:sample/one" if standalone else "verify"
         command = m.commands(old_root, "test", old["profiles"])[name]
         artifacts = None
         if standalone:
@@ -323,6 +323,131 @@ class TestAcceptance(unittest.TestCase):
             self.assertIsNone(result["duration_seconds"])
             self.assertNotIn("phases", result)
             self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
+
+    def test_historical_p0_producer_requires_asserted_negative_and_final_cleanup(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True, core=True)
+            source, receipt = m.load_bound(first)
+            files = {role: Path(item["path"]) for role, item in review["standalone"].items()}
+            launch = json.loads(files["launch"].read_text())
+            self.assertEqual(launch["acceptance_script_sha256"], "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5")
+            bundle = receipt["candidate_bundle_sha256"]
+            def phase(phase, state, rc=0, vm=1):
+                return f"E2E_PHASE phase={phase} state={state} duration_seconds=0 exit_code={rc} vm={vm}\n"
+            negative = phase("guest", "start") + phase("guest", "end", 23)
+            cleaned = phase("guest-cleanup", "start") + phase("guest-cleanup", "end")
+            begin = f"  [ .. ] phase=transport bundle={bundle}\n"
+            end = "  [ ok ] phase=transport duration=9s\n"
+            final_clean = {vm: f"ok: VM{vm} exact P0 state, pools, projects and releases removed\n" for vm in (1, 2)}
+            success = "ok: P0 release smoke passed within one broker lease\n"
+            release = "E2E lease released: slot=slot-002 run=sample\n"
+            log = ("E2E lease: yard=sample slot=slot-002 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
+                + begin + phase("transport", "start") + phase("transport", "end") + negative + cleaned + end
+                + f"  [ .. ] phase=cleanup bundle={bundle}\n"
+                + "".join(phase("guest", "start", vm=vm) + final_clean[vm] + phase("guest", "end", vm=vm)
+                    + phase("guest-cleanup", "start", vm=vm) + phase("guest-cleanup", "end", vm=vm) for vm in (1, 2))
+                + "  [ ok ] phase=cleanup duration=9s\n" + success + release)
+            command = m.commands(source, receipt["version"], receipt["profiles"])[name]
+            def check(text, **kwargs):
+                files["log"].write_text(text)
+                return m.standalone_result(source, receipt, name, command, files, **kwargs)
+            # This is the old producer's actual contract: no wrapper cleanup/release marker.
+            self.assertEqual(check(log)["environments"][0]["vm_count"], 2)
+            self.assertEqual(check(log, verify_source=False)["environments"][0]["vm_count"], 2)
+            before = (second / "receipt.json").read_bytes()
+            invalid = {
+                "missing negative": log.replace(negative, ""),
+                "unexpected exit": log.replace("exit_code=23", "exit_code=24"),
+                "other VM": log.replace(negative, negative.replace("vm=1", "vm=2")),
+                "extra negative": log.replace(negative, negative + negative),
+                "missing guest start": log.replace(phase("guest", "start"), ""),
+                "unclosed guest": log.replace(phase("guest", "end", 23), ""),
+                "guest began outside owner": log.replace(phase("guest", "start"), "", 1).replace(begin, phase("guest", "start") + begin),
+                "malformed phase": log.replace("exit_code=23", "exit_code=private-canary"),
+                "missing corresponding cleanup": log.replace(cleaned, ""),
+                "cleanup before negative": log.replace(negative + cleaned, cleaned + negative),
+                "failed cleanup": log.replace(phase("guest-cleanup", "end"), phase("guest-cleanup", "end", 3)),
+                "unclosed owner": log.replace(end, ""),
+                "duplicate owner": log.replace(begin, begin + begin),
+                "malformed extra owner": log.replace(end, "  [ ok ] phase=transport duration=private-canary\n" + end),
+                "failed owner": log.replace(end, "  [fail] phase=transport\n"),
+                "wrong owner bundle": log.replace(begin, begin.replace(bundle, "b" * 64)),
+                "negative outside owner": log.replace(negative, "").replace(begin, negative + begin),
+                "missing final VM cleanup": log.replace(final_clean[2], ""),
+                "missing final VM worktree cleanup": log.replace(phase("guest-cleanup", "start", vm=2) + phase("guest-cleanup", "end", vm=2), ""),
+                "duplicate final VM cleanup": log.replace(final_clean[1], final_clean[1] * 2),
+                "missing whole success": log.replace(success, ""),
+                "missing release": log.replace(release, ""),
+                "different lease release": log.replace(release, release.replace("run=sample", "run=other")),
+                "different launcher slot": log.replace("slot=slot-002", "slot=slot-003"),
+                "duplicate run": log + log,
+                "after release": log + phase("guest", "start"),
+                "extra failed phase": log.replace(success, phase("transport", "start") + phase("transport", "end", 1) + success),
+            }
+            for label, value in invalid.items():
+                with self.subTest(label=label), self.assertRaises(ValueError):
+                    check(value)
+            files["log"].write_text(log)
+            for field, value in (("acceptance_script_sha256", "f" * 64), ("source_fingerprint", "f" * 64)):
+                files["launch"].write_text(json.dumps(dict(launch, **{field: value})))
+                for verify in (True, False):
+                    with self.subTest(field=field, verify_source=verify), self.assertRaises(ValueError):
+                        check(log, verify_source=verify)
+            files["launch"].write_text(json.dumps(launch))
+            native = files["native"].read_bytes()
+            files["native"].write_text(json.dumps(dict(json.loads(native), exit_code=3)))
+            with self.assertRaises(ValueError):
+                check(log)
+            files["native"].write_bytes(native)
+            controller = source / command[1]
+            original = controller.read_bytes()
+            controller.write_bytes(original + b"\n# unknown producer\n")
+            try:
+                with self.assertRaises(ValueError):
+                    check(log)
+                files["launch"].write_text(json.dumps(dict(launch, acceptance_script_sha256=m.digest(controller))))
+                with self.assertRaises(ValueError):
+                    check(log)
+            finally:
+                controller.write_bytes(original)
+                files["launch"].write_text(json.dumps(launch))
+            unavailable = controller.with_suffix(".unavailable")
+            controller.rename(unavailable)
+            try:
+                with self.assertRaises((ValueError, OSError)):
+                    check(log)
+            finally:
+                unavailable.rename(controller)
+            files["launch"].write_text(json.dumps({key: value for key, value in launch.items()
+                if key not in {"source_fingerprint", "runtime_sha256", "bundle_sha256", "acceptance_script_sha256"}}))
+            with self.assertRaises(ValueError):
+                check(log, verify_source=False)
+            files["launch"].write_text(json.dumps(launch))
+            with self.assertRaises(ValueError):
+                m.standalone_result(source, receipt, "profile:sample/one", command, files)
+            changed_command = command + ["--lane", "transport"]
+            changed_launch = dict(launch, argv=launch["argv"][:-2] + ["--lane", "transport"] + launch["argv"][-2:])
+            files["launch"].write_text(json.dumps(changed_launch))
+            with self.assertRaises(ValueError):
+                m.standalone_result(source, receipt, name, changed_command, files)
+            files["launch"].write_text(json.dumps(launch))
+            # Exercise actual import and reload, retaining unchanged originals and no invented timing.
+            files["log"].write_text(log)
+            review["review"]["reason"] = "Interpret the exact historical P0 producer's asserted guest exit 23 and native-propagated direct cleanup"
+            for role, path in files.items():
+                review["standalone"][role]["sha256"] = m.digest(path)
+            declaration.write_text(json.dumps(review))
+            self.assertEqual((second / "receipt.json").read_bytes(), before)
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            # Copied original evidence stays portable after its initially verified source disappears.
+            unavailable_source = source.with_name("source-unavailable")
+            source.rename(unavailable_source)
+            try:
+                result = m.load_bound(second)[1]["checks"][name]
+            finally:
+                unavailable_source.rename(source)
+            self.assertIsNone(result["duration_seconds"])
+            self.assertNotIn("phases", result)
 
     def raw_standalone_fixture(self, directory):
         first, second, name, declaration, review = self.transfer_fixture(directory, standalone=True)

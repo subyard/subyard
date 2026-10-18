@@ -2,6 +2,7 @@ package githubbroker
 
 import (
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 // The pair fixture supplies a real synchronized owner file and the sending
@@ -33,6 +36,41 @@ func TestConnectionFixtureIssuer(t *testing.T) {
 		t.Fatal("invalid synthetic installation fixture")
 	}
 	app := os.Getenv("SUBYARD_GITHUB_FIXTURE_APP")
+	assertConnectionFixtureIssuer(t, connection, os.Getenv("SUBYARD_GITHUB_FIXTURE_PUBLIC_KEY"), app, installation)
+}
+
+func TestConnectionFixtureIssuerLocal(t *testing.T) {
+	root := testkit.TempDir(t)
+	connection := filepath.Join(root, "config", "generated", "github", "connection.json")
+	if err := os.MkdirAll(filepath.Dir(connection), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyData := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	bundle, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"settings":       map[string]any{"app_id": "123456", "installation_id": int64(42)},
+		"private_key":    string(keyData),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, connection, bundle, 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "config", "github-app.json"), []byte("{\"use_credential_settings\":true}"), 0o600)
+	public, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicPath := filepath.Join(root, "public.pem")
+	testkit.WriteFile(t, publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: public}), 0o600)
+	assertConnectionFixtureIssuer(t, connection, publicPath, "123456", 42)
+}
+
+func assertConnectionFixtureIssuer(t *testing.T, connection, publicKey, app string, installation int64) {
+	t.Helper()
 	issuer, err := LoadIssuer(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(connection))), "github-app.json"), connection)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +78,7 @@ func TestConnectionFixtureIssuer(t *testing.T) {
 	if issuer.cfg.AppID != app || issuer.cfg.InstallationID != installation {
 		t.Fatal("synchronized connection settings differ")
 	}
-	publicPEM, err := os.ReadFile(os.Getenv("SUBYARD_GITHUB_FIXTURE_PUBLIC_KEY"))
+	publicPEM, err := os.ReadFile(publicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +128,12 @@ func TestConnectionFixtureIssuer(t *testing.T) {
 	issuer.client, issuer.base = server.Client(), server.URL
 	status := httptest.NewRecorder()
 	NewHandler(issuer).ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
-	if status.Code != http.StatusOK || strings.TrimSpace(status.Body.String()) != `{"configured":true}` {
+	var observed map[string]any
+	if err := json.Unmarshal(status.Body.Bytes(), &observed); err != nil {
+		t.Fatal("received connection returned an invalid status")
+	}
+	digest, _ := observed["executable_sha256"].(string)
+	if status.Code != http.StatusOK || len(observed) != 3 || observed["configured"] != true || observed["protocol"] != float64(runtimeProtocol) || !validRuntimeDigest(digest) {
 		t.Fatal("received connection is not configured")
 	}
 	if token, err := issuer.Issue(t.Context()); err != nil || token.Value != "ghs_synthetic-connection-fixture" {

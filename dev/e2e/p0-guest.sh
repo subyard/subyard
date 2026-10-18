@@ -1141,12 +1141,6 @@ peer_yard_start() {
     cleanup_peer_snapshot_fixture
     printf '%s\n' "$MARKER" > "$PEER_REAL_YARD_MARKER"
   fi
-  if ! incus project show subyard >/dev/null 2>&1; then
-    incus project create subyard -c features.images=false >/dev/null
-  fi
-  if incus image info "$OWNER_BASE_IMAGE" --project default >/dev/null 2>&1; then
-    base_image="$OWNER_BASE_IMAGE"
-  fi
   install -d -m 0700 "$PEER_ROOT/config"
   printf 'AGENTS=none\nSSH_PORT=3222\nDEV_UID=1001\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
     "$base_image" "$base_image" "$PEER_KEYS_CONSUMER_ROOT" > "$PEER_ROOT/config/config.env"

@@ -6,11 +6,8 @@ Documentation=man:systemd.service(5)
 Type=oneshot
 ExecStart=@YARD_BIN@ _keys-auto-sync --if-due
 
-# The service handles encrypted records only. Keep a conservative process sandbox while allowing
-# writes to the operator-owned Subyard config/state roots and outbound SSH to enrolled owner hosts.
+# Verified runtime admission needs the host's root and operator ownership identities.
+# Filesystem sandboxing in a user service implicitly remaps root, invalidating that proof.
+# Keep unprivileged execution and privilege restrictions without a private user namespace.
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectControlGroups=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
 RestrictSUIDSGID=true

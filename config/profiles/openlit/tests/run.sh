@@ -5,6 +5,7 @@ export TMPDIR=/tmp
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$root/tests/helpers/profile-go.sh" openlit
 bash "$root/config/profiles/openlit/tests/e2e-controller.sh"
+python3 -B "$root/config/profiles/openlit/tests/owner-diagnostics-test.py"
 bash "$root/config/profiles/openlit/tests/candidate-test.sh"
 bash "$root/config/profiles/openlit/tests/network-lifecycle.sh"
 bash "$root/config/profiles/openlit/tests/owner-lifecycle.sh"

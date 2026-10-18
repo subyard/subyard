@@ -1123,6 +1123,95 @@ def validate_standalone_bundle(root, receipt):
         raise ValueError("invalid standalone tested bundle archive") from None
 
 
+# This exact historical producer asserts guest rc=23 in transport_probes(), and
+# its direct cleanup trap exits 3 on any cleanup/release failure. It predates
+# expected-negative and cleanup/release telemetry; unknown producers stay strict.
+HISTORICAL_P0_SHA256 = "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5"
+
+
+def validate_historical_p0_log(path, bundle, slot):
+    expected = ["lease", "transport-start", "negative", "negative-cleanup", "transport-end",
+                "cleanup-start", "clean-1", "final-guest-1", "final-cleanup-1",
+                "clean-2", "final-guest-2", "final-cleanup-2", "cleanup-end", "success", "release"]
+    events, active, owner, lease = [], {}, None, None
+    def invalid():
+        raise ValueError("historical P0 controller evidence differs")
+    with path.open("rb") as stream:
+        for line in stream:
+            if events and events[-1] == "release" and line.strip():
+                invalid()
+            if line.startswith(b"E2E lease:"):
+                if not re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=subyard-pair vms=2 base=[0-9a-f]{64}\n", line):
+                    invalid()
+                fields = [item.split(b"=", 1) for item in line.split()[2:]]
+                if any(len(item) != 2 for item in fields) or len(dict(fields)) != len(fields):
+                    invalid()
+                fields = dict(fields)
+                if fields.get(b"slot") != f"slot-{int(slot):03d}".encode() or not fields.get(b"run"):
+                    invalid()
+                lease = fields[b"slot"], fields[b"run"]
+                events.append("lease")
+            marker = re.fullmatch(rb"  \[ (\.\.|ok) \] phase=(transport|cleanup) (bundle=([0-9a-f]{64})|duration=[0-9]{1,9}s)\n", line)
+            if not marker and re.match(rb"  \[ (?:\.\.|ok) \] phase=(?:transport|cleanup)(?:[ \r\n]|$)", line):
+                invalid()
+            if marker:
+                phase = marker[2].decode()
+                if active:
+                    invalid()
+                if marker[1] == b"..":
+                    if owner is not None or marker[4] != bundle.encode():
+                        invalid()
+                    owner = phase
+                    events.append(phase + "-start")
+                else:
+                    if owner != phase or marker[4] is not None:
+                        invalid()
+                    owner = None
+                    events.append(phase + "-end")
+            if line.startswith(b"E2E_PHASE"):
+                stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+                if not stage or int(stage[4]) > 255:
+                    invalid()
+                key = stage[1], stage[5]
+                if stage[2] == b"start":
+                    if active or stage[3] != b"0" or stage[4] != b"0":
+                        invalid()
+                    pending = {"negative": b"1", "final-guest-1": b"1", "final-guest-2": b"2"}.get(events[-1] if events else None)
+                    if pending is not None and key != (b"guest-cleanup", pending):
+                        invalid()
+                    active[key] = owner
+                else:
+                    if key not in active:
+                        invalid()
+                    started_owner = active.pop(key)
+                    if stage[4] != b"0":
+                        if key != (b"guest", b"1") or stage[4] != b"23" or owner != "transport" or started_owner != owner:
+                            invalid()
+                        events.append("negative")
+                    elif key == (b"guest-cleanup", b"1") and owner == "transport":
+                        events.append("negative-cleanup")
+                    elif owner == "cleanup" and stage[5] is not None:
+                        vm = stage[5].decode()
+                        if stage[1] == b"guest" and events[-1:] == ["clean-" + vm]:
+                            events.append("final-guest-" + vm)
+                        elif stage[1] == b"guest-cleanup" and events[-1:] == ["final-guest-" + vm]:
+                            events.append("final-cleanup-" + vm)
+            clean = re.fullmatch(rb"ok: VM([12]) exact P0 state, pools, projects and releases removed\n", line)
+            if clean:
+                if owner != "cleanup" or (b"guest", clean[1]) not in active:
+                    invalid()
+                events.append("clean-" + clean[1].decode())
+            if line == b"ok: P0 release smoke passed within one broker lease\n":
+                events.append("success")
+            released = re.fullmatch(rb"E2E lease released: slot=([^\r\n ]+) run=([^\r\n ]+)\n", line)
+            if released:
+                if (released[1], released[2]) != lease:
+                    invalid()
+                events.append("release")
+    if events != expected or active or owner is not None:
+        invalid()
+
+
 def standalone_result(root, receipt, name, command, files, verify_source=True):
     """Verify existing bounded controller evidence, without inventing collector timing."""
     native = read_transfer_json(files["native"])
@@ -1182,6 +1271,12 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
             launched = parsed.astimezone(timezone.utc).isoformat()
     if raw and verify_source:
         validate_standalone_bundle(root, receipt)
+    # Initial import checks the actual bound controller above. Copied, hash-bound
+    # rich evidence retains this exact interpretation during portable revalidation.
+    historical_p0 = (not raw and name == "p0-release-smoke" and command == ["bash", "dev/e2e/p0-acceptance.sh"]
+        and launch["acceptance_script_sha256"] == HISTORICAL_P0_SHA256)
+    if historical_p0:
+        validate_historical_p0_log(files["log"], receipt["candidate_bundle_sha256"], actual[-1])
     # The bound source and exact launcher select a checksum-verified bundle.
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
     environments, stages, released = set(), set(), False
@@ -1192,13 +1287,13 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
                 environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
             stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
             if stage:
-                if stage[2] != b"0":
+                if stage[2] != b"0" and not (historical_p0 and stage.groups() == (b"guest", b"23", b"1")):
                     raise ValueError("standalone controller contains a failed phase")
                 stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
             if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
                 raise ValueError("standalone controller contains a failed phase")
             released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-    if (not environments or not released or ("cleanup/release", None) not in stages
+    if (not environments or not released or not historical_p0 and ("cleanup/release", None) not in stages
         or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
         raise ValueError("standalone controller evidence incomplete")
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",

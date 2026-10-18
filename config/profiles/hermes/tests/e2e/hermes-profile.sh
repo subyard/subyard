@@ -233,7 +233,13 @@ else
 fi
 [ "$(stat -c %a "$definition")" = 600 ] || die "yard definition is not mode 0600"
 yard "$YARD" start --yes
-yard "$YARD" init --yes
+if yard "$YARD" init --yes; then
+  :
+else
+  repeat_init_rc=$?
+  hermes_capture_repeat_init_readiness "$repeat_init_rc" || true
+  exit "$repeat_init_rc"
+fi
 
 printf '  [ .. ] provisioning only the generic Hermes substrate\n'
 yard "$YARD" provision --yes
@@ -432,8 +438,10 @@ fi
 printf '  [ .. ] tearing down only the marked disposable yard\n'
 definition_before_teardown="$(sha256sum "$definition")"
 state_dir="$SUBYARD_CONFIG_HOME/yards/$YARD/projects"
-[ -d "$state_dir" ] && [ ! -L "$state_dir" ] \
-  || die "Hermes project state is missing before teardown"
+if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] \
+    || die "Hermes project state is unsafe before teardown"
+fi
 yard "$YARD" teardown --yes
 [ -f "$definition" ] && [ ! -L "$definition" ] \
   || die "reusable yard definition disappeared during teardown"

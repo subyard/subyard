@@ -1,5 +1,53 @@
 #!/usr/bin/env bash
 # Private, bounded diagnostics; never send their contents to the terminal.
+# Project only fixed enums from one read-only inspection; keep its native exit
+# separate from parsing and from the repeat-init failure that triggered it.
+hermes_capture_repeat_init_readiness() {
+  local original="$1"
+  local -a codes
+  timeout --signal=TERM --kill-after=2 15 "$YARD_BIN" migrate --check --json 2>/dev/null | python3 -c '
+from collections import Counter
+import json, sys
+statuses = {"ready", "migration-required", "recovering", "operator-action-required"}
+codes = {"ready", "transition-required", "recovery-pending", "registry-invalid",
+    "unsupported-epoch", "unsupported-kind", "confirmation-required", "operation-declined",
+    "plan-stale", "migration-stale", "resource-conflict", "precondition-blocked",
+    "dependency-unavailable", "verification-failed", "activation-ambiguous",
+    "recovery-ambiguous", "journal-invalid", "rollback-incompatible", "rollback-expired"}
+owners = {"activation."+name for name in ("core-guest-runtime", "key-tools-runtime",
+    "materialized-config", "github-runtime", "git-fetch-runtime", "openlit-runtime", "orca-runtime")}
+try:
+    payload = sys.stdin.buffer.read(65537)
+    if len(payload) > 65536:
+        raise ValueError()
+    value = json.loads(payload)
+    outcome, decisions, blockers = value["outcome"], value.get("decisions", []), value.get("blockers", [])
+    if (type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+            or outcome["status"] not in statuses or outcome["code"] not in codes
+            or type(outcome["reachedGoal"]) is not bool
+            or not isinstance(decisions, list) or len(decisions) > 64
+            or not isinstance(blockers, list) or len(blockers) > 32
+            or any(not isinstance(row, dict) for row in decisions+blockers)):
+        raise ValueError()
+    changed = [row for row in decisions if row.get("decision") != "preserve"]
+    known = [row["resource"] for row in changed
+             if row.get("scope") == "activation" and row.get("resource") in owners]
+    projection = {"status": outcome["status"], "code": outcome["code"],
+        "reachedGoal": outcome["reachedGoal"], "decision_count": len(decisions),
+        "changed_activation_owners": sorted(set(known)), "other_changed_decisions": len(changed)-len(known),
+        "blocker_codes": dict(Counter(row["code"] for row in blockers if row.get("code") in codes)),
+        "other_blocker_codes": sum(row.get("code") not in codes for row in blockers)}
+    print("HERMES_REPEAT_INIT_READINESS="+json.dumps(projection, sort_keys=True))
+except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+    print("HERMES_REPEAT_INIT_READINESS_CAPTURE category=invalid-projection")
+    sys.exit(2)
+'
+  codes=("${PIPESTATUS[@]}")
+  printf 'HERMES_REPEAT_INIT_DIAGNOSTIC original_exit_code=%s native_exit_code=%s capture_exit_code=%s\n' \
+    "$original" "${codes[0]}" "${codes[1]}"
+  [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ]
+}
+
 hermes_capture_failure() {
   local directory="$1" original="$2" unit="subyard-github-$YARD.service" uid capture_rc=0
   [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 2

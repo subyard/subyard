@@ -48,10 +48,10 @@ agent_unlock() {
   timeout --signal=TERM --kill-after=3s 45 python3 - "$YARD_BIN" "$agent_key" "$ttl" "$passphrase" <<'PY'
 import errno
 import grp
+import json
 import os
 import pty
 import pwd
-import re
 import select
 import shlex
 import signal
@@ -73,6 +73,43 @@ deadline = time.monotonic() + 35
 buffer = b""
 attempts = 0
 rejected = False
+progress = {"operation_plan": False, "grant_step": False, "passphrase_sent": False,
+            "native_rejection": False}
+
+def report_wait():
+    # Read only this child's bounded process tree; never read argv or environment.
+    processes = []
+    queue = [pid]
+    seen = set()
+    while queue and len(seen) < 16:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            with open(f"/proc/{current}/stat") as stream:
+                state = stream.read(4096).rsplit(")", 1)[1].split()[0]
+            try:
+                name = os.path.basename(os.readlink(f"/proc/{current}/exe"))
+            except OSError:
+                name = "unknown"
+            if name == os.path.basename(os.path.realpath(sys.executable)):
+                name = "python3"
+            if name not in {"yard", "yard-engine", "sg", "incus", "ssh-add", "ssh-agent",
+                            "sh", "bash", "systemctl", "python3", "sleep", "unknown"}:
+                name = "other"
+            processes.append({"role": "child" if current == pid else "descendant",
+                              "state": state if state in "RSDZTtXIP" else "unknown",
+                              "executable": name})
+            for task in sorted(os.listdir(f"/proc/{current}/task"))[:128]:
+                with open(f"/proc/{current}/task/{task}/children") as stream:
+                    queue.extend(int(value) for value in stream.read(4096).split()[:16])
+        except (OSError, IndexError, ValueError):
+            continue
+    print("ssh-agent-e2e: wait=" + json.dumps({"progress": progress,
+          "processes": processes, "process_limit": bool(queue)}, separators=(",", ":")),
+          file=sys.stderr)
+
 try:
     while time.monotonic() < deadline:
         done, status = os.waitpid(pid, os.WNOHANG)
@@ -90,11 +127,14 @@ try:
                 continue
             raise
         buffer = (buffer + chunk)[-8192:]
+        progress["operation_plan"] |= b"Operation plan:" in buffer
+        progress["grant_step"] |= b"ssh-agent.grant" in buffer
         if b"bad passphrase" in buffer.lower():
             # Exercise ordinary operator cancellation after a rejected password.
             # SIGKILL would bypass CLI cleanup and only test the pending watchdog.
             os.write(terminal, b"\x03")
             rejected = attempts > 0
+            progress["native_rejection"] = True
             buffer = b""
             continue
         if b"enter passphrase for" in buffer.lower():
@@ -102,10 +142,12 @@ try:
                 raise RuntimeError("too many passphrase prompts")
             os.write(terminal, sys.argv[4].encode() + b"\n")
             attempts += 1
+            progress["passphrase_sent"] = True
             buffer = b""
     else:
         raise RuntimeError("public terminal unlock timed out")
 except (OSError, RuntimeError) as failure:
+    report_wait()
     try:
         os.killpg(pid, signal.SIGTERM)
         cleanup_deadline = time.monotonic() + 3
@@ -119,8 +161,7 @@ except (OSError, RuntimeError) as failure:
         pass
     except ChildProcessError:
         pass
-    # Drain only this fixture's PTY and report bounded CLI diagnostics. Never
-    # publish the raw terminal transcript or either synthetic credential value.
+    # Drain only this fixture's PTY. Never publish any terminal transcript.
     while select.select([terminal], [], [], 0)[0]:
         try:
             chunk = os.read(terminal, 4096)
@@ -129,15 +170,9 @@ except (OSError, RuntimeError) as failure:
         if not chunk:
             break
         buffer = (buffer + chunk)[-8192:]
-    diagnostic = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buffer.decode(errors="replace"))
-    for value in (sys.argv[2], sys.argv[4]):
-        diagnostic = diagnostic.replace(value, "<fixture credential>")
     print(f"ssh-agent-e2e: {failure}; passphrase prompts={attempts}", file=sys.stderr)
     if rejected:
         print("ssh-agent-e2e: native passphrase rejected and cancelled", file=sys.stderr)
-    for line in diagnostic.splitlines():
-        if line.startswith(("yard:", os.path.basename(sys.argv[1]) + ":", "SSH key access:")):
-            print(line[:1000], file=sys.stderr)
     sys.exit(1)
 finally:
     os.close(terminal)

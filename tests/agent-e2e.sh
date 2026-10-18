@@ -1454,6 +1454,65 @@ for invalid_delay in 00 61 18446744073709551616; do
   [ "$invalid_delay_rc" = 2 ] \
     || fail "P0 stale-init retry accepted unbounded retry delay $invalid_delay"
 done
+# Fresh peer init must own project creation after the snapshot fixture is removed.
+# Globals below are consumed by the extracted function.
+# shellcheck disable=SC2034
+(
+  eval "$(sed -n '/^peer_yard_start() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  PEER_ROOT="$TMP/peer-fresh-init"
+  PEER_REAL_YARD_MARKER="$PEER_ROOT/real-yard"
+  PEER_KEYS_CONSUMER_ROOT="$PEER_ROOT/consumer"
+  PEER_YARD_ENTRY=peer_contract_yard
+  OWNER_BASE_IMAGE='fixture-base'
+  P0_PEER_YARD_TIMEOUT=1800
+  SUBYARD_E2E_VM=2
+  MARKER=peer-fixture
+  install -d -m 0700 "$PEER_ROOT"
+  peer_state="$PEER_ROOT/project"
+  peer_calls="$PEER_ROOT/calls"
+  printf 'snapshot\n' > "$peer_state"
+  cleanup_peer_snapshot_fixture() {
+    [ "$(cat "$peer_state")" = snapshot ] || fail 'wrong peer snapshot state'
+    printf 'absent\n' > "$peer_state"
+    printf 'snapshot-cleanup\n' >> "$peer_calls"
+  }
+  incus() {
+    case "$*" in
+      'project show subyard') [ "$(cat "$peer_state")" != absent ] ;;
+      'project create subyard -c features.images=false') printf 'unmarked\n' > "$peer_state" ;;
+      'image info fixture-base --project default') return 0 ;;
+      *) fail "unexpected peer Incus command: $*" ;;
+    esac
+  }
+  timeout() {
+    [ "$1" = --foreground ] && [ "$2" = 1800 ] || fail 'wrong peer init timeout'
+    shift 2
+    "$@"
+  }
+  peer_contract_yard() {
+    local state
+    [ "$(sed -n 's/^BASE_IMAGE=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
+      && [ "$(sed -n 's/^BASE_IMAGE_FALLBACK=//p' "$PEER_ROOT/config/config.env")" = images:debian/13/cloud ] \
+      || fail 'fresh peer image is unavailable in its isolated project'
+    state="$(cat "$peer_state")"
+    printf '%s %s\n' "$*" "$state" >> "$peer_calls"
+    case "$*" in
+      'init --yes')
+        case "$state" in
+          absent) printf 'owned\n' > "$peer_state" ;;
+          owned) : ;;
+          *) fail 'fresh peer init received a fixture-created unmarked project' ;;
+        esac ;;
+      check|'start --yes') [ "$state" = owned ] || fail 'peer yard was not initialized' ;;
+      *) fail "unexpected peer yard command: $*" ;;
+    esac
+  }
+  peer_yard_start
+  [ "$(cat "$peer_calls")" = "$(printf '%s\n' snapshot-cleanup \
+    'init --yes absent' 'init --yes owned' 'check owned' 'start --yes owned')" ] \
+    || fail 'peer startup did not preserve fresh init, repeated init, check and start'
+)
+# End fresh peer init contract.
 release_update_source="$(awk '
   /^p0_apply_release_update\(\)/ { copying=1 }
   copying { print }

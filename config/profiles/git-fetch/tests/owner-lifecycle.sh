@@ -88,3 +88,69 @@ if SUBYARD_ENGINE_CONTEXT=0 bash "$root/config/profiles/git-fetch/owner.sh" --ye
   echo 'FAIL: unprepared owner invocation accepted' >&2; exit 1
 fi
 printf 'ok: git-fetch owner transport, lifecycle and release activation selection/absence/stopped/errors\n'
+
+# Exercise the real fixture handoff and its failed-init cleanup without Incus.
+python3 - "$root/config/profiles/git-fetch/tests/e2e/installed-activation.sh" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+source = Path(sys.argv[1]).read_text()
+def function(name):
+    start = source.index(name + '() {')
+    return source[start:source.index('\n}\n', start) + 3]
+with tempfile.TemporaryDirectory(prefix='subyard-fetch-init-', dir='/tmp') as temporary:
+    for failure in (0, 23, -1):
+        calls = Path(temporary) / str(failure)
+        calls.touch()
+        script = function('initialize_yard') + function('cleanup') + r'''
+set -euo pipefail
+STATE=fixture PROJECT=project INSTANCE=yard NAME=named
+claimed=1 initialized=0 init_attempted=0 project_state=probe
+calls=$1 failure=$2
+[ "$failure" != -1 ] || project_state=foreign
+die() { printf '%s\n' "$*" >&2; exit 2; }
+incus() {
+  case "$*" in
+    'project get project user.subyard.git-fetch-fixture')
+      case "$project_state" in probe|marked) printf '%s\n' "$STATE" ;; esac ;;
+    'project show project') [ "$project_state" != absent ] ;;
+    'project delete project')
+      [ "$project_state" = probe ] || exit 99
+      project_state=absent; printf 'delete-probe\n' >> "$calls" ;;
+    'project set project user.subyard.git-fetch-fixture fixture')
+      case "$project_state" in native|marked) ;; *) exit 99 ;; esac
+      project_state=marked; printf 'claim\n' >> "$calls" ;;
+    'config set yard user.subyard.git-fetch-fixture fixture --project project')
+      printf 'instance-claim\n' >> "$calls" ;;
+    'list --project project --format=json') printf '[]\n' ;;
+    *) printf 'unexpected incus: %s\n' "$*" >&2; exit 99 ;;
+  esac
+}
+yard() {
+  [ "$*" = 'init --yes' ] || exit 99
+  printf 'init %s\n' "$project_state" >> "$calls"
+  case "$project_state" in absent) project_state=native ;; marked) ;; *) return 41 ;; esac
+  return "$failure"
+}
+trap cleanup EXIT
+initialize_yard
+initialize_yard
+trap - EXIT
+'''
+        result = subprocess.run(['bash', '-c', script, 'fixture', str(calls), str(failure)],
+                                capture_output=True, text=True)
+        log = calls.read_text().splitlines()
+        if failure == 0:
+            assert result.returncode == 0, (result.returncode, result.stdout, result.stderr, log)
+            assert log == ['delete-probe', 'init absent', 'claim', 'instance-claim',
+                           'init marked', 'claim', 'instance-claim'], log
+        elif failure == 23:
+            assert result.returncode == 3 and 'original_exit=23 cleanup_exit=1' in result.stderr, (result.returncode, result.stderr)
+            assert log == ['delete-probe', 'init absent'], log
+        else:
+            assert result.returncode == 3 and 'original_exit=2 cleanup_exit=1' in result.stderr, (result.returncode, result.stderr)
+            assert 'UID probe project ownership changed' in result.stderr and log == [], (result.stderr, log)
+print('ok: git-fetch fresh/repeat init owns its project; failed init cannot claim or delete partial state')
+PY

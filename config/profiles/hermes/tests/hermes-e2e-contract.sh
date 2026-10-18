@@ -93,6 +93,57 @@ for scenario in free busy occupied-address; do
   )
 done
 
+# A substrate-only yard may have no workspace project store to remove.
+teardown="$(sed -n '/^printf .*tearing down only/,$p' "$E2E")"
+cat > "$fixture/teardown-contract.sh" <<'CONTRACT'
+set -euo pipefail
+STATE="$1" scenario="$2"
+SUBYARD_CONFIG_HOME="$STATE/config" YARD=fixture project=native
+definition="$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
+state_dir="$SUBYARD_CONFIG_HOME/yards/$YARD/projects"
+install -d -m 0700 "${definition%/*}"
+printf 'fixture definition\n' > "$definition"
+chmod 0600 "$definition"
+case "$scenario" in
+  present|teardown-failure) install -d -m 0700 "$state_dir" ;;
+  symlink) install -d -m 0700 "$STATE/target"; ln -s "$STATE/target" "$state_dir" ;;
+  dangling) ln -s "$STATE/missing" "$state_dir" ;;
+  file) printf 'foreign\n' > "$state_dir" ;;
+esac
+: > "$STATE/native-project"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+yard() {
+  [ "$*" = 'fixture teardown --yes' ] || exit 99
+  : > "$STATE/teardown-called"
+  [ "$scenario" != teardown-failure ] || return 23
+  [ ! -d "$state_dir" ] || rmdir "$state_dir"
+  rm -- "$STATE/native-project"
+}
+incus() {
+  [ "$*" = 'project show native' ] || exit 99
+  [ -e "$STATE/native-project" ]
+}
+CONTRACT
+printf '%s\n' "$teardown" >> "$fixture/teardown-contract.sh"
+for scenario in absent present symlink dangling file teardown-failure; do
+  state="$fixture/teardown-$scenario"
+  install -d -m 0700 "$state"
+  rc=0
+  bash "$fixture/teardown-contract.sh" "$state" "$scenario" > "$state/output" 2>&1 || rc=$?
+  case "$scenario" in
+    absent|present)
+      [ "$rc" = 0 ] && [ -e "$state/teardown-called" ] \
+        || { cat "$state/output" >&2; fail "teardown rejected valid $scenario project state"; } ;;
+    teardown-failure)
+      [ "$rc" = 23 ] && [ -e "$state/teardown-called" ] \
+        && [ -d "$state/config/yards/fixture/projects" ] \
+        || fail 'fixture masked ordinary teardown failure' ;;
+    *)
+      [ "$rc" = 2 ] && [ ! -e "$state/teardown-called" ] \
+        || fail "unsafe $scenario project state reached teardown" ;;
+  esac
+done
+
 # Execute the disabled-resource setup with stale preview admission at the CLI boundary.
 # Model currentReport (not internal Inspection): the public JSON has no plan token.
 cat > "$fixture/disabled-resource-contract.sh" <<'CONTRACT'

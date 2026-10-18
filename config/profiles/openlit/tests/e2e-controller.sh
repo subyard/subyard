@@ -7,9 +7,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 setup_profile_controller "$ROOT" config/profiles/openlit/tests/e2e/acceptance.sh
 assert_controller_missing_slot
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh' "$tmp/calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=180 4500 bash config/profiles/openlit/tests/e2e/owner.sh' "$tmp/calls"
+bash "$tmp/$controller" --slot 7 --kind container > "$tmp/container-calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=180 4500 bash config/profiles/openlit/tests/e2e/owner.sh container' "$tmp/container-calls"
 bash "$tmp/$controller" --slot 7 --kind vm > "$tmp/vm-calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh vm' "$tmp/vm-calls"
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=180 4500 bash config/profiles/openlit/tests/e2e/owner.sh vm' "$tmp/vm-calls"
 assert_controller_failure --slot 7
 printf 'ok: acceptance dispatch, slot requirement and failure propagation\n'
 
