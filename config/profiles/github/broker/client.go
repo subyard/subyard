@@ -152,7 +152,8 @@ func runChild(ctx context.Context, client Client, command []string, token, repos
 	}
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	helper := "!" + quote(executable) + " _github-client --socket " + quote(socket) + " credential"
-	environment = append(environment, "GH_TOKEN="+token,
+	context, _ := json.Marshal(gitRunContext{Version: 1, Socket: socket})
+	environment = append(environment, runContext+"="+string(context), "GH_TOKEN="+token,
 		"GIT_CONFIG_COUNT="+strconv.Itoa(count+3),
 		"GIT_CONFIG_KEY_"+strconv.Itoa(count)+"=credential.https://github.com.helper",
 		"GIT_CONFIG_VALUE_"+strconv.Itoa(count)+"=",
@@ -222,7 +223,7 @@ func readCredentialInput(input io.Reader) (credentialInput, error) {
 func printHelp(output io.Writer) {
 	fmt.Fprintln(output, "usage: subyard-github [--socket PATH] run [--repo OWNER/REPO] -- COMMAND [ARGS...]")
 	fmt.Fprintln(output, "       subyard-github [--socket PATH] credential get|store|erase")
-	fmt.Fprintln(output, "       subyard-github [--socket PATH] status [--runtime]")
+	fmt.Fprintln(output, "       subyard-github [--socket PATH] status [--runtime|--git]")
 	fmt.Fprintln(output, "run supplies short-lived GitHub CLI and Git HTTPS authorization only to COMMAND.")
 }
 
@@ -309,6 +310,9 @@ func RunClient(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stdout)
 		return 0
 	case "status":
+		if len(args) == 2 && args[1] == "--git" {
+			return gitStatus(ctx, stdout)
+		}
 		if len(args) != 1 && (len(args) != 2 || args[1] != "--runtime") {
 			fmt.Fprintln(stderr, "github-broker: status accepts only --runtime")
 			return 2

@@ -38,14 +38,14 @@ def observe():
     if not engine.exists():
         engine = SOURCE.parents[2]/'.build/profiles/github/bin/broker'
     inputs = {name: hashlib.sha256((SOURCE/name).read_bytes()).hexdigest()
-              for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github')}
+              for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py')}
     if engine.is_symlink():
         raise ValueError('unsafe native GitHub runtime source')
     inputs['engine'] = hashlib.sha256(engine.read_bytes()).hexdigest()
     # These are transport paths and settings; connection contents never enter a fingerprint.
     settings = {key: os.environ.get(key, '') for key in ('SUBYARD_YARD', 'INCUS_PROJECT',
         'YARD_INSTANCE_NAME', 'SUBYARD_HOME', 'SUBYARD_CONFIG_HOME', 'SUBYARD_OPERATOR_HOME',
-        'SUBYARD_KEYS_CONSUMER_ROOT', 'SUBYARD_USER', 'DEV_USER', 'SSH_PORT')}
+        'SUBYARD_KEYS_CONSUMER_ROOT', 'SUBYARD_USER', 'DEV_USER', 'SSH_PORT', 'GITHUB_GIT_MODE')}
     desired = digest({'schema': 1, 'selected': selected, 'inputs': inputs, 'settings': settings})
     state = Path(os.environ['SUBYARD_HOME'])/'github-broker'
     unit = Path(os.environ['SUBYARD_OPERATOR_HOME'])/'.config/systemd/user'/f'subyard-github-{yard}.service'
@@ -61,7 +61,7 @@ def observe():
         ready = False
     facts['ready'] = ready
     guest = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--']
-    probe = "getent passwd \"$1\" >/dev/null || exit 2; for path in /usr/local/libexec/subyard/github-client /usr/local/bin/subyard-github; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null && sha256sum \"$path\" 2>/dev/null || exit 2; fi; done"
+    probe = "getent passwd \"$1\" >/dev/null || exit 2; for path in /usr/local/libexec/subyard/github-client /usr/local/bin/subyard-github /usr/local/bin/git-remote-subyard-github; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null && sha256sum \"$path\" 2>/dev/null || exit 2; fi; done; home=$(getent passwd \"$1\" | cut -d: -f6); if [ ! -L \"$home/.config/subyard/github-git.conf\" ] && [ \"$(head -n 1 \"$home/.config/subyard/github-git.conf\" 2>/dev/null)\" = '# subyard-managed-github-git-v1' ]; then for path in \"$home/.config/git/config\" \"$home/.config/subyard/github-git.conf\"; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null || exit 2; fi; done; fi"
     installed = subprocess.run(guest + ['sh', '-c', probe, 'subyard', os.environ.get('DEV_USER', 'dev')], capture_output=True, timeout=3)
     ready = ready and installed.returncode == 0
     facts['ready'] = ready

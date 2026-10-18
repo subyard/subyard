@@ -25,6 +25,7 @@ bash -n "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/co
 shellcheck -S warning "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh"
 if [ "$preflight" = 1 ]; then
   python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"
+  python3 -B "$ROOT/config/profiles/github/tests/release-observation-test.py"
   bash "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh" --local-probe
   printf 'ok: release activation local fixture prerequisites; no lease acquired\n'
   exit 0
@@ -85,7 +86,9 @@ SUBYARD_E2E_CANDIDATE_BUNDLE="$WORK/fixture-bundle.tar.gz"
 SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | cut -d' ' -f1)"
 export SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
 printf 'release_activation_composed_transport_sha256=%s\n' "$SUBYARD_E2E_CANDIDATE_SHA256"
-remaining=$((2700 - $(date +%s) + STARTED))
+# The lifecycle includes authentic predecessor install and supported rollback.
+# Keep a one-hour work bound; outer ownership and cleanup deadlines remain intact.
+remaining=$((3600 - $(date +%s) + STARTED))
 [ "$remaining" -ge 300 ] || { printf 'release-activation: work deadline exhausted before VM allocation\n' >&2; exit 2; }
 bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --vm-count 1 --vm 1 \
   --purpose github-release-activation -- timeout --signal=TERM --kill-after=360 "$remaining" \

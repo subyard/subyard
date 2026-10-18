@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "settings": [{"name":"GITHUB_GIT_MODE","type":"string","scopes":["shipped","yard","command"],"application":"yard-init","syncable":true,"default":"off","enum":["off","broker-first"]}],
   "default_yards": ["default"],
   "disabled_when": {"NESTED_E2E_VMS": "1"},
   "selected_provision_only": true,

@@ -90,8 +90,8 @@ if [ "$mode" = pause ] || [ "$mode" = resume ]; then
   exit 0
 fi
 guest_hook() {
-  tar -C "$profile_dir" -cf - provision.sh SKILL.md bin/subyard-github | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
-    --env DEV_USER="$DEV_USER" -- bash -euo pipefail -c '
+  tar -C "$profile_dir" -cf - provision.sh git_wiring.py SKILL.md bin/subyard-github bin/git-remote-subyard-github | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
+    --env DEV_USER="$DEV_USER" --env GITHUB_GIT_MODE="${GITHUB_GIT_MODE:-off}" -- bash -euo pipefail -c '
       bundle="$(mktemp -d /tmp/subyard-github.XXXXXX)"
       trap '\''rm -rf -- "$bundle"'\'' EXIT
       tar -xf - -C "$bundle"

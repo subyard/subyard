@@ -51,7 +51,7 @@ class RuntimeTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.source = self.root/'profile'
         (self.source/'bin').mkdir(parents=True)
-        for name in ('owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github', 'bin/broker'):
+        for name in ('owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py', 'bin/broker'):
             (self.source/name).write_text(name)
         (self.source/'profile.json').write_text('{"default_yards":["default"],"disabled_when":{"NESTED_E2E_VMS":"1"}}')
         self.ready = False
@@ -165,6 +165,12 @@ class RuntimeTest(unittest.TestCase):
         self.assertNotEqual(old['desired'], disabled['desired'])
         os.environ['ENVIRONMENT_PROFILES'] = 'github'
         (self.source/'bin/broker').write_text('new-native-runtime')
+        changed, _ = runtime.observe()
+        self.assertNotEqual(old['desired'], changed['desired'])
+
+    def test_git_mode_binds_runtime_assessment(self):
+        old, _ = runtime.observe()
+        os.environ['GITHUB_GIT_MODE'] = 'broker-first'
         changed, _ = runtime.observe()
         self.assertNotEqual(old['desired'], changed['desired'])
 

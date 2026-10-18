@@ -164,6 +164,71 @@ Concurrent ledger conflicts retain the last verified consumer until resolved, as
 SSH transport, starts again after stop/start or reboot, and does not require an interactive owner
 SSH session. The profile also installs the short local skill for supported agents.
 
+## Ordinary Git with original-authentication fallback
+
+The opt-in yard setting `GITHUB_GIT_MODE=broker-first` routes ordinary system Git `clone`,
+`fetch`, `pull`, `push` and `ls-remote` for canonical `https://github.com/owner/repo`,
+`git@github.com:owner/repo` and `ssh://git@github.com/owner/repo` URLs (with optional `.git`).
+Enable the profile on the owner for a running yard, then set the mode and authorize runtime repair:
+
+```sh
+yard -Y <yard> profile enable github
+yard -Y <yard> config set GITHUB_GIT_MODE broker-first --scope yard
+yard -Y <yard> migrate
+yard -Y <yard> profile status github --json
+```
+
+Inside the yard, `subyard-github status --git` reports the effective Git mode and whether a
+custom global-config location overrides the managed wiring. This local check mints no token.
+To turn routing off while retaining the broker and `gh` wrapper:
+
+```sh
+yard -Y <yard> config set GITHUB_GIT_MODE off --scope yard
+yard -Y <yard> migrate
+```
+
+Changing the mode changes the desired installed runtime. Run `yard migrate` after setting it;
+ordinary mutations remain gated until that fresh assessment and confirmation reconcile the wiring.
+Use the same repair command for managed fragment drift reported by profile status.
+
+The mode defaults to `off`. `yard profile disable github` removes this yard's managed router,
+include and fragment as well as its broker. Repair and release activation use the same profile
+lifecycle; repeated application preserves current files. The owned include is in the developer's
+`~/.config/git/config`; its fragment is `~/.config/subyard/github-git.conf`. Delivery of
+`~/.gitconfig` preserves that include. Foreign settings and credential helpers remain intact;
+conflicting GitHub rewrites or unsafe owned paths refuse installation. `GIT_CONFIG_GLOBAL` or a
+custom `XDG_CONFIG_HOME` can bypass this standard XDG location; inspect `status --git` from the
+same environment as the affected command. Command and repository configuration retain Git's
+ordinary precedence. Aliases and other hosts are outside this routing scope.
+
+At ref discovery, the broker checks the selected repository's installation and effective token
+permissions through `/git-access/v1`; legacy `/token` is unchanged. Reads require Contents read
+or write. Every push conservatively requires both Contents write and Workflows write, including
+code-only pushes. Missing or unknown grants, an unavailable/unconfigured broker, an old broker,
+or failed read-only broker discovery choose the original transport before refs reach parent Git.
+Targeted requests never retry the default installation, and token scope remains installation-wide.
+
+Broker HTTPS uses stock Git with an ephemeral credential helper isolated from ordinary helpers,
+stores, authorization headers and `.netrc`, including inherited command configuration. Original
+HTTPS retains its existing credential configuration; original SSH uses native
+Git and the developer's SSH command, config, agent and host trust. Saved remote URLs, push URLs
+and refspecs are unchanged. After publishing refs, the selected identity stays fixed: rejection,
+partial push, cancellation or a lost response is an error, with no automatic replay under another
+identity. Atomic pushes, explicit leases and push options retain native Git semantics.
+Fallback prints a fixed reason without upstream details. Tentative broker discovery is silent;
+after selection, native progress and errors are shown with broker credentials redacted.
+
+Parent Git runs `pre-push` once, but its second argument is the effective
+`subyard-github::...` helper URL. Hooks that parse this URL, including Git LFS integration, require
+separate compatibility work; transparent LFS/custom-hook support is not promised. The helper
+supports fetch/push/option rather than connect/stateless-connect, so `fetch --negotiate-only`
+is unsupported. Git's pack engine remains native. Submodules allow only the narrowly validated
+`subyard-github` protocol; the profile never broadly enables arbitrary protocols. Live GitHub
+permission policy and external authentication still require verification with the intended account.
+
+Explicit `subyard-github run -- git ...` retains its earlier policy even in this mode: HTTPS uses
+only the broker and SSH uses its original transport. `gh` wrapper behavior is unchanged.
+
 ## Use and verify access
 
 Use the client wrapper for GitHub CLI commands against a repository available to the App:
@@ -195,8 +260,9 @@ wrap `git fetch` / `git push`). The wrapper supplies an ephemeral credential hel
 child process environment. Each GitHub credential URL selects its own installation, including
 when a command accesses multiple remotes. Direct Git commands obtain tokens only through that
 helper; they do not mint an initial `GH_TOKEN`. Pass `run --repo owner/repo` if a Git hook also
-needs GitHub CLI authorization. Ordinary unwrapped commands keep their existing authentication;
-the profile does not modify Git configuration or the GitHub CLI auth store. Token requests have no per-call approval or
+needs GitHub CLI authorization. With the default `GITHUB_GIT_MODE=off`, ordinary unwrapped commands keep their existing
+authentication. The GitHub CLI auth store is unchanged. The optional mode below owns a separate
+Git configuration include. Token requests have no per-call approval or
 permission overrides: GitHub App installation permissions determine the accessible
 repositories and actions. Repository selection uses
 [GitHub's App-authenticated installation lookup](https://docs.github.com/en/rest/apps/apps#get-a-repository-installation-for-the-authenticated-app),
@@ -218,5 +284,6 @@ protected connection for each request, so materializing a new revision takes eff
 the next request without placing credentials in the yard.
 
 For transport failures, inspect `systemctl --user status subyard-github-<YARD>.service` on the
-owner host and repeat `yard -Y <yard> profile enable github` to repair the managed files and pinned yard transport.
+owner host. For installed-runtime drift, run `yard -Y <yard> migrate` with fresh authorization;
+repeat `yard -Y <yard> profile enable github` to resume profile installation when release readiness permits it.
 Remote controllers use the same `init` path on the owner; no App credential belongs on the controller.

@@ -20,6 +20,13 @@ DEV_GROUP="$(id -gn "$DEV_USER")"
 
 wrapper=/usr/local/bin/subyard-github
 engine=/usr/local/libexec/subyard/github-client
+remote=/usr/local/bin/git-remote-subyard-github
+remote_source="$(dirname "$0")/bin/git-remote-subyard-github"
+wiring_source="$(dirname "$0")/git_wiring.py"
+git_mode="${GITHUB_GIT_MODE:-off}"
+case "$git_mode" in off|broker-first) ;; *) printf 'github provision: invalid Git mode\n' >&2; exit 2 ;; esac
+wiring() { python3 "$wiring_source" "$DEV_HOME" "$git_mode" "$1"; }
+remote_body() { cat "$remote_source"; }
 skill_dir=/usr/local/share/subyard/skills/subyard-github
 skill="$skill_dir/SKILL.md"
 socket_dir="$DEV_HOME/.local/share/subyard"
@@ -78,6 +85,8 @@ user_directory() {
 
 changed=0
 if [ "$mode" = check-removed ]; then
+  owned_file "$remote" remote_body && changed=1
+  python3 "$wiring_source" "$DEV_HOME" off check || changed=1
   owned_file "$wrapper" wrapper_body && changed=1
   owned_file "$skill" skill_body && changed=1
   for link in "${skill_links[@]}"; do
@@ -90,6 +99,9 @@ if [ "$mode" = check-removed ]; then
 fi
 if [ "$mode" = check ] || [ "$mode" = remove ]; then
   command -v gh >/dev/null 2>&1 || changed=1
+  owned_file "$remote" remote_body && cmp -s <(remote_body) "$remote" \
+    && [ "$(stat -c '%a:%u:%g' "$remote")" = 755:0:0 ] || changed=1
+  wiring check || changed=1
   [ -x "$engine" ] || changed=1
   owned_file "$wrapper" wrapper_body && cmp -s <(wrapper_body) "$wrapper" || changed=1
   owned_file "$skill" skill_body && cmp -s <(skill_body) "$skill" || changed=1
@@ -104,6 +116,8 @@ if [ "$mode" = check ] || [ "$mode" = remove ]; then
 fi
 
 if [ "$mode" = remove ]; then
+  wiring remove
+  owned_file "$remote" remote_body && rm -f -- "$remote"
   socket_path_safe || { printf 'github provision: refusing symlinked socket path\n' >&2; exit 1; }
   [ ! -L "$skill_dir" ] || { printf 'github provision: refusing symlinked skill directory\n' >&2; exit 1; }
   if [ -L "$socket" ] || { [ -e "$socket" ] && [ ! -S "$socket" ]; }; then
@@ -130,6 +144,9 @@ fi
 [ -x "$engine" ] || { printf 'github provision: select the github profile and run yard init first\n' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 [ ! -L "$skill_dir" ] || { printf 'github provision: refusing symlinked skill directory\n' >&2; exit 1; }
+if [ -e "$remote" ] || [ -L "$remote" ]; then
+  owned_file "$remote" remote_body || { printf 'github provision: unmanaged remote helper exists\n' >&2; exit 1; }
+fi
 if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
   owned_file "$wrapper" wrapper_body \
     || { printf 'github provision: unmanaged wrapper exists: %s\n' "$wrapper" >&2; exit 1; }
@@ -150,6 +167,8 @@ elif [ ! -d "$skill_dir" ] || [ -L "$skill_dir" ]; then
   exit 1
 fi
 install -m 0755 "$wrapper_source" "$wrapper"
+install -m 0755 "$remote_source" "$remote"
+wiring apply
 install -m 0644 "$skill_source" "$skill"
 for link in "${skill_links[@]}"; do
   if [ -e "$link" ] || [ -L "$link" ]; then

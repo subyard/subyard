@@ -188,6 +188,10 @@ func validRepository(repository string) bool {
 // IssueRepository selects the repository's installation using owner-side App
 // authentication. An empty repository retains the configured default installation.
 func (issuer *Issuer) IssueRepository(ctx context.Context, repository string) (Token, error) {
+	return issuer.issueRepository(ctx, repository, "")
+}
+
+func (issuer *Issuer) issueRepository(ctx context.Context, repository, operation string) (Token, error) {
 	if issuer == nil || issuer.key == nil || issuer.client == nil || issuer.base == "" {
 		return Token{}, errors.New("github broker is not configured")
 	}
@@ -222,10 +226,16 @@ func (issuer *Issuer) IssueRepository(ctx context.Context, repository string) (T
 			return Token{}, errInstallationLookup
 		}
 		var installation struct {
-			ID int64 `json:"id"`
+			ID          int64             `json:"id"`
+			Permissions map[string]string `json:"permissions"`
 		}
 		if json.Unmarshal(data, &installation) != nil || installation.ID <= 0 {
 			return Token{}, errInstallationLookup
+		}
+		if operation != "" {
+			if state := permissionState(installation.Permissions, operation); state != "available" {
+				return Token{}, &gitAccessError{state}
+			}
 		}
 		installationID = installation.ID
 	}
@@ -238,14 +248,20 @@ func (issuer *Issuer) IssueRepository(ctx context.Context, repository string) (T
 		return Token{}, errTokenRejected
 	}
 	var result struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
+		Token       string            `json:"token"`
+		ExpiresAt   time.Time         `json:"expires_at"`
+		Permissions map[string]string `json:"permissions"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil || len(result.Token) > 4096 || !tokenPattern.MatchString(result.Token) {
 		return Token{}, errors.New("invalid github token response")
 	}
 	if result.ExpiresAt.IsZero() || !result.ExpiresAt.After(now) || result.ExpiresAt.After(now.Add(75*time.Minute)) {
 		return Token{}, errors.New("invalid github token expiry")
+	}
+	if operation != "" {
+		if state := permissionState(result.Permissions, operation); state != "available" {
+			return Token{}, &gitAccessError{state}
+		}
 	}
 	return Token{Value: result.Token, ExpiresAt: result.ExpiresAt}, nil
 }
@@ -299,6 +315,8 @@ func (handler Handler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 		writeJSON(writer, http.StatusOK, status)
+	case "/git-access/v1":
+		handler.gitAccess(writer, request)
 	case "/token":
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)
