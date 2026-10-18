@@ -5,6 +5,32 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 cd "$ROOT"
 die() { printf 'release-activation: %s\n' "$*" >&2; exit 2; }
 stage() { printf 'release_activation_stage=%s elapsed_seconds=%s\n' "$1" "$SECONDS"; }
+# Changing an activation input leaves ordinary mutations gated until a fresh,
+# authorized repair has reconciled the installed runtime.
+set_git_mode() {
+  local mode="$1" log_prefix="$2"
+  yard config set GITHUB_GIT_MODE "$mode" --scope yard --yes > "$log_prefix-setting.log" 2>&1
+  yard migrate --yes > "$log_prefix-apply.log" 2>&1
+}
+trace_deferred_migration() {
+  local original_python source before native_exit capture_exit=0 unchanged=0
+  original_python="$(command -v python3)"
+  source="$STATE/runtime/current/config/profiles/github/runtime.py"
+  before="$(hash "$source")"
+  install -m 0700 "$ROOT/config/profiles/github/tests/e2e/runtime-observer-trace.py" "$STATE/wrappers/python3"
+  # Trace only this invocation. The callback observes original Python returns;
+  # installed source and functions, native status and stdout stay untouched.
+  if PATH="$STATE/wrappers:$PATH" SUBYARD_TRACE_REAL_PYTHON="$original_python" \
+      SUBYARD_TRACE_GITHUB_SOURCE="$source" SUBYARD_TRACE_GITHUB_LOG="$STATE/native-github-observations.log" \
+      yard migrate --yes > "$STATE/deferred-migrate.log" 2>&1; then native_exit=0; else native_exit=$?; fi
+  [ "$before" != "$(hash "$source")" ] || unchanged=1
+  if ! "$original_python" "$ROOT/config/profiles/github/tests/e2e/runtime-observer-trace.py" \
+      --verify "$STATE/native-github-observations.log" "$NAMED" > "$STATE/native-github-capture.log" 2>&1; then capture_exit=1; fi
+  printf 'release_activation_observation_terminal native_exit=%s capture_exit=%s installed_source_unchanged=%s\n' \
+    "$native_exit" "$capture_exit" "$unchanged"
+  [ "$native_exit" = 0 ] || return "$native_exit"
+  [ "$capture_exit" = 0 ] && [ "$unchanged" = 1 ] || die 'native observation diagnostic was incomplete'
+}
 # Shared with the controller so both select the same authentic baseline and synthetic B.
 candidate_identity() {
   python3 - "$1" "$2" <<'PY'
@@ -426,8 +452,16 @@ assert json.loads(receipt.read_text())==expected
 print('ok: age/SOPS receipts match installed bytes, exact versions/archive pins and protected modes')
 PY
 }
+verify_git_wiring() {
+  guest_dev /usr/local/bin/subyard-github status --git | jq -e '.mode=="broker-first" and .state=="current"' >/dev/null
+  guest_dev git config --get subyard.githubGitMode | grep -Fxq broker-first
+  [ "$(guest stat -c '%a:%u:%g' /usr/local/bin/git-remote-subyard-github)" = 755:0:0 ] || die 'Git remote helper permissions differ'
+  [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/subyard/github-git.conf)" = "644:$FIXTURE_DEV_UID:$(guest id -g dev)" ] || die 'Git fragment permissions differ'
+  guest_dev git config --file /home/dev/.config/git/config --get-all include.path | grep -Fxq /home/dev/.config/subyard/github-git.conf
+}
 verify_runtime() {
   local source="$1" wanted preview ccusage
+  if [ "$(setting GITHUB_GIT_MODE)" = broker-first ]; then verify_git_wiring; fi
   wanted="$(hash "$source/config/profiles/github/bin/broker")"
   guest_dev /usr/local/bin/subyard-github status --runtime \
     | jq -e --arg wanted "$wanted" '.protocol==1 and .broker_sha256==$wanted and .client_sha256==$wanted' >/dev/null
@@ -473,6 +507,25 @@ PY
 }
 
 if [ "$MODE" = --local-probe ]; then
+  (
+    # Exercise the same sequence used by the physical fixture. A setting write
+    # creates pending activation; ordinary profile mutations must remain gated.
+    pending="$STATE/git-mode-pending"
+    yard() {
+      case "$*" in
+        'config set GITHUB_GIT_MODE broker-first --scope yard --yes'|'config set GITHUB_GIT_MODE off --scope yard --yes')
+          touch "$pending" ;;
+        'migrate --yes') [ -f "$pending" ] && rm -- "$pending" ;;
+        'profile enable github --yes') [ ! -e "$pending" ] ;;
+        *) return 99 ;;
+      esac
+    }
+    for mode in broker-first off broker-first; do
+      set_git_mode "$mode" "$STATE/git-mode-probe"
+      yard profile enable github --yes
+    done
+  ) || die 'Git mode change did not authorize runtime repair before profile mutation'
+  printf 'ok: Git mode changes reconcile activation through fresh migrate before profile mutations\n'
   mkdir "$STATE/uid-commands"
   cat > "$STATE/uid-commands/getent" <<'SH'
 #!/bin/sh
@@ -788,6 +841,34 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/noop.log" 2>&1
 [ "$stable" = "$(systemctl_user show "$UNIT" -p MainPID --value):$(stat -c '%i' "$SUBYARD_HOME/github-broker/default-engine"):$(guest stat -c '%i' /usr/local/bin/subyard-preview)" ] || die 'no-op activation changed PID/inodes'
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'runtime retry changed completed migrations'
 
+stage broker-first-owned-wiring-lifecycle
+set_git_mode broker-first "$STATE/git-mode"
+yard profile enable github --yes > "$STATE/git-enable.log" 2>&1
+verify_git_wiring
+# Configuration delivery may replace .gitconfig; the independent XDG include survives.
+guest_dev sh -c 'printf "[user]\n\tname = Delivered fixture\n" > /home/dev/.gitconfig'
+verify_git_wiring
+wiring_inode="$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)"
+yard profile enable github --yes > "$STATE/git-repeat.log" 2>&1
+[ "$wiring_inode" = "$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)" ] || die 'repeated Git enable rewrote current fragment'
+guest_dev sh -c 'printf "# subyard-managed-github-git-v1\n# fixture drift\n" > /home/dev/.config/subyard/github-git.conf'
+yard profile status github --json | jq -e '.runtime=="pending"' >/dev/null
+yard migrate --yes > "$STATE/git-repair.log" 2>&1
+verify_git_wiring
+set_git_mode off "$STATE/git-off"
+guest test ! -e /home/dev/.config/subyard/github-git.conf
+guest_dev git config --global --get user.name | grep -Fxq 'Delivered fixture'
+set_git_mode broker-first "$STATE/git-on"
+verify_git_wiring
+yard profile disable github --yes > "$STATE/git-disable.log" 2>&1
+guest test ! -e /home/dev/.config/subyard/github-git.conf
+guest test ! -e /usr/local/bin/git-remote-subyard-github
+guest_dev git config --global --get user.name | grep -Fxq 'Delivered fixture'
+yard profile enable github --yes > "$STATE/git-reenable.log" 2>&1
+claim_units
+verify_git_wiring
+cp "$SUBYARD_CONFIG_HOME/yards/default/config.env" "$STATE/selection-live"
+
 stage authentic-predecessor-rollback-refusal
 links="$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")"
 if yard update --rollback --yes > "$STATE/predecessor-rollback.log" 2>&1; then die "incompatible $BASELINE predecessor rollback succeeded"; fi
@@ -797,7 +878,7 @@ cmp -s "$STATE/ledger-retained" "$ledger" || die 'refused rollback changed migra
 
 stage explicit-stopped-yard-start-and-migrate
 yard -Y "$NAMED" start --yes > "$STATE/start-deferred.log" 2>&1
-yard migrate --yes > "$STATE/deferred-migrate.log" 2>&1
+trace_deferred_migration
 claim_units
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- runuser -u dev -- \
   /usr/local/bin/subyard-github status --runtime | jq -e --arg wanted "$wanted" '.broker_sha256==$wanted and .client_sha256==$wanted' >/dev/null

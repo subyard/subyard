@@ -77,6 +77,10 @@ engine compatibility surface, not a client fallback.
 | `host.sync.status` | `{}` | `host-sync-status.schema.json`, capability `host-sync-status-v1` |
 | `session.prepare` | `kind`, optional `scope`, optional `projectId` | `session-prepare.schema.json`, capability `session-prepare-v1` |
 
+`profile.list` includes unselected profiles. Its `eligibility` reason can be
+`allowed`, `dedicated-role-required`, `exclusive-role`, `lifecycle-only` or
+`policy-disabled`; clients retain the owner's `eligible` decision and reason.
+
 Core context/status/project DTOs predate the narrow GUI projections and contain
 owner-native paths. A native client must project their safe facts before frontend
 IPC. Terminal sessions, protected credential payloads, passphrases and interactive

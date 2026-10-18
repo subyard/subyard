@@ -10,9 +10,72 @@ import sys
 import time
 
 
+class IncompleteTree(Exception):
+    pass
+
+
+def owned_tree(app, pid, defunct, deadline):
+    queue, items = [(app, 0)], []
+    while queue:
+        if time.monotonic() >= deadline:
+            raise TimeoutError('accessible_tree_unavailable')
+        node, depth = queue.pop()
+        if node is None:
+            raise IncompleteTree()
+        assert node.get_process_id() == pid, 'foreign_accessible_node'
+        assert depth <= 32, 'accessible_depth_exceeded'
+        assert len(items) < 2048, 'accessible_node_limit_exceeded'
+        if node.get_state_set().contains(defunct):
+            raise IncompleteTree()
+        count = node.get_child_count()
+        if count < 0:
+            raise IncompleteTree()
+        assert count <= 512, 'accessible_child_limit_exceeded'
+        items.append(node)
+        for index in range(count):
+            if time.monotonic() >= deadline:
+                raise TimeoutError('accessible_tree_unavailable')
+            child = node.get_child_at_index(index)
+            if child is None:
+                raise IncompleteTree()
+            queue.append((child, depth + 1))
+    return items
+
+
+def complete_tree(read, deadline, diagnostics):
+    while time.monotonic() < deadline:
+        try:
+            items = read(deadline)
+            if time.monotonic() >= deadline:
+                break
+            return items
+        except IncompleteTree:
+            diagnostics['incomplete_tree_retries'] = diagnostics.get('incomplete_tree_retries', 0) + 1
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+    raise TimeoutError('accessible_tree_unavailable')
+
+
+def default_scope(items, atspi):
+    assert any(node.get_role() == atspi.Role.LABEL and node.get_name() == 'Local owner / default'
+               and node.get_state_set().contains(atspi.StateType.SHOWING) for node in items), 'local_scope_changed'
+    assert any(node.get_role() == atspi.Role.LIST_ITEM and node.get_name() == 'Local owner / default'
+               and node.get_state_set().contains(atspi.StateType.SELECTED) for node in items), 'local_scope_changed'
+
+
+def default_input(items, atspi, expected_focus, deadline, send):
+    default_scope(items, atspi)
+    if expected_focus is not None:
+        focused = {(node.get_role(), node.get_name()) for node in items
+                   if node.get_state_set().contains(atspi.StateType.FOCUSED)}
+        assert focused == {expected_focus}, 'focus_target_unavailable'
+    if time.monotonic() >= deadline:
+        raise TimeoutError('accessible_tree_unavailable')
+    send()
+
+
 def x11_key(pid, key):
-    # Only the four local SHORT keys; no remote/UI key translation.
-    if key not in ('alt+r', 'Tab', 'space', 'alt+F4'):
+    # Only the local SHORT keys; no remote/UI key translation.
+    if key not in ('alt+r', 'Tab', 'shift+Tab', 'space', 'alt+F4'):
         raise ValueError('unsupported local X11 key')
     windows = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--pid', str(pid)], timeout=3).splitlines()
     assert len(windows) == 1 and windows[0].isdigit(), 'owned_x11_window_unavailable'
@@ -67,7 +130,7 @@ def main():
     assert backend != 'x11' or (os.environ.get('VERANDA_GTK_SCENARIO', 'local') == 'local' and os.environ.get('VERANDA_GTK_UI') != '1')
     started = time.monotonic()
     stage = "accessibility"
-    result = {"original_exit_code": 1, "physical_key_commands": 0,
+    result = {"original_exit_code": 1, "physical_key_commands": 0, 'physical_keys': [],
               "accessibility_actions_used": False, "backend": backend}
     def identity():
         process = Path('/proc') / str(pid)
@@ -92,33 +155,36 @@ def main():
         def owned():
             assert identity() == original_identity, 'owned_process_identity_changed'
 
-        def nodes():
+        read_deadline = None
+
+        def read_tree(deadline):
             owned()
             for _ in range(64):
                 if not context.pending(): break
                 context.iteration(False)
             desktop = Atspi.get_desktop(0)
-            applications = [desktop.get_child_at_index(i) for i in range(desktop.get_child_count())]
+            desktop.clear_cache()
+            count = desktop.get_child_count()
+            if count < 0:
+                raise IncompleteTree()
+            assert count <= 512, 'accessible_child_limit_exceeded'
+            applications = []
+            for index in range(count):
+                if time.monotonic() >= deadline: raise TimeoutError('accessible_tree_unavailable')
+                applications.append(desktop.get_child_at_index(index))
+            if any(app is None for app in applications):
+                raise IncompleteTree()
             apps = [app for app in applications if app and app.get_process_id() == pid]
             last_accessibility.update(desktop_applications=len(applications), matching_applications=len(apps))
             assert len(apps) <= 1, 'duplicate_owned_accessible_application'
             if not apps:
-                last_tree.clear()
-                return []
+                raise IncompleteTree()
             app = apps[0]
             app.clear_cache()
-            queue, items = [(app, 0)], []
-            while queue:
-                node, depth = queue.pop()
-                if not node: continue
-                assert depth <= 32, 'accessible_depth_exceeded'
-                assert len(items) < 2048, 'accessible_node_limit_exceeded'
-                if node.get_state_set().contains(Atspi.StateType.DEFUNCT): continue
-                items.append(node)
-                count = node.get_child_count()
-                assert count >= 0, 'accessible_children_unavailable'
-                assert count <= 512, 'accessible_child_limit_exceeded'
-                queue.extend((node.get_child_at_index(i), depth + 1) for i in range(count))
+            return owned_tree(app, pid, Atspi.StateType.DEFUNCT, deadline)
+
+        def nodes():
+            items = complete_tree(read_tree, read_deadline or time.monotonic() + 20, snapshot_state)
             if (os.environ.get('VERANDA_GTK_SCENARIO', 'local') == 'local'
                     and os.environ.get('VERANDA_GTK_UI') != '1' and time.monotonic() >= snapshot_state['next']):
                 # Cache diagnostics during normal reads, at most once per second.
@@ -138,17 +204,24 @@ def main():
                     except BaseException as diagnostic_error:
                         snapshot_state['error'] = type(diagnostic_error).__name__
                         break
-                last_tree[:] = snapshot
                 snapshot_state['truncated'] = len(snapshot) != len(items)
+                if not snapshot_state['truncated']:
+                    last_tree[:] = snapshot
             return items
 
-        def wait(predicate, seconds=20):
-            deadline = time.monotonic() + seconds
-            while time.monotonic() < deadline:
-                value = predicate()
-                if value: return value
-                time.sleep(.05)
-            raise TimeoutError(stage)
+        def wait(predicate, seconds=20, deadline=None):
+            nonlocal read_deadline
+            previous = read_deadline
+            read_deadline = deadline if deadline is not None else time.monotonic() + seconds
+            try:
+                while time.monotonic() < read_deadline:
+                    value = predicate()
+                    if time.monotonic() >= read_deadline: break
+                    if value: return value
+                    time.sleep(.05)
+                raise TimeoutError(stage)
+            finally:
+                read_deadline = previous
 
         def keys(*arguments):
             assert backend == 'wayland'
@@ -165,7 +238,20 @@ def main():
             else:
                 keys(*{'alt+r': ('-M', 'alt', '-k', 'r', '-m', 'alt'),
                        'Tab': ('-k', 'Tab'), 'space': ('-k', 'space'),
+                       'shift+Tab': ('-M', 'shift', '-k', 'ISO_Left_Tab', '-m', 'shift'),
                        'alt+F4': ('-M', 'alt', '-k', 'F4', '-m', 'alt')}[key])
+            result['physical_keys'].append(key)
+
+        def default_nodes(deadline):
+            items = wait(nodes, deadline=deadline)
+            default_scope(items, Atspi)
+            return items
+
+        def default_key(key, deadline, expected_focus=None):
+            items = default_nodes(deadline)
+            # Mnemonic/window shortcuts do not depend on the current control.
+            assert expected_focus is not None or key in ('alt+r', 'alt+F4')
+            default_input(items, Atspi, expected_focus, deadline, lambda: local_key(key))
 
         def observed():
             for node in nodes():
@@ -288,19 +374,33 @@ def main():
             before = wait(observed)
             result["local_default_selected"] = True
             stage = "physical-refresh"
+            deadline = time.monotonic() + 20
             time.sleep(1.1)
-            local_key('alt+r')
-            after = wait(lambda: (value if (value := observed()) and value != before else None))
+            default_key('alt+r', deadline)
+            # Shared mnemonics focus the button instead of activating it.
+            wait(lambda: any(node.get_name() == 'Refresh' and node.get_state_set().contains(Atspi.StateType.FOCUSED) for node in nodes()), deadline=deadline)
+            default_key('space', deadline, (Atspi.Role.PUSH_BUTTON, 'Refresh'))
+            after = wait(lambda: (value if (value := observed()) and value != before else None), deadline=deadline)
             result["refresh_observation_changed"] = after != before
             stage = "physical-projects-tab"
+            deadline = time.monotonic() + 20
+            allowed = {(Atspi.Role.PUSH_BUTTON, name) for name in ('Refresh', 'Shell', 'Copy shell command',
+                       'Start', 'Stop', 'Reconcile', 'Connect remote host')}
+            allowed.update((Atspi.Role.PAGE_TAB, name) for name in ('Overview', 'Projects', 'Profiles', 'Diagnostics', 'Settings'))
+            allowed.add((Atspi.Role.LABEL, 'Yard state: NOT_CREATED\n10 projects\nObserved: ' + after))
             for count in range(65):
-                buttons = [node for node in nodes() if node.get_name() == "Projects" and node.get_state_set().contains(Atspi.StateType.FOCUSED)]
-                if buttons: break
-                assert count < 64
-                local_key('Tab')
-            local_key('space')
+                items = default_nodes(deadline)
+                focused = {(node.get_role(), node.get_name()) for node in items if node.get_state_set().contains(Atspi.StateType.FOCUSED)}
+                assert len(focused) == 1 and focused <= allowed, 'focus_target_unavailable'
+                if focused == {(Atspi.Role.PAGE_TAB, 'Projects')}: break
+                assert count < 64, 'focus_target_unavailable'
+                previous_focus = next(iter(focused))
+                default_input(items, Atspi, previous_focus, deadline, lambda: local_key('shift+Tab'))
+                wait(lambda: any(node.get_state_set().contains(Atspi.StateType.FOCUSED) and (node.get_role(), node.get_name()) != previous_focus for node in nodes()), deadline=deadline)
+            default_key('space', deadline, (Atspi.Role.PAGE_TAB, 'Projects'))
             expected = {f"project-00-{index:02}" for index in range(10)}
-            wait(lambda: expected <= {node.get_name() for node in nodes() if node.get_state_set().contains(Atspi.StateType.SHOWING)})
+            wait(lambda: expected <= {node.get_name() for node in default_nodes(deadline) if node.get_state_set().contains(Atspi.StateType.SHOWING)}, deadline=deadline)
+            default_nodes(deadline)
             result["visible_real_project_names"] = 10
 
         if os.environ.get('VERANDA_GTK_UI') == '1':
@@ -368,7 +468,10 @@ def main():
         capture_view(backend, capture)
         result['useful_view_capture_sha256'] = hashlib.sha256(capture.read_bytes()).hexdigest()
         stage = "physical-close"
-        local_key('alt+F4')
+        if scenario == 'local' and os.environ.get('VERANDA_GTK_UI') != '1':
+            default_key('alt+F4', time.monotonic() + 20)
+        else:
+            local_key('alt+F4')
         result["original_exit_code"] = 0
         result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1"
         result["owner_mutation_executed"] = False
@@ -376,7 +479,7 @@ def main():
         result.update(failure_stage=stage, failure_type=type(error).__name__)
         reasons = {'owned_process_terminated', 'owned_process_identity_changed',
                    'duplicate_owned_accessible_application', 'accessible_depth_exceeded',
-                   'accessible_node_limit_exceeded', 'accessible_children_unavailable',
+                   'accessible_node_limit_exceeded', 'accessible_children_unavailable', 'foreign_accessible_node', 'local_scope_changed',
                    'accessible_child_limit_exceeded', 'focus_target_unavailable', 'decline_registered_host', 'cancel_changed_store', 'repair_changed_owner', 'repair_missing_replacement', 'unicode_gtk_text_mismatch', 'draft_restart_missing', 'refresh_replaced_editor', 'refresh_reset_caret', 'refresh_reset_selection', 'owned_x11_window_unavailable', 'owned_x11_window_changed', 'x11_capture_failed'}
         if isinstance(error, AssertionError) and str(error) in reasons:
             result['failure_reason'] = str(error)
@@ -410,6 +513,7 @@ def main():
                         diagnostic['screenshot_error'] = type(diagnostic_error).__name__
                 return diagnostic
             retain_failure_diagnostics(result, collect)
+    result['incomplete_tree_retries'] = snapshot_state.get('incomplete_tree_retries', 0)
     result["duration_seconds"] = time.monotonic() - started
     print("VERANDA_GTK_INPUT " + json.dumps(result), flush=True)
     return result["original_exit_code"]

@@ -23,8 +23,10 @@ and `.git`, `.build`, `.cache`, `node_modules`, `vendor`, `.venv`, `venv` and
 `__pycache__` directories. Worktrees sharing a Git common directory are fetched
 once per cycle. Discovery keeps no persistent state and is independent of Orca.
 
-The existing `subyard-github run` wrapper supplies GitHub HTTPS authorization when
-installed. SSH uses the developer's existing forwarded-agent socket and known
+When the effective Git setting selects `GITHUB_GIT_MODE=broker-first`, the worker uses ordinary
+Git and the [GitHub router](github.md#ordinary-git-with-original-authentication-fallback), including
+its original-authentication fallback. With routing off, the existing `subyard-github run` wrapper
+supplies GitHub HTTPS authorization when installed. SSH uses the developer's existing forwarded-agent socket and known
 host trust. Authentication is noninteractive. Journal diagnostics contain counts
 and generic failures, without remote URLs or Git output.
 

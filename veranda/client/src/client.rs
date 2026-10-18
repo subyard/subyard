@@ -1473,7 +1473,11 @@ impl ProfileList {
                     || !matches!(profile.provision_scope.as_str(), "shared" | "dedicated")
                     || !matches!(
                         profile.eligibility.as_str(),
-                        "allowed" | "dedicated-role-required" | "exclusive-role"
+                        "allowed"
+                            | "dedicated-role-required"
+                            | "exclusive-role"
+                            | "lifecycle-only"
+                            | "policy-disabled"
                     )
                     || !matches!(
                         profile.convergence.as_str(),

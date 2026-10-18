@@ -126,7 +126,7 @@ observed child death and fixture cleanup. Configured records do not establish
 container start/provision lifecycle. A captured screenshot is separate from any
 latency or resource measurement.
 The X11 driver verifies that its one visible window belongs to the exact owned
-GUI PID before activation and each of its four supported keys. It does not use
+GUI PID before activation and each of its supported keys. It does not use
 accessibility actions or synthetic window-directed key events. X11 currently
 supports only the local SHORT; combining `--x11` with `--remote` or `--ui` fails
 before VM preparation. Each result identifies its backend, screenshot, original

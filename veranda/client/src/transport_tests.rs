@@ -196,6 +196,11 @@ while True:
     names = {'owner.inventory':'owner-inventory', 'context.get':'context',
              'profile.list':'profile-list', 'settings.list':'settings-list',
              'host.sync.status':'host-sync-status', 'operation.plan':'operation-exact'}
+    if method == 'profile.list' and mode.startswith('manager-profile-'):
+        result = fixture('profile-list')['result']
+        result['profiles'][0].update(eligible=False, eligibility=mode.removeprefix('manager-profile-'))
+        reply(request, result)
+        continue
     reply(request, fixture(names[method])['result'] if method in names else {'pong':True})
 "#;
 

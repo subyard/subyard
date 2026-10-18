@@ -23,6 +23,120 @@ fixture = memory.fixture
 
 
 class EvidenceChecks(unittest.TestCase):
+    def test_x11_readiness_requires_live_owned_services_and_actual_ewmh_before_gui(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(short)
+        live = SimpleNamespace(poll=lambda: None)
+        dead = SimpleNamespace(poll=lambda: 1)
+        for scenario in ('ready', 'display-dead', 'manager-dead', 'timeout', 'ewmh-unready'):
+            now = [0.0]
+            def advance(seconds): now[0] += seconds
+            replies = [SimpleNamespace(returncode=0, stdout='1280 800\n', stderr=''),
+                       SimpleNamespace(returncode=0, stdout='4\n', stderr='')]
+            if scenario == 'ewmh-unready':
+                replies = replies[:1] + [SimpleNamespace(returncode=0, stdout='0\n', stderr='')] * 2
+            with self.subTest(scenario=scenario), \
+                    patch.object(short.fixture, 'private_log', side_effect=lambda path: contextlib.nullcontext(io.StringIO())), \
+                    patch.object(short.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(short.time, 'sleep', side_effect=advance), \
+                    patch.object(short.subprocess, 'run', side_effect=(subprocess.TimeoutExpired('xdotool', .1)
+                                 if scenario == 'timeout' else replies)) as query, \
+                    patch.object(short.subprocess, 'Popen') as gui:
+                def launch():
+                    short.wait_x11_ready(dead if scenario == 'display-dead' else live, None, {}, .1, Path('display.log'))
+                    short.wait_x11_ready(live, dead if scenario == 'manager-dead' else live, {}, .1, Path('wm.log'))
+                    gui(['gui'])
+                if scenario == 'ready':
+                    launch()
+                    gui.assert_called_once_with(['gui'])
+                    self.assertEqual([call.args[0] for call in query.call_args_list],
+                                     [['xdotool', 'getdisplaygeometry'], ['xdotool', 'get_num_desktops']])
+                else:
+                    with self.assertRaises((AssertionError, TimeoutError)):
+                        launch()
+                    gui.assert_not_called()
+                    if scenario == 'display-dead': query.assert_not_called()
+                    if scenario == 'manager-dead': self.assertEqual(query.call_count, 1)
+                    if scenario in ('timeout', 'ewmh-unready'): self.assertEqual(now[0], .1)
+
+    def test_default_input_requires_the_actual_body_and_expected_typed_focus(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(LABEL=29, LIST_ITEM=32, PUSH_BUTTON=43, PAGE_TAB=37),
+                                StateType=SimpleNamespace(SHOWING='showing', SELECTED='selected', FOCUSED='focused'))
+        def node(role, name, *states):
+            return SimpleNamespace(get_role=lambda: role, get_name=lambda: name,
+                                   get_state_set=lambda: SimpleNamespace(contains=lambda state: state in states))
+        selected = node(32, 'Local owner / default', 'showing', 'selected')
+        body = node(29, 'Local owner / default', 'showing')
+        summary = 'Yard state: NOT_CREATED\n10 projects\nObserved: 2026-10-18T08:47:03Z'
+        for role, name, physical_key in ((43, 'Refresh', 'space'), (37, 'Projects', 'space'),
+                                         (29, summary, 'shift+Tab')):
+            correct = node(role, name, 'showing', 'focused')
+            for items in ([selected, node(29, 'Local owner / fleet-01', 'showing'), correct],
+                          [selected, body, node(43, 'Reconcile', 'showing', 'focused')],
+                          [selected, body, node(43 if role == 29 else 29, name, 'showing', 'focused')],
+                          [selected, body, node(role, name + ' wrong', 'showing', 'focused')]):
+                with self.subTest(role=role, name=name, items=items), \
+                        patch.object(driver.time, 'monotonic', return_value=0), \
+                        patch.object(driver, 'x11_key') as key:
+                    with self.assertRaises(AssertionError):
+                        driver.default_input(items, atspi, (role, name), 1, lambda: key(77, physical_key))
+                    key.assert_not_called()
+            with patch.object(driver.time, 'monotonic', return_value=0), \
+                    patch.object(driver, 'x11_key') as key:
+                driver.default_input([selected, body, correct], atspi, (role, name), 1, lambda: key(77, physical_key))
+                key.assert_called_once_with(77, physical_key)
+
+    def test_whole_accessible_tree_retry_never_authorizes_partial_or_unowned_input(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        class Node:
+            def __init__(self, children=(), pid=77, count=None):
+                self.children, self.pid, self.count = children, pid, count
+            def get_process_id(self): return self.pid
+            def get_state_set(self): return SimpleNamespace(contains=lambda state: False)
+            def get_child_count(self): return len(self.children) if self.count is None else self.count
+            def get_child_at_index(self, index): return self.children[index]
+        for broken in (Node(count=-1), Node([None]), Node([Node(count=-1)])):
+            with self.subTest(broken=broken), patch.object(driver.time, 'monotonic', return_value=0), \
+                    patch.object(driver.time, 'sleep'), patch.object(driver, 'x11_key') as key:
+                trees = iter((broken, Node([Node()])))
+                diagnostics = {}
+                items = driver.complete_tree(lambda deadline: driver.owned_tree(next(trees), 77, 'defunct', deadline), 1, diagnostics)
+                self.assertEqual(len(items), 2)
+                key(77, 'space')
+                key.assert_called_once_with(77, 'space')
+                self.assertEqual(diagnostics['incomplete_tree_retries'], 1)
+        now = [0.0]
+        def advance(seconds): now[0] += seconds
+        with patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(driver.time, 'sleep', side_effect=advance), patch.object(driver, 'x11_key') as key:
+            diagnostics = {}
+            with self.assertRaises(TimeoutError):
+                driver.complete_tree(lambda deadline: driver.owned_tree(Node(count=-1), 77, 'defunct', deadline), .1, diagnostics)
+                key(77, 'space')
+            key.assert_not_called()
+            self.assertEqual(now[0], .1)
+            self.assertEqual(diagnostics['incomplete_tree_retries'], 2)
+        deep = Node()
+        for _ in range(33): deep = Node([deep])
+        large = Node([Node([Node() for _ in range(512)]) for _ in range(4)])
+        for tree, reason in ((Node(pid=88), 'foreign_accessible_node'),
+                             (Node(count=513), 'accessible_child_limit_exceeded'),
+                             (deep, 'accessible_depth_exceeded'),
+                             (large, 'accessible_node_limit_exceeded')):
+            with self.subTest(reason=reason), patch.object(driver.time, 'monotonic', return_value=0), \
+                    patch.object(driver.time, 'sleep') as retry, patch.object(driver, 'x11_key') as key:
+                with self.assertRaisesRegex(AssertionError, reason):
+                    driver.complete_tree(lambda deadline: driver.owned_tree(tree, 77, 'defunct', deadline), 1, {})
+                    key(77, 'space')
+                retry.assert_not_called()
+                key.assert_not_called()
+
     def test_failed_diagnostics_preserve_original_failure_and_remove_partial_image(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec)

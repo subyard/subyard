@@ -106,7 +106,9 @@
             "enum": [
               "allowed",
               "exclusive-role",
-              "dedicated-role-required"
+              "dedicated-role-required",
+              "lifecycle-only",
+              "policy-disabled"
             ]
           },
           "convergence": {

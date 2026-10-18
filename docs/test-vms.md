@@ -743,7 +743,7 @@ assets remain intact. The guest uses the actual checksum-pinned 0.20.0 installer
 against immutable published release metadata, two container yards and a config-only absent yard.
 The default `--baseline 0.19.0` preserves the original 0.19.1 activation fixture path. A first transition may
 download unchanged native tool pins once to establish trustworthy activation receipts. The lane
-has a 45-minute work budget and bounded marker-owned cleanup; its terminal output retains native
+has a 60-minute work budget and bounded marker-owned cleanup; its terminal output retains native
 phase logs and reports cleanup separately. It does not use external GitHub accounts or manage the
 outer yard's lifecycle.
 

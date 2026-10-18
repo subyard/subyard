@@ -14,11 +14,12 @@ def read_only_commands(package, *, project="subyard", instance="yard", user="dev
     owner = (package / 'owner.sh').read_text()
     invocation = owner.split('| incus exec ', 1)[1].split('\n}', 1)[0].replace('\\\n', '')
     substitutions = {'$YARD_INSTANCE_NAME': instance, '$INCUS_PROJECT': project,
-                     'DEV_USER=$DEV_USER': 'DEV_USER='+user, '$@': '--check-removed'}
+                     'DEV_USER=$DEV_USER': 'DEV_USER='+user,
+                     'GITHUB_GIT_MODE=${GITHUB_GIT_MODE:-off}': 'GITHUB_GIT_MODE=off', '$@': '--check-removed'}
     removed = ['exec'] + [substitutions.get(word, word) for word in shlex.split(invocation)]
-    assert removed[:11] == ['exec', instance, '--project', project, '--env',
-                            'DEV_USER='+user, '--', 'bash', '-euo', 'pipefail', '-c']
-    assert removed[12:] == ['subyard', '--check-removed']
+    assert removed[:13] == ['exec', instance, '--project', project, '--env',
+                            'DEV_USER='+user, '--env', 'GITHUB_GIT_MODE=off', '--', 'bash', '-euo', 'pipefail', '-c']
+    assert removed[14:] == ['subyard', '--check-removed']
     return [(prefix + ['getent', 'passwd', user], f'{user}:x:1000:1000::/home/{user}:/bin/bash\n'),
             (removed, ''),
             (prefix + ['sh', '-c', probe, 'subyard', user], ''),
