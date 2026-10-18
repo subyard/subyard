@@ -42,12 +42,14 @@ Missing htop returns an owner error; the ordinary host Shell remains available.
 Start, Stop, Reconcile and reported-preset named-yard creation prepare owner plans.
 Creation targets an existing owner session; selecting an unknown yard never creates it.
 
-Profiles show effective `ENVIRONMENT_PROFILES` and layer provenance separately
+Profiles show requested and effective `ENVIRONMENT_PROFILES`, selection presence,
+owner reasons, source groups and layer provenance separately
 from observed convergence: `current` is Applied, `changes-required` is Changes
 required, `unknown` is Unavailable and `not-applicable` is N/A. Checkboxes edit a
 nonsecret draft; Review selection prepares a config plan. Provision is a separate
-reviewed operation. The current RPC projection has no profile descriptions or
-separate desired-selection DTO, so those fields are absent. Settings display typed
+reviewed operation. Ordered whole-list drafts preserve hidden names, duplicates and
+explicit empty selections across refresh and restart. Profile descriptions are not
+provided by the owner. Settings display typed
 availability, effective/default values, allowed scopes and provenance. Public
 editable scalar values have scoped Set/Unset review; protected path/file/executable
 values and credentials are excluded. Profile selection has its own surface.
@@ -126,10 +128,10 @@ observed child death and fixture cleanup. Configured records do not establish
 container start/provision lifecycle. A captured screenshot is separate from any
 latency or resource measurement.
 The X11 driver verifies that its one visible window belongs to the exact owned
-GUI PID before activation and each of its supported keys. It does not use
-accessibility actions or synthetic window-directed key events. X11 currently
-supports only the local SHORT; combining `--x11` with `--remote` or `--ui` fails
-before VM preparation. Each result identifies its backend, screenshot, original
+GUI PID before activation and each key or text event, and verifies the active
+window again after activation. It does not use
+accessibility actions or synthetic window-directed key events. Both X11 and Wayland support `--remote` and `--remote --ui`;
+text uses their native keyboard injection tools. Each result identifies its backend, screenshot, original
 GUI exit and observed process identities.
 
 Use the existing [candidate-bundle transport](../../docs/test-vms.md) to include
@@ -204,6 +206,29 @@ The helper does not measure resource/latency budgets, create running
 yards or establish full UX/IME/platform/package behavior.
 The client does not retain each engine/SSH child's original wait status; observed
 identity death after app-directed shutdown must not be reported as a child exit0.
+
+For repeated fresh VM leases, `--prepared-assets DIRECTORY` accepts an explicitly
+staged private directory instead of rebuilding the runtime and downloading the
+base image for every lifetime. Its `prepared-assets.json` binds the runtime
+bundle, checksum, manifest and provenance to the supplied engine version/SHA and
+staged compiled helpers, plus the exported `images:debian/13` container's full
+fingerprint, architecture and image parts. Every listed file must be an owned
+independent regular file with mode `0600`; directories must be plain `0700`.
+Missing, additional, symlinked or changed inputs fail before installation.
+The default source-packaging path remains available when the option is absent.
+
+Prepared assets still pass through the normal runtime installer, installed-engine
+identity check, migration/readiness check and canonical yard init/teardown. The
+fixture imports only a previously absent image into the allocated guest, serves
+that one owned public image through the guest Incus daemon on HTTPS loopback,
+and pins both primary and fallback image references to its full fingerprint.
+The remote uses the daemon certificate read through the local API, an exclusive
+client certificate pin and an independent TLS identity check. Existing listeners,
+image/alias collisions and remote collisions are rejected. Exact owned remote,
+listener, pin and image cleanup follows product teardown; unrelated client
+settings and projects are preserved. Installed CLI help, actual import/export,
+TLS routing through the canonical project and native cleanup require a leased
+VM result; host-free artifact contracts do not establish those properties.
 
 ## Linux GTK package preparation
 

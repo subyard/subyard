@@ -1425,9 +1425,24 @@ pub struct Provenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<String>,
 }
+// Go nil slices encode as null. A custom deserializer permits null, while
+// deliberately omitting serde(default) keeps absent wire fields an error.
+fn nullable_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
 #[derive(Deserialize, Serialize)]
 pub struct Selection {
     value: String,
+    #[serde(deserialize_with = "nullable_vec")]
+    requested: Vec<String>,
+    #[serde(deserialize_with = "nullable_vec")]
+    effective: Vec<String>,
+    present: bool,
+    #[serde(deserialize_with = "nullable_vec")]
     provenance: Vec<Provenance>,
 }
 #[derive(Deserialize, Serialize)]
@@ -1438,12 +1453,17 @@ pub struct Profile {
     has_yard_preset: bool,
     descriptor_version: Option<u32>,
     selected: bool,
+    requested: bool,
+    effective: bool,
+    reason: String,
+    source_group: String,
     provisionable: bool,
     provision_scope: String,
     eligible: bool,
     eligibility: String,
     convergence: String,
     diagnostic: Option<String>,
+    #[serde(deserialize_with = "nullable_vec")]
     resources: Vec<String>,
 }
 #[derive(Deserialize)]
@@ -1452,6 +1472,7 @@ struct ProfileList {
     schema_version: u32,
     yard_name: String,
     selection: Selection,
+    #[serde(deserialize_with = "nullable_vec")]
     profiles: Vec<Profile>,
 }
 impl ProfileList {
@@ -1460,9 +1481,16 @@ impl ProfileList {
             || self.yard_name != yard
             || self.profiles.len() > 256
             || !list_text(&self.selection.value)
+            || [&self.selection.requested, &self.selection.effective]
+                .iter()
+                .any(|names| {
+                    names.join(" ").len() > 8192 || names.iter().any(|name| !safe_name(name))
+                })
             || !profile_provenance_valid(&self.selection.provenance)
             || self.profiles.iter().any(|profile| {
                 !safe_name(&profile.name)
+                    || !list_text(&profile.reason)
+                    || !list_text(&profile.source_group)
                     || profile
                         .descriptor_version
                         .is_some_and(|version| version != 1)
@@ -2102,6 +2130,15 @@ impl Provenance {
     }
 }
 impl Selection {
+    pub fn requested(&self) -> &[String] {
+        &self.requested
+    }
+    pub fn effective(&self) -> &[String] {
+        &self.effective
+    }
+    pub fn present(&self) -> bool {
+        self.present
+    }
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -2110,6 +2147,18 @@ impl Selection {
     }
 }
 impl Profile {
+    pub fn requested(&self) -> bool {
+        self.requested
+    }
+    pub fn effective(&self) -> bool {
+        self.effective
+    }
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+    pub fn source_group(&self) -> &str {
+        &self.source_group
+    }
     pub fn name(&self) -> &str {
         &self.name
     }

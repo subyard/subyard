@@ -759,3 +759,80 @@ func TestOwnerProfileInventoryExcludesRequestedLifecycleOnlyPackage(t *testing.T
 	}
 	t.Fatal("cleanup package missing from inventory")
 }
+
+// Check the declared profile metadata against the real RPC projection, without
+// introducing a second general-purpose JSON Schema implementation.
+func TestOwnerProfileRPCMetadataMatchesPublishedSchema(t *testing.T) {
+	handler, _, _ := ownerQueryFixture(t)
+	value, err := handler.Handle(context.Background(), rpc.Call{Method: "profile.list", Params: json.RawMessage(`{}`)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	schemaRaw, err := os.ReadFile(filepath.Join("..", "..", "api", "yard-rpc", "v1", "profile-list.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(schemaRaw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	check := func(name string, declaration map[string]any, emitted map[string]any, fields []string) {
+		t.Helper()
+		declared := declaration["properties"].(map[string]any)
+		required := declaration["required"].([]any)
+		for key := range emitted {
+			if _, ok := declared[key]; !ok {
+				t.Fatalf("%s emitted undeclared %s", name, key)
+			}
+		}
+		for _, field := range fields {
+			if !slices.Contains(required, any(field)) {
+				t.Fatalf("%s does not require %s", name, field)
+			}
+			if _, ok := emitted[field]; !ok {
+				t.Fatalf("%s omitted %s", name, field)
+			}
+		}
+	}
+	selectionSchema := properties["selection"].(map[string]any)
+	selection := wire["selection"].(map[string]any)
+	check("selection", selectionSchema, selection, []string{"value", "requested", "effective", "present", "provenance"})
+	// The production DTO also admits nil slices. They remain explicit null fields.
+	nullable := value.(ownerapi.ProfileList)
+	nullable.Selection.Requested = nil
+	nullable.Selection.Effective = nil
+	nullableRaw, err := json.Marshal(nullable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nullableWire map[string]any
+	if err := json.Unmarshal(nullableRaw, &nullableWire); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"requested", "effective"} {
+		got, present := nullableWire["selection"].(map[string]any)[field]
+		if !present || got != nil {
+			t.Fatalf("nil %s omitted or changed", field)
+		}
+	}
+	for _, field := range []string{"requested", "effective", "provenance"} {
+		declaration := selectionSchema["properties"].(map[string]any)[field].(map[string]any)
+		types, ok := declaration["type"].([]any)
+		if !ok || !slices.Contains(types, any("array")) || !slices.Contains(types, any("null")) {
+			t.Fatalf("%s rejects Go slice wire values", field)
+		}
+	}
+	rowSchema := properties["profiles"].(map[string]any)["items"].(map[string]any)
+	for _, row := range wire["profiles"].([]any) {
+		check("profile", rowSchema, row.(map[string]any), []string{"requested", "effective", "reason", "sourceGroup"})
+	}
+}

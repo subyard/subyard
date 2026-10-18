@@ -4,8 +4,8 @@ use gtk::Orientation;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
-use subyard_veranda::presentation::FormLifetime;
-use subyard_veranda::state::{repository_url, AppState, Scope};
+use subyard_veranda::presentation::{profile_selection, toggle_profile, FormLifetime};
+use subyard_veranda::state::{repository_url, AppState, Scope, PROFILE_SELECTION};
 use subyard_veranda::worker::Details;
 use veranda_lib::client::{Fact, HostSyncStatus, Profile, Provenance, Setting};
 
@@ -50,7 +50,7 @@ struct Forms {
     lifetime: FormLifetime,
     settings: HashMap<String, SettingRow>,
     profiles: HashMap<String, ProfileRow>,
-    selected: Rc<RefCell<BTreeSet<String>>>,
+    selected: Rc<RefCell<Vec<String>>>,
     selection: Option<gtk::Label>,
     apply_profiles: Option<gtk::Button>,
     creation: Option<Creation>,
@@ -164,7 +164,8 @@ fn profile_fact(profile: &Profile) -> String {
         _ => "Unavailable",
     };
     format!(
-        "Observed convergence: {convergence}\nEligibility: {}\n{}\nResources: {}",
+        "Requested: {} · Effective: {}\nReason: {} · Source: {}\nObserved convergence: {convergence}\nEligibility: {}\n{}\nResources: {}",
+        profile.requested(), profile.effective(), profile.reason(), profile.source_group(),
         profile.eligibility(),
         profile.diagnostic().unwrap_or(""),
         profile.resources().join(", ")
@@ -397,8 +398,11 @@ impl Pages {
                     .selection
                     .get_or_insert_with(|| label(&self.profiles, ""));
                 selection.set_text(&format!(
-                    "Effective profile selection: {}\n{}",
-                    details.selection().value(),
+                    "Requested profile selection: {}\nEffective profile selection: {}\nSelection present: {}{}\n{}",
+                    details.selection().requested().join(" "),
+                    details.selection().effective().join(" "),
+                    details.selection().present(),
+                    if details.selection().present() { "" } else { " (absent; editing owner defaults)" },
                     provenance(details.selection().provenance())
                 ));
                 let current: BTreeSet<_> = details
@@ -406,10 +410,13 @@ impl Pages {
                     .iter()
                     .map(|p| p.name().to_owned())
                     .collect();
-                forms
-                    .selected
-                    .borrow_mut()
-                    .retain(|name| current.contains(name));
+                *forms.selected.borrow_mut() = profile_selection(
+                    state,
+                    scope,
+                    details.selection().present(),
+                    details.selection().requested(),
+                    details.selection().effective(),
+                );
                 forms.profiles.retain(|name, row| {
                     if current.contains(name) || row.check.has_focus() {
                         true
@@ -429,14 +436,13 @@ impl Pages {
                     if !forms.profiles.contains_key(profile.name()) {
                         let root = column();
                         let check = gtk::CheckButton::with_label(profile.name());
-                        let field = format!("profile:{}", profile.name());
-                        let active = state
-                            .value(scope, &field)
-                            .map_or(profile.selected(), |value| value == "true");
-                        check.set_active(active);
-                        if active {
-                            forms.selected.borrow_mut().insert(profile.name().into());
-                        }
+                        check.set_active(
+                            forms
+                                .selected
+                                .borrow()
+                                .iter()
+                                .any(|name| name == profile.name()),
+                        );
                         let chosen = forms.selected.clone();
                         let name = profile.name().to_owned();
                         let cb = callback.clone();
@@ -445,12 +451,11 @@ impl Pages {
                             if updating.get() {
                                 return;
                             }
-                            if check.is_active() {
-                                chosen.borrow_mut().insert(name.clone());
-                            } else {
-                                chosen.borrow_mut().remove(&name);
-                            }
-                            cb(Action::Draft(field.clone(), check.is_active().to_string()));
+                            toggle_profile(&mut chosen.borrow_mut(), &name, check.is_active());
+                            cb(Action::Draft(
+                                PROFILE_SELECTION.into(),
+                                chosen.borrow().join(" "),
+                            ));
                         });
                         root.append(&check);
                         let fact = label(&root, "");
@@ -477,19 +482,14 @@ impl Pages {
                     row.provision.set_visible(profile.provisionable());
                     row.provision
                         .set_sensitive(plans && profile.provisionable() && profile.eligible());
-                    // No user draft: update the selection fact without disrupting
-                    // a focused check. Editor text buffers are never reset here.
-                    if state
-                        .value(scope, &format!("profile:{}", profile.name()))
-                        .is_none()
-                        && !row.check.has_focus()
-                    {
-                        row.check.set_active(profile.selected());
-                        if profile.selected() {
-                            forms.selected.borrow_mut().insert(profile.name().into());
-                        } else {
-                            forms.selected.borrow_mut().remove(profile.name());
-                        }
+                    if !row.check.has_focus() {
+                        row.check.set_active(
+                            forms
+                                .selected
+                                .borrow()
+                                .iter()
+                                .any(|name| name == profile.name()),
+                        );
                     }
                 }
                 if forms.apply_profiles.is_none() {

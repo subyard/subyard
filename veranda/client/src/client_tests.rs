@@ -3754,3 +3754,90 @@ fn registration_winning_cancel_race_returns_its_committed_outcome_once() {
     assert!(!attempt.is_cancelled());
     assert_eq!(attempt.publish(|| Ok(8)).unwrap_err().code, "cancelled");
 }
+
+#[test]
+fn profile_intent_metadata_is_required_and_nullable_lists_are_real_owner_values() {
+    let wire = fixture("profile-list");
+    let decoded = decode::<ProfileList>(wire.clone()).unwrap();
+    let selection = serde_json::to_value(&decoded.selection).unwrap();
+    for field in ["requested", "effective", "present"] {
+        assert_eq!(
+            selection.get(field),
+            wire["selection"].get(field),
+            "lost {field}"
+        );
+    }
+    for field in ["requested", "effective", "present", "provenance"] {
+        let mut missing = wire.clone();
+        missing["selection"].as_object_mut().unwrap().remove(field);
+        assert!(decode::<ProfileList>(missing).is_err(), "missing {field}");
+    }
+    for field in ["requested", "effective", "reason", "sourceGroup"] {
+        let mut missing = wire.clone();
+        missing["profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            decode::<ProfileList>(missing).is_err(),
+            "missing row {field}"
+        );
+    }
+    for value in [json!(null), json!([])] {
+        let mut nullable = wire.clone();
+        for field in ["requested", "effective", "provenance"] {
+            nullable["selection"][field] = value.clone();
+        }
+        nullable["profiles"][0]["resources"] = value;
+        decode::<ProfileList>(nullable)
+            .unwrap()
+            .validate("default")
+            .unwrap();
+    }
+}
+
+#[test]
+fn profile_metadata_is_generic_bounded_and_value_keeps_owner_whitespace() {
+    let mut wire = fixture("profile-list");
+    wire["selection"]["value"] = json!("  owner  supplied\tvalue ");
+    wire["profiles"][0]["reason"] = json!("future owner reason");
+    wire["profiles"][0]["sourceGroup"] = json!("future owner source");
+    let decoded = decode::<ProfileList>(wire.clone()).unwrap();
+    decoded.validate("default").unwrap();
+    assert_eq!(decoded.selection.value(), "  owner  supplied\tvalue ");
+    assert_eq!(decoded.profiles[0].reason(), "future owner reason");
+    assert_eq!(decoded.profiles[0].source_group(), "future owner source");
+    for field in ["reason", "sourceGroup"] {
+        let mut bad = wire.clone();
+        bad["profiles"][0][field] = json!("x".repeat(8193));
+        assert!(decode::<ProfileList>(bad)
+            .unwrap()
+            .validate("default")
+            .is_err());
+    }
+    wire["selection"]["requested"] = json!(vec!["a"; 4097]);
+    assert!(decode::<ProfileList>(wire)
+        .unwrap()
+        .validate("default")
+        .is_err());
+}
+
+#[test]
+fn profile_intent_large_duplicate_lists_use_existing_owner_byte_bound() {
+    let mut wire = fixture("profile-list");
+    for count in [1025, 4096] {
+        let names = vec!["a"; count];
+        wire["selection"]["value"] = json!(names.join(" "));
+        wire["selection"]["requested"] = json!(names);
+        wire["selection"]["effective"] = wire["selection"]["requested"].clone();
+        decode::<ProfileList>(wire.clone())
+            .unwrap()
+            .validate("default")
+            .unwrap();
+    }
+    wire["selection"]["requested"] = json!(vec!["a"; 4097]);
+    assert!(decode::<ProfileList>(wire)
+        .unwrap()
+        .validate("default")
+        .is_err());
+}

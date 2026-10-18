@@ -61,16 +61,49 @@ def wait_x11_ready(display, manager, env, deadline, log):
             time.sleep(min(.05, max(0, deadline - time.monotonic())))
 
 
+def ssh_owner_argv(state, port, account):
+    # Owner appends its RPC subcommand after this transport/engine prefix.
+    return ['ssh', '-F', 'none', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'UserKnownHostsFile=' + str(state / 'known_hosts'), '-o', 'GlobalKnownHostsFile=none',
+            '-p', port, '--', account + '@127.0.0.1', 'yard']
+
+
+def retain_lifetime_snapshot(lifetime, tree, app):
+    # Runs before ExitStack cleanup on every success/failure path. A diagnostic
+    # failure cannot replace the original action/GUI failure.
+    try:
+        lifetime['process_snapshot_before_cleanup'] = tree.sample()
+        lifetime['observed_process_history'] = tree.process_history()
+        lifetime['gui_exit_at_snapshot'] = app.poll()
+    except BaseException as error:
+        lifetime['process_snapshot_failure_type'] = type(error).__name__
+
+
+def short_scenarios(remote, owner_focus):
+    if remote and owner_focus:
+        raise ValueError('owner focus diagnostic is local only')
+    return ['owner-focus'] if owner_focus else ['connect', 'remote-restore', 'local-restore'] if remote else ['local']
+
+
+def verify_persisted_selection(selected, connection_id, scenario):
+    assert scenario in ('connect', 'remote-restore', 'local-restore')
+    assert selected['tab'] == ('Overview' if scenario == 'local-restore' else 'Projects')
+    assert selected['connectionId'] == (None if scenario == 'remote-restore' else connection_id)
+    assert selected['yardName'] == (None if scenario == 'local-restore' else 'default')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gui", type=Path)
     parser.add_argument("engine", type=Path)
-    parser.add_argument("--x11", action="store_true", help="run the local SHORT on a private Xvfb display instead of Wayland")
+    parser.add_argument("--x11", action="store_true", help="run the SHORT on a private Xvfb display instead of Wayland")
     parser.add_argument("--remote", action="store_true", help="include real loopback SSH onboarding, cancellation and saved selection lifetimes")
     parser.add_argument("--ui", action="store_true", help="include focused typed GTK pages, plan/discard and Unicode draft restoration")
+    parser.add_argument("--owner-focus", action="store_true", help="diagnose one local owner-row physical focus lifetime")
+    parser.add_argument("--prepared-assets", type=Path, help="validated staged runtime and exact Debian container image assets")
     args = parser.parse_args()
-    if args.x11 and (args.remote or args.ui):
-        parser.error("--x11 supports only the local SHORT; --remote and --ui require Wayland")
+    if args.owner_focus and (args.remote or args.ui):
+        parser.error("--owner-focus requires a local lifetime without --remote or --ui")
     if args.ui and not args.remote:
         parser.error("--ui currently requires the three --remote lifetimes")
     if os.environ.get("SUBYARD_E2E_VM") != "1" or os.getuid() == 0:
@@ -83,14 +116,17 @@ def main():
     result = {"schema_version": 1, "original_exit_code": 1, "stage": "packages",
               "run": os.environ.get("SUBYARD_E2E_RUN_ID"), "slot": os.environ.get("SUBYARD_E2E_SLOT"),
               "backend": "x11" if args.x11 else "wayland",
-              "scope": "GTK Linux Wayland local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
+              "scope": "GTK Linux local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
               "gui_sha256": hashlib.sha256(args.gui.read_bytes()).hexdigest(),
               "engine_sha256": hashlib.sha256(args.engine.read_bytes()).hexdigest()}
     try:
         with fixture.recorded_state() as state, contextlib.ExitStack() as stack:
+            state_info = state.stat()
+            result['fixture_state_identity'] = {'name': state.name, 'device': state_info.st_dev,
+                                                'inode': state_info.st_ino}
             def retain_evidence():
                 result['private_logs'] = {}
-                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
+                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'sshd.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
                     path = state / name
                     if path.exists():
                         assert path.stat().st_nlink == 1 and path.stat().st_size <= 2 * 1024 * 1024
@@ -109,7 +145,8 @@ def main():
                  "libgtk-4-1",
                  "dbus", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0", "openssh-server"], env, state / "apt-install.log", 300)
             result["stage"] = "platform"
-            stack.enter_context(fixture.prepared_platform(state, args.engine))
+            stack.enter_context(fixture.prepared_platform(state, args.engine, prepared_assets=args.prepared_assets)
+                                if args.prepared_assets is not None else fixture.prepared_platform(state, args.engine))
             for name in ("home", "runtime", "xdg-config", "xdg-cache", "xdg-data", "owner-config", "owner-data", "fleet", "compositor", "bin"):
                 probe.private_dir(state / name)
             (state / "bin/yard").symlink_to(args.engine.resolve())
@@ -162,11 +199,15 @@ def main():
                     time.sleep(.05)
                 run(['ssh-add', str(state / 'agent-key')], env, state / 'ssh-add.log', 5)
                 remote_env['SSH_AUTH_SOCK'] = env['SSH_AUTH_SOCK']
-                forced = '#!/usr/bin/python3\nimport os,pathlib,shlex,time\n'
+                captured_yards = sorted(path.name for path in (state / 'remote-config/yards').iterdir() if path.is_dir() and not path.is_symlink())
+                assert len(captured_yards) == 20 and all(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', name) for name in captured_yards)
+                result['captured_rpc_yards'] = captured_yards
+                forced = '#!/usr/bin/python3\nimport importlib.util,os,pathlib,shlex,time\n'
                 forced += 'root=pathlib.Path(' + repr(str(state)) + ')\n'
                 forced += 'args=shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND",""))\n'
-                forced += 'assert args in [["yard","rpc","--stdio"],["yard","-Y","default","rpc","--stdio"]]\n'
-                forced += 'if (root/"block").exists():\n (root/"blocked-start").touch(mode=0o600)\n time.sleep(60)\n'
+                forced += 'spec=importlib.util.spec_from_file_location("ssh_fixture",' + repr(str(ROOT / 'veranda/desktop/ssh-fixture.py')) + ')\nhelper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)\n'
+                forced += 'assert helper.allowed_rpc(args,' + repr(captured_yards) + ')\n'
+                forced += 'if helper.maybe_block(root,args,os.environ.get("SSH_CONNECTION","")):\n time.sleep(60)\n'
                 forced += 'engine=' + repr(str(args.engine.resolve())) + '\nos.execve(engine,[engine]+args[1:],' + repr(remote_env) + ')\n'
                 probe.private_file(state / 'bin/owner-rpc', forced)
                 (state / 'bin/owner-rpc').chmod(0o700)
@@ -201,14 +242,14 @@ def main():
                 # GTK actions; no mocked frames or compatibility rewrites.
                 spec = importlib.util.spec_from_file_location('remote_owner', ROOT / 'dev/e2e/veranda-owner.py')
                 owner_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(owner_module)
-                ssh = ['ssh', '-F', 'none', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                       '-o', 'UserKnownHostsFile=' + str(state / 'known_hosts'), '-o', 'GlobalKnownHostsFile=none',
-                       '-p', port, '--', account + '@127.0.0.1', 'yard rpc --stdio']
+                ssh = ssh_owner_argv(state, port, account)
+                result['stage'] = 'authenticated-ssh-preflight'
                 with fixture.private_log(state / 'ssh-preflight.log') as output, contextlib.redirect_stdout(output):
                     owner = owner_module.Owner(ssh, env=env, timeout=10)
                     try:
                         assert owner.result('rpc.negotiate')['engineVersion'] == result['fleet']['engine_version']
-                        assert len(owner.result('owner.inventory')['yards']) == 20
+                        inventory = owner.result('owner.inventory')
+                        assert sorted(yard['name'] for yard in inventory['yards']) == captured_yards
                     finally: owner.close()
                 result['authenticated_ssh_preflight'] = True
 
@@ -260,55 +301,59 @@ def main():
             else:
                 service("keyboard", ["wtype", "-s", "120000"])
             result['lifetimes'] = []
-            scenarios = ['connect', 'remote-restore', 'local-restore'] if args.remote else ['local']
+            scenarios = short_scenarios(args.remote, args.owner_focus)
             for scenario in scenarios:
                 result["stage"] = "launch-" + scenario
-                suffix = '' if scenario in ('local', 'connect') else '-' + scenario
+                suffix = '' if scenario in ('local', 'connect', 'owner-focus') else '-' + scenario
                 app_log = stack.enter_context(fixture.private_log(state / ('app' + suffix + '.log')))
                 app = subprocess.Popen([str(args.gui.resolve())], env=env, stdout=app_log, stderr=subprocess.STDOUT, start_new_session=True)
                 tree = probe.Tree(app.pid, engine=args.engine.resolve())
                 stack.enter_context(fixture.cleanup_on_exit(lambda app=app, tree=tree: tree.stop(app), "app-" + scenario))
-                driver = ROOT / "veranda/desktop/wayland-input.py"
-                capture = state / ('useful.png' if not suffix else scenario + '.png')
-                driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0", VERANDA_GTK_BACKEND=result['backend'])
-                if args.remote:
-                    driver_env.update(VERANDA_GTK_DESTINATION=destination, VERANDA_GTK_FINGERPRINT=fingerprints[0],
-                                      VERANDA_GTK_REPLACEMENT=fingerprints[1], VERANDA_GTK_BLOCK=str(state / 'block'))
-                result["stage"] = "physical-action-" + scenario
-                with fixture.private_log(state / ('input' + suffix + '.log')) as output:
-                    action = subprocess.Popen([sys.executable, str(driver)], env=driver_env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-                    action_tree = probe.Tree(action.pid)
-                    stack.enter_context(fixture.cleanup_on_exit(lambda action=action, tree=action_tree: tree.stop(action), "input-" + scenario))
-                    deadline = time.monotonic() + (180 if args.remote else 90)
-                    while action.poll() is None:
-                        tree.sample()
-                        assert time.monotonic() < deadline
-                        time.sleep(.05)
-                frames = [line[len("VERANDA_GTK_INPUT "):] for line in (state / ('input' + suffix + '.log')).read_text().splitlines() if line.startswith("VERANDA_GTK_INPUT ")]
-                assert len(frames) == 1
-                lifetime = {'scenario': scenario, 'input_exit_code': action.returncode, 'input': json.loads(frames[0])}
+                lifetime = {'scenario': scenario}
                 result['lifetimes'].append(lifetime)
-                assert action.returncode == 0
-                result["stage"] = "natural-close-" + scenario
-                lifetime['gui_original_exit_code'] = app.wait(timeout=15)
-                assert app.returncode == 0
-                history = tree.process_history()
-                assert any("local-core" in row["observed_roles"] for row in history)
-                assert all(row["alive_at_end"] is False for row in history)
-                lifetime['observed_process_history'] = history
-                lifetime['all_observed_owned_processes_naturally_dead'] = True
-                if args.remote:
-                    assert any('app-ssh-helper' in row['observed_roles'] for row in history)
-                    store = state / 'xdg-data/subyard/veranda'
-                    record = json.loads((store / 'connections.json').read_bytes())
-                    assert len(record['connections']) == 1
-                    for path in store.iterdir():
-                        info = path.lstat()
-                        assert info.st_uid == os.getuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
-                    selected = json.loads((store / 'navigation.json').read_bytes())
-                    assert selected['tab'] == 'Projects' if scenario != 'local-restore' else selected['tab'] == 'Overview'
-                    assert selected['connectionId'] == record['connections'][0]['id'] if scenario != 'remote-restore' else selected['connectionId'] is None
-                    lifetime['private_metadata_and_selection_verified'] = True
+                try:
+                    driver = ROOT / "veranda/desktop/wayland-input.py"
+                    capture = state / ('useful.png' if not suffix else scenario + '.png')
+                    driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0", VERANDA_GTK_BACKEND=result['backend'])
+                    if args.remote:
+                        driver_env.update(VERANDA_GTK_DESTINATION=destination, VERANDA_GTK_FINGERPRINT=fingerprints[0],
+                                          VERANDA_GTK_REPLACEMENT=fingerprints[1], VERANDA_GTK_BLOCK=str(state / 'block'))
+                    result["stage"] = "physical-action-" + scenario
+                    with fixture.private_log(state / ('input' + suffix + '.log')) as output:
+                        action = subprocess.Popen([sys.executable, str(driver)], env=driver_env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                        action_tree = probe.Tree(action.pid)
+                        stack.enter_context(fixture.cleanup_on_exit(lambda action=action, tree=action_tree: tree.stop(action), "input-" + scenario))
+                        deadline = time.monotonic() + (180 if args.remote else 90)
+                        while action.poll() is None:
+                            tree.sample()
+                            assert time.monotonic() < deadline
+                            time.sleep(.05)
+                    lifetime['input_exit_code'] = action.returncode
+                    frames = [line[len("VERANDA_GTK_INPUT "):] for line in (state / ('input' + suffix + '.log')).read_text().splitlines() if line.startswith("VERANDA_GTK_INPUT ")]
+                    assert len(frames) == 1
+                    lifetime.update(input_exit_code=action.returncode, input=json.loads(frames[0]))
+                    assert action.returncode == 0
+                    result["stage"] = "natural-close-" + scenario
+                    lifetime['gui_original_exit_code'] = app.wait(timeout=15)
+                    assert app.returncode == 0
+                    history = tree.process_history()
+                    assert any("local-core" in row["observed_roles"] for row in history)
+                    assert all(row["alive_at_end"] is False for row in history)
+                    lifetime['observed_process_history'] = history
+                    lifetime['all_observed_owned_processes_naturally_dead'] = True
+                    if args.remote:
+                        assert any('app-ssh-helper' in row['observed_roles'] for row in history)
+                        store = state / 'xdg-data/subyard/veranda'
+                        record = json.loads((store / 'connections.json').read_bytes())
+                        assert len(record['connections']) == 1
+                        for path in store.iterdir():
+                            info = path.lstat()
+                            assert info.st_uid == os.getuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+                        selected = json.loads((store / 'navigation.json').read_bytes())
+                        verify_persisted_selection(selected, record['connections'][0]['id'], scenario)
+                        lifetime['private_metadata_and_selection_verified'] = True
+                finally:
+                    retain_lifetime_snapshot(lifetime, tree, app)
             result['shutdown_scope'] = 'observed GUI/local engine/owned SSH PID+start identities; child wait status is not retained by client'
             result["stage"] = "cleanup"
         result.update(original_exit_code=0, fixture_cleanup="passed", stage="completed")

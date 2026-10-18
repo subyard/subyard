@@ -83,6 +83,10 @@ fn nonsecret(value: &str) -> bool {
     .iter()
     .any(|marker| lower.contains(marker))
 }
+pub const PROFILE_SELECTION: &str = "profiles:selection";
+fn profile_list_value(value: &str) -> bool {
+    value.split_whitespace().all(identity)
+}
 impl Scope {
     fn valid(&self) -> bool {
         self.connection.as_deref().is_none_or(identity) && self.yard.as_deref().is_none_or(identity)
@@ -135,7 +139,11 @@ impl AppState {
         for (index, draft) in self.drafts.iter().enumerate() {
             let allowed = matches!(
                 draft.field.as_str(),
-                "create:name" | "create:preset" | "sync:repository" | "remote:destination"
+                "create:name"
+                    | "create:preset"
+                    | "sync:repository"
+                    | "remote:destination"
+                    | "profiles:selection"
             ) || draft.field.strip_prefix("setting:").is_some_and(|name| {
                 identity(name)
                     && ![
@@ -152,6 +160,7 @@ impl AppState {
             if !draft.scope.valid()
                 || !allowed
                 || !text(&draft.value)
+                || draft.field == "profiles:selection" && !profile_list_value(&draft.value)
                 || draft.field == "sync:repository"
                     && !draft.value.is_empty()
                     && !repository_url(&draft.value)
@@ -197,6 +206,14 @@ impl AppState {
         value: String,
     ) -> Result<(), NativeError> {
         let mut next = self.clone();
+        if field == "profiles:selection" {
+            // Consolidate only after validating the replacement, and commit atomically.
+            if !profile_list_value(&value) {
+                return Err(invalid());
+            }
+            next.drafts
+                .retain(|draft| draft.scope != scope || !draft.field.starts_with("profile:"));
+        }
         if let Some(draft) = next
             .drafts
             .iter_mut()

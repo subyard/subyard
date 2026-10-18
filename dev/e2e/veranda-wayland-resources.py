@@ -21,6 +21,9 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('veranda_probe', ROOT / 'dev/measure-veranda.py')
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+spec = importlib.util.spec_from_file_location('veranda_prepared', ROOT / 'dev/e2e/veranda-prepared-assets.py')
+prepared = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(prepared)
 
 
 def output_geometry(text):
@@ -115,8 +118,12 @@ def recorded_state(observer=None):
         logs = {name: (state / name).read_text(errors='replace')
                 for name in ('apt-update.log', 'apt-install.log', 'platform-stop-check.log', 'platform-prepare.log', 'platform-remove.log',
                              'platform-cleanup.log', 'platform-release-package.log', 'platform-release-install.log',
-                             'platform-release-config.log', 'platform-release-migrate.log', 'platform-release-check.log', 'weston.log', 'probe.log', 'probe-gdk.log')
+                             'platform-release-config.log', 'platform-release-migrate.log', 'platform-release-check.log',
+                             'platform-prepared-image.log', 'weston.log', 'probe.log', 'probe-gdk.log')
                 if (state / name).is_file()}
+        for path in state.glob('builder-*.log'):
+            assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 2 * 1024 * 1024
+            logs[path.name] = path.read_text(errors='replace')
         print('VERANDA_WAYLAND_LOGS ' + json.dumps(logs), flush=True)
     with cleanup_on_exit(lambda: cleanup_state(state, identity), 'fixture', observer):
         with cleanup_on_exit(export_logs, 'logs'):
@@ -193,7 +200,7 @@ time.sleep(60)
     print('VERANDA_ROOT_STATE_CLEANED', flush=True)
 
 
-def prepare_release(state, engine, env):
+def prepare_release(state, engine, env, prepared_assets=None):
     """Commit fresh capabilities through the same-candidate installed release owner."""
     version = subprocess.check_output([str(engine), '--version'], env=env, text=True, timeout=5).strip()
     if not re.fullmatch(r'yard [A-Za-z0-9][A-Za-z0-9._+-]*', version):
@@ -205,12 +212,16 @@ def prepare_release(state, engine, env):
         with private_log(state / ('platform-release-' + name + '.log')) as log:
             if run_probe(argv, env, log, privileged=True):
                 raise RuntimeError('platform release ' + name + ' failed')
-    command(['bash', str(ROOT / 'dev/package-engine.sh'), '--version', version.removeprefix('yard '),
-             '--output-dir', str(release)], 'package')
-    bundles = list(release.glob('subyard-*-linux-*.tar.gz'))
-    if len(bundles) != 1:
-        raise RuntimeError('platform release bundle is ambiguous')
-    bundle = bundles[0]
+    if prepared_assets is None:
+        command(['bash', str(ROOT / 'dev/package-engine.sh'), '--version', version.removeprefix('yard '),
+                 '--output-dir', str(release)], 'package')
+        bundles = list(release.glob('subyard-*-linux-*.tar.gz'))
+        if len(bundles) != 1:
+            raise RuntimeError('platform release bundle is ambiguous')
+        bundle = bundles[0]
+    else:
+        assets = prepared.validate(prepared_assets, engine, version.removeprefix('yard '), ROOT)
+        bundle = Path(prepared_assets) / assets['runtime']['bundle']
     command(['bash', str(ROOT / 'scripts/install-runtime-release.sh'), '--runtime-root', str(runtime),
              '--bundle', str(bundle), '--checksum', str(bundle) + '.sha256',
              '--manifest', str(bundle) + '.manifest.json', '--provenance', str(bundle) + '.provenance.json'], 'install')
@@ -256,11 +267,11 @@ def platform_environment(state):
 
 
 @contextlib.contextmanager
-def prepared_platform(state, engine, observer=None):
+def prepared_platform(state, engine, observer=None, prepared_assets=None):
     """Use the product reconciler; keep the temporary yard outside the measured fleet."""
     platform, name, env = platform_environment(state)
     product_stop_check(state, env)
-    prepare_release(state, engine, env)
+    prepare_release(state, engine, env, prepared_assets) if prepared_assets is not None else prepare_release(state, engine, env)
 
     def product(command, log_name):
         with private_log(state / log_name) as log:
@@ -268,7 +279,29 @@ def prepared_platform(state, engine, observer=None):
         if rc:
             raise RuntimeError(log_name.removesuffix('.log') + ' failed')
 
-    with cleanup_on_exit(lambda: product(['teardown'], 'platform-cleanup.log'), 'platform', observer):
+    with contextlib.ExitStack() as assets_context:
+        if prepared_assets is not None:
+            assets = prepared.validate(prepared_assets, engine, subprocess.check_output(
+                [str(engine), '--version'], env=env, text=True, timeout=5).strip().removeprefix('yard '), ROOT)
+            image_log = assets_context.enter_context(private_log(state / 'platform-prepared-image.log'))
+            def incus_command(argv, timeout):
+                result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=timeout)
+                # Never persist unrelated remote/client configuration or certificates.
+                image_log.write(json.dumps({'command': argv[1:3], 'original_exit': result.returncode}) + '\n')
+                if '--help' in argv or argv[1:] == ['version']:
+                    image_log.write(result.stdout)
+                if result.returncode:
+                    image_log.write(result.stderr)
+                image_log.flush()
+                if result.returncode:
+                    raise subprocess.CalledProcessError(result.returncode, argv)
+                return result.stdout
+            reference = assets_context.enter_context(prepared.image_remote(
+                prepared_assets, assets, state, env, incus_command))
+            with (Path(env['SUBYARD_CONFIG_HOME']) / 'yards' / name / 'config.env').open('a') as config:
+                config.write('YARD_IMAGE=' + reference + '\nYARD_IMAGE_FALLBACK=' + reference + '\n')
+        assets_context.enter_context(cleanup_on_exit(lambda: product(['teardown'], 'platform-cleanup.log'), 'platform', observer))
         product(['init'], 'platform-prepare.log')
         product(['teardown', '--keep-data'], 'platform-remove.log')
         substrate = platform / 'incus'
