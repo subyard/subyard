@@ -264,6 +264,17 @@ else
   fail 'upgrade-only required an installation context'
 fi
 [ ! -e "$contextless_home" ] || fail 'contextless upgrade touched the data home'
+
+if TEST_UID=1000 TEST_SUDO_MODE=reexec TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
+  run_installer "$contextless_home" --upgrade-only >"$contextless_output" 2>&1; then
+  grep -Fq 'Incus is' "$contextless_output" \
+    || fail 'contextless sudo upgrade did not reach its success boundary'
+else
+  cat "$contextless_output" >&2
+  fail 'sudo upgrade-only required an installation context'
+fi
+[ ! -e "$contextless_home" ] || fail 'contextless sudo upgrade touched the data home'
+
 if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
   run_installer "$contextless_home" >"$contextless_output" 2>&1; then
   fail 'normal installation accepted missing installation authority'
