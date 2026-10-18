@@ -1384,6 +1384,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
 			cli.printRemoteStatusFacts(status, ownerEndpoint)
+			cli.printReleaseReadiness(cli.remoteReleaseReadiness(ctx, ownerEndpoint), ownerEndpoint)
 			return 0
 		}
 		if loaded.Context.AccessKind == domain.AccessRemote {
@@ -1402,14 +1403,16 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n",
 				status.Context.DevUser, status.Context.SSHPort)
 			cli.printRemoteStatusFacts(status, loaded.Context.OwnerEndpoint)
+			cli.printReleaseReadiness(cli.remoteReleaseReadiness(ctx, loaded.Context.OwnerEndpoint), loaded.Context.OwnerEndpoint)
 			return 0
 		}
 		return cli.printYardStatus(ctx, loaded)
 	}
 	results := cli.allOwnerInventoriesForStatus(ctx, loaded)
+	releases := cli.summaryReleaseReadiness(ctx, loaded, results)
 	code := 0
 	first := true
-	for _, result := range results {
+	for index, result := range results {
 		if result.err != nil {
 			code = 1
 			fmt.Fprintf(cli.options.Stderr, "Warning: owner inventory refresh: %v\n", result.err)
@@ -1428,6 +1431,11 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			fmt.Fprintf(cli.options.Stdout, "  instance %s (%s)\n", yard.Instance, yard.Kind)
 			fmt.Fprintf(cli.options.Stdout, "  ssh      %s:%d\n", yard.DevUser, yard.SSHPort)
 			fmt.Fprintf(cli.options.Stdout, "  projects %d\n", len(yard.Projects))
+			owner := ""
+			if index != 0 {
+				owner = result.inventory.HostID
+			}
+			cli.printReleaseReadiness(releases[index], owner)
 		}
 	}
 	return code
@@ -1538,6 +1546,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		fmt.Fprintf(cli.options.Stdout, "  security FAIL  (inspect: %s security)\n", cli.yardHint(status.Context))
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
+	cli.printReleaseReadiness(cli.releaseReadiness(ctx), "")
 	return 0
 }
 
@@ -3973,6 +3982,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
 		"projects", "yard-status", ownerinventory.ProfileDashboardStatusCapability, "credential-metadata", "credential-status",
 		"operation-plan", "operation-execute", "resync", "owner-inventory-v1",
+		ownerinventory.ReleaseReadinessCapability,
 		profileListCapability, settingsListCapability, hostSyncStatusCapability, sessionPrepareCapability,
 		yardBootstrapCapability,
 		credentialPrepareCapability, exactPlanCapability, operationStepsCapability,
@@ -4484,6 +4494,11 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, err
 		}
 		return boundedOwnerQuery(handler.hostSyncStatus(ctx))
+	case "release.readiness":
+		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
+			return nil, err
+		}
+		return handler.cli.releaseReadiness(ctx), nil
 	case "owner.inventory":
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err

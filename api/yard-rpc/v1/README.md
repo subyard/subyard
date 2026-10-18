@@ -66,6 +66,7 @@ engine compatibility surface, not a client fallback.
 | `integration.status` | `id`, optional `ownerOnly` | `core-results.schema.json#/$defs/integration` |
 | `project.list` | optional `live` | `core-results.schema.json#/$defs/projects` |
 | `owner.inventory` | `{}` | `owner-inventory.schema.json` |
+| `release.readiness` | `{}` | `release-readiness.schema.json`, capability `release-readiness-v1` |
 | `yard.status` | `{}` | `core-results.schema.json#/$defs/status` |
 | `credential.list` | `{}` | `core-results.schema.json#/$defs/credentials` |
 | `credential.status` | `{}` | `core-results.schema.json#/$defs/credentialStatus` |

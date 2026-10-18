@@ -17,6 +17,8 @@ import (
 
 const Capability = "owner-inventory-v1"
 
+const ReleaseReadinessCapability = "release-readiness-v1"
+
 // ProfileDashboardStatusCapability preserves the legacy closed status response while
 // allowing controllers to render profile dashboard routes through VM guest SSH.
 const ProfileDashboardStatusCapability = "yard-status-profile-dashboards-v1"
@@ -122,6 +124,21 @@ func (client Client) YardStatus(ctx context.Context) (domain.YardStatus, error) 
 		return status, errors.New("owner returned invalid yard status JSON")
 	}
 	return status, nil
+}
+
+func (client Client) ReleaseReadiness(ctx context.Context) (*domain.ReleaseReadiness, error) {
+	raw, err := client.call(ctx, "release-readiness", "release.readiness", ReleaseReadinessCapability)
+	if errors.Is(err, errCapabilityUnsupported) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var readiness domain.ReleaseReadiness
+	if err := json.Unmarshal(raw, &readiness); err != nil {
+		return nil, errors.New("owner returned invalid release readiness JSON")
+	}
+	return &readiness, nil
 }
 
 func (client Client) call(ctx context.Context, id, method, capability string) (json.RawMessage, error) {

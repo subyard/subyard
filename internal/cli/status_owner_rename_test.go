@@ -378,15 +378,23 @@ func TestHostRepairConfirmsLegacyTrustAndOwnerRename(t *testing.T) {
 	}
 }
 
-func writeStatusOwnerResponses(t *testing.T, inventory domain.OwnerInventory) {
+func writeStatusOwnerResponses(t *testing.T, inventory domain.OwnerInventory, readiness ...*domain.ReleaseReadiness) {
 	t.Helper()
 	var framed bytes.Buffer
 	codec := rpc.NewCodec(bytes.NewReader(nil), &framed)
-	for _, response := range []rpc.Response{
-		{Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate", Result: map[string]any{"capabilities": []string{ownerinventory.Capability, "yard-status"}}},
+	capabilities := []string{ownerinventory.Capability, "yard-status"}
+	if len(readiness) != 0 {
+		capabilities = append(capabilities, ownerinventory.ReleaseReadinessCapability)
+	}
+	responses := []rpc.Response{
+		{Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate", Result: map[string]any{"capabilities": capabilities}},
 		{Version: rpc.ProtocolVersion, Type: "response", ID: "inventory", Result: inventory},
 		{Version: rpc.ProtocolVersion, Type: "response", ID: "status", Result: domain.YardStatus{State: "RUNNING", ProjectCount: 1, Context: domain.Context{YardName: "default", DevUser: "dev", SSHPort: 2222}}},
-	} {
+	}
+	if len(readiness) != 0 {
+		responses = append(responses, rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "release-readiness", Result: readiness[0]})
+	}
+	for _, response := range responses {
 		if err := codec.Write(response); err != nil {
 			t.Fatal(err)
 		}

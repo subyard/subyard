@@ -90,6 +90,13 @@ func TestV0173CurrentRecoveryPreservesOriginalJournalAndAssets(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.Outcome.Status != releasetransition.StatusRecovering || len(report.Blockers) != 0 {
 				t.Fatalf("delegated report: %s, %v, stderr=%s", stdout.String(), err, stderr.String())
 			}
+			if scenario == "resume" {
+				outputSize := stdout.Len()
+				readiness, err := runtime.InspectCurrentReadiness(context.Background(), fixture.configHome)
+				if err != nil || readiness.Status != releasetransition.StatusRecovering || readiness.Retry != "yard migrate" || stdout.Len() != outputSize {
+					t.Fatalf("typed readiness lost standalone recovery or printed output: %+v, %v", readiness, err)
+				}
+			}
 			store, _ := releasetransition.NewPOSIXV2Store(fixture.configHome)
 			checked, _ := store.ReadCurrentJournal()
 			if !sameProtectedSnapshot(fixture.journal, checked) {

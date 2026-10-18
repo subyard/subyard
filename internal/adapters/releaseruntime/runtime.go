@@ -61,6 +61,7 @@ type Prepared struct {
 	run           func(context.Context) error
 	check         func(context.Context) (releasetransition.Inspection, error)
 	nativePlan    releasetransition.PlanToken
+	currentReport *currentReport
 }
 
 type verifiedPreparationError struct {

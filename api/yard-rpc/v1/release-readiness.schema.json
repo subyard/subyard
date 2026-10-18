@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-readiness.schema.json",
+  "description": "Read-only readiness of the owner's exact installed release; unavailable verification is unknown.",
+  "type": "object",
+  "properties": {
+    "status": {
+      "enum": ["ready", "migration-required", "recovering", "operator-action-required", "unknown"]
+    },
+    "code": {"type": "string", "maxLength": 8192},
+    "message": {"type": "string", "maxLength": 8192},
+    "next": {"type": "string", "maxLength": 8192}
+  },
+  "required": ["status"],
+  "additionalProperties": false
+}

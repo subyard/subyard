@@ -527,6 +527,17 @@ its optional `consequences` field preserves those explanations when the owner su
 A successful inspection exits 0 even when work remains; inspect `outcome.status` for
 readiness. Unavailable or unsupported inspection never means ready.
 
+`yard status` also reports installed release readiness for each yard's owner host:
+`release OK (ready)`, `release NOT OK` with the state, reason and next action, or
+`release unknown` when verification is unavailable. This is the same read-only
+inspection as `yard migrate --check`, bounded to 30 seconds. It never downloads a
+candidate or repairs the installation, and a non-ready release does not prevent
+the remaining yard status from being displayed. Remote status requests the
+`release-readiness-v1` capability separately from inventory, so a cached yard
+inventory cannot turn old release readiness into a current `OK`. Older owners or
+unreachable release observers report `unknown`. Readiness describes the installed
+release; it does not guarantee compatibility with a future update candidate.
+
 Migration history has a separate schema 1 compact representation at
 `release-transition/v2/history-checkpoint.json`: registry provenance, per-domain epoch, compacted
 prefix boundary and digest, and applied suffix. Before publication, `release-transition/v2/ledger.json`

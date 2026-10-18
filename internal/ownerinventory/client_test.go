@@ -359,3 +359,41 @@ func TestYardStatusCapabilitySkew(t *testing.T) {
 		})
 	}
 }
+
+func TestReleaseReadinessCapabilitySkew(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		capabilities []string
+		payload      json.RawMessage
+		wantStatus   string
+		wantError    bool
+	}{
+		{"new ready owner", []string{ReleaseReadinessCapability}, json.RawMessage(`{"status":"ready"}`), "ready", false},
+		{"new recovering owner", []string{ReleaseReadinessCapability}, json.RawMessage(`{"status":"recovering","next":"yard update"}`), "recovering", false},
+		{"old owner", []string{Capability}, json.RawMessage(`{"status":"ready"}`), "", false},
+		{"invalid response", []string{ReleaseReadinessCapability}, json.RawMessage(`[]`), "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			codec := rpc.NewCodec(nil, &output)
+			if err := codec.Write(rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "negotiate",
+				Result: map[string]any{"capabilities": test.capabilities}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := codec.Write(rpc.Response{Version: rpc.ProtocolVersion, Type: "response", ID: "release-readiness", Result: test.payload}); err != nil {
+				t.Fatal(err)
+			}
+			readiness, err := (Client{Transport: &responseTransport{payload: output.Bytes()}}).ReleaseReadiness(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("readiness=%+v err=%v", readiness, err)
+			}
+			if test.wantStatus == "" {
+				if readiness != nil {
+					t.Fatalf("unverified owner returned readiness: %+v", readiness)
+				}
+			} else if readiness == nil || readiness.Status != test.wantStatus {
+				t.Fatalf("readiness=%+v want status=%s", readiness, test.wantStatus)
+			}
+		})
+	}
+}

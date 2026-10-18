@@ -63,6 +63,20 @@ type currentSnapshot struct {
 	journal, ledger, checkpoint releasetransition.ProtectedSnapshot
 }
 
+// InspectCurrentReadiness shares migrate --check's verified, read-only inspection.
+// Missing installation metadata or an unavailable owner never implies readiness.
+func (runtime *Runtime) InspectCurrentReadiness(ctx context.Context, configHome string) (releasetransition.Outcome, error) {
+	prepared, err := runtime.PrepareCurrentTransition(ctx, []string{"--check"}, configHome, "default")
+	if err != nil {
+		return releasetransition.Outcome{}, err
+	}
+	outcome := prepared.currentReport.Outcome
+	if prepared.currentReport.Next != "" {
+		outcome.Retry = prepared.currentReport.Next
+	}
+	return outcome, nil
+}
+
 // PrepareCurrentTransition inspects and completes the exact installed current
 // release. It never selects, downloads, or publishes a release.
 func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments []string, configHome, yard string) (Prepared, error) {
@@ -405,7 +419,7 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 		blockerOutcome.Retry = report.Blockers[index].Retry
 		report.Blockers[index].Retry = CurrentReleaseRetry(blockerOutcome)
 	}
-	return Prepared{Action: "migrate.check", TargetRelease: string(report.Current), run: func(context.Context) error {
+	return Prepared{Action: "migrate.check", TargetRelease: string(report.Current), currentReport: &report, run: func(context.Context) error {
 		if parsed.json {
 			return json.NewEncoder(runtime.config.Stdout).Encode(report)
 		}
