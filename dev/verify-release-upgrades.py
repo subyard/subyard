@@ -376,6 +376,7 @@ class Fixture:
         self.runtime = self.data / "runtime"
         self.journal = self.config / "release-transition/v2/journal.json"
         self.version = version
+        self.arch = arch
         self.baseline_version = baseline_version
         self.config.mkdir(parents=True)
         control = root.parent / "incus-observation.json"
@@ -1928,7 +1929,8 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
                "migrations": ["introduce-owner-publication-state-v1", "localize-ssh-port-settings-v3"]}
     # The exact candidate identity comes from verified package bytes, not a
     # patched installed asset or a journal supplied by this fixture.
-    bundle = next(Path(fixture.env["YARD_RELEASE_BASE_URL"].removeprefix("file://")).glob(f"subyard-{fixture.version}-linux-*.tar.gz"))
+    bundle = (Path(fixture.env["YARD_RELEASE_BASE_URL"].removeprefix("file://")) /
+              f"subyard-{fixture.version}-linux-{fixture.arch}.tar.gz")
     history["target"] = fixture.version + "-" + digest(bundle)[:12]
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
