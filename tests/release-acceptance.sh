@@ -1409,10 +1409,9 @@ while True: time.sleep(1)
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
         lease = "E2E lease: slot=slot-1 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
         guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
-        for text, code, status in (("", 4, "failed"), (typed.replace("memory", "cpu"), 4, "failed"),
-                                   (typed, 23, "failed"), (typed + lease, 4, "failed"),
-                                   (typed + guest, 4, "failed"), (lease + typed, 4, "blocked"),
-                                   (guest + typed, 4, "blocked")):
+        for text, code in (("", 4), (typed.replace("memory", "cpu"), 4), (typed, 23),
+                           (typed + lease, 4), (typed + guest, 4), (lease + typed, 4),
+                           (guest + typed, 4), (typed + lease + typed, 4), (typed + guest + typed, 4)):
             with self.subTest(text=text, code=code), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
                 output = Path(temporary)
                 blocked, following = "profile:sample/one", "profile:sample/two"
@@ -1426,11 +1425,21 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64):
                     self.assertEqual(m.run_checks(output, [1], [], False), 1)
                 persisted = json.loads((output / "receipt.json").read_text())
-                self.assertEqual(persisted["checks"][blocked]["status"], status)
-                self.assertEqual(persisted["checks"][blocked]["exit_code"], code)
+                attempt = persisted["checks"][blocked]
+                self.assertEqual(attempt["status"], "failed")
+                self.assertEqual(attempt["exit_code"], code)
+                self.assertEqual(attempt["termination"], "exit")
+                self.assertEqual(attempt["failure_class"], "unknown")
+                self.assertNotIn("reason", attempt)
+                self.assertEqual(persisted["result"], "failed")
                 self.assertEqual(persisted["checks"][following]["status"], "pending")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
                 self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked])
+                results = [item for item in events if item["event"] == "check-result"]
+                self.assertEqual([(item["status"], item["exit_code"], item["failure_class"]) for item in results],
+                                 [("failed", code, "unknown")])
+                self.assertNotIn("reason", results[0])
+                self.assertEqual(events[-1]["status"], "failed")
 
     def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
         with tempfile.TemporaryDirectory() as temporary:

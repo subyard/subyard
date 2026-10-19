@@ -439,7 +439,9 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Typed capacity refusal is
+Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
+marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
+Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
 environment failure; otherwise cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
