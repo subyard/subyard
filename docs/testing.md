@@ -412,12 +412,18 @@ A repeated `run` executes only checks without a passing result. Use `--only prof
 After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
 the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
 bound to that identity and are retained; capacity alone does not require another `prepare`.
+This is a separate continuation run: retry the blocked check after conditions change, retaining
+its original attempt logs/events and applicable PASS results from the same candidate.
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. The collector requires every
 lane to pass and accepts `--only profile:NAME/ID` for one lane. Available approved slots take the
-next queued check after their controller exits; a failed or blocked worker stops its queue.
+next queued check after their controller exits. A typed `blocked/capacity_memory` or
+`blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
+next independent check. The blocked attempt is recorded and is never requeued in that run;
+the candidate remains incomplete. Failures, interruptions, unknown refusals and attempts that
+reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform

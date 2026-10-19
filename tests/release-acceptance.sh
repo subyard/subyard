@@ -1349,7 +1349,90 @@ while True: time.sleep(1)
                 ("fixture/unfinished", "start", 0, 0)])
             self.assertNotIn("do-not-export", json.dumps(events))
 
-    def test_interrupted_attempt_saved_and_blocked_worker_stops_queue(self):
+    def test_prelease_capacity_refusal_continues_once_and_later_retries_same_candidate(self):
+        for resource in ("memory", "disk"):
+            with self.subTest(resource=resource), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                output = Path(temporary)
+                source = output / "source"
+                source.mkdir()
+                available = output / "capacity-available"
+                controller = source / "controller.sh"
+                controller.write_text("#!/bin/bash\n"
+                    'test ! -f "$1" || exit 0\n'
+                    "printf 'agent-e2e: retryable capacity refusal for slot-1: resource=" + resource +
+                    "; retry after resources become available\\n'\nexit 4\n")
+                blocked, following = "profile:sample/one", "profile:sample/two"
+                checks = {"verify": ["true"], blocked: ["bash", str(controller), str(available)], following: ["true"]}
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
+                calls, original = [], {}
+                execute = m.execute
+                def observe(name, *args):
+                    calls.append((name, args[-1]))
+                    result = execute(name, *args)
+                    original[name] = copy.deepcopy(result)
+                    return result
+                with patch.object(m, "load_bound", return_value=(source, receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "execute", side_effect=observe):
+                    self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                    self.assertEqual(calls, [(blocked, 1), (following, 1)])
+                    persisted = json.loads((output / "receipt.json").read_text())
+                    self.assertEqual(persisted["result"], "incomplete")
+                    self.assertEqual(persisted["checks"][blocked], original[blocked] | {
+                        "execution_environment": m.execution_environment()})
+                    self.assertEqual(persisted["checks"][blocked]["reason"], "capacity_" + resource)
+                    self.assertEqual(persisted["checks"][following]["status"], "passed")
+                    events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+                    attempts = [item for item in events if item["event"] == "check-result"]
+                    self.assertEqual([(item["check"], item["status"]) for item in attempts],
+                                     [(blocked, "blocked"), (following, "passed")])
+                    self.assertEqual(events[-1]["status"], "incomplete")
+                    blocked_log = output / original[blocked]["log"]
+                    log_bytes = blocked_log.read_bytes()
+                    available.touch()
+                    calls.clear()
+                    self.assertEqual(m.run_checks(output, [1], [blocked], False), 0)
+                    self.assertEqual(calls, [(blocked, 1)])
+                    retried = json.loads((output / "receipt.json").read_text())
+                    self.assertEqual(retried["result"], "passed")
+                    self.assertEqual(retried["checks"][following], persisted["checks"][following])
+                    for key in ("source_fingerprint", "candidate_bundle_sha256"):
+                        self.assertEqual(retried[key], persisted[key])
+                    self.assertEqual(blocked_log.read_bytes(), log_bytes)
+                    self.assertEqual((output / "events.jsonl").read_text().splitlines()[:len(events)],
+                                     [json.dumps(item, sort_keys=True) for item in events])
+
+    def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
+        typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
+        lease = "E2E lease: slot=slot-1 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
+        guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+        for text, code, status in (("", 4, "failed"), (typed.replace("memory", "cpu"), 4, "failed"),
+                                   (typed, 23, "failed"), (typed + lease, 4, "failed"),
+                                   (typed + guest, 4, "failed"), (lease + typed, 4, "blocked"),
+                                   (guest + typed, 4, "blocked")):
+            with self.subTest(text=text, code=code), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                output = Path(temporary)
+                blocked, following = "profile:sample/one", "profile:sample/two"
+                command = ["python3", "-c", "import sys; sys.stdout.write(" + repr(text) + "); sys.exit(" + str(code) + ")"]
+                checks = {"verify": ["true"], blocked: command, following: ["true"]}
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
+                with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64):
+                    self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                persisted = json.loads((output / "receipt.json").read_text())
+                self.assertEqual(persisted["checks"][blocked]["status"], status)
+                self.assertEqual(persisted["checks"][blocked]["exit_code"], code)
+                self.assertEqual(persisted["checks"][following]["status"], "pending")
+                events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked])
+
+    def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             names = ["verify", "profile:sample/one", "profile:sample/two"]

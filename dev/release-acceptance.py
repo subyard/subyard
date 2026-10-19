@@ -444,7 +444,7 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
     return offset, discard
 
 
-def capacity_reason(log):
+def capacity_reason(log, *, prelease=False):
     # The runner emits this only after validating the typed broker refusal.
     reason = None
     with log.open("rb") as stream:
@@ -453,6 +453,8 @@ def capacity_reason(log):
             if match:
                 reason = match[1].decode()
             elif line.startswith(b"E2E lease:") or re.match(rb"E2E_PHASE phase=guest state=start ", line):
+                if prelease:
+                    return None
                 reason = None
     return reason
 
@@ -868,7 +870,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
             with lock:
                 receipt["checks"][name] = result
                 save(output, receipt)
-            if result["status"] != "passed":
+            # Only an owning typed refusal before any lease/guest boundary frees
+            # this worker for another check. Preserve the attempt without retrying it.
+            capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
+                                and result.get("termination") == "exit"
+                                and result.get("reason") in ("capacity_memory", "capacity_disk")
+                                and capacity_reason(output / result["log"], prelease=True) == result["reason"].removeprefix("capacity_"))
+            if result["status"] != "passed" and not capacity_blocked:
                 return
     with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
         futures = [pool.submit(collect, slot) for slot in slots]
