@@ -7,7 +7,8 @@ out="${1:-$ROOT/.build/release-owner-delivery/check}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 export TMPDIR=/tmp
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.build/release-owner-delivery/target}"
+cargo_environment="$(python3 "$ROOT/dev/cargo_cache.py" --target-dir "$ROOT/.build/release-owner-delivery/target" --snapshot --run-target --manifest-path release-owner/Cargo.toml)"
+eval "$cargo_environment"
 version=1.0.0-release-owner-delivery
 for arch in amd64 arm64; do
   ./dev/package-engine.sh --experimental-release-owner --version "$version" --arch "$arch" --output-dir "$out/$arch"

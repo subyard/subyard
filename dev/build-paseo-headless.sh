@@ -49,7 +49,7 @@ if ! python3 "$helper" inside 2>/dev/null; then
     /bin/bash "$SCRIPT_DIR/build-paseo-headless.sh" --output-dir "$OUTPUT_DIR" --arch "$TARGET_ARCH"
 fi
 temporary="$(mktemp -d /tmp/subyard-paseo-build.XXXXXX)"
-npm_cache="$temporary/npm-cache"
+npm_cache="${SUBYARD_NPM_PUBLIC_CACHE:-$temporary/npm-cache}"
 npm_diagnostics="$temporary/npm-diagnostics"
 mkdir -p "$npm_cache" "$npm_diagnostics" "$temporary/npm-home" "$temporary/npm-logs"
 : >"$temporary/npm-user.npmrc"

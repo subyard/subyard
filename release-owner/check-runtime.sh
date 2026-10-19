@@ -4,16 +4,9 @@ cd "$(dirname "$0")/.."
 export TMPDIR=/tmp
 out="$PWD/.build/release-owner-runtime"
 mkdir -p "$out"
-# Prefer the configured stable toolchain; retain the existing task cache only
-# as a compatibility fallback. This cache has no source-tree pilot dependency.
-if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
- if [[ -x .build/migrationhistory-pilot/toolchain/cargo/bin/cargo ]]; then
-  export CARGO_HOME="$PWD/.build/migrationhistory-pilot/toolchain/cargo"
-  export RUSTUP_HOME="$PWD/.build/migrationhistory-pilot/toolchain/rustup"
-  export PATH="$CARGO_HOME/bin:$PATH"
- fi
-fi
-export CARGO_TARGET_DIR="$out/target"
+# Keep downloads and intermediates shared; final artifacts belong to this check.
+cargo_environment="$(python3 dev/cargo_cache.py --target-dir "${build:-$out/target}" --snapshot --run-target --manifest-path release-owner/Cargo.toml)"
+eval "$cargo_environment"
 export SUBYARD_RUST_RUNTIME_CORPUS="$out/runtime-corpus.json"
 export SUBYARD_RUST_SETTINGS_CORPUS="$out/settings-corpus.json"
 export SUBYARD_RUST_LINKS_CORPUS="$out/links-corpus.json"
@@ -31,7 +24,7 @@ export SUBYARD_RUST_CODEC_FAULT_PEER="$out/codec-faults"
 go build -o "$SUBYARD_RUST_CODEC_FAULT_PEER" release-owner/tests/fixtures/codec_faults.go
 go build -o "$SUBYARD_RUST_OPERATION_PEER" release-owner/tests/fixtures/operation_peer.go
 go version
-rustc --version
+"$RUSTC" --version
 export SUBYARD_RUST_HISTORY_CORPUS="$out/history-corpus.json"
 go test -race -count=1 -v ./internal/migrationhistory -run '^TestRustHistoryOracleCorpus$'
 cargo test --locked --manifest-path release-owner/Cargo.toml --test history_oracle -- --ignored --nocapture
@@ -43,14 +36,14 @@ go test -count=1 -v ./internal/adapters/releaseruntime -run '^TestRollbackSuppor
 go test -count=1 -v ./internal/adapters/reconcileruntime -run '^TestPreparedRuntimeRecipeCorpus$'
 cargo test --locked --manifest-path release-owner/Cargo.toml --lib --bins -- --nocapture
 cargo test --locked --manifest-path release-owner/Cargo.toml --doc
-cargo clippy --locked --manifest-path release-owner/Cargo.toml --all-targets --all-features -- -D warnings
+cargo clippy --locked --manifest-path release-owner/Cargo.toml --all-targets --all-features -- --remap-path-prefix="$PWD=." -D warnings
 go test -race -count=1 ./internal/config ./internal/adapters/incusclient ./internal/adapters/reconcileruntime ./internal/releaseowner
 go build -o "$out/yard" ./cmd/yard
 cargo build --locked --manifest-path release-owner/Cargo.toml --bin subyard-release-owner
-cargo build --locked --manifest-path release-owner/Cargo.toml --features fixture-cuts --target-dir "$out/target-fixture" --bin subyard-release-owner
-export SUBYARD_RUST_PACKAGED_OWNER="$out/target/debug/subyard-release-owner"
-export SUBYARD_RUST_OWNER_EXECUTABLE="$out/target-fixture/debug/subyard-release-owner"
-export SUBYARD_RUST_FIXTURE_OWNER="$out/target-fixture/debug/subyard-release-owner"
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR-fixture" cargo build --locked --manifest-path release-owner/Cargo.toml --features fixture-cuts --bin subyard-release-owner
+export SUBYARD_RUST_PACKAGED_OWNER="$CARGO_TARGET_DIR/debug/subyard-release-owner"
+export SUBYARD_RUST_OWNER_EXECUTABLE="$CARGO_TARGET_DIR-fixture/debug/subyard-release-owner"
+export SUBYARD_RUST_FIXTURE_OWNER="$CARGO_TARGET_DIR-fixture/debug/subyard-release-owner"
 export SUBYARD_RUST_NATIVE_HELPER="$out/yard"
 export SUBYARD_RUST_OPERATION_REPLAY_OUTPUT="$out/operation-replay"
 go test -race -count=1 -v ./internal/cli -run '^TestRustOwnerWholeOperationReplay$'
@@ -66,8 +59,8 @@ else
  exit 1
 fi
 # rust-lld ships with rustc; these are cross-build checks, never ARM execution.
-sysroot="$(rustc --print sysroot)"
-host="$(rustc -vV | sed -n 's/^host: //p')"
+sysroot="$("$RUSTC" --print sysroot)"
+host="$("$RUSTC" -vV | sed -n 's/^host: //p')"
 linker="$sysroot/lib/rustlib/$host/bin/rust-lld"
 test -x "$linker"
 for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do

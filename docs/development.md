@@ -41,6 +41,59 @@ homes beneath that developer's home; its readiness check reads installed toolcha
 downloading them. `go.mod` still selects the exact Go compiler and shared Go caches live under
 `/srv/cache`.
 
+The profile publishes absolute `GOCACHE` and `GOMODCACHE` through PAM's
+`/etc/environment`, `/etc/profile.d/subyard-dev.sh`, and an `environment.d` file.
+New SSH/login shells and IDE/agent command shells that source `/etc/profile` therefore
+keep the same caches with a separate application `XDG_CONFIG_HOME`. Future user-manager
+processes inherit the same defaults. Provisioning does not restart existing sessions or
+services; a system service that does not launch such a shell must pass the cache environment
+explicitly. The standard Go user configuration is still written to the developer's
+`~/.config/go/env`, independently of the provision caller's XDG settings.
+
+Rust runners use `dev/cargo_cache.py` before Cargo, supplying the owning manifest and a
+run-owned final output directory. For example, from the checkout root:
+
+```sh
+cargo_environment="$(python3 dev/cargo_cache.py --manifest-path release-owner/Cargo.toml --target-dir "$PWD/.build/my-check/target" --snapshot --run-target)"
+eval "$cargo_environment"
+```
+
+`--run-target` allocates an invocation-owned final subdirectory under the given target
+parent. This preserves explicit absolute cache/home/target overrides; a caller sharing an
+explicit final directory must serialize its own build/read/publication boundary. Otherwise Cargo packages and
+Rustup toolchains use the invoking developer's normal homes, and intermediates use
+`$SUBYARD_CARGO_BUILD_ROOT/<resolved-compiler-group>` (`/srv/cache/cargo-build/subyard`
+in the profile, or `~/.cache/subyard/cargo-build` outside it). Cargo 1.91 or newer is required.
+The group records the resolved compiler and Cargo identity, plus explicit compiler wrappers;
+Cargo fingerprints features, targets, profiles and flags within that group. Final images,
+depfiles, logs and receipts remain in their owning output directories.
+
+A checkout-local pass-through workspace compiler wrapper prevents Cargo from reusing
+checkout-dependent built-in manifest paths for another checkout. Existing explicit workspace
+wrappers are chained. Non-member local path dependencies additionally require checkout remap
+flags; the helper adds these conservatively because Cargo's workspace wrapper does not cover
+them. Absolute remap differences, including sealed packaging, can rebuild dependencies across
+checkouts; a shared directory alone does not promise a cache hit for incompatible flags.
+The helper explicitly exports its selected compiler (`RUSTC`, then `CARGO_BUILD_RUSTC`, then
+PATH); a compiler selected only by Cargo config must be supplied through that environment.
+Clippy retains its own driver and receives a checkout remap argument.
+
+`--snapshot` defaults `CARGO_INCREMENTAL=0` for disposable source copies. Omit it for a
+continually edited checkout, where normal Cargo incremental behavior remains available.
+Ordinary dev/test debug information and assertions are preserved. For a measured space tradeoff,
+opt into `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only`; set either to `2` for full debug information.
+A small cache regression fixture does not justify changing all development profiles.
+
+For new ad-hoc checks, inherit these shared roots even when isolating HOME or XDG. Do not
+copy a previous attempt's Go/Cargo caches beside evidence or install a new toolchain per run.
+Cold-cache capacity checks and fixtures with a separate UID keep their intentional isolation.
+Old frozen runners retain their recorded settings. Cargo owns concurrent build locking;
+remove only completed run-owned final directories during ordinary evidence cleanup.
+`cargo clean` can also remove shared intermediates, so it is not a final-output cleanup command.
+Cargo's normal package-cache automatic GC remains enabled; compiled intermediates have no
+new size limit or automatic eviction policy.
+
 Debian 13 currently ships an older bootstrap Go than the Incus client requires. That is acceptable
 for source development because Go follows the module's `toolchain` directive. Confirm the selected
 compiler with `go version` after the first build.
@@ -142,8 +195,9 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
-Native Paseo builds keep downloads, npm cache and logs in operation-owned disk
-scratch under `.build/paseo-operation-<uid>`. A private temporary mount catches direct
+Native Paseo builds share public npm downloads through `SUBYARD_NPM_PUBLIC_CACHE`
+when configured by the profile. HOME, npm configuration and logs remain isolated. Other
+downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-<uid>`. A private temporary mount catches direct
 `/tmp`, `/var/tmp` and `/dev/shm` writes. One build runs per checkout and user;
 completion removes scratch, and the next invocation removes leftovers with a valid
 durable ownership receipt after SIGKILL or reboot. Incomplete initialization or

@@ -21,13 +21,14 @@ for tool in cargo rustc jq sha256sum readelf; do
 done
 cd "$REPO"
 export TMPDIR=/tmp
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/.build/release-owner/target}"
+cargo_environment="$(python3 "$REPO/dev/cargo_cache.py" --target-dir "$REPO/.build/release-owner/target" --snapshot --run-target --manifest-path release-owner/Cargo.toml)"
+eval "$cargo_environment"
 mkdir -p "$(dirname "$OUTPUT")"
 (
   flock 9
-  compiler="$(rustc -vV)"
+  compiler="$("$RUSTC" -vV)"
   cargo_version="$(cargo --version)"
-  sysroot="$(rustc --print sysroot)"
+  sysroot="$("$RUSTC" --print sysroot)"
   host="$(sed -n 's/^host: //p' <<< "$compiler")"
   linker="$sysroot/lib/rustlib/$host/bin/rust-lld"
   [ -x "$linker" ] || { printf 'build-release-owner: rust-lld is required\n' >&2; exit 2; }
@@ -38,7 +39,7 @@ mkdir -p "$(dirname "$OUTPUT")"
     bash tests/helpers/source-files.sh \
       | while IFS= read -r -d '' relative; do
           case "$relative" in
-            release-owner/Cargo.toml|release-owner/Cargo.lock|release-owner/build.rs|release-owner/src/*.rs|config/profiles/*.rs|rust-toolchain.toml|dev/build-release-owner.sh)
+            release-owner/Cargo.toml|release-owner/Cargo.lock|release-owner/build.rs|release-owner/src/*.rs|config/profiles/*.rs|rust-toolchain.toml|dev/build-release-owner.sh|dev/cargo_cache.py|dev/cargo-workspace-rustc.sh)
               [ -f "$relative" ] && [ ! -L "$relative" ] || {
                 printf 'build-release-owner: source input must be a regular non-symlink file\n' >&2; exit 1;
               }

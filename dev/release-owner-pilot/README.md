@@ -18,14 +18,21 @@ This scope does not fence production or arbitrary same-UID writers.
 
 `make verify-release-owner-pilot` runs the owning Go race packages, Rust unit and
 compiler contracts, strict codec golden, Clippy and independent-process fault cuts.
-Artifacts and logs belong in `.build/release-owner-pilot`. Fixtures always use `/tmp`.
+Logs belong in `.build/release-owner-pilot`; default final Cargo artifacts and the
+native Go helper share one invocation-owned `target/run-*` directory beneath it.
+Ordinary local/preflight modes inherit developer Cargo/Rustup homes and use the
+[shared Cargo intermediate cache](../../docs/development.md#toolchain), without
+selecting historical task toolchains or private caches. Explicit `CARGO_TARGET_DIR`
+overrides remain caller-owned and require serialization if shared. Snapshots default
+to `CARGO_INCREMENTAL=0`. Fixtures always use `/tmp`.
 `bash dev/release-owner-pilot/check.sh --preflight` builds and checks the same bounded
 artifacts without executing process faults. After allocating a disposable VM, run
 `bash dev/release-owner-pilot/check.sh --vm` in its transported current source tree.
 The VM entrypoint builds locked artifacts and runs the artifact preflight and real
 process matrix; it does not repeat the local logical/unit/race/compiler matrix.
 It may install the official checksum-verified minimal stable Rust toolchain under
-its ignored task directory when missing (installer timeout: ten minutes; bounded
+its ignored task directory when missing and reuse that VM-owned installation on a
+later invocation (installer timeout: ten minutes; bounded
 curl downloads); normal local/preflight modes never install it. No operator config, Incus, credentials or release bundle is required.
 
 The v1 inner protocol is canonical sorted-key JSON with integer precision, strict

@@ -47,6 +47,7 @@ set -euo pipefail
   printf 'go ran from %s, want %s\n' "$(pwd -P)" "$SUBYARD_DEV_EXPECT_CWD" >&2
   exit 91
 }
+[ "$GOENV" = "$HOME/.config/go/env" ] || exit 98
 case "${1:-}" in
   env)
     if [ "${2:-}" = -w ]; then
@@ -136,6 +137,9 @@ common_env=(
   SUBYARD_DEV_HOME="$tmp/home"
   GOCACHE="$test_cache"
   GOMODCACHE="$test_mod_cache"
+  SUBYARD_CARGO_BUILD_ROOT="$tmp/cache/cargo-build/subyard"
+  SUBYARD_NPM_PUBLIC_CACHE="$tmp/cache/npm-public"
+  SUBYARD_DEV_SYSTEM_ROOT="$tmp/system"
   SUBYARD_DEV_EXPECT_CWD="$tmp/home"
   SUBYARD_DEV_EXPECT_GOCACHE="$test_cache"
   SUBYARD_DEV_EXPECT_GOMODCACHE="$test_mod_cache"
@@ -155,6 +159,12 @@ run_hook
 [ -d "$test_cache" ] || fail "Go build cache was not created"
 [ -d "$test_mod_cache" ] || fail "Go module cache was not created"
 [ -d "$tmp/home/.config/go" ] || fail "Go user config directory was not created"
+# An agent shell sources the system profile while retaining its isolated XDG.
+env -i PATH="$PATH" XDG_CONFIG_HOME="$tmp/agent-config" bash --noprofile --norc -c \
+  '. "$1"; [ "$GOCACHE" = "$2" ] && [ "$GOMODCACHE" = "$3" ] && [ "$XDG_CONFIG_HOME" = "$4" ] && [ "$CARGO_HOME" = "$5/.cargo" ] && [ "$RUSTUP_HOME" = "$5/.rustup" ]' \
+  sh "$tmp/system/etc/profile.d/subyard-dev.sh" "$test_cache" "$test_mod_cache" "$tmp/agent-config" "$tmp/home" \
+  || fail "fresh isolated agent shell did not inherit absolute cache paths"
+
 grep -Fxq 'update -qq' "$SUBYARD_DEV_APT_LOG" || fail "apt metadata was not refreshed"
 grep -Fxq 'install --no-remove -y -qq golang-go shellcheck jq ripgrep binutils curl ca-certificates' "$SUBYARD_DEV_APT_LOG" \
   || fail "bootstrap dependencies were not installed"

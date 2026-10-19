@@ -40,6 +40,10 @@ coordinator, and do not create or close shared task files or start another full 
    remaining steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
+   For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes;
+   use the [development cache workflow](../../../docs/development.md#toolchain) for
+   shared Cargo intermediates and separate final outputs. Do not copy build caches
+   into each evidence directory. Preserve deliberate cold-cache and UID-isolation fixtures.
    Choose tests by the policy below and existing coverage.
    Simplify unnecessary implementation scope before expanding its test machinery.
 3. Run the applicable checks against the final changes using the policy below.

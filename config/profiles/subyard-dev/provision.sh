@@ -26,6 +26,31 @@ DEV_HOME="${SUBYARD_DEV_HOME:-$(getent passwd "$DEV_USER" | cut -d: -f6)}"
 DEV_HOME="${DEV_HOME:-/home/$DEV_USER}"
 GOCACHE="${GOCACHE:-/srv/cache/go-build}"
 GOMODCACHE="${GOMODCACHE:-/srv/cache/go-mod}"
+SUBYARD_CARGO_BUILD_ROOT="${SUBYARD_CARGO_BUILD_ROOT:-/srv/cache/cargo-build/subyard}"
+SUBYARD_NPM_PUBLIC_CACHE="${SUBYARD_NPM_PUBLIC_CACHE:-/srv/cache/npm-public}"
+SYSTEM_ROOT="${SUBYARD_DEV_SYSTEM_ROOT:-}"
+
+# PAM launches, login shells (including IDE/agent command shells), and future
+# user-manager processes get the same absolute paths despite isolated app XDG.
+cache_environment() {
+  printf '%s\n' "GOCACHE=$GOCACHE" "GOMODCACHE=$GOMODCACHE" \
+    "CARGO_HOME=$DEV_HOME/.cargo" "RUSTUP_HOME=$DEV_HOME/.rustup" \
+    "SUBYARD_CARGO_BUILD_ROOT=$SUBYARD_CARGO_BUILD_ROOT" \
+    "SUBYARD_NPM_PUBLIC_CACHE=$SUBYARD_NPM_PUBLIC_CACHE"
+}
+check_environment() {
+  local temporary status=0
+  temporary="$(mktemp /tmp/subyard-dev-environment.XXXXXX)"
+  cache_environment > "$temporary"
+  cmp -s "$temporary" "$SYSTEM_ROOT/etc/environment.d/60-subyard-dev.conf" || status=1
+  while IFS= read -r line; do
+    grep -Fxq "$line" "$SYSTEM_ROOT/etc/environment" 2>/dev/null || status=1
+    grep -Fxq "export $line" "$SYSTEM_ROOT/etc/profile.d/subyard-dev.sh" 2>/dev/null || status=1
+  done < "$temporary"
+  rm -f -- "$temporary"
+  return "$status"
+}
+
 
 run_as_dev() {
   if [ "$(id -un)" = "$DEV_USER" ]; then
@@ -40,7 +65,7 @@ run_as_dev() {
 }
 
 run_go_as_dev() {
-  run_as_dev env -u GOCACHE -u GOMODCACHE -u GOTOOLCHAIN go "$@"
+  run_as_dev env -u GOCACHE -u GOMODCACHE -u GOTOOLCHAIN GOENV="$DEV_HOME/.config/go/env" go "$@"
 }
 
 run_rustup_as_dev() {
@@ -83,7 +108,7 @@ if [ "$check_only" -eq 1 ]; then
   fi
   group_id="$(getent group "$DEV_GROUP" | cut -d: -f3)"
   expected_owner="$(id -u "$DEV_USER"):$group_id"
-  directories=("$GOCACHE" "$GOMODCACHE" "$DEV_HOME/.config/go")
+  directories=("$GOCACHE" "$GOMODCACHE" "$SUBYARD_CARGO_BUILD_ROOT" "$SUBYARD_NPM_PUBLIC_CACHE" "$DEV_HOME/.config/go")
   [ "$with_rust" = 0 ] || directories+=("$DEV_HOME/.cargo" "$DEV_HOME/.rustup")
   for directory in "${directories[@]}"; do
     if [ ! -d "$directory" ] || [ -L "$directory" ] \
@@ -91,6 +116,7 @@ if [ "$check_only" -eq 1 ]; then
       changed=1
     fi
   done
+  check_environment || changed=1
   if [ "$changed" -eq 0 ]; then
     mapfile -t go_env < <(run_go_as_dev env GOCACHE GOMODCACHE GOTOOLCHAIN)
     [ "${go_env[0]-}" = "$GOCACHE" ] || changed=1
@@ -121,6 +147,21 @@ apt-get update -qq
 apt-get install --no-remove -y -qq golang-go shellcheck jq ripgrep binutils curl ca-certificates
 
 install -d -o "$DEV_USER" -g "$DEV_GROUP" "$GOCACHE" "$GOMODCACHE" "$DEV_HOME/.config/go"
+install -d -o "$DEV_USER" -g "$DEV_GROUP" "$SUBYARD_CARGO_BUILD_ROOT" "$SUBYARD_NPM_PUBLIC_CACHE"
+install -d -m 0755 "$SYSTEM_ROOT/etc/profile.d" "$SYSTEM_ROOT/etc/environment.d"
+# Preserve other profiles' PAM settings; replace only our marked block.
+[ ! -L "$SYSTEM_ROOT/etc/environment" ] || { printf 'subyard-dev provision: environment must not be a symlink\n' >&2; exit 1; }
+touch "$SYSTEM_ROOT/etc/environment"
+sed -i '/^# >>> subyard-dev >>>$/,/^# <<< subyard-dev <<<$/d' "$SYSTEM_ROOT/etc/environment"
+{
+  printf '# >>> subyard-dev >>>\n'
+  cache_environment
+  printf '# <<< subyard-dev <<<\n'
+} >> "$SYSTEM_ROOT/etc/environment"
+cache_environment > "$SYSTEM_ROOT/etc/environment.d/60-subyard-dev.conf"
+cache_environment | sed 's/^/export /' > "$SYSTEM_ROOT/etc/profile.d/subyard-dev.sh"
+chmod 0644 "$SYSTEM_ROOT/etc/environment" "$SYSTEM_ROOT/etc/environment.d/60-subyard-dev.conf" "$SYSTEM_ROOT/etc/profile.d/subyard-dev.sh"
+
 if [ "$with_rust" = 1 ]; then
 for directory in "$DEV_HOME/.cargo" "$DEV_HOME/.rustup"; do
   [ ! -L "$directory" ] || { printf 'subyard-dev provision: Rust home must not be a symlink\n' >&2; exit 1; }

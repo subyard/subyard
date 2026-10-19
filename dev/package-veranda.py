@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build a separate Linux GTK DEB from current public inputs; never install it."""
+from cargo_cache import environment as cargo_environment
 import argparse
 import datetime
 import hashlib
@@ -127,7 +128,7 @@ def workspace_inputs(metadata, source):
         public_input(ROOT/name, paths)
 
 
-def compiled_inputs(depfile, source, target_dir):
+def compiled_inputs(depfile, source, target_dir, build_dir=None):
     """Bind the actual Rust module/include inputs, including ignored include files."""
     plain(depfile)
     if depfile.stat().st_size > 16*1024*1024:
@@ -143,7 +144,7 @@ def compiled_inputs(depfile, source, target_dir):
         if not path.is_absolute():
             path = ROOT/path
         no_symlink_parents(path)
-        if path.is_relative_to(target_dir):
+        if path.is_relative_to(target_dir) or (build_dir is not None and path.is_relative_to(build_dir)):
             # Build-script outputs have public owning scripts checked above.
             plain(path)
             continue
@@ -248,7 +249,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version',required=True,type=stable_version)
     parser.add_argument('--output-dir',type=Path,default=ROOT/'.build/veranda-package/release')
-    parser.add_argument('--target-dir',type=Path,default=ROOT/'.build/veranda-package/target')
+    parser.add_argument('--target-dir',type=Path,default=Path(os.environ['CARGO_TARGET_DIR']) if os.environ.get('CARGO_TARGET_DIR') else None)
     parser.add_argument('--sdk-root',type=Path,help='optional extracted published Debian GTK SDK')
     parser.add_argument('--sdk-debs',type=Path,help='matching original SDK DEBs for native dependency authority')
     args=parser.parse_args()
@@ -262,7 +263,12 @@ def main():
         parser.error('unsupported native architecture')
     for tool in ['cargo','rustc','dpkg','dpkg-deb','dpkg-shlibdeps','readelf','rg','du','pkg-config','desktop-file-validate','appstreamcli']:
         if not shutil.which(tool): parser.error(tool+' is required')
-    output=output_path(args.output_dir); target_dir=output_path(args.target_dir)
+    output=output_path(args.output_dir)
+    if args.target_dir is None:
+        target_parent=output_path(ROOT/'.build/veranda-package/target')
+        target_parent.mkdir(parents=True,exist_ok=True)
+        args.target_dir=Path(tempfile.mkdtemp(prefix='run-',dir=target_parent))
+    target_dir=output_path(args.target_dir)
     source=inventory(); source_hash=hashlib.sha256(encoded(source)).hexdigest()
     output.mkdir(parents=True,exist_ok=True)
     artifact_name=f'subyard-veranda_{args.version}_{arch}.deb'
@@ -277,6 +283,7 @@ def main():
     env=dict(os.environ, VERANDA_PRODUCT_VERSION=args.version, CARGO_TARGET_DIR=str(target_dir), CARGO_BUILD_JOBS='2', TMPDIR='/tmp', CARGO_PROFILE_RELEASE_OPT_LEVEL='2', CARGO_PROFILE_RELEASE_DEBUG='0', CARGO_PROFILE_RELEASE_STRIP='symbols', CARGO_PROFILE_RELEASE_LTO='false', CARGO_PROFILE_RELEASE_CODEGEN_UNITS='16', CARGO_PROFILE_RELEASE_INCREMENTAL='false', CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS='false', CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS='false')
     for key in ['CARGO_ENCODED_RUSTFLAGS','RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','CARGO_BUILD_RUSTC']:
         env.pop(key,None)
+    env=cargo_environment(target_dir, snapshot=True, toolchain=TOOLCHAIN, env=env, manifest_path=ROOT/'veranda/desktop/Cargo.toml')
     env['RUSTFLAGS']='--remap-path-prefix='+str(ROOT)+'=public-source'
     if args.sdk_root:
         sdk=args.sdk_root.resolve()/'usr'
@@ -292,7 +299,7 @@ def main():
         notices(metadata,Path(temporary))
     run(['cargo','+'+TOOLCHAIN,'build','--release','--locked','--target',target,'--manifest-path',str(ROOT/'veranda/desktop/Cargo.toml')],env=env,timeout=1800)
     executable=target_dir/target/'release/veranda'
-    rust_inputs=compiled_inputs(executable.with_suffix('.d'), source, target_dir)
+    rust_inputs=compiled_inputs(executable.with_suffix('.d'), source, target_dir, Path(env['CARGO_BUILD_BUILD_DIR']))
     # Cargo legitimately hardlinks its generated executable to a hashed target.
     # Package staging below makes an independent copy; external inputs stay strict.
     if not stat.S_ISREG(executable.lstat().st_mode):
@@ -318,7 +325,7 @@ def main():
         date=datetime.date.today().isoformat()
         appstream=(ROOT/f'veranda/desktop/packaging/{APP_ID}.metainfo.xml.in').read_text().replace('@VERSION@',args.version).replace('@DATE@',date)
         write(package/f'usr/share/metainfo/{APP_ID}.metainfo.xml',appstream.encode())
-        build={'schemaVersion':1,'productVersion':args.version,'applicationId':APP_ID,'target':target,'rustToolchain':TOOLCHAIN,'profile':{'name':'release','optLevel':2,'strip':'symbols','lto':False,'codegenUnits':16,'incremental':False,'debugAssertions':False,'overflowChecks':False},'rustcVersion':subprocess.check_output(['rustc','+'+TOOLCHAIN,'--version'],env=env,text=True,timeout=10).strip(),'gtkBuildVersion':subprocess.check_output(['pkg-config','--modversion','gtk4'],env=env,text=True,timeout=10).strip(),'elfSha256':sha(binary),'sourceInputsSha256':source_hash,'rustSourceInputs':rust_inputs,'runtimeDepends':dependencies,'dtNeeded':needed,'cargoLockSha256':sha(ROOT/'veranda/desktop/Cargo.lock'),'rustDependencyNoticesSha256':sha(doc/'rust-dependencies.json'),'rootLicenseSha256':sha(doc/'copyright')}
+        build={'schemaVersion':1,'productVersion':args.version,'applicationId':APP_ID,'target':target,'rustToolchain':TOOLCHAIN,'profile':{'name':'release','optLevel':2,'strip':'symbols','lto':False,'codegenUnits':16,'incremental':False,'debugAssertions':False,'overflowChecks':False},'rustcVersion':subprocess.check_output([env['RUSTC'],'+'+TOOLCHAIN,'--version'],env=env,text=True,timeout=10).strip(),'gtkBuildVersion':subprocess.check_output(['pkg-config','--modversion','gtk4'],env=env,text=True,timeout=10).strip(),'elfSha256':sha(binary),'sourceInputsSha256':source_hash,'rustSourceInputs':rust_inputs,'runtimeDepends':dependencies,'dtNeeded':needed,'cargoLockSha256':sha(ROOT/'veranda/desktop/Cargo.lock'),'rustDependencyNoticesSha256':sha(doc/'rust-dependencies.json'),'rootLicenseSha256':sha(doc/'copyright')}
         write(doc/'build-info.json',encoded(build))
         files=[path for path in package.rglob('*') if path.is_file()]
         installed_bytes=sum(path.stat().st_size for path in files)

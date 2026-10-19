@@ -147,6 +147,23 @@ class PackageBoundaryTest(unittest.TestCase):
                 inputs.append({'path':'veranda/client/ignored text.txt'})
                 self.assertEqual(package.compiled_inputs(depfile,inputs,checkout/'.build/target'),['veranda/client/hidden.rs','veranda/client/ignored text.txt'])
 
+    def test_separate_build_generated_inputs_preserve_public_source_validation(self):
+        with tempfile.TemporaryDirectory(dir='/tmp',prefix='veranda-build-root-test-') as temporary:
+            root=Path(temporary);checkout=root/'repo';checkout.mkdir()
+            module=checkout/'main.rs';module.write_text('fn main() {}');module.chmod(0o644)
+            build=root/'shared-build';build.mkdir()
+            generated=build/'generated.rs';generated.write_text('pub fn generated() {}');generated.chmod(0o644)
+            depfile=root/'veranda.d';depfile.write_text('veranda: '+str(module)+' '+str(generated)+'\n')
+            with patch.object(package,'ROOT',checkout):
+                self.assertEqual(package.compiled_inputs(depfile,[{'path':'main.rs'}],root/'target',build),['main.rs'])
+                with self.assertRaises(ValueError):package.compiled_inputs(depfile,[],root/'target',build)
+                foreign=root/'foreign.rs';foreign.write_text('foreign');foreign.chmod(0o644)
+                depfile.write_text('veranda: '+str(module)+' '+str(foreign)+'\n')
+                with self.assertRaises(ValueError):package.compiled_inputs(depfile,[{'path':'main.rs'}],root/'target',build)
+                generated.unlink();generated.symlink_to(module)
+                depfile.write_text('veranda: '+str(module)+' '+str(generated)+'\n')
+                with self.assertRaises(ValueError):package.compiled_inputs(depfile,[{'path':'main.rs'}],root/'target',build)
+
     @unittest.skipUnless(all(shutil.which(tool) for tool in ['bash','dpkg','dpkg-deb']), 'Bash/Debian orchestration fixture tools')
     def test_normal_package_cost_sequence_precedes_fixture_tools(self):
         # Execute real helper orchestration with apt/lease/GTK boundaries replaced
