@@ -33,6 +33,40 @@ Debian 13 currently ships an older bootstrap Go than the Incus client requires. 
 for source development because Go follows the module's `toolchain` directive. Confirm the selected
 compiler with `go version` after the first build.
 
+## Rust release owner
+
+Runtime packages include `bin/subyard-release-owner`, its exact Go native helper
+`bin/yard-engine`, and the manifest-bound declaration `config/release-owner.json`.
+The installed host needs neither a Go nor a Rust toolchain. Building packages requires
+Go from `go.mod`, the root stable Rust toolchain, Cargo, musl target standard libraries,
+and `readelf` from binutils. Dependencies build with `Cargo.lock` and `--locked`;
+fixture-only Cargo features are excluded from shipped binaries.
+
+`dev/build-release-owner.sh` builds the normal owner for Linux amd64 or arm64 musl.
+`dev/package-engine.sh` uses it when assembling a runtime. The manifest-listed build
+sidecar records the actual compiler, Cargo target, lockfile and source input hashes,
+features, executable digest and static ELF checks. The stable toolchain channel does
+not itself pin a compiler version; use the recorded resolved version when reproducing
+an artifact. Cross-compiling arm64 verifies a build, while native ARM process behavior
+is checked separately in CI.
+
+`make verify-release-owner-foundation`, `make verify-release-owner-recovery` and
+`make verify-release-owner-legacy` provide focused domain, protected-storage and frozen
+codec checks. `release-owner/check-runtime.sh` adds actual owner/native process gates.
+Its owning Go trace export runs before the Rust consumers; full-entry replay then binds exact
+native plan, grant and durable journal bytes. Scripted component peers establish protocol and
+reducer comparison, while normal sealed packages and real component effects have separate gates.
+`dev/check-release-owner-delivery.sh` packages both architectures and checks inventory,
+sealing, the retained session, artifact tampering and execution without toolchains.
+Standalone Go unit tests remain usable without building Rust; package and process gates
+require both toolchains. Preserve absolute `CARGO_HOME` and `RUSTUP_HOME` when a test
+isolates `HOME`.
+
+The dev-only history and native-owner pilots remain comparison fixtures. Their passes
+do not replace the normal packaged owner, released-caller compatibility, component
+acceptance or VM gates. Production routing and release acceptance remain gated until
+the complete owner candidate has passed those checks.
+
 ## Build and test
 
 `make cli-docs` builds the current CLI and regenerates [the command reference](cli-reference.md)

@@ -24,15 +24,19 @@ import (
 )
 
 type verifiedPublishedCandidate struct {
-	commandManifestBound bool
-	projectCreatorDigest [sha256.Size]byte
-	producerEvidence     uninstall.ProducerEvidence
-	candidate            publishedCandidate
-	root                 *os.File
-	engine               *os.File
-	manifestDigest       releasetransition.Fingerprint
-	registryDigest       releasetransition.Fingerprint
-	version              string
+	commandManifestBound  bool
+	commandManifestDigest releasetransition.Fingerprint
+	projectCreatorDigest  [sha256.Size]byte
+	producerEvidence      uninstall.ProducerEvidence
+	candidate             publishedCandidate
+	root                  *os.File
+	engine                *os.File
+	releaseOwner          *os.File
+	manifestDigest        releasetransition.Fingerprint
+	registryDigest        releasetransition.Fingerprint
+	checkpointRaw         []byte
+	checkpointDigest      [sha256.Size]byte
+	version               string
 }
 
 func (candidate *verifiedPublishedCandidate) Close() error {
@@ -43,6 +47,9 @@ func (candidate *verifiedPublishedCandidate) Close() error {
 	if candidate.engine != nil {
 		result = candidate.engine.Close()
 	}
+	if candidate.releaseOwner != nil {
+		result = errors.Join(result, candidate.releaseOwner.Close())
+	}
 	if candidate.root != nil {
 		result = errors.Join(result, candidate.root.Close())
 	}
@@ -52,6 +59,217 @@ func (candidate *verifiedPublishedCandidate) Close() error {
 type candidateManifestEntry struct {
 	path   string
 	digest [sha256.Size]byte
+}
+
+const (
+	releaseOwnerDeclarationPath = "config/release-owner.json"
+	releaseOwnerImagePath       = "bin/subyard-release-owner"
+	releaseOwnerSchemaPath      = "config/release-owner.schema.json"
+	releaseOwnerBuildPath       = "config/release-owner-build.json"
+)
+
+type releaseOwnerDeclaration struct {
+	SchemaVersion   int    `json:"schemaVersion"`
+	Kind            string `json:"kind"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	Owner           string `json:"owner"`
+	Helper          string `json:"helper"`
+	Schema          string `json:"schema"`
+	BuildInputs     string `json:"buildInputs"`
+}
+
+func expectedReleaseOwnerDeclaration() releaseOwnerDeclaration {
+	return releaseOwnerDeclaration{1, "rust-release-owner", 1, releaseOwnerImagePath,
+		"bin/yard-engine", releaseOwnerSchemaPath, releaseOwnerBuildPath}
+}
+
+type releaseOwnerBuild struct {
+	SchemaVersion   int      `json:"schemaVersion"`
+	Kind            string   `json:"kind"`
+	Compiler        string   `json:"compiler"`
+	Cargo           string   `json:"cargo"`
+	Target          string   `json:"target"`
+	Profile         string   `json:"profile"`
+	Features        []string `json:"features"`
+	Locked          bool     `json:"locked"`
+	StaticELF       bool     `json:"staticELF"`
+	Codegen         []string `json:"codegen"`
+	ImageSHA256     string   `json:"imageSHA256"`
+	CargoLockSHA256 string   `json:"cargoLockSHA256"`
+	Inputs          []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"inputs"`
+}
+
+// Declaration absence is the legacy format. A partially added owner is never legacy.
+// These assets are checked before either executable's version probe can run.
+func verifyReleaseOwnerDeclaration(rootFD int, entries []candidateManifestEntry) error {
+	digests := make(map[string][sha256.Size]byte, len(entries))
+	for _, entry := range entries {
+		digests[entry.path] = entry.digest
+	}
+	_, declared := digests[releaseOwnerDeclarationPath]
+	for _, path := range []string{releaseOwnerImagePath, releaseOwnerSchemaPath, releaseOwnerBuildPath} {
+		_, present := digests[path]
+		if present != declared {
+			return errors.New("published runtime release owner assets are incomplete")
+		}
+	}
+	if !declared {
+		return nil
+	}
+	if _, present := digests["bin/yard-engine"]; !present {
+		return errors.New("published runtime release owner helper is unbound")
+	}
+	readJSON := func(path string, value any) error {
+		file, err := openCandidateFile(rootFD, path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		payload, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+		if err != nil || len(payload) > 1<<20 || sha256.Sum256(payload) != digests[path] {
+			return errors.New("published runtime release owner metadata changed")
+		}
+		return decodeClosedCandidateJSON(payload, value)
+	}
+	var declaration releaseOwnerDeclaration
+	if err := readJSON(releaseOwnerDeclarationPath, &declaration); err != nil ||
+		declaration != expectedReleaseOwnerDeclaration() {
+		return errors.New("published runtime release owner declaration is invalid")
+	}
+	// The distributed schema describes this exact closed declaration, not a replacement
+	// protocol or a request to load an arbitrary executable or JSON schema implementation.
+	var schema any
+	if err := readJSON(releaseOwnerSchemaPath, &schema); err != nil {
+		return errors.New("published runtime release owner schema is invalid")
+	}
+	declarationPayload, _ := json.Marshal(declaration)
+	var constants map[string]any
+	_ = json.Unmarshal(declarationPayload, &constants)
+	properties := make(map[string]any, len(constants))
+	for key, value := range constants {
+		properties[key] = map[string]any{"const": value}
+	}
+	expectedSchema := map[string]any{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$id":     "https://subyard.dev/schemas/release-owner-v1.json", "type": "object",
+		"additionalProperties": false,
+		"required":             []string{"schemaVersion", "kind", "protocolVersion", "owner", "helper", "schema", "buildInputs"},
+		"properties":           properties,
+	}
+	actualSchema, _ := json.Marshal(schema)
+	wantedSchema, _ := json.Marshal(expectedSchema)
+	if !bytes.Equal(actualSchema, wantedSchema) {
+		return errors.New("published runtime release owner schema is unsupported")
+	}
+	var build releaseOwnerBuild
+	if err := readJSON(releaseOwnerBuildPath, &build); err != nil {
+		return errors.New("published runtime release owner build inputs are invalid")
+	}
+	ownerDigest := digests[releaseOwnerImagePath]
+	if build.SchemaVersion != 1 || build.Kind != "rust-release-owner-build" ||
+		!strings.HasPrefix(build.Compiler, "rustc ") || !strings.Contains(build.Compiler, "\nhost: ") ||
+		!strings.HasPrefix(build.Cargo, "cargo ") ||
+		(build.Target != "x86_64-unknown-linux-musl" && build.Target != "aarch64-unknown-linux-musl") ||
+		build.Profile != "release" || build.Features == nil || len(build.Features) != 0 ||
+		!build.Locked || !build.StaticELF || build.ImageSHA256 != hex.EncodeToString(ownerDigest[:]) ||
+		strings.Join(build.Codegen, "\n") != "linker=rust-lld\ntarget-feature=+crt-static\nremap-path-prefix=repository=." ||
+		!lowerSHA256(build.CargoLockSHA256) || len(build.Inputs) < 6 {
+		return errors.New("published runtime release owner build inputs are unsupported")
+	}
+	previous := ""
+	inputs := map[string]string{}
+	for _, input := range build.Inputs {
+		if !safeCandidateRelativePath(input.Path) || input.Path <= previous || !lowerSHA256(input.SHA256) {
+			return errors.New("published runtime release owner source inventory is invalid")
+		}
+		previous, inputs[input.Path] = input.Path, input.SHA256
+	}
+	for _, required := range []string{"release-owner/Cargo.toml", "release-owner/Cargo.lock", "rust-toolchain.toml",
+		"dev/build-release-owner.sh", "release-owner/src/lib.rs", "release-owner/src/bin/subyard-release-owner.rs"} {
+		if inputs[required] == "" {
+			return errors.New("published runtime release owner source inventory is incomplete")
+		}
+	}
+	if inputs["release-owner/Cargo.lock"] != build.CargoLockSHA256 {
+		return errors.New("published runtime release owner lockfile is unbound")
+	}
+	return nil
+}
+
+func lowerSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
+}
+
+// encoding/json otherwise accepts duplicate object keys. Reject them at every depth,
+// then apply the typed closed schema and refuse trailing JSON values.
+func decodeClosedCandidateJSON(payload []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	var consume func() error
+	consume = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch token {
+		case json.Delim('{'):
+			seen := map[string]bool{}
+			for decoder.More() {
+				key, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := key.(string)
+				if !ok || seen[name] {
+					return errors.New("duplicate JSON field")
+				}
+				seen[name] = true
+				if err := consume(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+		case json.Delim('['):
+			for decoder.More() {
+				if err := consume(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+		}
+		return err
+	}
+	if err := consume(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON data")
+	}
+	decoder = json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	// Require the exact JSON field spelling and presence, including explicit empty
+	// feature lists. Struct decoding alone treats field names case-insensitively.
+	var original any
+	if err := json.Unmarshal(payload, &original); err != nil {
+		return err
+	}
+	before, _ := json.Marshal(original)
+	encoded, err := json.Marshal(value)
+	var normalized any
+	if err == nil {
+		err = json.Unmarshal(encoded, &normalized)
+	}
+	after, _ := json.Marshal(normalized)
+	if err != nil || !bytes.Equal(before, after) {
+		return errors.New("JSON fields do not match the closed schema")
+	}
+	return nil
 }
 
 func (runtime *Runtime) verifyPublishedCandidate(
@@ -71,8 +289,12 @@ func (runtime *Runtime) verifyPublishedCandidate(
 		candidate: candidate,
 		root:      root,
 	}
+	selectedRust := false
 	fail := func(err error) (*verifiedPublishedCandidate, error) {
 		verified.Close()
+		if selectedRust {
+			err = markSelectedRustOwnerError(err)
+		}
 		return nil, err
 	}
 	rootFD := int(verified.root.Fd())
@@ -97,19 +319,31 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	if err := verifyCandidateInventory(rootFD, entries); err != nil {
 		return fail(err)
 	}
+	if err := verifyReleaseOwnerDeclaration(rootFD, entries); err != nil {
+		return fail(err)
+	}
+	for _, entry := range entries {
+		if entry.path == releaseOwnerDeclarationPath {
+			selectedRust = true
+		}
+	}
 	for _, entry := range entries {
 		file, openErr := openCandidateFile(rootFD, entry.path)
 		if openErr != nil {
 			return fail(errors.New("published runtime contains an unavailable manifest entry"))
 		}
-		if entry.path == "bin/yard-engine" {
-			verified.producerEvidence.EngineSHA256 = hex.EncodeToString(entry.digest[:])
+		if entry.path == "bin/yard-engine" || entry.path == releaseOwnerImagePath {
 			info, statErr := file.Stat()
 			if statErr != nil || info.Mode().Perm()&0o111 == 0 {
 				file.Close()
 				return fail(errors.New("published runtime engine is unavailable"))
 			}
-			verified.engine, err = sealVerifiedEngine(file, entry.digest)
+			if entry.path == releaseOwnerImagePath {
+				verified.releaseOwner, err = sealVerifiedEngine(file, entry.digest)
+			} else {
+				verified.producerEvidence.EngineSHA256 = hex.EncodeToString(entry.digest[:])
+				verified.engine, err = sealVerifiedEngine(file, entry.digest)
+			}
 		} else {
 			err = verifyCandidateFile(file, entry.digest)
 			if err == nil && entry.path == "scripts/02-create-project.sh" {
@@ -117,6 +351,7 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			}
 			if err == nil && entry.path == "config/commands.registry" {
 				verified.commandManifestBound = true
+				verified.commandManifestDigest = releasetransition.Fingerprint(hex.EncodeToString(entry.digest[:]))
 			}
 			if err == nil && (entry.path == "config/systemd/subyard-power-reconcile.service.in" ||
 				entry.path == "config/systemd/subyard-keys-sync.service.in" || entry.path == "config/systemd/subyard-keys-sync.timer.in") {
@@ -134,6 +369,13 @@ func (runtime *Runtime) verifyPublishedCandidate(
 				verified.registryDigest = releasetransition.Fingerprint(
 					hex.EncodeToString(entry.digest[:]),
 				)
+			}
+			if err == nil && entry.path == "config/release-checkpoint.json" {
+				verified.checkpointRaw, err = io.ReadAll(io.NewSectionReader(file, 0, releasetransition.MaxMigrationCheckpointCapabilityBytes+1))
+				if err == nil && (len(verified.checkpointRaw) > releasetransition.MaxMigrationCheckpointCapabilityBytes || sha256.Sum256(verified.checkpointRaw) != entry.digest) {
+					err = errors.New("published runtime checkpoint capability changed")
+				}
+				verified.checkpointDigest = entry.digest
 			}
 		}
 		file.Close()
@@ -556,6 +798,19 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 			errors.New("published runtime registry changed after inspection")
 	}
 	request.RegistryDigest = assets.registryDigest
+	if releaseOwnerRoutingEnabled && engine.releaseOwner != nil {
+		target := assets
+		if target.candidate.release != request.Target || target.manifestDigest != request.ArtifactDigest {
+			var err error
+			target, err = runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: request.Target,
+				root: filepath.Join(request.RuntimeRoot, "releases", string(request.Target))}, request.RuntimeRoot, &request.ArtifactDigest)
+			if err != nil {
+				return releasetransition.ProcessResponse{}, err
+			}
+			defer target.Close()
+		}
+		return runtime.invokeRustOwnerTransition(ctx, assets, engine, target, request, nil, grant)
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return releasetransition.ProcessResponse{}, err

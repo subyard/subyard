@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -29,6 +30,24 @@ type ProfileRuntimePlan struct {
 	inputs      string
 	resolved    map[string]ports.RuntimeObservation
 	unavailable bool
+}
+
+// SelectedRuntimeInputs captures native handler/environment/source identity for
+// one compiled activation. It does not select yards or decide release work.
+func (runtime Runtime) SelectedRuntimeInputs(id string) (string, error) {
+	if id == "core-guest-runtime" || id == "key-tools-runtime" {
+		return runtime.profileRuntimeInputs(nil)
+	}
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return "", err
+	}
+	for _, definition := range definitions {
+		if definition.Runtime.ActivationID == id {
+			return runtime.profileRuntimeInputs([]profile.Definition{definition})
+		}
+	}
+	return "", errors.New("selected runtime owner is unavailable")
 }
 
 func (runtime Runtime) PrepareProfileRuntimes(ctx context.Context, unavailable, reconstruct bool, dependent ...bool) (*ProfileRuntimePlan, error) {
@@ -80,7 +99,10 @@ func (runtime Runtime) PrepareProfileRuntimes(ctx context.Context, unavailable, 
 }
 
 func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (string, error) {
-	environment := slices.Clone(runtime.Environment)
+	if runtime.ownerSources != nil {
+		return runtime.ownerSources.inputs(runtime, definitions)
+	}
+	environment := runtime.bindingEnvironment(runtime.Environment)
 	// Authorization bookkeeping changes after consent; it is not a desired
 	// runtime, handler or guest input. The sudo adapter validates it separately.
 	environment = slices.DeleteFunc(environment, func(value string) bool {
@@ -101,6 +123,7 @@ func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (s
 	}
 	sources := map[string]string{}
 	count := 0
+	var bytes int64
 	for _, root := range []string{filepath.Join(runtime.RepositoryRoot, "config"), filepath.Join(runtime.RepositoryRoot, "scripts")} {
 		if _, err := os.Stat(root); os.IsNotExist(err) {
 			continue
@@ -130,7 +153,7 @@ func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (s
 				if err != nil {
 					return err
 				}
-				sources[path] = "symlink:" + target
+				sources[runtime.bindingPath(path)] = "symlink:" + runtime.bindingPath(target)
 				return nil
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
@@ -138,10 +161,27 @@ func (runtime Runtime) profileRuntimeInputs(definitions []profile.Definition) (s
 				return fmt.Errorf("native source metadata is unavailable")
 			}
 			if info.IsDir() {
-				sources[path] = fmt.Sprintf("directory:%o:%d:%d:%d:%d", info.Mode(), stat.Dev, stat.Ino, stat.Uid, stat.Gid)
+				sources[runtime.bindingPath(path)] = fmt.Sprintf("directory:%o:%d:%d:%d:%d", info.Mode(), stat.Dev, stat.Ino, stat.Uid, stat.Gid)
 				return nil
 			}
-			sources[path] = fmt.Sprintf("%o:%d:%d:%d:%d:%d:%v:%v", info.Mode(), info.Size(), stat.Dev, stat.Ino, stat.Uid, stat.Gid, stat.Mtim, stat.Ctim)
+			if !info.Mode().IsRegular() {
+				return errors.New("native source is not a regular file")
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			hash := sha256.New()
+			size, err := io.Copy(hash, io.LimitReader(file, (128<<20)+1))
+			file.Close()
+			if err != nil {
+				return err
+			}
+			bytes += size
+			if size > 128<<20 || bytes > 256<<20 {
+				return errors.New("native source byte bound")
+			}
+			sources[runtime.bindingPath(path)] = fmt.Sprintf("%o:%d:%d:%d:%d:%d:%v:%v:%x", info.Mode(), info.Size(), stat.Dev, stat.Ino, stat.Uid, stat.Gid, stat.Mtim, stat.Ctim, hash.Sum(nil))
 			return nil
 		})
 		if err != nil {

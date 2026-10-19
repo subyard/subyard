@@ -127,6 +127,12 @@ func aliasRepairRuntimeFixture(t *testing.T, root string) string {
 			if entry.IsDir() {
 				return os.MkdirAll(target, 0o700)
 			}
+			// This fixture is an explicit historical Go shell owner. Current
+			// Rust declarations require their real image and build inputs and
+			// must never be copied as a partial declaration into this bundle.
+			if tree == "config" && (relative == "release-owner.json" || relative == "release-owner.schema.json" || relative == "release-owner-build.json") {
+				return nil
+			}
 			payload, err := os.ReadFile(path)
 			if err != nil {
 				return err

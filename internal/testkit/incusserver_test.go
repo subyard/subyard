@@ -1,6 +1,7 @@
 package testkit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,50 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestIncusOperationExactResourceAndFinalReadback(t *testing.T) {
+	fake, err := NewIncusServer(TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fake.Close()
+	fake.QueueExec(IncusServerExecStep{})
+	post := httptest.NewRecorder()
+	fake.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/1.0/instances/yard/exec?project=scope", bytes.NewBufferString(`{"command":["true"]}`)))
+	if post.Code != http.StatusAccepted {
+		t.Fatal("exec acceptance", post.Code)
+	}
+	get := func(path string, want int) map[string]any {
+		t.Helper()
+		response := httptest.NewRecorder()
+		fake.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != want {
+			t.Fatal("operation response", response.Code)
+		}
+		var body struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Metadata
+	}
+	running := get("/1.0/operations/operation-1", http.StatusOK)
+	if running["status_code"] != float64(103) {
+		t.Fatal("uncompleted operation was final")
+	}
+	resources := running["resources"].(map[string]any)["instances"].([]any)
+	if len(resources) != 1 || resources[0] != "/1.0/instances/yard?project=scope" {
+		t.Fatal("operation lost original resource")
+	}
+	close(fake.operations["operation-1"].stdinDone)
+	get("/1.0/operations/operation-1/wait", http.StatusOK)
+	final := get("/1.0/operations/operation-1", http.StatusOK)
+	if final["id"] != "operation-1" || final["status_code"] != float64(200) {
+		t.Fatal("exact terminal was not retained")
+	}
+	get("/1.0/operations/missing", http.StatusNotFound)
+}
 
 func TestIncusInventoryReplacementReturnsAuthoritativeAbsence(t *testing.T) {
 	fake := &IncusServer{instances: map[string]map[string]any{}}

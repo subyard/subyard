@@ -201,6 +201,17 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(desired,{'marker':'','device':None})
         self.assertEqual(origin,'http://127.0.0.1:22222')
 
+    def test_refresh_cannot_report_current_for_a_different_desired_assessment(self):
+        before = dashboard.observe(True,'dev','claude codex')[0]
+        after = dict(before, actual='b'*64, desired='b'*64)
+        observation = (before, self.native, {}, {}, '')
+        with patch.object(dashboard,'observe',side_effect=[observation, (after,)]), \
+             patch.object(dashboard,'route',return_value=({}, {}, '')), \
+             patch.object(dashboard,'publish'), \
+             patch.object(sys,'argv',['dashboard.py','refresh','1','dev','claude codex',before['actual'],before['desired']]):
+            with self.assertRaisesRegex(ValueError,'desired assessment changed'):
+                dashboard.main()
+
     def test_pause_preserves_exact_instance_route_identity(self):
         before=json.dumps(self.snapshot,sort_keys=True)
         with patch.object(dashboard,'guest',return_value='paused'), patch.object(sys,'argv',['dashboard.py','pause','1','dev','claude codex']):
@@ -267,6 +278,17 @@ class DashboardTest(unittest.TestCase):
         with patch.object(dashboard.subprocess,'run',side_effect=error),contextlib.redirect_stderr(captured):
             with self.assertRaises(subprocess.CalledProcessError): ORIGINAL_RUN('incus')
         self.assertEqual(captured.getvalue(),'openlit: guest progress=image-pull\nopenlit: guest image-pull exit=124\n')
+
+    def test_host_transport_retains_the_checked_owner_descriptor(self):
+        reader, writer = os.pipe()
+        try:
+            os.set_blocking(reader, False)
+            with patch.object(dashboard,'owner_descriptors',return_value=(writer,)):
+                ORIGINAL_RUN(sys.executable,'-c','import os;os.write('+str(writer)+',b"retained")')
+            self.assertEqual(os.read(reader,32),b'retained')
+        finally:
+            os.close(reader)
+            os.close(writer)
 
     def test_compose_failure_reason_is_closed_and_keeps_native_error(self):
         for message, reason in (
@@ -335,6 +357,8 @@ class ColdTransportTest(unittest.TestCase):
     def reap_helpers(self):
         if not self.pids.exists(): return
         pending=set(map(int,self.pids.read_text().split()))
+        if hasattr(self,'transport') and self.transport.exists():
+            pending.add(int(self.transport.read_text()))
         end=time.monotonic()+1
         while pending and time.monotonic()<end:
             for pid in list(pending):
@@ -422,6 +446,48 @@ class ColdTransportTest(unittest.TestCase):
         self.assertTrue(self.pids.exists())
         self.assertFalse(self.published.exists())
         self.reap_helpers()
+
+    def test_refresh_cancel_closes_transport_and_reaps_guest_group(self):
+        # Refresh has the same foreground lifetime as cold apply, including a
+        # nested timeout whose child ignores TERM and must be killed as a group.
+        self.hanging_pull()
+        source=(PROFILE/'guest.sh').read_text()
+        compose=source[source.index('compose() {'):source.index('\nnative()')]
+        self.write(self.profile/'guest.sh','#!/bin/bash\nset -euo pipefail\nmode=$1\nroot='+str(self.profile)+'\nstate='+str(self.root)+'\n'+compose+'\ncompose config --images\ntouch '+str(self.published)+'\n')
+        with patch.dict(dashboard.GUEST_TIMEOUTS, {'refresh':0.9}):
+            with self.assertRaises(subprocess.SubprocessError):
+                dashboard.guest('refresh',True,'dev','claude codex','')
+        self.assertTrue(self.pids.exists())
+        self.assertFalse(self.published.exists())
+        self.reap_helpers()
+
+    def test_refresh_caller_loss_closes_guest_liveness_pipe(self):
+        self.hanging_pull()
+        self.transport=self.root/'transport'
+        self.write(self.bin/'incus','#!/usr/bin/env python3\nimport os,sys\nopen('+repr(str(self.transport))+',"w").write(str(os.getpid()))\na=sys.argv[sys.argv.index("--")+1:];os.execvp(a[0],a)\n',0o700)
+        self.write(self.profile/'guest.sh','#!/bin/bash\nset -euo pipefail\ndocker &\nwait\ntouch '+str(self.published)+'\n')
+        program = ('import importlib.util\nfrom pathlib import Path\n'
+                   'spec=importlib.util.spec_from_file_location("dashboard",'+repr(str(PROFILE/'dashboard.py'))+')\n'
+                   'dashboard=importlib.util.module_from_spec(spec);spec.loader.exec_module(dashboard)\n'
+                   'dashboard.ROOT=Path('+repr(str(self.profile))+')\n'
+                   'dashboard.ENV={"INCUS_PROJECT":"fixture","YARD_INSTANCE_NAME":"yard"}\n'
+                   'dashboard.GUEST_TIMEOUTS["refresh"]=5\n'
+                   'dashboard.COLD_CANCEL_SECONDS=0.2;dashboard.COLD_KILL_SECONDS=0.05\n'
+                   'dashboard.guest("refresh",True,"dev","claude codex","")\n')
+        caller = subprocess.Popen([sys.executable,'-c',program], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            end=time.monotonic()+2
+            while not self.pids.exists() and caller.poll() is None and time.monotonic()<end:
+                time.sleep(0.005)
+            self.assertTrue(self.pids.exists())
+            caller.kill()
+            self.assertEqual(caller.wait(timeout=1),-9)
+            self.reap_helpers()
+            self.assertFalse(self.published.exists())
+        finally:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=1)
 
     def test_refresh_retains_its_pull_subdeadline(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:

@@ -65,5 +65,5 @@ func (client *Client) RemoveOwnedResourceIngress(ctx context.Context, yard yardn
 	} else {
 		delete(instance.Config, contract.OwnershipKey())
 	}
-	return updateInstanceDevices(project, yard.Instance, instance, etag)
+	return updateInstanceDevices(ctx, project, yard.Instance, instance, etag)
 }

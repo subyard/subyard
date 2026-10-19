@@ -74,20 +74,24 @@ func compareAndSwapPersistentFileGuarded(
 		return sourceAccessError(configHome, "persistent settings directory", err)
 	}
 	defer unix.Close(root)
+	if err := validatePersistentDirectoryFD(root); err != nil {
+		return sourceContext(filepath.Clean(configHome), 0, "", "persistent settings directory", err)
+	}
+	if err := unix.Flock(root, unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(root, unix.LOCK_UN)
+	return compareAndSwapPersistentFileAt(root, filepath.Clean(configHome), parts, expected, desired, guard, fault, local)
+}
+
+func compareAndSwapPersistentFileAt(root int, displayRoot string, parts []string, expected PersistentFileSnapshot, desired []byte, guard func() error, fault func(string) error, local bool) error {
 	current := root
 	defer func() {
 		if current != root {
 			_ = unix.Close(current)
 		}
 	}()
-	currentPath := filepath.Clean(configHome)
-	if err := validatePersistentDirectoryFD(current); err != nil {
-		return sourceContext(currentPath, 0, "", "persistent settings directory", err)
-	}
-	if err := unix.Flock(root, unix.LOCK_EX); err != nil {
-		return err
-	}
-	defer unix.Flock(root, unix.LOCK_UN)
+	currentPath := displayRoot
 	if guard != nil {
 		if err := guard(); err != nil {
 			return err

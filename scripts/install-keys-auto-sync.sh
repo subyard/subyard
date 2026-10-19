@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
+# shellcheck source=scripts/lib/native-installed-stage.sh
+. "$SCRIPT_DIR/lib/native-installed-stage.sh"
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
@@ -22,6 +24,11 @@ TIMER_TEMPLATE="$REPO/config/systemd/subyard-keys-sync.timer.in"
 SKIP_ENABLE="${SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE:-0}"
 RUNTIME_ROOT="${YARD_RUNTIME_ROOT:-$SUBYARD_HOME/runtime}"
 YARD_BIN="$RUNTIME_ROOT/current/bin/yard"
+if [ -n "${SUBYARD_PREPARED_KEYS_YARD_BIN:-}" ]; then
+  # The native owning component freezes this existing launcher selection before
+  # consent. Its private source snapshot must never enter an installed unit.
+  YARD_BIN="$SUBYARD_PREPARED_KEYS_YARD_BIN"
+else
 DEVELOPMENT_YARD_BIN="$REPO/.build/yard"
 if [ ! -x "$YARD_BIN" ] && [ -f "$DEVELOPMENT_YARD_BIN" ] \
   && [ ! -L "$DEVELOPMENT_YARD_BIN" ] && [ -x "$DEVELOPMENT_YARD_BIN" ]; then
@@ -29,6 +36,7 @@ if [ ! -x "$YARD_BIN" ] && [ -f "$DEVELOPMENT_YARD_BIN" ] \
 fi
 if [ "$SKIP_ENABLE" = 1 ] && [ ! -x "$YARD_BIN" ]; then
   YARD_BIN="$REPO/bin/yard"
+fi
 fi
 [ -x "$YARD_BIN" ] \
   || die "yard runtime is missing — run the Subyard release installer (or build the development candidate)"

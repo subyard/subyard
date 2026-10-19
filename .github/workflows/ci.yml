@@ -12,7 +12,8 @@ permissions:
 jobs:
   native-engine-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    # Include native Rust process contracts and both locked musl builds.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,7 +24,15 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install engine test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y gcc jq ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq ripgrep
+      - name: Set up release owner Rust toolchain
+        run: |
+          export CARGO_HOME="$GITHUB_WORKSPACE/.build/rust-toolchain/cargo"
+          export RUSTUP_HOME="$GITHUB_WORKSPACE/.build/rust-toolchain/rustup"
+          printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "$CARGO_HOME" "$RUSTUP_HOME" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$CARGO_HOME" >> "$GITHUB_PATH"
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+          "$CARGO_HOME/bin/rustup" toolchain install stable --profile minimal --component rustfmt,clippy --target x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
       - name: Build and run native engine
         run: |
           dev/build-engine.sh
@@ -31,6 +40,15 @@ jobs:
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 ./cmd/... ./internal/...
+      - name: Native Rust owner and sealed helper process contracts
+        run: |
+          ./release-owner/check-runtime.sh
+          ./dev/build-release-owner.sh --output .build/release-owner-delivery/native/subyard-release-owner
+          SUBYARD_RUST_OWNER_EXECUTABLE="$PWD/.build/release-owner-delivery/native/subyard-release-owner" \
+            SUBYARD_RUST_NATIVE_HELPER="$PWD/.build/yard" \
+            SUBYARD_RUST_RUNTIME_CORPUS="$PWD/.build/release-owner-runtime/runtime-corpus.json" \
+            go test -count=1 ./internal/adapters/releaseruntime -run '^TestReleaseOwnerNormalSealedMissingProofRefusal$'
+          ./dev/check-release-owner-delivery.sh .build/release-owner-delivery/native-package
       - name: Native OpenLIT profile Go checks
         run: bash tests/helpers/profile-go.sh openlit
 
@@ -39,7 +57,7 @@ jobs:
     # supported RestartForceExitStatus=/Type= compatibility boundary.
     runs-on: ubuntu-24.04
     # Include setup and ShellCheck alongside all core and profile checks.
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,7 +68,43 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install system test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y gcc jq openssh-server ripgrep shellcheck zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+      - name: Set up release owner Rust toolchain
+        run: |
+          export CARGO_HOME="$GITHUB_WORKSPACE/.build/rust-toolchain/cargo"
+          export RUSTUP_HOME="$GITHUB_WORKSPACE/.build/rust-toolchain/rustup"
+          printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "$CARGO_HOME" "$RUSTUP_HOME" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$CARGO_HOME" >> "$GITHUB_PATH"
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+          "$CARGO_HOME/bin/rustup" toolchain install stable --profile minimal --component rustfmt,clippy --target x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - name: Pinned Rust owner predecessor inputs (amd64)
+        run: |
+          python3 - <<'PYBASELINES'
+          import json, pathlib, runpy
+          root = pathlib.Path.cwd()
+          cache = root / ".build/rust-p1-predecessors/attempt-1"
+          cache.mkdir(parents=True, exist_ok=True)
+          verifier = runpy.run_path(str(root / "dev/verify-release-upgrades.py"))
+          assets = []
+          for version, hashes in ((verifier["BASELINE"], verifier["BASELINE_SHA256"]),
+                                  (verifier["PUBLISHED_BASELINE"], verifier["PUBLISHED_BASELINE_SHA256"]),
+                                  (verifier["MIGRATION_OWNER_BASELINE"], verifier["MIGRATION_OWNER_SHA256"])):
+              existing = cache / ("baseline-" + version)
+              directory = verifier["baseline_assets"](cache, existing if existing.exists() else None,
+                                                       version, hashes, "amd64")
+              assets.append(dict(version=version, directory=str(directory.relative_to(root)),
+                                 bundleSHA256=hashes["amd64"]))
+          (cache / "index.json").write_text(json.dumps(dict(schemaVersion=1, architecture="amd64", assets=assets)) + "\n")
+          PYBASELINES
+      - name: Native Rust owner and authentic Go writer coexistence (amd64)
+        run: |
+          export SUBYARD_RUST_PREDECESSOR_ASSETS="$PWD/.build/rust-p1-predecessors/attempt-1"
+          ./release-owner/check-runtime.sh
+          SUBYARD_RUST_FIXTURE_OWNER="$PWD/.build/release-owner-runtime/target-fixture/debug/subyard-release-owner" \
+            SUBYARD_RUST_NATIVE_HELPER="$PWD/.build/release-owner-runtime/yard" \
+            SUBYARD_RUST_RUNTIME_CORPUS="$PWD/.build/release-owner-runtime/runtime-corpus.json" \
+            go test -count=1 -v ./internal/cli -run '^TestRustOwnerReleasedWriterExclusion$'
+          ./dev/check-release-owner-delivery.sh .build/release-owner-delivery/amd64-package
       - name: ShellCheck
         run: |
           mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)

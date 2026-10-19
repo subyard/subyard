@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -32,6 +33,7 @@ class Runtime:
                  state=Path('/var/lib/subyard/git-fetch'), units=Path('/etc/systemd/system')):
         self.state, self.units = state, units
         self.selected, self.stopped = selected, stopped
+        self.custody_guard = None
         account = pwd.getpwnam(user)
         if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*', user) or account.pw_uid == 0:
             raise ValueError('invalid developer account')
@@ -166,6 +168,7 @@ class Runtime:
                 raise ValueError('foreign loaded service unit')
             units.append(unit)
         if units:
+            self.guard_custody()
             systemctl('stop', *units)
 
     def pause(self):
@@ -189,7 +192,9 @@ class Runtime:
         # Every source/loaded identity check still applies before systemctl start.
         if not self.check(stopped=self.manager(TIMER)[0] == 'inactive'):
             raise ValueError('paused runtime identity changed')
-        systemctl('start', TIMER)
+        if self.manager(TIMER)[0] != 'active':
+            self.guard_custody()
+            systemctl('start', TIMER)
 
     def create_state(self):
         # Publish the directory and marker together. A crash before rename leaves
@@ -213,6 +218,7 @@ class Runtime:
     def apply(self, refresh=False):
         if self.check(refresh=refresh):
             return True
+        self.guard_custody()
         installed = self.owned()
         if refresh and not installed:
             raise ValueError('release refresh requires owned installation')
@@ -221,13 +227,18 @@ class Runtime:
         if not installed:
             self.create_state()
         for path, content in self.assets.items():
+            self.guard_custody()
             self.publish(path, content)
+        self.guard_custody()
         systemctl('daemon-reload')
         if self.selected and not disabled:
+            self.guard_custody()
             systemctl('enable', TIMER)
             if not self.stopped:
+                self.guard_custody()
                 systemctl('start', TIMER)
         else:
+            self.guard_custody()
             systemctl('disable', TIMER)
         if not self.check(refresh=refresh):
             raise ValueError('runtime verification failed')
@@ -284,16 +295,118 @@ class Runtime:
             raise ValueError('release runtime verification failed')
         return verified
 
+    def guard_custody(self):
+        if self.custody_guard is not None:
+            self.custody_guard()
+
+    def custody_path(self):
+        # This sibling belongs to the profile, outside the observed installed
+        # directory. Claiming a generation must not alter the consented runtime
+        # baseline merely by changing its parent directory timestamps.
+        return self.state.parent/('.'+self.state.name+'.native-custody.json')
+
+    def custody_generation(self):
+        path = self.custody_path()
+        fact = self.fact(path)
+        if fact is None:
+            return '0'
+        if fact[0] != 0o600:
+            raise ValueError('unsafe native custody mode')
+        if len(fact[1]) > 4096:
+            raise ValueError('native custody record bound')
+        value = json.loads(fact[1])
+        if (not isinstance(value, dict) or set(value) != {'version', 'owner', 'generation'}
+                or type(value['version']) is not int or value['version'] != 1
+                or value['owner'] != 'git-fetch-runtime'
+                or not isinstance(value['generation'], str)
+                or not re.fullmatch('[a-f0-9]{64}', value['generation'])):
+            raise ValueError('invalid native custody generation')
+        raw = (json.dumps(value, sort_keys=True, separators=(',', ':'))+'\n').encode()
+        if raw != fact[1]:
+            raise ValueError('noncanonical native custody generation')
+        return value['generation']
+
+    def claim_custody(self, allowed, generation, lock_fd, lock_path, allow_absent_install=False):
+        validate_lock(lock_fd, lock_path)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        validate_lock(lock_fd, lock_path)
+        if ((not self.owned() and not allow_absent_install) or not re.fullmatch('[a-f0-9]{64}', generation)
+                or any(value != '0' and not re.fullmatch('[a-f0-9]{64}', value) for value in allowed)):
+            raise ValueError('invalid native custody claim')
+        current = self.custody_generation()
+        if current not in {*allowed, generation}:
+            raise ValueError('native custody generation changed')
+        if current != generation:
+            path = self.custody_path()
+            self.safe(path)
+            if not path.parent.exists():
+                path.parent.mkdir(mode=0o755)
+                path.parent.chmod(0o755)
+            raw = (json.dumps({'version': 1, 'owner': 'git-fetch-runtime', 'generation': generation},
+                              sort_keys=True, separators=(',', ':'))+'\n').encode()
+            fd, temporary = tempfile.mkstemp(prefix='.'+path.name+'.', dir=path.parent)
+            try:
+                with os.fdopen(fd, 'wb') as output:
+                    os.fchmod(output.fileno(), 0o600)
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        # Repeating an already visible CAS repairs a prior file/parent fsync
+        # failure; visibility alone is not durable native fencing.
+        path = self.custody_path()
+        generation_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(generation_fd)
+            os.fsync(parent)
+        finally:
+            os.close(generation_fd)
+            os.close(parent)
+        if self.custody_generation() != generation:
+            raise ValueError('native custody publication changed')
+        validate_lock(lock_fd, lock_path)
+        return {'generation': generation}
+
+
+def validate_lock(fd, path):
+    opened = os.fstat(fd)
+    named = path.lstat()
+    if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1 or opened.st_mode & 0o777 != 0o600
+            or stat.S_ISLNK(named.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        raise ValueError('unsafe or replaced lifecycle lock')
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def ordinary_custody(runtime, fd, lock):
+    # Share the complete lifecycle lock with native claims. A no-op never
+    # reaches the guard; the first effect invalidates every older claim.
+    generation = None
+    def guard():
+        nonlocal generation
+        validate_lock(fd, lock)
+        if generation is None:
+            current = runtime.custody_generation()
+            generation = secrets.token_hex(32)
+            runtime.claim_custody((current,), generation, fd, lock, allow_absent_install=True)
+        elif runtime.custody_generation() != generation:
+            raise ValueError('native custody changed before effect')
+    runtime.custody_guard = guard
+
+
 def main():
     mode, selected, user, stopped, *extra = sys.argv[1:]
-    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh') or selected not in ('0', '1') or stopped not in ('0', '1'):
+    if mode not in ('check', 'apply', 'pause', 'resume', 'observe', 'refresh', 'custody-observe', 'custody-refresh', 'custody-fence') or selected not in ('0', '1') or stopped not in ('0', '1'):
         raise ValueError('invalid lifecycle request')
-    if len(extra) != {'observe': 1, 'refresh': 4}.get(mode, 0):
+    if len(extra) != {'observe': 1, 'refresh': 4, 'custody-observe': 1, 'custody-refresh': 6, 'custody-fence': 4}.get(mode, 0):
         raise ValueError('invalid lifecycle arguments')
     if os.geteuid() != 0:
         raise ValueError('invalid lifecycle authority')
@@ -310,10 +423,51 @@ def main():
     actual = runtime.fact(lock)
     if actual is not None and actual[0] != 0o600:
         raise ValueError('unsafe lifecycle lock')
-    fd = os.open(lock, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    if mode == 'custody-observe' and actual is None:
+        print(json.dumps({'generation': runtime.custody_generation()}))
+        return
+    flags = os.O_RDONLY if mode == 'custody-observe' else os.O_CREAT | os.O_WRONLY
+    fd = os.open(lock, flags | os.O_NOFOLLOW, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        if mode != 'custody-observe':
+            os.fchmod(fd, 0o600)
+        validate_lock(fd, lock)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        validate_lock(fd, lock)
+        if mode == 'custody-observe':
+            print(json.dumps({'generation': runtime.custody_generation()}))
+            return
+        if mode in ('custody-refresh', 'custody-fence'):
+            if not re.fullmatch('[a-f0-9]{64}', extra[0]):
+                raise ValueError('invalid native custody source binding')
+            if mode == 'custody-fence':
+                _, expected, generation, successor = extra
+                if successor in (expected, generation):
+                    raise ValueError('native custody successor is not fresh')
+                validate_lock(fd, lock)
+                result = runtime.claim_custody((expected, generation), successor, fd, lock)
+                validate_lock(fd, lock)
+                print(json.dumps(result))
+                return
+            binding, operation, actual, desired, expected, generation = extra
+            if not re.fullmatch('[a-zA-Z0-9_-]+', operation) or any(
+                    not re.fullmatch('[a-f0-9]{64}', value) for value in (actual, desired)):
+                raise ValueError('invalid release activation request')
+            validate_lock(fd, lock)
+            runtime.claim_custody((expected,), generation, fd, lock)
+            def guard():
+                validate_lock(fd, lock)
+                if runtime.custody_generation() != generation:
+                    raise ValueError('native custody changed before effect')
+            runtime.custody_guard = guard
+            guard()
+            print(json.dumps(runtime.refresh(binding, operation, actual, desired)))
+            guard()
+            return
+        # Every current ordinary mutator invalidates delayed native authority
+        # under the same lock before its first real effect. Checks and no-op
+        # lifecycle calls leave the durable generation untouched.
+        ordinary_custody(runtime, fd, lock)
         if mode == 'refresh':
             print(json.dumps(runtime.refresh(*extra)))
             return
@@ -328,9 +482,30 @@ def main():
         os.close(fd)
 
 
+def failure_reason(error):
+    # Only fixed source-owned reasons cross this transport. Never render a
+    # native exception, filesystem path, JSON value or system-manager output.
+    public = {
+        'unsafe managed parent', 'unsafe managed path', 'unsafe managed file',
+        'invalid developer account', 'unsupported developer home', 'unsupported developer group',
+        'unsafe runtime directory', 'foreign runtime directory', 'foreign service unit',
+        'foreign loaded service unit', 'runtime directory appeared during publication',
+        'runtime verification failed', 'system manager operation failed',
+        'unsafe lifecycle lock', 'unsafe or replaced lifecycle lock',
+        'native custody generation changed', 'native custody changed before effect',
+    }
+    if type(error) is ValueError and str(error) in public:
+        return str(error)
+    if isinstance(error, subprocess.TimeoutExpired):
+        return 'native operation timed out'
+    if isinstance(error, OSError):
+        return 'native filesystem operation failed'
+    return 'profile request could not be verified'
+
+
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-        print('git-fetch: profile reconciliation failed; inspect owned timer state', file=sys.stderr)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('git-fetch: '+failure_reason(error)+'; inspect owned timer state', file=sys.stderr)
         sys.exit(2)

@@ -3,12 +3,14 @@ package reconcileruntime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
@@ -29,23 +31,105 @@ type guestConfigFile struct {
 	ownedFormat         string
 }
 
+// PreparedConfigs retains the exact component source/payload/destination set.
+// Its private fields cannot be reconstructed from a binding supplied over IPC.
+type PreparedConfigs struct {
+	files    []guestConfigFile
+	payloads map[string][]byte
+	entries  []integrationArtifact
+	binding  string
+	runtime  string
+	instance string
+	sources  map[configSourceKey]configSourceBytes
+}
+
+type configSourceKey struct {
+	path   string
+	follow bool
+}
+type configSourceBytes struct {
+	payload []byte
+	exists  bool
+}
+
+func (p *PreparedConfigs) Binding() string {
+	if p == nil {
+		return ""
+	}
+	return p.binding
+}
+func configBindingEnvironment(environment []string) []string {
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "SUBYARD_OPERATION_ID=") || strings.HasPrefix(entry, "SUBYARD_SUDO_PREAUTHORIZED=") {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+func (runtime Runtime) configRuntimeBinding() string {
+	raw, _ := json.Marshal(struct {
+		Project, Instance, User string
+		Environment             []string
+	}{runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.devUser(), runtime.bindingEnvironment(runtime.Environment)})
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
+}
 func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
+	prepared, err := runtime.PrepareConfigs(ctx)
+	if err != nil {
+		return err
+	}
+	return runtime.applyPreparedConfigs(ctx, prepared, false)
+}
+func (runtime Runtime) PrepareConfigs(ctx context.Context) (*PreparedConfigs, error) {
 	if runtime.Executor == nil {
-		return errors.New("Incus executor is required")
+		return nil, errors.New("Incus executor is required")
 	}
 	if !domain.SafeName(runtime.devUser()) {
-		return errors.New("invalid developer user")
+		return nil, errors.New("invalid developer user")
 	}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil || !state.InstanceFound {
-		return firstError(err, errors.New("yard instance is missing"))
+		return nil, firstError(err, errors.New("yard instance is missing"))
 	}
 	if !strings.EqualFold(state.Instance.Status, "running") {
-		return errors.New("yard is not running")
+		return nil, errors.New("yard is not running")
 	}
+	return runtime.prepareConfigPayloads(state.Instance.Config["volatile.uuid"])
+}
+
+// prepareConfigPayloads captures only the fixed owning file selection and its
+// original bytes. Future owner children use it without inventing a guest UUID.
+func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs, error) {
 	files, err := runtime.guestConfigFiles()
 	if err != nil {
-		return err
+		return nil, err
+	}
+	sources := map[configSourceKey]configSourceBytes{}
+	reader := func(asset config.MaterializedAsset) ([]byte, error) {
+		key := configSourceKey{asset.Source, asset.FollowSymlinks}
+		if value, exists := sources[key]; exists {
+			if !value.exists {
+				return nil, os.ErrNotExist
+			}
+			return value.payload, nil
+		}
+		var payload []byte
+		var err error
+		if runtime.SourceReader != nil {
+			payload, err = runtime.SourceReader(asset)
+		} else {
+			payload, err = asset.ReadSource()
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		sources[key] = configSourceBytes{payload, err == nil}
+		return payload, err
+	}
+	for index := range files {
+		files[index].readAsset = reader
 	}
 	output := runtime.Stdout
 	if output == nil {
@@ -55,13 +139,21 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 	// Read once so the inventory intent describes exactly the bytes applied.
 	payloads := make(map[string][]byte)
 	entries := []integrationArtifact{}
+	if len(files) > 2048 {
+		return nil, errors.New("prepared config file bound")
+	}
+	bytes := 0
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return err
+			return nil, err
+		}
+		bytes += len(payload)
+		if bytes > 32<<20 {
+			return nil, errors.New("prepared config payload bound")
 		}
 		payloads[file.destination] = payload
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
@@ -69,6 +161,89 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 			entry.Kind, entry.Format = "structured", file.ownedFormat
 		}
 		entries = append(entries, entry)
+	}
+
+	bindings := map[string]string{}
+	for destination, payload := range payloads {
+		bindings[destination] = fmt.Sprintf("%x", sha256.Sum256(payload))
+	}
+	type sourceBinding struct {
+		Integration, Label, Source, Destination, PreviewSource, OwnedFormat string
+		FollowSymlinks, PreviewInstructions                                 bool
+	}
+	bindingsSources := make([]sourceBinding, 0, len(files))
+	for _, file := range files {
+		bindingsSources = append(bindingsSources, sourceBinding{file.integration, file.label, runtime.bindingPath(file.source), file.destination, runtime.bindingPath(file.previewSource), file.ownedFormat, file.followSymlinks, file.previewInstructions})
+	}
+	raw, err := json.Marshal(struct {
+		Payloads map[string]string
+		Entries  []integrationArtifact
+		Runtime  string
+		Sources  []sourceBinding
+		Instance string
+	}{bindings, entries, runtime.configRuntimeBinding(), bindingsSources, instance})
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedConfigs{files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources}, nil
+}
+
+// ApplyPreparedConfigs rechecks the captured sources and uses only the cached
+// approved payloads. It never discovers a new file or integration at execution.
+func (runtime Runtime) ApplyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
+	return runtime.applyPreparedConfigs(ctx, prepared, true)
+}
+
+// CheckPreparedConfigs checks the retained exact source/resource set without
+// discovering another selection or making a guest call.
+func (runtime Runtime) CheckPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
+	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
+		return domain.ErrPlanStale
+	}
+	for _, file := range prepared.files {
+		// Prepared readers may project an approved future import. Mutation checks
+		// its now-published native source rather than rereading the old projection.
+		file.readAsset = nil
+		expected, exists := prepared.payloads[file.destination]
+		actual, err := file.readSource()
+		if !exists && os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !exists || !slices.Equal(actual, expected) {
+			return domain.ErrPlanStale
+		}
+	}
+	state, err := runtime.reconcileState(ctx)
+	if err != nil {
+		return err
+	}
+	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") || state.Instance.Config["volatile.uuid"] != prepared.instance {
+		return domain.ErrPlanStale
+	}
+	return nil
+}
+func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs, recheck bool) error {
+	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
+		return domain.ErrPlanStale
+	}
+	if recheck {
+		if err := runtime.CheckPreparedConfigs(ctx, prepared); err != nil {
+			return err
+		}
+	}
+	files, payloads, entries := prepared.files, prepared.payloads, prepared.entries
+	if recheck {
+		files = slices.Clone(files)
+		for i := range files {
+			files[i].readAsset = nil
+		}
+	}
+	output := runtime.Stdout
+	if output == nil {
+		output = io.Discard
 	}
 	if len(entries) != 0 {
 		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {

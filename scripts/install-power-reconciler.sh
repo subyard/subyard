@@ -12,6 +12,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/ui.sh"
 # shellcheck source=scripts/lib/host.sh
 . "$SCRIPT_DIR/lib/host.sh"
+# shellcheck source=scripts/lib/native-installed-stage.sh
+. "$SCRIPT_DIR/lib/native-installed-stage.sh"
 
 LIBEXEC_DIR="${SUBYARD_POWER_LIBEXEC_DIR:-/usr/local/libexec/subyard}"
 RECONCILER_PATH="${SUBYARD_POWER_RECONCILER_PATH:-$LIBEXEC_DIR/yard-boot-reconcile}"
@@ -24,6 +26,7 @@ action=install
 for arg in "$@"; do
   case "$arg" in
     --remove-if-unused) action=remove-if-unused ;;
+    --native-fence) action=native-fence ;;
     -y|--yes) ;;
     -*) die "unknown option '$arg'" ;;
   esac
@@ -39,6 +42,14 @@ else
 fi
 proceed_or_die
 require_root "installing a host systemd unit and root-owned reconciler needs root"
+# shellcheck source=scripts/lib/native-install-custody.sh
+. "$SCRIPT_DIR/lib/native-install-custody.sh"
+subyard_install_custody host-power "$LIBEXEC_DIR" "$RECONCILER_PATH" "$UNIT_PATH"
+if [ "$action" = native-fence ]; then
+  [ -n "${SUBYARD_NATIVE_SUCCESSOR:-}" ] || die 'native fence successor is required'
+  subyard_install_custody_verify host-power "$LIBEXEC_DIR"
+  exit 0
+fi
 
 if [ "$action" = remove-if-unused ]; then
   # shellcheck source=scripts/lib/teardown-services.sh
@@ -73,6 +84,11 @@ exec {publication_engine_fd}<"$ENGINE_SOURCE"
 publication_engine="/proc/self/fd/$publication_engine_fd"
 [ -f "$publication_engine" ] && [ -x "$publication_engine" ] \
   || die 'opened power engine must be an executable regular file'
+if [ -n "${SUBYARD_NATIVE_ENGINE_SHA256:-}" ]; then
+  [[ "$SUBYARD_NATIVE_ENGINE_SHA256" =~ ^[a-f0-9]{64}$ ]] \
+    && [ "$(sha256sum "$publication_engine" | cut -d ' ' -f1)" = "$SUBYARD_NATIVE_ENGINE_SHA256" ] \
+    || die 'prepared host engine changed before installation'
+fi
 # Read the protected epoch as its approved operator before copying any runtime.
 publication_args=(env "SUBYARD_REPOSITORY_ROOT=/proc/self/fd/$publication_root_fd" "SUBYARD_CONFIG_HOME=${SUBYARD_CONFIG_HOME:?}")
 if [ "$(id -u)" = 0 ] && [ "${SUBYARD_USER:-root}" != root ]; then
@@ -90,7 +106,8 @@ exec {publication_engine_fd}<&-
   || die "could not initialize the host network policy lock"
 
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+subyard_result=0
+trap 'subyard_result=$?; rm -f "$tmp"; subyard_prepared_installed_finish "$subyard_result"' EXIT
 sed "s|@SUBYARD_POWER_RECONCILER@|$RECONCILER_PATH|g" "$TEMPLATE" > "$tmp"
 # Snapshot owning declarations into the root-owned unit beside its copied engine.
 printf '\n[Service]\nEnvironment=SUBYARD_PUBLICATION_CONTRACTS=%s\n' "$publication_contracts" >> "$tmp"
@@ -105,3 +122,4 @@ if ! systemctl is-enabled --quiet "$UNIT_NAME"; then
   systemctl enable "$UNIT_NAME" >/dev/null
 fi
 ok "$UNIT_NAME enabled (it runs on boot; not started during setup)"
+subyard_install_custody_verify host-power "$LIBEXEC_DIR"

@@ -29,6 +29,7 @@ type Setting struct {
 type RuntimeHook struct {
 	ActivationID         string   `json:"activation_id"`
 	Handler              string   `json:"handler"`
+	Custody              bool     `json:"custody,omitempty"`
 	ProjectsChangedHooks []string `json:"projects_changed_hooks,omitempty"`
 }
 
@@ -67,6 +68,11 @@ func (definition Definition) sourcePath(path string, executable bool) (string, e
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	rootInfo, rootErr := os.Lstat(root)
+	if pinnedRepositoryRoot.MatchString(root) {
+		// A declared development native asset also validates go.mod directly
+		// beneath the retained repository descriptor, rather than a package.
+		rootInfo, rootErr = os.Stat(root)
+	}
 	if err != nil || rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return "", errors.New("profile root must be a real directory")
 	}
@@ -74,6 +80,9 @@ func (definition Definition) sourcePath(path string, executable bool) (string, e
 		// Only the kernel directory-descriptor anchor may be a symlink. Check
 		// every component below it, including the profile package's ancestors.
 		anchor := strings.TrimSuffix(profileDescriptorRoot.FindString(root), "/")
+		if pinnedRepositoryRoot.MatchString(root) {
+			anchor = root
+		}
 		if anchor == "" {
 			return "", errors.New("profile root must be a real directory")
 		}
@@ -82,7 +91,11 @@ func (definition Definition) sourcePath(path string, executable bool) (string, e
 			return "", errors.New("profile directory descriptor is unavailable")
 		}
 		current := anchor
-		for _, part := range strings.Split(strings.TrimPrefix(root, anchor+"/"), string(filepath.Separator)) {
+		parts := []string{}
+		if root != anchor {
+			parts = strings.Split(strings.TrimPrefix(root, anchor+"/"), string(filepath.Separator))
+		}
+		for _, part := range parts {
 			current = filepath.Join(current, part)
 			info, err := os.Lstat(current)
 			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {

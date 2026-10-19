@@ -5,11 +5,63 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import signal
 import subprocess
 import sys
+import time
 
 
 SOURCE = Path(__file__).resolve().parent
+OWNER_BARRIER = SOURCE.parents[2]/'scripts/lib/native-owner-barrier.py'
+OWNER_TIMEOUT = 90
+OWNER_CANCEL_SECONDS = 2
+
+
+def apply_owner(environment):
+    """Keep the ordinary owner and its foreground children inside one lifetime."""
+    child = subprocess.Popen([str(SOURCE/'owner.sh'), '--yes'], env=environment,
+                             stdout=sys.stderr, start_new_session=True,
+                             pass_fds=runpy.run_path(str(OWNER_BARRIER))['inherited_owner_descriptors']())
+    previous = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    def cancel(signum, frame):
+        raise SystemExit(128+signum)
+    for s in previous:
+        signal.signal(s, cancel)
+    try:
+        # Keep the leader unreaped until its group is drained, including a
+        # child that outlives an already exited owner shell.
+        deadline = time.monotonic()+OWNER_TIMEOUT
+        while True:
+            result = os.waitid(os.P_PID, child.pid, os.WEXITED|os.WNOHANG|os.WNOWAIT)
+            if result:
+                status = result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+                if status:
+                    raise subprocess.CalledProcessError(status, child.args)
+                return
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(child.args, OWNER_TIMEOUT)
+            time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+    finally:
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)
+        try:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            # Allow normal traps to finish before terminating surviving children.
+            deadline = time.monotonic()+OWNER_CANCEL_SECONDS
+            while time.monotonic() < deadline:
+                time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=1)
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
 
 
 def digest(value):
@@ -114,8 +166,7 @@ def main():
             return
         if result['actual'] != arguments[2] or result['desired'] != arguments[3]:
             raise ValueError('GitHub runtime assessment changed before apply')
-        subprocess.run([str(SOURCE/'owner.sh'), '--yes'], env=environment,
-                       stdout=sys.stderr, check=True, timeout=90)
+        apply_owner(environment)
         result, _ = observe()
         if result['state'] != 'current' or result['desired'] != arguments[3]:
             raise ValueError('GitHub runtime activation did not converge')

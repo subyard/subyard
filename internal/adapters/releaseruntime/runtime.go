@@ -98,6 +98,7 @@ func (prepared Prepared) Check(ctx context.Context) (releasetransition.Inspectio
 }
 
 type Runtime struct {
+	rustOwners             *rustOwnerSessions
 	config                 Config
 	pinnedCandidateRoot    *os.File
 	pinnedCandidateRelease releasetransition.ReleaseID
@@ -108,20 +109,28 @@ func New(config Config) *Runtime {
 	if config.HTTPClient == nil {
 		config.HTTPClient = http.DefaultClient
 	}
-	return &Runtime{config: config}
+	return &Runtime{config: config, rustOwners: &rustOwnerSessions{sessions: map[string]*rustOwnerSession{}}}
 }
 
 func (runtime *Runtime) Close() error {
-	if runtime == nil || runtime.pinnedCandidateRoot == nil {
+	if runtime == nil {
 		return nil
+	}
+	var err error
+	if runtime.rustOwners != nil {
+		err = runtime.rustOwners.Close()
+	}
+	if runtime.pinnedCandidateRoot == nil {
+		return err
 	}
 	root := runtime.pinnedCandidateRoot
 	runtime.pinnedCandidateRoot = nil
 	runtime.pinnedCandidateRelease = ""
-	return root.Close()
+	return errors.Join(err, root.Close())
 }
 
 type protectedTransitionInspection struct {
+	rustOwner                     bool
 	journal                       releasetransition.JournalRecord
 	journalSnapshot               releasetransition.ProtectedSnapshot
 	owner                         candidateVerification
@@ -130,6 +139,34 @@ type protectedTransitionInspection struct {
 	inspection                    releasetransition.Inspection
 	activationReconciliationOwned bool
 	recoveryRequest               *releasetransition.RecoveryProcessRequest
+}
+
+// selectedRustOwnerError makes verified Rust selection sticky across admission
+// failures. Historical completed-metadata compatibility cannot replace this owner.
+type selectedRustOwnerError struct{ cause error }
+
+func (err selectedRustOwnerError) Error() string { return err.cause.Error() }
+func (err selectedRustOwnerError) Unwrap() error { return err.cause }
+
+func markSelectedRustOwnerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var selected selectedRustOwnerError
+	if errors.As(err, &selected) {
+		return err
+	}
+	return selectedRustOwnerError{cause: err}
+}
+
+func allowsCompletedMetadataAdmission(protected *protectedTransitionInspection, err error) bool {
+	var selected selectedRustOwnerError
+	if errors.As(err, &selected) {
+		return false
+	}
+	return err != nil || protected != nil && !protected.rustOwner &&
+		protected.journal.Checkpoint == releasetransition.JournalComplete &&
+		protected.inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired
 }
 
 type redactedReleaseInspectionError struct{ cause error }
@@ -211,7 +248,13 @@ func (runtime *Runtime) inspectProtectedTransition(
 	configHome string,
 	yard string,
 	inheritedSettingIDs []string,
-) (*protectedTransitionInspection, error) {
+) (result *protectedTransitionInspection, resultErr error) {
+	selectedRust := false
+	defer func() {
+		if selectedRust {
+			resultErr = markSelectedRustOwnerError(resultErr)
+		}
+	}()
 	store, err := releasetransition.NewPOSIXV2Store(configHome)
 	if err != nil {
 		return nil, err
@@ -327,6 +370,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 			)
 		}
 	}
+	selectedRust = releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil
 	request := releasetransition.ProcessRequest{
 		SchemaVersion:       releasetransition.ProcessProtocolSchemaV1,
 		Mode:                releasetransition.ProcessInspect,
@@ -340,7 +384,12 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
-	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request); err != nil {
+	if outcome, err := func() (*releasetransition.Outcome, error) {
+		if releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil {
+			return nil, nil
+		}
+		return runtime.inspectConfigLayoutRollback(ctx, verifiedTarget, request)
+	}(); err != nil {
 		return nil, publicCandidateFailure(err)
 	} else if outcome != nil {
 		return nil, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
@@ -401,11 +450,18 @@ func (runtime *Runtime) inspectProtectedTransition(
 			)
 		}
 	} else if inspection.Resume != nil {
-		return nil, publicCandidateFailure(
-			errors.New("candidate returned a resume plan for a complete release transition"),
-		)
+		// A completed journal can retain native terminal cleanup. Only the
+		// exact Rust session's checked private ticket can admit that original
+		// durable continuation; a frozen Resume field alone has no authority.
+		session := runtime.findRustOwnerSession(verifiedOwner.manifestDigest, request, nil)
+		if !releaseOwnerRoutingEnabled || verifiedOwner.releaseOwner == nil || session == nil ||
+			inspection.Plan != journal.ResumePlan || !session.matchesRustAdmission(*inspection) {
+			return nil, publicCandidateFailure(
+				errors.New("candidate returned a resume plan for a complete release transition"),
+			)
+		}
 	}
-	if journal.Checkpoint == releasetransition.JournalComplete &&
+	if !(releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil) && journal.Checkpoint == releasetransition.JournalComplete &&
 		inspection.Outcome.Status == releasetransition.StatusRecovering &&
 		inspection.Outcome.Code == releasetransition.CodeRecoveryPending {
 		// Older protected callers need the historical transaction on the V1
@@ -425,7 +481,8 @@ func (runtime *Runtime) inspectProtectedTransition(
 		inspection.Outcome = &outcome
 	}
 	protected := &protectedTransitionInspection{
-		journal: journal, journalSnapshot: snapshot,
+		rustOwner: releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil,
+		journal:   journal, journalSnapshot: snapshot,
 		owner: candidateVerification{
 			candidate: owner, digest: verifiedOwner.manifestDigest, version: verifiedOwner.version,
 			registryDigest: verifiedOwner.registryDigest,
@@ -517,7 +574,7 @@ func (runtime *Runtime) PrepareTransition(
 	var completedAdmission *SourceAdmission
 	// A validated fresh repair still belongs to the exact original owner.
 	// Metadata admission is only a fallback for unavailable or blocked inspection.
-	if !parsed.rollback && (err != nil || protected != nil && protected.journal.Checkpoint == releasetransition.JournalComplete && protected.inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired) {
+	if !parsed.rollback && allowsCompletedMetadataAdmission(protected, err) {
 		proof, proofErr := runtime.InspectSourceAdmission(ctx, parsed.root, configHome)
 		if proofErr == nil && proof.Metadata.Journal != nil && proof.Metadata.Journal.Checkpoint == releasetransition.JournalComplete && proof.Metadata.Journal.SourceIngress == nil {
 			completedAdmission = &proof
@@ -536,6 +593,28 @@ func (runtime *Runtime) PrepareTransition(
 		return Prepared{}, redactReleaseInspectionError(err)
 	}
 	if protected != nil {
+		if releaseOwnerRoutingEnabled && protected.journal.Checkpoint == releasetransition.JournalComplete {
+			session := runtime.findRustOwnerSession(protected.owner.digest, protected.request, protected.recoveryRequest)
+			if session != nil && session.matchesRustAdmission(protected.inspection) &&
+				(parsed.force || parsed.version != "" && parsed.version != protected.target.version ||
+					parsed.rollback != (protected.journal.Goal.Direction == releasetransition.DirectionActivatePrevious)) {
+				// Match the requested frontend scope to the original operation
+				// checked by Rust; do not silently execute another goal's plan.
+				outcome := *protected.inspection.Outcome
+				outcome.Status, outcome.ReachedGoal = releasetransition.StatusOperatorActionRequired, false
+				outcome.Code = releasetransition.CodeRecoveryPending
+				outcome.Message = "the exact original release has pending terminal owner cleanup; the requested goal was not admitted"
+				retry := "yard update --offline --version " + protected.target.version
+				if protected.journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
+					retry = "yard update --rollback"
+				}
+				outcome.Retry = "run " + retry + " to complete the original cleanup, then retry the requested update goal"
+				if parsed.check {
+					return runtime.preparePublicInspectionOutcome(parsed, outcome), nil
+				}
+				return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
+			}
+		}
 		unfinished := protected.journal.Checkpoint != releasetransition.JournalComplete ||
 			protected.inspection.Outcome.Status != releasetransition.StatusReady
 		exactCompletedTarget := !parsed.offline && protected.journal.SourceIngress != nil &&
@@ -706,7 +785,14 @@ func (runtime *Runtime) PrepareTransition(
 			prepared.Steps[index].DependsOn = append(prepared.Steps[index].DependsOn, publication.ID)
 		}
 		prepared.Steps = append([]domain.OperationStep{publication}, prepared.Steps...)
-		prepared.Close = func() error { return os.RemoveAll(draftRoot) }
+		originalClose := prepared.Close
+		prepared.Close = func() error {
+			var closeErr error
+			if originalClose != nil {
+				closeErr = originalClose()
+			}
+			return errors.Join(closeErr, os.RemoveAll(draftRoot))
+		}
 		prepared.run = func(ctx context.Context) error {
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
@@ -748,6 +834,9 @@ func (runtime *Runtime) PrepareTransition(
 				if err := publishApprovedDraft(candidate, parsed.root, rootBefore, releasesBefore); err != nil {
 					if !errors.Is(err, unix.EEXIST) {
 						return fmt.Errorf("publish approved release: %w", err)
+					}
+					if releaseOwnerRoutingEnabled && inspectionCandidate.releaseOwner != nil {
+						return fmt.Errorf("%w: another runtime directory replaced the prepared Rust candidate", domain.ErrPlanStale)
 					}
 					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
 					if verifyErr != nil {
@@ -1046,13 +1135,48 @@ func (runtime *Runtime) prepareRetainedTransition(
 		))
 	}
 	defer verified.Close()
-	if !supportedSourceVersion(verified.version) {
-		return Prepared{}, errors.New(LegacyReinstallGuidance)
-	}
 	verifiedPreparation := func(cause error) error {
 		return verifiedPreparationError{cause: cause, prepared: Prepared{
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
 		}}
+	}
+	owner := verified
+	var active *verifiedPublishedCandidate
+	if verified.registryDigest == "" {
+		activeCandidate := publishedCandidate{
+			release: releasetransition.ReleaseID(
+				strings.TrimPrefix(links.current.target, "releases/"),
+			),
+			root: filepath.Join(parsed.root, links.current.target),
+		}
+		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
+		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return Prepared{}, verifiedPreparation(err)
+		}
+		if err != nil || active.registryDigest == "" {
+			if active != nil {
+				active.Close()
+			}
+			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
+				observed, release, nil, releasetransition.CodeRollbackIncompatible,
+				"the active release cannot own a transition to the retained release",
+				"restore a compatible retained release, then run yard update --rollback",
+			)))
+		}
+		defer active.Close()
+		owner = active
+	}
+	if releaseOwnerRoutingEnabled && owner.releaseOwner != nil {
+		request := releasetransition.ProcessRequest{
+			SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+			RuntimeRoot: parsed.root, ConfigHome: configHome, Yard: yard,
+			Target: release, Direction: releasetransition.DirectionActivatePrevious,
+			ArtifactDigest: verified.manifestDigest, InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+		}
+		return runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
+	}
+	if !supportedSourceVersion(verified.version) {
+		return Prepared{}, errors.New(LegacyReinstallGuidance)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
@@ -1089,8 +1213,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 		ArtifactDigest:      verified.manifestDigest,
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 	}
-	owner := verified
-	var active *verifiedPublishedCandidate
 	// A pre-v2 target remains the verified rollback artifact, but it has no
 	// transition registry. The verified active v2 release owns that exact goal.
 	// Preserve the frozen target-owner convention. An unaware target is safe
@@ -1118,30 +1240,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 				"retain a compatible checkpoint-reader release, then run yard update --check",
 			)))
 		}
-	}
-	if verified.registryDigest == "" {
-		activeCandidate := publishedCandidate{
-			release: releasetransition.ReleaseID(
-				strings.TrimPrefix(links.current.target, "releases/"),
-			),
-			root: filepath.Join(parsed.root, links.current.target),
-		}
-		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
-		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return Prepared{}, verifiedPreparation(err)
-		}
-		if err != nil || active.registryDigest == "" {
-			if active != nil {
-				active.Close()
-			}
-			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
-				observed, release, nil, releasetransition.CodeRollbackIncompatible,
-				"the active release cannot own a transition to the retained release",
-				"restore a compatible retained release, then run yard update --rollback",
-			)))
-		}
-		defer active.Close()
-		owner = active
 	}
 	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	if err != nil {
@@ -1233,6 +1331,9 @@ func verifiedMigrationCheckpointReader(verified *verifiedPublishedCandidate) (bo
 	if err != nil {
 		return false, err
 	}
+	if sha256.Sum256(payload) != verified.checkpointDigest || !bytes.Equal(payload, verified.checkpointRaw) {
+		return false, errors.New("source checkpoint capability does not match its verified manifest")
+	}
 	if err := releasetransition.ValidateMigrationCheckpointCapability(payload); err != nil {
 		return false, err
 	}
@@ -1287,7 +1388,13 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	if outcome, err := runtime.inspectConfigLayoutRollback(ctx, target, request); err != nil {
+	rustOwner := releaseOwnerRoutingEnabled && owner.releaseOwner != nil
+	if outcome, err := func() (*releasetransition.Outcome, error) {
+		if rustOwner {
+			return nil, nil
+		}
+		return runtime.inspectConfigLayoutRollback(ctx, target, request)
+	}(); err != nil {
 		return Prepared{}, err
 	} else if outcome != nil {
 		if parsed.check {
@@ -1295,7 +1402,13 @@ func (runtime *Runtime) prepareVerifiedTransition(
 		}
 		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 	}
-	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
+	var response releasetransition.ProcessResponse
+	var err error
+	if rustOwner {
+		response, err = runtime.invokeRustOwnerTransition(ctx, owner, owner, target, request, nil, "")
+	} else {
+		response, err = runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
+	}
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -1357,6 +1470,20 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	delegate *candidateVerification,
 	recoveryRequest *releasetransition.RecoveryProcessRequest,
 ) (prepared Prepared, err error) {
+	engine := owner
+	if delegate != nil {
+		engine = *delegate
+	}
+	session := runtime.findRustOwnerSession(engine.digest, request, recoveryRequest)
+	if session != nil {
+		defer func() {
+			if err != nil || parsed.check {
+				_ = session.Close()
+				return
+			}
+			prepared = runtime.retainRustPreparation(prepared, session, parsed, request, inspection)
+		}()
+	}
 	if recoveryRequest != nil {
 		requestCopy := *recoveryRequest
 		requestCopy.InheritedSettingIDs = slices.Clone(requestCopy.InheritedSettingIDs)
@@ -1379,7 +1506,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	if err := releasetransition.ValidateProcessInspection(goal, inspection); err != nil {
 		return Prepared{}, fmt.Errorf("candidate returned an inconsistent release inspection: %w", err)
 	}
-	if revalidation != nil {
+	if revalidation != nil && session == nil {
 		inspection.Assessment.Consequences = v0111RecoveryConsequences(
 			inspection.Assessment.Consequences,
 		)

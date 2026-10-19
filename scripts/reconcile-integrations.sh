@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
+# shellcheck source=scripts/lib/native-installed-stage.sh
+. "$SCRIPT_DIR/lib/native-installed-stage.sh"
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 PROJ=(--project "$INCUS_PROJECT")

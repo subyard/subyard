@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lifecycle idempotency, deselection,  ownership contracts."""
 import importlib.util
+import fcntl
 import os
 import stat
 from pathlib import Path
@@ -16,6 +17,11 @@ spec.loader.exec_module(guest)
 
 
 class GuestTests(unittest.TestCase):
+    def test_transport_diagnostic_exposes_only_fixed_source_reason(self):
+        self.assertEqual(guest.failure_reason(ValueError('unsafe managed parent')), 'unsafe managed parent')
+        self.assertEqual(guest.failure_reason(ValueError('private native output')), 'profile request could not be verified')
+        self.assertEqual(guest.failure_reason(OSError('private native output')), 'native filesystem operation failed')
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='subyard-git-fetch-guest-', dir='/tmp')
         self.addCleanup(self.temporary.cleanup)
@@ -79,6 +85,105 @@ class GuestTests(unittest.TestCase):
         result.safe = fixture_safe
         self.assertIsNotNone(original)
         return result
+
+    def custody_lock(self):
+        path = self.base/'install.lock'
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        self.addCleanup(os.close, fd)
+        return fd, path
+
+    def test_native_fence_rejects_delayed_first_claim_and_original_generation(self):
+        runtime = self.runtime()
+        runtime.apply()
+        self.calls.clear()
+        fd, lock = self.custody_lock()
+        original, successor, retry = 'a'*64, 'b'*64, 'c'*64
+        # Recovery also admits absent/0: the original request may not have
+        # reached its first claim when its transport disappears.
+        self.assertEqual(runtime.claim_custody(('0', original), successor, fd, lock), {'generation': successor})
+        for delayed in ('0', original):
+            with self.assertRaises(ValueError):
+                runtime.claim_custody((delayed,), original, fd, lock)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(runtime.claim_custody(('0', original), successor, fd, lock), {'generation': successor})
+        self.assertEqual(runtime.claim_custody((successor,), retry, fd, lock), {'generation': retry})
+        for delayed in ('0', original, successor):
+            with self.assertRaises(ValueError):
+                runtime.claim_custody((delayed,), original, fd, lock)
+        self.assertEqual(runtime.custody_path().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(runtime.custody_generation(), retry)
+
+    def test_ordinary_mutation_invalidates_delayed_native_first_claim(self):
+        runtime = self.runtime()
+        fd, lock = self.custody_lock()
+        original = 'a'*64
+        guest.ordinary_custody(runtime, fd, lock)
+        self.assertTrue(runtime.apply())
+        installed = runtime.custody_generation()
+        self.assertNotEqual(installed, '0')
+        with self.assertRaises(ValueError): runtime.claim_custody(('0',), original, fd, lock)
+        guest.ordinary_custody(runtime, fd, lock)
+        self.assertTrue(runtime.apply())
+        self.assertEqual(runtime.custody_generation(), installed, 'no-op must not invalidate consent')
+        guest.ordinary_custody(runtime, fd, lock)
+        self.assertTrue(runtime.pause())
+        paused = runtime.custody_generation()
+        self.assertNotEqual(paused, installed)
+        guest.ordinary_custody(runtime, fd, lock)
+        runtime.resume()
+        resumed = runtime.custody_generation()
+        self.assertNotEqual(resumed, paused)
+        for predecessor in ('0', installed, paused):
+            with self.assertRaises(ValueError): runtime.claim_custody((predecessor,), original, fd, lock)
+
+    def test_native_claim_keeps_runtime_baseline_and_refuses_unrelated_drift(self):
+        runtime = self.runtime()
+        runtime.apply()
+        (self.units/guest.TIMER).write_text(guest.MARKER+'drift\n')
+        baseline = runtime.observe('f'*64)
+        self.calls.clear()
+        fd, lock = self.custody_lock()
+        runtime.claim_custody(('0',), 'a'*64, fd, lock)
+        self.assertEqual(runtime.observe('f'*64), baseline)
+        with self.assertRaises(ValueError):
+            runtime.claim_custody(('0', 'b'*64), 'c'*64, fd, lock)
+        self.assertEqual(runtime.custody_generation(), 'a'*64)
+
+    def test_native_claim_refuses_busy_or_replaced_actual_install_lock(self):
+        runtime = self.runtime()
+        runtime.apply()
+        fd, lock = self.custody_lock()
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        second = os.open(lock, os.O_WRONLY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, second)
+        with self.assertRaises(BlockingIOError):
+            runtime.claim_custody(('0',), 'a'*64, second, lock)
+        self.assertEqual(runtime.custody_generation(), '0')
+        lock.unlink()
+        lock.write_text('')
+        lock.chmod(0o600)
+        with self.assertRaises(ValueError):
+            runtime.claim_custody(('0',), 'a'*64, fd, lock)
+        self.assertEqual(runtime.custody_generation(), '0')
+
+    def test_native_claim_repairs_uncertain_parent_sync_on_exact_retry(self):
+        runtime = self.runtime()
+        runtime.apply()
+        fd, lock = self.custody_lock()
+        original = os.fsync
+        calls = []
+        def fail_parent(descriptor):
+            calls.append(descriptor)
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError('fixture parent sync failure')
+            return original(descriptor)
+        with patch.object(guest.os, 'fsync', fail_parent), self.assertRaises(OSError):
+            runtime.claim_custody(('0',), 'a'*64, fd, lock)
+        self.assertEqual(runtime.custody_generation(), 'a'*64)
+        with patch.object(guest.os, 'fsync', wraps=original) as synced:
+            runtime.claim_custody(('0',), 'a'*64, fd, lock)
+            self.assertEqual(synced.call_count, 2)
 
     def test_install_repeat_drift_and_disable(self):
         disabled = self.runtime(False)

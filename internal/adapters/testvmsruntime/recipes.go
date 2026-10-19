@@ -81,6 +81,10 @@ func (backend *Backend) installRecipes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return backend.installRecipeBundle(ctx, archive, manifest)
+}
+
+func (backend *Backend) installRecipeBundle(ctx context.Context, archive, manifest []byte) error {
 	// Immutable content-addressed directories keep running builders insulated
 	// from a simultaneous broker upgrade. The symlink swap is atomic.
 	digest := sha256.Sum256(manifest)
@@ -103,6 +107,6 @@ link=$(mktemp -u /usr/local/libexec/subyard/.e2e-recipes-link.XXXXXXXX)
 ln -s -- "$root" "$link"
 mv -Tf -- "$link" /usr/local/libexec/subyard/e2e-recipes
 `
-	_, _, err = backend.Runner.Run(ctx, "incus", []string{"exec", backend.Instance, "--project", backend.Project, "--", "sh", "-c", script, "install-recipes", generation}, nil, bytes.NewReader(archive))
+	_, _, err := backend.Runner.Run(ctx, "incus", []string{"exec", backend.Instance, "--project", backend.Project, "--", "sh", "-c", script, "install-recipes", generation}, nil, bytes.NewReader(archive))
 	return err
 }

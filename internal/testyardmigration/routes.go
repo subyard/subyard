@@ -190,6 +190,17 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 	if err != nil {
 		return err
 	}
+	if options.RouteDevices != nil {
+		if err := ValidatePreparedRouteDevices(options, before, options.RouteDevices); err != nil {
+			return err
+		}
+		if options.CheckRouteDevices == nil {
+			return errors.New("original route device guard unavailable")
+		}
+		if err := options.CheckRouteDevices(ctx, options.RouteDevices); err != nil {
+			return err
+		}
+	}
 	if !prepared.Active {
 		return verifyRouteConsumers(ctx, options, false, prepared, activation)
 	}
@@ -203,6 +214,9 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 	}
 	if !routeReady || !hasManagedYard(yards, CurrentYard) ||
 		managedYardRunning(yards, CurrentYard) {
+		if options.RouteDevices != nil && !options.RouteDevices.Broker {
+			return errors.New("route broker work was not prepared")
+		}
 		if err := run(
 			ctx,
 			options,
@@ -228,6 +242,12 @@ func commitRouteConsumers(ctx context.Context, options Options, before string, a
 	}
 	for _, yard := range yards {
 		if yard.Yard == LegacyYard || yard.Mounted || !yard.AllowsHostAccess {
+			continue
+		}
+		if options.RouteDevices != nil {
+			if err := applyOriginalRouteDevice(ctx, options, before, yard); err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := runIncus(

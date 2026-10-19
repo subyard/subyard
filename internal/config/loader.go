@@ -156,7 +156,7 @@ func load(
 		}
 		defer unlock()
 	}
-	pending, err := PendingConfigurationTransaction(configHome)
+	pending, err := options.ProspectiveFiles.pendingTransaction(configHome)
 	if err != nil {
 		return domain.Context{}, nil, err
 	}
@@ -226,7 +226,7 @@ func load(
 	if !domain.SafeName(yardName) {
 		return domain.Context{}, nil, fmt.Errorf("invalid yard name %q", yardName)
 	}
-	resetFallback, err := YardFallbackReset(configHome, yardName)
+	resetFallback, err := options.ProspectiveFiles.fallbackReset(configHome, yardName)
 	if err != nil {
 		return domain.Context{}, nil, err
 	}

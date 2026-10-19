@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="$ROOT"
 TMP="$(mktemp -d /tmp/subyard-engine-release.XXXXXX)"
 incus_pid=''
 cleanup() {
@@ -171,7 +172,7 @@ jq -e '.schemaVersion == 1 and .kind == "runtime" and .version == "1.0.0-test" a
   || fail 'runtime bundle manifest is incompatible'
 bundle_list="$TMP/runtime-bundle.list"
 tar -tzf "$bundle_one" > "$bundle_list"
-! grep -Eq '^\./config/profiles/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
+! grep -Eq '^\./config/profiles/[^/]+/(tests/|.*\.(go|rs)$)' "$bundle_list" \
   || fail 'runtime bundle contains profile-owned tests or Go source'
 ! grep -Eq '^\./config/(agents|retired-integrations)/[^/]+/(tests/|.*\.go$)' "$bundle_list" \
   || fail 'runtime bundle contains integration-owned tests or Go source'
@@ -183,6 +184,10 @@ grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
   || fail 'runtime bundle omitted untracked profile assets or native executable'
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
+  && grep -Fxq './bin/subyard-release-owner' "$bundle_list" \
+  && grep -Fxq './config/release-owner.json' "$bundle_list" \
+  && grep -Fxq './config/release-owner.schema.json' "$bundle_list" \
+  && grep -Fxq './config/release-owner-build.json' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/tomli_w.py' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/TOMLI_W_LICENSE' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
@@ -789,23 +794,23 @@ fi
 # standalone bootstrap operators use: immutable publication followed by the
 # exact packaged candidate runtime.
 recovery_release="$TMP/v0111-recovery-release"
+recovery_previous_installer="$recovery_release/subyard-install-runtime-release-0.9.1.sh"
 recovery_previous_bundle="$recovery_release/subyard-0.9.1-linux-amd64.tar.gz"
 recovery_older_source_bundle="$recovery_release/subyard-0.11.0-linux-amd64.tar.gz"
 recovery_source_bundle="$recovery_release/subyard-0.11.1-linux-amd64.tar.gz"
 recovery_candidate_bundle="$recovery_release/subyard-0.11.2-linux-amd64.tar.gz"
-# Pin the historical persisted-state contract in this disposable source copy.
-# The exact two-step recovery journal predates publication metadata and SSH localization;
-# current bootstrap and transition checks above keep the current registry.
+# Historical source binaries remain exact published Go owners. The candidate is
+# current Rust tooling with the exact historical two-step registry. Its current
+# declaration and sealed helper remain bound to that newly built candidate.
+. "$ROOT/tests/helpers/release-candidate.sh"
+for historical_version in 0.9.1 0.11.0 0.11.1; do
+  release_candidate_historical "$ROOT" "$SOURCE_ROOT/.build/rust-p1-predecessors/attempt-1" \
+    "$historical_version" "$recovery_release"
+done
 (
 cp "$ROOT/config/release-transition.json" "$TMP/release-transition.current.json"
 trap 'cp "$TMP/release-transition.current.json" "$ROOT/config/release-transition.json"' EXIT
-jq '.currentEpochs["power-metadata"] = 1 | .currentEpochs.settings = 2 |
-  .migrations |= map(select(.kind != "owner-publication-state-v1" and .kind != "local-ssh-port-settings-v2-to-v3"))' \
-  "$TMP/release-transition.current.json" > "$TMP/release-transition.historical.json"
-cp "$TMP/release-transition.historical.json" "$ROOT/config/release-transition.json"
-"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.9.1 >/dev/null
-"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.0 >/dev/null
-"$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.1 >/dev/null
+tar -xOzf "$recovery_source_bundle" ./config/release-transition.json > "$ROOT/config/release-transition.json"
 "$ROOT/dev/package-engine.sh" --output-dir "$recovery_release" --version 0.11.2 >/dev/null
 )
 recovery_fixture="$TMP/release-transition-fixture"
@@ -820,13 +825,11 @@ printf '%s\n' 'YARD_TEMPLATE=test-vms' 'SSH_PORT=2293' 'AGENTS=' \
 chmod 0600 "$recovery_config/yards/recovery-yard/config.env"
 HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
   SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
-  "$ROOT/scripts/install-runtime-release.sh" \
+  bash "$recovery_previous_installer" \
   --runtime-root "$recovery_runtime" \
   --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
   --manifest "$recovery_previous_bundle.manifest.json" \
   --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
-recovery_previous_path="$(readlink "$recovery_runtime/current")"
-recovery_previous="${recovery_previous_path#releases/}"
 recovery_source_path="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
   SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
   "$ROOT/scripts/install-runtime-release.sh" \
@@ -835,11 +838,12 @@ recovery_source_path="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data"
   --manifest "$recovery_source_bundle.manifest.json" \
   --provenance "$recovery_source_bundle.provenance.json")"
 recovery_source="${recovery_source_path#releases/}"
-"$recovery_fixture" seed \
-  "$recovery_runtime" "$recovery_config" "$recovery_previous" "$recovery_source" >/dev/null
+recovery_source_transaction="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
+  SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
+  release_candidate_seed_historical "$ROOT" "$recovery_runtime" "$recovery_config" "$recovery_source" recovery-yard)"
 recovery_source_journal="$recovery_config/release-transition/v2/journal.json"
 recovery_ledger="$recovery_config/release-transition/v2/ledger.json"
-jq -e '.checkpoint == "reconciling" and .transaction == "tx-source-v0111" and
+jq -e --arg transaction "$recovery_source_transaction" '.checkpoint == "reconciling" and .transaction == $transaction and
   [.steps[].migration] == ["canonicalize-test-vms-settings-v2", "canonicalize-test-yard-owner-v2"] and
   all(.steps[]; .checkpoint == "verified")' \
   "$recovery_source_journal" >/dev/null \
@@ -878,13 +882,11 @@ cp "$recovery_config/yards/recovery-yard/config.env" \
   "$source_version_config/yards/recovery-yard/config.env"
 HOME="$source_version_home" SUBYARD_HOME="$source_version_home/data" \
   SUBYARD_CONFIG_HOME="$source_version_config" YARD_RELEASE_CACHE="$source_version_home/cache" \
-  "$ROOT/scripts/install-runtime-release.sh" \
+  bash "$recovery_previous_installer" \
   --runtime-root "$source_version_runtime" \
   --bundle "$recovery_previous_bundle" --checksum "$recovery_previous_bundle.sha256" \
   --manifest "$recovery_previous_bundle.manifest.json" \
   --provenance "$recovery_previous_bundle.provenance.json" >/dev/null
-source_version_previous_path="$(readlink "$source_version_runtime/current")"
-source_version_previous="${source_version_previous_path#releases/}"
 source_version_source_path="$(HOME="$source_version_home" SUBYARD_HOME="$source_version_home/data" \
   SUBYARD_CONFIG_HOME="$source_version_config" YARD_RELEASE_CACHE="$source_version_home/cache" \
   "$ROOT/scripts/install-runtime-release.sh" \
@@ -893,9 +895,9 @@ source_version_source_path="$(HOME="$source_version_home" SUBYARD_HOME="$source_
   --manifest "$recovery_older_source_bundle.manifest.json" \
   --provenance "$recovery_older_source_bundle.provenance.json")"
 source_version_source="${source_version_source_path#releases/}"
-"$recovery_fixture" seed \
-  "$source_version_runtime" "$source_version_config" \
-  "$source_version_previous" "$source_version_source" >/dev/null
+HOME="$source_version_home" SUBYARD_HOME="$source_version_home/data" \
+  SUBYARD_CONFIG_HOME="$source_version_config" YARD_RELEASE_CACHE="$source_version_home/cache" \
+  release_candidate_seed_historical "$ROOT" "$source_version_runtime" "$source_version_config" "$source_version_source" recovery-yard >/dev/null
 source_version_baseline="$TMP/v0110-source-baseline"
 install -d "$source_version_baseline"
 cp -a "$source_version_runtime" "$source_version_baseline/runtime"
@@ -969,11 +971,11 @@ recovery_archive="$recovery_config/release-transition/v2/transactions/$recovery_
     '.checkpoint == "complete" and (.steps | length) == 0 and
     .authorizationPlan == $plan' \
     "$recovery_terminal_journal" >/dev/null \
-  && jq -e --arg plan "$recovery_plan" \
-    '.journal.transaction == "tx-source-v0111" and
+  && jq -e --arg plan "$recovery_plan" --arg transaction "$recovery_source_transaction" \
+    '.journal.transaction == $transaction and
     .replacement.reason == "post-activation-scope-v0.11.1" and
     .authorizationPlan == $plan' "$recovery_archive" >/dev/null \
-  && [ -d "$recovery_config/release-transition/v2/transactions/tx-source-v0111/evidence" ] \
+  && [ -d "$recovery_config/release-transition/v2/transactions/$recovery_source_transaction/evidence" ] \
   && [ "$(find "$recovery_config/release-transition/v2/transactions" \
     -type f -name superseded-journal.json | wc -l)" -eq 1 ] \
   && cmp -s "$recovery_ledger" "$recovery_baseline/ledger.json" \

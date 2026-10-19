@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 	incus "github.com/lxc/incus/v6/client"
 	"github.com/lxc/incus/v6/shared/api"
@@ -638,13 +639,22 @@ func (client *Client) NetworkPower(ctx context.Context, yard yardnetwork.Yard, a
 	if err != nil {
 		return err
 	}
+	if err := beforeNative(powerContext, server, "network-power", yard.Project, yard.Instance); err != nil {
+		return err
+	}
 	operation, err := server.UseProject(yard.Project).UpdateInstanceState(yard.Instance, api.InstanceStatePut{
 		Action: action, Timeout: 30, Force: false,
 	}, "")
 	if err != nil {
 		return normalizeError(action+" network-managed instance", err)
 	}
-	if err := operation.WaitContext(powerContext); err != nil {
+	var waitErr error
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		waitErr = waitNative(powerContext, server, operation, "network-power", yard.Project, yard.Instance)
+	} else {
+		waitErr = operation.WaitContext(powerContext)
+	}
+	if err := waitErr; err != nil {
 		return normalizeOperationError("wait for "+action+" network-managed instance", operation.Get(), err)
 	}
 	if action == "start" {

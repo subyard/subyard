@@ -44,10 +44,10 @@ func (runtime Runtime) integrationPackageBindingWithSourceReader(definition prof
 	}
 	values := map[string]string{}
 	for _, setting := range definition.Settings {
-		values[setting.Name] = runtime.environmentValue(setting.Name)
+		values[setting.Name] = runtime.bindingPath(runtime.environmentValue(setting.Name))
 	}
 	for _, input := range definition.Inputs {
-		values[input.Name] = input.Value
+		values[input.Name] = runtime.bindingPath(input.Value)
 	}
 	for _, suffix := range []string{"PROVISION", "CLEANUP"} {
 		path := runtime.environmentValue("AGENT_" + definition.Name + "_" + suffix)

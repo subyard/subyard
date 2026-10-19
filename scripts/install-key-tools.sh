@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/engine-context.sh
 . "$SCRIPT_DIR/lib/engine-context.sh"
 subyard_require_engine_context
+# shellcheck source=scripts/lib/native-installed-stage.sh
+. "$SCRIPT_DIR/lib/native-installed-stage.sh"
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 
@@ -84,7 +86,7 @@ announce "Install encrypted-key tools" \
 proceed_or_die
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'result=$?; rm -rf "$tmp"; subyard_prepared_installed_finish "$result"' EXIT
 age_archive="age-v$AGE_VERSION-linux-$arch.tar.gz"
 age_url="https://github.com/FiloSottile/age/releases/download/v$AGE_VERSION/$age_archive"
 sops_asset="sops-v$SOPS_VERSION.linux.$arch"

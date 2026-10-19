@@ -18,16 +18,19 @@ case "$1" in
   --resume) mode=resume ;;
   --observe) [ "$#" = 2 ] || exit 2; mode=observe; extra=("$2") ;;
   --refresh) [ "$#" = 5 ] || exit 2; mode=refresh; extra=("${@:2}") ;;
+  --custody-observe) [ "$#" = 2 ] || exit 2; mode=custody-observe; extra=("${@:2}") ;;
+  --custody-refresh) [ "$#" = 7 ] || exit 2; mode=custody-refresh; extra=("${@:2}") ;;
+  --custody-fence) [ "$#" = 5 ] || exit 2; mode=custody-fence; extra=("${@:2}") ;;
   *) exit 2 ;;
 esac
-if [ "$mode" != observe ] && [ "$mode" != refresh ]; then [ "$#" = 1 ] || exit 2; fi
+case "$mode" in observe|refresh|custody-*) ;; *) [ "$#" = 1 ] || exit 2 ;; esac
 state="$(incus list "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" -f csv -c s 2>/dev/null)" || exit 2
 case "$state" in
   RUNNING) ;;
   ''|STOPPED)
     if [ "$mode" = observe ]; then
       if [ -z "$state" ]; then printf '{"state":"absent"}\n'; else printf '{"state":"deferred"}\n'; fi
-    elif [ "$mode" = refresh ]; then exit 2; fi
+    elif [ "$mode" = refresh ] || [[ "$mode" = custody-* ]]; then exit 2; fi
     exit 0 ;;
   *) printf 'git-fetch: yard is not ready for profile reconciliation\n' >&2; exit 2 ;;
 esac

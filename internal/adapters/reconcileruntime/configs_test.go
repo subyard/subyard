@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -486,5 +487,25 @@ func TestPreviewInstructionAssetRejectsNonregularSources(t *testing.T) {
 				t.Fatalf("invalid runtime instruction asset silently fell back: %v", err)
 			}
 		})
+	}
+}
+
+func TestPreparedConfigsRefusesChangedSourceBeforeGuestMutation(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "AGENTS.md")
+	testkit.WriteFile(t, source, []byte("approved instructions\n"), 0o600)
+	incus := runningIncus(0)
+	runtime := Runtime{Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}, Incus: incus, Executor: incus,
+		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001}}
+	prepared, err := runtime.PrepareConfigs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, source, []byte("changed after consent\n"), 0o600)
+	if err = runtime.ApplyPreparedConfigs(context.Background(), prepared); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("changed source: %v", err)
+	}
+	if len(incus.ExecCalls) != 0 {
+		t.Fatalf("stale prepared config mutated guest: %#v", incus.ExecCalls)
 	}
 }

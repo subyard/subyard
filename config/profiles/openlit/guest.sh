@@ -31,9 +31,9 @@ safe_file() {
 }
 compose() {
   local bound=(timeout 240)
-  # Cold phases stay in the aggregate supervisor's group. GNU timeout's
+  # Activation phases stay in the aggregate supervisor's group. GNU timeout's
   # default separate group would let them escape caller cancellation.
-  [ "$mode" != apply ] || bound=(timeout --foreground 240)
+  if [ "$mode" = apply ] || [ "$mode" = refresh ]; then bound=(timeout --foreground 240); fi
   "${bound[@]}" docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" "$@"
 }
 native() { python3 "$root/native.py" "$1" --home "$home" --state "$state/native.json" --uid "$uid" --gid "$gid" --agents "$2"; }
@@ -126,11 +126,11 @@ if [ "$selected" = 1 ]; then
   for image in "${images[@]}"; do docker image inspect "$image" >/dev/null 2>&1 || missing=1; done
   if [ "$missing" = 1 ]; then
     # First delivery retains its own limit inside the aggregate cold deadline.
-    # Foreground timeout keeps cold children in the supervisor's owned group.
+    # Foreground timeout keeps children in the supervisor's owned group.
     pull_command=(docker compose --project-directory "$state" --env-file "$state/database.env" -f "$root/compose.yaml" pull --quiet)
     if [ "$mode" = refresh ]; then
       pull_limit=20
-      pull_command=(timeout "$pull_limit" "${pull_command[@]}")
+      pull_command=(timeout --foreground "$pull_limit" "${pull_command[@]}")
     else
       pull_limit=900
       pull_command=(timeout --foreground "$pull_limit" "${pull_command[@]}")

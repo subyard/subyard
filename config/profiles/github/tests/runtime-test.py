@@ -2,14 +2,18 @@
 """Owning activation CAS, selection and credential-preservation regressions."""
 import importlib.util
 import contextlib
+import ctypes
 import io
 import json
 import os
 import runpy
+import shlex
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +72,10 @@ class RuntimeTest(unittest.TestCase):
         patch.object(runtime, 'SOURCE', self.source).start()
         patch.dict(os.environ, self.environment, clear=True).start()
         patch.object(subprocess, 'run', self.fake_run).start()
+        patch.object(runtime, 'apply_owner', self.fake_apply).start()
+
+    def fake_apply(self, environment):
+        self.fake_run([str(self.source/'owner.sh'), '--yes'], env=environment)
 
     def fake_run(self, argv, **kwargs):
         if argv[0] == str(self.source/'owner.sh'):
@@ -218,6 +226,82 @@ class RuntimeTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'invalid GitHub runtime yard'):
                     runtime.observe()
         self.assertEqual(self.applies, 0)
+
+
+class OwnerProcessTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='subyard-github-owner-', dir='/tmp')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.pids = self.root/'children'
+        self.published = self.root/'published'
+        self.owner = self.root/'owner.sh'
+        self.owner.write_text('#!/bin/bash\nset -euo pipefail\n'
+                              'python3 -c '+shlex.quote('import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                              'open('+repr(str(self.pids))+', "w").write(str(os.getpid())); time.sleep(30)')+' &\n'
+                              'wait\ntouch '+str(self.published)+'\n')
+        self.owner.chmod(0o700)
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.previous = ctypes.c_int()
+        self.assertEqual(self.libc.prctl(37, ctypes.byref(self.previous), 0, 0, 0), 0)
+        self.assertEqual(self.libc.prctl(36, 1, 0, 0, 0), 0)
+        self.addCleanup(lambda: self.libc.prctl(36, self.previous.value, 0, 0, 0))
+        self.addCleanup(self.reap_child)
+        for patcher in (patch.object(runtime, 'SOURCE', self.root),
+                        patch.object(runtime, 'OWNER_TIMEOUT', 0.3),
+                        patch.object(runtime, 'OWNER_CANCEL_SECONDS', 0.1)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def reap_child(self):
+        if not self.pids.exists():
+            return
+        pid = int(self.pids.read_text())
+        end = time.monotonic()+1
+        while time.monotonic() < end:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    return
+            except ChildProcessError:
+                return
+            time.sleep(0.01)
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        self.fail('GitHub owner cancellation left a live foreground child')
+
+    def test_timeout_drains_owner_children_before_return(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runtime.apply_owner(os.environ.copy())
+        self.assertTrue(self.pids.exists())
+        self.assertFalse(self.published.exists())
+        self.reap_child()
+
+    def test_exited_owner_cannot_hide_a_surviving_child(self):
+        self.owner.write_text(self.owner.read_text().replace('wait\ntouch',
+            'for attempt in {1..100}; do [ ! -e '+str(self.pids)+' ] || break; sleep 0.005; done\nexit 0\ntouch'))
+        runtime.apply_owner(os.environ.copy())
+        self.assertTrue(self.pids.exists())
+        self.reap_child()
+
+    def test_signal_cancellation_drains_owner_children(self):
+        done = threading.Event()
+        def cancel():
+            end = time.monotonic()+1
+            while not done.wait(0.005) and time.monotonic() < end:
+                if self.pids.exists():
+                    os.kill(os.getpid(), 15)
+                    return
+        thread = threading.Thread(target=cancel)
+        thread.start()
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                runtime.apply_owner(os.environ.copy())
+            self.assertEqual(caught.exception.code, 143)
+        finally:
+            done.set()
+            thread.join(timeout=1)
+        self.assertFalse(self.published.exists())
+        self.reap_child()
 
 
 if __name__ == '__main__':

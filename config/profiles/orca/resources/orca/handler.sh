@@ -433,10 +433,15 @@ set -euo pipefail
 desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"
 discovery_service="$8"; discovery_timer="$9"; shift 9
 codex_profile="$1"; codex_bin="$2"; shift 2
-if [ ! -e "$executable" ] && [ ! -e "$unit" ] && [ ! -e "$hook" ] &&
-  [ ! -e "$directory" ] && [ ! -e "$marker" ] && [ ! -e "$lock" ] &&
-  [ ! -e "$codex_profile" ] && [ ! -L "$codex_profile" ] &&
-  [ ! -e "$codex_bin" ] && [ ! -L "$codex_bin" ]; then
+present=0
+# The package launcher may be a symlink; profile-owned contract paths may not.
+[ ! -e "$executable" ] && [ ! -L "$executable" ] || present=1
+for artifact in "$unit" "$hook" "$directory" "$marker" "$lock" \
+  "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin" "$directory"/*.py; do
+  [ ! -L "$artifact" ] || { echo 'Orca runtime contract contains an unsafe symbolic link' >&2; exit 1; }
+  [ ! -e "$artifact" ] || present=1
+done
+if [ "$present" = 0 ]; then
   printf '{"state":"absent","actual":"","desired":""}\n'
   exit 0
 fi
@@ -1440,7 +1445,8 @@ if [ "$sub" = _runtime-contract ]; then
     apply)
       [ "$#" -eq 4 ] \
         || die "usage: _runtime-contract apply <operation-id> <expected-actual> <expected-desired>"
-      [ -n "${2:-}" ] || die "runtime contract apply requires an operation ID"
+      [[ "${2:-}" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ "${3:-}" =~ ^[a-f0-9]{64}$ ]] &&
+        [[ "${4:-}" =~ ^[a-f0-9]{64}$ ]] || die "invalid Orca runtime activation arguments"
       SUBYARD_OPERATION_ID="$2"
       observation="$(observe_registration_contract)"
       [ "$(jq -r .actual <<<"$observation")" = "$3" ] &&
@@ -1452,7 +1458,8 @@ if [ "$sub" = _runtime-contract ]; then
         stale)
           stage_registration_contract
           cleanup_guest || die "Orca guest staging directory could not be removed"
-          observe_registration_contract | jq -e 'select(.state == "current")'
+          observe_registration_contract | jq -e --arg desired "$4" \
+            'select(.state == "current" and .actual == .desired and .desired == $desired)'
           ;;
         *) die "invalid Orca runtime contract observation" ;;
       esac

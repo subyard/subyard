@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"io"
 	"os"
 	"os/exec"
@@ -44,6 +46,22 @@ func (ProcessRunner) Run(
 	stdin io.Reader,
 ) ([]byte, []byte, error) {
 	command := exec.CommandContext(ctx, name, arguments...)
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		home := ports.NativeOwnerHome(ctx)
+		if home == "" {
+			return nil, nil, errors.New("native broker command owner scope unavailable")
+		}
+		owner, err := uninstall.BorrowOwnerLock(home)
+		if err != nil {
+			return nil, nil, err
+		}
+		if owner == nil {
+			return nil, nil, errors.New("native broker command requires original owner barrier")
+		}
+		defer owner.Close()
+		command.ExtraFiles = append(command.ExtraFiles, owner)
+		environment = append(append([]string(nil), environment...), "SUBYARD_NATIVE_OWNER_FD3=1")
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {

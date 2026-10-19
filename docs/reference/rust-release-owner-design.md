@@ -1,7 +1,7 @@
 ---
 title: Rust release-transition owner
 status: proposed architecture; selected boundary for gated evaluation
-updated: 2026-10-17
+updated: 2026-10-18
 ---
 
 # Rust release-transition owner
@@ -10,7 +10,7 @@ This ADR selects a complete Rust release-transition owner as the next architectu
 It specifies the ownership and protocol contracts for that evaluation. Production still uses the
 Go owner described in [Architecture](control-plane-architecture.md) and
 [Release transitions](resumable-release-transition-design.md). This decision does not establish
-runtime equivalence, measured performance, implemented codecs or permission to switch writers.
+runtime equivalence, production performance, production codecs or permission to switch writers.
 
 ## Context and alternatives
 
@@ -28,8 +28,8 @@ Moving a planner alone leaves authorization, effects and recovery in another lan
 
 Strengthened Go is the comparison baseline. Existing private fields, checked constructors and deep
 copies already provide useful guarantees. Rust adds closed payload variants, exhaustive matching,
-immutable ownership and consuming phase handles only where the actual API uses them. No latency,
-startup, CPU, RSS or test-count improvement has been measured for these alternatives.
+immutable ownership and consuming phase handles only where the actual API uses them. No production latency,
+startup, CPU, RSS or test-count improvement has been established for these alternatives.
 
 The source baseline now includes the shared Go prepared lifecycle, sealed approval snapshot,
 serialized confirmation/execution/close and consumption before native admission
@@ -123,7 +123,8 @@ IPC avoids shared pointers but does not export Rust ownership or remove runtime 
 
 ## One operation and its authority
 
-These are conceptual states, not a new workflow framework or implemented Rust API.
+The implemented owner uses private, consuming preparation and consent handles for these
+phases. Durable recovery remains independently checked; the type state is local to one process.
 Wire DTOs, checked domain values and executable handles are distinct. Executable phase handles
 have private constructors, no `Clone`/`Copy` or general deserialization, and consuming transitions.
 Rust move semantics protect a local value; they neither ensure execution nor prevent durable replay.
@@ -157,13 +158,16 @@ older process. Such callers do not gain Rust mutation eligibility until that con
 requiring a bridge instead must preserve the declared supported upgrade/recovery paths.
 
 An inherited helper lock descriptor refers to the same open file description, not a reopened path.
-Only the custodian may explicitly unlock; borrowers close their descriptors without `LOCK_UN`.
-The owner must drain/join supervised native work before unlocking. Linux
+Every holder releases its descriptor by closing it, without `LOCK_UN`. The final close
+releases the shared lock, so closing the frontend cannot unlock surviving native work.
+Accepted native work retains the original account and update lock descriptions through drain. Linux
 [flock](https://man7.org/linux/man-pages/man2/flock.2.html) shares a lock across duplicated descriptors;
 explicit unlock through one descriptor releases that shared lock. Rust
 [OwnedFd](https://doc.rust-lang.org/std/os/fd/struct.OwnedFd.html) manages descriptor lifetime but does
-not enforce this protocol. The current owner-barrier borrowing contract is a useful precedent;
-the current update lock has no equivalent delegation API yet.
+not enforce this protocol. The native helper validates the received account barrier against its protected named inode
+and registers the same open file description for fixed privileged child forwarding.
+The update lease is likewise transferred with accepted work; reopening a lock pathname does
+not substitute for either descriptor.
 
 The helper accepts only closed operation variants and bound logical targets/recipes. It has no
 generic shell/argv/path execution API, no release reducer, no journal writer and no independent
@@ -197,20 +201,34 @@ unknown effects cannot be safely classified is ineligible until that recovery bo
 
 ## Protocols and consumer evolution
 
-Yard RPC, the frozen release process protocol and the proposed inner owner/helper protocol are
-separate boundaries. There is one canonical schema/codec contract per version at each boundary.
-The new inner contract will have one schema bundle for owner-session and native-operation DTOs,
-shared golden bytes and Go/Rust codecs; independently maintained Go/Rust struct layouts are not
-the schema source. Protocol identifiers here describe a design, not shipped capabilities.
+Yard RPC, the frozen release process protocol and the private owner/native protocol are
+separate boundaries. Frozen public codecs preserve their existing versions, fields and semantics.
+Private typed DTOs reject unsupported roles, variants and versions before effects; their evolution
+does not silently extend a public recovery contract.
 
-For the inner session, use bounded length-prefixed frames with the existing 1 MiB frame ceiling,
-one in-flight mutating native request and a bounded ordered event queue. Bulk file/exec streams
-use separately owned pipes with explicit per-operation byte limits; they are not unlimited JSON
-buffers. Negotiate schema/product version, role and required capabilities before execution.
-Bind operation/session, exact artifact pair, scope/step and expected/desired identity on each
-native request. Reject unknown variants, missing limits and unsupported versions before effects.
-Only allowlisted bounded diagnostics cross the boundary. Events and replies have defined ordering;
-queue overflow closes admission and enters cancellation/reobservation, not silent event loss.
+The frontend opens one Unix owner session with bounded JSON messages. Startup passes the sealed
+helper image, private grant pipe, dedicated late-custody socket and retained repository-root
+descriptor through `SCM_RIGHTS`. Read-only Open returns a session and pinned data-root identity.
+The native helper receives its own retained configuration and repository descriptors. Late
+admission uses the separate socket so buffered JSON reads cannot consume ancillary descriptors.
+
+Native frames bind sequence, length and payload SHA-256. Requests are at most 1 MiB and replies
+at most 8 MiB, with one mutation in flight. Larger prepared installed-runtime recipes use bounded
+chunks: at most 8,192 files, 64 MiB raw bytes and 96 MiB serialized bytes per recipe,
+with a 32 MiB individual blob ceiling. These bounds preserve the existing materialized-config
+payload allowance alongside script metadata. Deduplicated prepared raw payloads have a
+128 MiB aggregate ceiling. Protected native witnesses and whole-
+transaction retirement staging each have a separate 128 MiB ceiling; the combined raw/witness/
+staging ceiling is 384 MiB. Limits refuse admission rather than silently dropping records.
+Immutable recipe source metadata and original file bytes bind execution; execution does not
+reread a mutable source to manufacture a new approved recipe.
+
+Only fixed component operations and allowlisted bounded diagnostics cross the boundary.
+Operation/session, exact artifacts, scope, step and expected/desired identities bind native work.
+An uncertain mutation is reobserved through its owning guard and durable witness; it is never
+blindly retried. Unknown work is not eligible for retirement. Whole-transaction staging and
+retirement preserve protected current, receipt and retained-owner roots before removing proven
+unreferenced evidence.
 
 Deadlines do not extend plan expiry. Cancellation is a request plus a terminal observation, not a
 successful reply by itself. Inner transport loss/EOF cancels admission and supervises native work.
@@ -237,9 +255,11 @@ on it; this is a contract boundary, not a release-count timeout. A breaking publ
 a separately versioned Yard RPC capability and paired consumer update before changing the default.
 
 Artifact manifests bind exact owner, Go helper, component executables, schemas and source inputs as
-one verified candidate. The current verifier specially seals only `bin/yard-engine`
-([verified_candidate_linux.go](../../internal/adapters/releaseruntime/verified_candidate_linux.go));
-new executables require equivalent verified launch and retained-asset binding before effects.
+one verified candidate. The verifier seals both `bin/yard-engine` and `bin/subyard-release-owner`
+([verified_candidate_linux.go](../../internal/adapters/releaseruntime/verified_candidate_linux.go)).
+The closed declaration and its schema/build sidecar must name exact manifest-listed assets.
+Older bundles remain admissible only when the declaration and all reserved Rust assets are absent;
+a malformed declaration or partial asset set refuses before execution.
 Semantic history fingerprints cannot substitute for byte-exact artifacts, journal bytes or receipts.
 New delivery includes both Linux architectures, declared native dependencies and no installed-host
 Rust/Go toolchain requirement. This extends the existing trusted owner process boundary; it does
@@ -247,9 +267,8 @@ not introduce a new root service or promise protection from a malicious same-UID
 
 ## Compatibility and writer admission
 
-The following matrix specifies admission and routing, not measured compatibility. Source inspection
-was refreshed on 2026-10-17 at public `ccfa6e0`.
-The Rust columns have no implementation yet. Existing released-binary contracts are owned by
+The following matrix specifies implemented admission boundaries and required compatibility.
+It does not claim that the final candidate has completed every acceptance gate. Existing released-binary contracts are owned by
 [verify-release-upgrades.py](../../dev/verify-release-upgrades.py), the
 [support policy](legacy-migration-support.md) and the
 [current recovery contracts](../control-plane.md#release-migrations). Preserve their actual
@@ -300,21 +319,22 @@ owner or refuse incompatible work before mutation. A bridge must establish that 
 custody contract while preserving the declared upgrade/recovery horizon; merely advertising a
 new capability cannot fence an already-running old process.
 
-Two source-level custody cases need separate proof:
+Two historical custody topologies need distinct checks:
 
-- Inspected released v0.18.1 and v0.21.0 sources lack the current installation owner barrier.
-  A newly acquired Rust owner barrier cannot exclude these writers. Their actual supported
-  paths must be shown to use the common update/admission boundary or receive a supported refusal.
-- The current Go caller can hold the outer installation barrier and explicitly unlock after
-  its child exits. Its verified child uses `CommandContext`, which does not establish termination
-  of every nested helper or remote Incus operation. A Rust/helper child surviving that boundary
-  must not be allowed to mutate after the caller unlocks. Same-OFD borrowing alone is insufficient.
+- Official v0.11.2, v0.18.1 and v0.21.0 callers predate the account owner barrier.
+  Their compatibility exclusion uses the shared `migrations/update.lock`, followed by
+  protected journal reobservation. A frozen caller with genuinely absent account custody
+  may acquire it only after a matching inspected plan and real inherited grant, or a
+  checked durable continuation. Invalid supplied custody refuses; it is never replaced.
+- Current callers pass the actual account barrier open file description. Every holder
+  uses close-only release, while native helper and privileged children retain that
+  description through work and drain. Coordinator exit is not native completion.
 
-These are unresolved cutover proofs, not newly discovered current-Go runtime failures. Required
-cases include a prepared old plan before cutover, an old writer waiting for the update lock,
-caller death while helper/remote work survives, ordinary pending-owner continuation and a new
-process after partial native effects. New mutation remains inadmissible if standard old-writer
-paths or native quiescence cannot be fenced. A new Rust-only mutex or nonce is not a repair.
+Required cutover cases include a prepared released plan waiting for the update lock,
+publication of Rust pending evidence before that waiter rereads state, owner death before
+journal publication, public released caller upgrade, and privileged native work surviving
+its helper. Focused serialization checks do not replace the final packaged public caller
+and lifecycle checks. A new Rust-only mutex or nonce would not establish this boundary.
 
 | Last established point | Permitted stop or recovery path |
 | --- | --- |
@@ -330,25 +350,56 @@ and verified staging paths; do not compensate with manual production state chang
 cannot be enabled until its finite package/API map and these predecessor/fault cases are tied to
 one accepted candidate. That implementation gate remains open.
 
-## Evaluation and cutover limits
+## Implemented boundary and cutover limits
 
-The first experiment is read-only comparison of the final Go history interface with closed Rust
-values on the same independent corpus. It proves only semantic/type behavior. The first B pilot
-then exercises a bounded complete intent/consent/guard/CAS/effect/verify/crash-resume path with the
-new process boundary on disposable VMs. It adds IPC/fencing faults to existing owning acceptance;
-a parser, client improvement or synthetic component alone does not establish complete B readiness.
+The production crate contains the complete release owner, protected POSIX store,
+frozen history model, migration and activation orchestration, recovery and retention.
+It invokes an operation-scoped Go helper through closed typed operations. The helper
+owns component preparation, source-bound recipes, guarded physical effects and native
+observations. It does not call the Go release reducer or return a release eligibility
+verdict. A retained read-only Go syntax bridge preserves historical JSON admission;
+Rust checks policy while retaining original bytes for fingerprints and canonicality.
 
-The first production ownership unit is the complete release transition, including all shipped
-activation contracts that the release claims to support. It cannot stop at a Rust planner or
-reuse a policy-bearing Go `Converge` as its executor. Delivery, code/package mapping, compiler-negative
-examples, native fault tests, performance budgets and final candidate gates belong to implementation
-planning after the owning Go history/command work is available.
+The frontend verifies the manifest inventory and declaration before starting an owner.
+It seals both executable images into immutable memfds and retains the repository root
+file description. An image replacement after verification cannot redirect execution.
+Raw registry, capability and layout bytes cross the private boundary without UTF-8
+conversion. Rust verifies complete source, target and previous artifact inventories
+before native initialization and again under the update lease before effects.
 
-Before any writer switch, prove admission and fencing against supported old Go writers, including
-already prepared calls and old recovery processes. A new lock, session nonce or simultaneous use
-of the compatibility lock proves serialization only, not old-writer eligibility. If old writers
-cannot honor the boundary, a bridge release or a separately supported ownership transition is
-required. No such proof or bridge is claimed by this ADR.
+A current prepared frontend retains its original private Rust session through consent,
+execution, expiry or close. The frozen process protocol remains version 1, with its
+existing schema-2 recovery contracts. Historical inspect and converge processes may
+open separate private sessions, but converge must match the original plan and real
+inherited grant or exact durable continuation. A checked durable receipt can return a
+private successor admission ticket bound to that same opened session and data root;
+it is neither a fresh grant nor a transferable JSON capability.
+
+Terminal owner cleanup has the same exact-session continuation boundary. A complete journal
+alone is not proof that its archive deletion finished. Optional authenticated original
+source/previous tuples are captured from syntax-only journal IDs; Rust requires and checks
+them against the original bundle only when cleanup is pending. Clean no-op inspection can
+ignore expired old tuples. Every successful private inspection/outcome explicitly returns
+its checked retained release references, including an empty list when none remain. Pending
+cleanup can resume its original plan and transaction without a fresh grant, after original
+root/inventory verification under the update lease. A different frontend goal refuses
+before effects rather than silently executing a retargeted plan.
+
+Owner choice precedes inspection and consent. A Rust declaration selects the sealed
+Rust owner and its exact Go helper. A supported historical target selects its exact
+sealed historical Go executable. Pending work retains its original owner and assets;
+errors never choose another reducer. The existing registry-absent rollback exception
+uses the active verified owner against the exact older target artifact and preserves
+its compatibility policy. The historical standalone engine/assets exception remains
+restricted to its exact supported Go delegate; it does not grant Rust access to an
+old Go journal. Unsupported combinations return a supported continuation or bridge
+instruction rather than executing a replacement reducer.
+
+The frontend still holds the default routing switch pending the complete functional
+comparison and candidate acceptance. Implementation and focused process checks do not
+establish same-candidate released-caller, VM, native ARM or performance acceptance.
+The dev-only history and single-migration pilots remain bounded comparison fixtures,
+not alternate production owners or fallback routes.
 
 The compatibility matrix must bind actual predecessor callers/owners, pending and terminal journals,
 checkpoint/projection bytes, shipped component contracts and all current replacement grammars to

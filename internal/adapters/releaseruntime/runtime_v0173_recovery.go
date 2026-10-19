@@ -47,11 +47,11 @@ func (runtime *Runtime) setV0173StandaloneRetry(ctx context.Context, root string
 	if !isV0173ActivationOnlyBlocker(protected) {
 		return
 	}
-	retry := "publish a verified standalone release newer than v0.17.3 with the exact original migration registry and catalog, then run its bin/yard migrate --check and bin/yard migrate before retrying yard update"
+	retry := "publish a verified historical Go standalone bridge newer than v0.17.3 with the exact original migration registry and catalog, then run its bin/yard migrate --check and bin/yard migrate before retrying yard update"
 	if candidate, available := runtime.verifiedStandaloneCandidateRoot(ctx, root); available {
 		defer candidate.Close()
 		version, err := semver.Parse(candidate.version)
-		if err == nil && version.GT(semver.MustParse("0.17.3")) && candidate.registryDigest == protected.journal.RegistryDigest {
+		if candidate.releaseOwner == nil && err == nil && version.GT(semver.MustParse("0.17.3")) && candidate.registryDigest == protected.journal.RegistryDigest {
 			launcher := shellquote.Word(filepath.Join(candidate.candidate.root, "bin", "yard"))
 			retry = fmt.Sprintf("run %s migrate --check, then %s migrate; retry yard update after recovery", launcher, launcher)
 		}
@@ -83,6 +83,11 @@ func (runtime *Runtime) inspectV0173ActivationOnlyRecovery(
 		return protected, nil
 	}
 	defer delegate.Close()
+	// The historical exception delegates to the exact Go engine. A Rust owner
+	// cannot reinterpret that engine's journal or acquire its durable grant.
+	if delegate.releaseOwner != nil {
+		return protected, nil
+	}
 	version, err := semver.Parse(delegate.version)
 	if err != nil || !version.GT(semver.MustParse("0.17.3")) ||
 		delegate.registryDigest != protected.journal.RegistryDigest ||

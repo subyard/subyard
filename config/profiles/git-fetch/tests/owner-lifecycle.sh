@@ -23,6 +23,9 @@ Path(os.environ['GIT_FETCH_FIXTURE_CALLS']).write_text(json.dumps(arguments))
 if arguments[0]=='check' and os.environ.get('GIT_FETCH_FIXTURE_DRIFT')=='1': print('git-fetch-drift')
 if arguments[0]=='pause': print('paused')
 if arguments[0] in ('observe','refresh'): print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
+if arguments[0]=='custody-observe': print(json.dumps({'generation':'0'}))
+if arguments[0]=='custody-refresh': print(json.dumps({'state':'current','actual':'a'*64,'desired':'a'*64}))
+if arguments[0]=='custody-fence': print(json.dumps({'generation':arguments[-1]}))
 PY
 chmod 755 "$state/bin/incus"
 export PATH="$state/bin:$PATH" GIT_FETCH_FIXTURE_CALLS="$state/calls"
@@ -84,6 +87,29 @@ assert json.loads(response)=={'state':'absent'}
 assert fixture(profile,yard='named',project='subyard-fixture',instance='yard-fixture')[0][0][-1]!=arguments[-1]
 PY
 expect_exit 2 env GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" apply operation "$expected" "$expected"
+generation=$(printf '%064d' 1)
+successor=$(printf '%064d' 2)
+bash "$root/config/profiles/git-fetch/runtime.sh" custody-observe > "$state/custody"
+python3 - "$state/calls" "$state/custody" <<'PY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['custody-observe','1','dev','0'] and len(args)==5
+assert json.load(open(sys.argv[2]))=={'generation':'0'}
+PY
+bash "$root/config/profiles/git-fetch/runtime.sh" custody-apply operation "$expected" "$expected" 0 "$generation" > /dev/null
+python3 - "$state/calls" "$expected" "$generation" <<'PY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['custody-refresh','1','dev','0'] and args[5:]==['operation',sys.argv[2],sys.argv[2],'0',sys.argv[3]]
+PY
+bash "$root/config/profiles/git-fetch/runtime.sh" custody-fence 0 "$generation" "$successor" > "$state/custody"
+python3 - "$state/calls" "$generation" "$successor" "$state/custody" <<'PY'
+import json,sys
+args=json.load(open(sys.argv[1]))
+assert args[:4]==['custody-fence','1','dev','0'] and args[5:]==['0',sys.argv[2],sys.argv[3]]
+assert json.load(open(sys.argv[4]))=={'generation':sys.argv[3]}
+PY
+expect_exit 2 env GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/runtime.sh" custody-fence 0 "$generation" "$successor"
 if SUBYARD_ENGINE_CONTEXT=0 bash "$root/config/profiles/git-fetch/owner.sh" --yes >/dev/null 2>&1; then
   echo 'FAIL: unprepared owner invocation accepted' >&2; exit 1
 fi

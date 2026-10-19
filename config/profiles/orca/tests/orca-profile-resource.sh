@@ -464,7 +464,16 @@ jq -e '.action == "up" and .changed == true' "$TMP/bootstrap-plan.json" >/dev/nu
 rm -f "$TMP/missing-yard"
 if [ "${1:-}" = --source-observer-fixture ]; then
   observer="$ROOT/config/profiles/orca/resources/orca/handler.sh"
-  for artifact in etc/profile.d/subyard-orca-codex.sh usr/local/libexec/subyard/orca-codex/codex; do
+  cp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime"
+  empty_digest="$(printf '%064d' 0)"
+  if "$observer" _runtime-contract apply bad/operation "$empty_digest" "$empty_digest" \
+    >"$TMP/invalid-runtime-id.out" 2>&1; then fail 'runtime contract accepted an invalid operation ID'; fi
+  if "$observer" _runtime-contract apply valid-operation bad-digest "$empty_digest" \
+    >"$TMP/invalid-runtime-digest.out" 2>&1; then fail 'runtime contract accepted an invalid digest'; fi
+  cmp "$ORCA_TEST_LOG" "$TMP/before-invalid-runtime" \
+    || fail 'invalid runtime activation arguments reached the transport'
+  for artifact in etc/profile.d/subyard-orca-codex.sh usr/local/libexec/subyard/orca-codex/codex \
+    etc/systemd/system/subyard-orca-discovery.service etc/systemd/system/subyard-orca-discovery.timer; do
     target="$ORCA_TEST_GUEST/$artifact"
     mkdir -p "${target%/*}"
     printf 'orphaned Codex integration\n' >"$target"
@@ -472,10 +481,20 @@ if [ "${1:-}" = --source-observer-fixture ]; then
     jq -e '.state == "stale"' "$TMP/codex-orphan.json" >/dev/null \
       || fail "runtime contract ignored orphaned $artifact"
     rm -f "$target"
+    ln -s "$TMP/missing-contract-target" "$target"
+    if "$observer" _runtime-contract observe >"$TMP/contract-symlink.json" 2>"$TMP/contract-symlink.err"; then
+      fail "runtime contract accepted an orphaned symbolic link at $artifact"
+    fi
+    rm -f "$target"
   done
   ORCA_TEST_ADVERTISE=127.0.0.1 run_orca up --yes >"$TMP/up-output"
   touch "$TMP/drain-exec-stdin"
+  mkdir -p "$ORCA_TEST_GUEST/usr/bin"
+  ln -s "$ORCA_TEST_GUEST/tmp/unrelated" "$ORCA_TEST_GUEST/usr/bin/orca-ide"
   "$observer" _runtime-contract observe >"$2/current.json"
+  jq -e '.state == "current"' "$2/current.json" >/dev/null \
+    || fail 'runtime contract refused the package-owned launcher symlink'
+  rm -f "$ORCA_TEST_GUEST/usr/bin/orca-ide"
   restart_count="$(count_log 'systemctl restart subyard-orca.service')"
   unit_hash="$(sha256sum "$ORCA_TEST_GUEST/etc/systemd/system/subyard-orca.service")"
   cp "$ORCA_TEST_GUEST/etc/profile.d/subyard-orca-codex.sh" "$TMP/expected-codex-profile"
@@ -688,7 +707,7 @@ fi
 grep -Fq 'yard init' "$TMP/stale-sync-apply.out" \
   || fail 'stale sync apply did not provide an init recovery hint'
 if "$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract apply \
-  orca-refresh wrong "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
+  orca-refresh "$(printf '%064d' 0)" "$(jq -r .desired <<<"$observation")" >"$TMP/runtime-stale.out" 2>&1; then
   fail 'runtime contract apply accepted a stale assessment'
 fi
 restart_count="$(count_log 'systemctl restart subyard-orca.service')"

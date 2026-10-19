@@ -82,6 +82,12 @@ trap cleanup_bundle EXIT
 install -d "$bundle_stage/bin"
 install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
+"$SCRIPT_DIR/build-release-owner.sh" --arch "$goarch" \
+  --output "$bundle_stage/bin/subyard-release-owner"
+install -d "$bundle_stage/config"
+mv "$bundle_stage/bin/subyard-release-owner.build.json" "$bundle_stage/config/release-owner-build.json"
+# Build locks are development coordination, never runtime assets.
+rm -f -- "$bundle_stage/bin/.release-owner-build.lock"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
   internal/adapters/configmaterial/tomli_w.py
@@ -112,7 +118,7 @@ runtime_extras=(
 while IFS= read -r -d '' relative; do
   [ -e "$REPO/$relative" ] || continue
   case "$relative" in
-    config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/retired-integrations/*/tests/*) continue ;;
+    config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs|config/retired-integrations/*/tests/*) continue ;;
   esac
   case "$relative" in
     scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
@@ -148,6 +154,10 @@ for required in \
   config/commands.registry \
   config/migrations.json \
   config/release-transition.json \
+  config/release-owner.json \
+  config/release-owner.schema.json \
+  config/release-owner-build.json \
+  bin/subyard-release-owner \
   config/preview/subyard-preview \
   config/preview/instructions.md \
   completions/yard.bash; do

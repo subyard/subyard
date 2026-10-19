@@ -39,6 +39,60 @@ func BorrowOwnerLock(dataHome string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), file.Name()), nil
 }
 
+// RegisterBorrowedOwnerLock exposes an already checked, held native owner OFD to
+// existing delegated installer/guard children. The caller retains ownership of
+// held; release closes only this duplicate, never unlocks any borrower's OFD.
+// It performs no path reopen or lock acquisition.
+func RegisterBorrowedOwnerLock(dataHome string, held *os.File) (func(), error) {
+	if held == nil {
+		return nil, errors.New("native owner barrier is missing")
+	}
+	path := OwnerLockPath(dataHome)
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := held.Stat()
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
+		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || !os.SameFile(current, info) {
+		return nil, errors.New("native owner barrier differs from its protected installation")
+	}
+	fd, err := syscall.Dup(int(held.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(fd)
+	file := os.NewFile(uintptr(fd), path)
+	ownerFiles.Lock()
+	previous := ownerFiles.files[path]
+	ownerFiles.files[path] = file
+	ownerFiles.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ownerFiles.Lock()
+			if ownerFiles.files[path] == file {
+				if previous != nil {
+					if _, err := previous.Stat(); err != nil {
+						previous = nil
+					}
+				}
+				if previous == nil {
+					delete(ownerFiles.files, path)
+				} else {
+					ownerFiles.files[path] = previous
+				}
+			}
+			ownerFiles.Unlock()
+			file.Close()
+		})
+	}, nil
+}
+
 // Native guard children retain the already-held barriers if their caller is
 // interrupted. They never acquire a new scope or unlock their parent's OFDs.
 func borrowOwnerBarriers() ([]*os.File, error) {
@@ -84,7 +138,6 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 	defer parent.Close()
 	name := filepath.Base(path)
 	var file *os.File
-	borrowed := false
 	if inherited := os.Getenv("SUBYARD_OWNER_LOCK_FD"); inherited != "" {
 		fd, parseErr := strconv.Atoi(inherited)
 		if parseErr != nil || fd < 3 {
@@ -102,7 +155,6 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 			file.Close()
 			return Tree{}, nil, errors.New("inherited owner barrier belongs to another installation")
 		}
-		borrowed = true
 	} else {
 		file, err = parent.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 		if err == nil {
@@ -123,7 +175,7 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 		return Tree{}, nil, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uid {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uid || stat.Nlink != 1 {
 		file.Close()
 		return Tree{}, nil, errors.New("owner mutation lock must be an operator-owned real mode 0600 file")
 	}
@@ -144,6 +196,12 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 		}
 	}
 	binding, err := Capture(path)
+	if err == nil {
+		current, statErr := parent.Lstat(name)
+		if statErr != nil || !os.SameFile(info, current) {
+			err = errors.New("owner coordination lock changed while acquiring its barrier")
+		}
+	}
 	if err == nil && expected != nil {
 		err = CheckOwnerLockIdentity(*expected)
 	}
@@ -165,9 +223,8 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 			}
 		}
 		ownerFiles.Unlock()
-		if !borrowed {
-			syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		}
+		// SCM_RIGHTS/Dup borrowers share this open file description. Explicit
+		// LOCK_UN would release their barrier while accepted work still owns it.
 		file.Close()
 	}, nil
 }

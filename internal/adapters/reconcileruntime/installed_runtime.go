@@ -369,6 +369,10 @@ func (runtime Runtime) installedKeyLeaves() []string {
 }
 
 func (runtime Runtime) ApplyInstalledRuntime(ctx context.Context, id, operationID, actual, desired string) error {
+	return runtime.applyInstalledRuntimeLeaves(ctx, id, operationID, actual, desired, runtime.installedKeyLeaves())
+}
+
+func (runtime Runtime) applyInstalledRuntimeLeaves(ctx context.Context, id, operationID, actual, desired string, leaves []string) error {
 	if !domain.SafeID(operationID) {
 		return errors.New("installed runtime refresh requires operation ID")
 	}
@@ -387,16 +391,20 @@ func (runtime Runtime) ApplyInstalledRuntime(ctx context.Context, id, operationI
 		if err != nil {
 			return err
 		}
-		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_PREVIEW_ENDPOINT": string(endpoint)}, "refresh-installed-guest-runtime.sh", "--yes"); err != nil {
+		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_PREVIEW_ENDPOINT": string(endpoint), "SUBYARD_PREPARED_INSTALLED_CLEANUP": runtime.preparedInstalledCleanup()}, "refresh-installed-guest-runtime.sh", "--yes"); err != nil {
 			return err
 		}
 	} else {
-		for _, script := range runtime.installedKeyLeaves() {
+		for index, script := range leaves {
 			arguments := []string{"--yes"}
 			if script == "install-keys-auto-sync.sh" {
 				arguments = []string{"--refresh", "--yes"}
 			}
-			if err := runtime.runScript(ctx, runtime.Stderr, script, arguments...); err != nil {
+			environment := map[string]string{}
+			if index == len(leaves)-1 {
+				environment["SUBYARD_PREPARED_INSTALLED_CLEANUP"] = runtime.preparedInstalledCleanup()
+			}
+			if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, script, arguments...); err != nil {
 				return err
 			}
 		}
@@ -409,4 +417,11 @@ func (runtime Runtime) ApplyInstalledRuntime(ctx context.Context, id, operationI
 		return errors.New("installed runtime refresh did not converge")
 	}
 	return nil
+}
+
+func (runtime Runtime) preparedInstalledCleanup() string {
+	if runtime.environmentValue("SUBYARD_PREPARED_INSTALLED_STAGE") != "" {
+		return "1"
+	}
+	return ""
 }

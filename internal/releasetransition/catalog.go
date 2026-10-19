@@ -152,6 +152,11 @@ func (catalog CapabilityCatalog) Digest() Fingerprint {
 	return catalog.digest
 }
 
+// Descriptors returns the immutable compiled catalog as delivery facts.
+func (catalog CapabilityCatalog) Descriptors() []CapabilityDescriptor {
+	return slices.Clone(catalog.descriptors)
+}
+
 // SupportsSourceMetadata admits read-only history from exact supported catalogs
 // with unchanged compiled semantics. The registry stays within its owner's catalog.
 func (catalog CapabilityCatalog) SupportsSourceMetadata(source Fingerprint, registry RegistryV2) bool {

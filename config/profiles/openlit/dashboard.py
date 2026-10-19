@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import runpy
 import selectors
 import signal
 from pathlib import Path
@@ -16,6 +17,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).absolute().parent
+OWNER_BARRIER = ROOT.parents[2]/'scripts/lib/native-owner-barrier.py'
 ENV = os.environ
 PHASE = 'arguments'
 KEY = 'user.subyard.openlit_dashboard'
@@ -56,12 +58,19 @@ def guest_error(error):
         if diagnostic in stderr.splitlines(): print(diagnostic, file=sys.stderr)
 
 
+def owner_descriptors():
+    if not os.environ.get('SUBYARD_NATIVE_OWNER_FD3'):
+        return ()
+    return runpy.run_path(str(OWNER_BARRIER))['inherited_owner_descriptors']()
+
+
 def run(*args, input=None, timeout=240):
     if COLD_DEADLINE is not None:
         timeout = min(timeout, COLD_DEADLINE-time.monotonic())
         if timeout <= 0: raise subprocess.TimeoutExpired(args, 0)
     try:
-        return subprocess.run(args, input=input, capture_output=True, check=True, timeout=timeout).stdout
+        return subprocess.run(args, input=input, capture_output=True, check=True, timeout=timeout,
+                              pass_fds=owner_descriptors()).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         guest_error(error)
         raise
@@ -133,7 +142,8 @@ def cold_run(*args, input, timeout, deadline):
     if remaining <= 0: raise subprocess.TimeoutExpired(args, timeout)
     framed = memoryview(f'{remaining} {COLD_KILL_SECONDS} {len(input)}\n'.encode()+input)
     child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
+                             stderr=subprocess.PIPE, bufsize=0, start_new_session=True,
+                             pass_fds=owner_descriptors())
     output, errors = bytearray(), bytearray()
     previous = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     def cancel(signum, frame): raise SystemExit(128+signum)
@@ -308,7 +318,7 @@ def guest(mode, selected, user, agents, origin, *bindings):
         archive.add(ROOT.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
     transport = ('incus', 'exec', ENV['YARD_INSTANCE_NAME'], '--project', ENV['INCUS_PROJECT'], '--')
     arguments = ('subyard', mode, str(int(selected)), user, agents, *bindings)
-    if mode == 'apply':
+    if mode in ('apply', 'refresh'):
         program = 'import os,selectors,signal,subprocess,sys,tempfile,time\n'+inspect.getsource(supervise_cold)+'\nsupervise_cold(sys.argv[1],sys.argv[2:])\n'
         output = cold_run(*transport, 'python3', '-c', program, COLD_GUEST_SCRIPT, *arguments,
                           input=stream.getvalue(), timeout=GUEST_TIMEOUTS[mode], deadline=deadline)
@@ -389,6 +399,8 @@ def operation():
     verified, *_ = observe(selected, user, agents)
     if verified['state'] not in ('current', 'absent'):
         raise ValueError('dashboard verification failed')
+    if mode == 'refresh' and verified['desired'] != bindings[1]:
+        raise ValueError('dashboard/runtime desired assessment changed during refresh')
     if mode == 'refresh': print(json.dumps(verified))
     elif selected and desired.get('deferred'): print('openlit: native telemetry ready; dashboard publication deferred')
     else: print('openlit: native telemetry and dashboard are ready')

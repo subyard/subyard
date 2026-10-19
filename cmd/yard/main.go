@@ -22,10 +22,31 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_release-owner-native-v1" {
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		if cli.RunReleaseOwnerNative(context.Background(), os.Stdin, os.Stdout) != nil {
+			fmt.Fprintln(os.Stderr, "release owner native session refused")
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_release-owner-codec-v1" {
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		if err := releasetransition.RunLegacyCodec(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "release owner codec refused")
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if len(os.Args) > 1 && (os.Args[1] == "_test-vms-facade" || os.Args[1] == "_test-vms-worker") {

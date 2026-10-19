@@ -813,12 +813,99 @@ func (runtime Runtime) PrepareSourceIntegrationPlan(ctx context.Context, reader 
 	return plan, err
 }
 
+type PreparedIntegrations struct {
+	plan             IntegrationPlan
+	configs          *PreparedConfigs
+	entries          []integrationArtifact
+	skipped          string
+	runtime, binding string
+	hooks            *ProjectHookPlan
+	sources          *PreparedInstalledRuntime
+}
+
+func (p *PreparedIntegrations) calculateBinding() string {
+	raw, _ := json.Marshal(struct {
+		Plan, Configs, Runtime, Skipped string
+		Entries                         []integrationArtifact
+	}{p.plan.StateBinding(), p.configs.Binding(), p.runtime, p.skipped, p.entries})
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
+}
+
+func (p *PreparedIntegrations) Binding() string {
+	if p == nil {
+		return ""
+	}
+	return p.binding
+}
+
+func (runtime Runtime) PrepareIntegrations(ctx context.Context, plan IntegrationPlan) (*PreparedIntegrations, error) {
+	configs, err := runtime.PrepareConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := runtime.integrationArtifactsPhase("apply")
+	if err != nil {
+		return nil, err
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	skipped := []string{}
+	for _, definition := range definitions {
+		if definition.Lifecycle != nil {
+			skipped = append(skipped, definition.Name)
+		}
+	}
+	p := &PreparedIntegrations{plan: plan, configs: configs, entries: entries, skipped: strings.Join(skipped, " "), runtime: runtime.configRuntimeBinding(), hooks: runtime.HookPlan}
+	raw, err := json.Marshal(struct {
+		Plan, Configs, Runtime, Skipped string
+		Entries                         []integrationArtifact
+	}{plan.StateBinding(), configs.Binding(), p.runtime, p.skipped, entries})
+	if err != nil {
+		return nil, err
+	}
+	p.binding = fmt.Sprintf("%x", sha256.Sum256(raw))
+	return p, nil
+}
+
+func (runtime Runtime) ApplyPreparedIntegrations(ctx context.Context, prepared *PreparedIntegrations) error {
+	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
+		return domain.ErrPlanStale
+	}
+	if err := runtime.CheckPreparedConfigs(ctx, prepared.configs); err != nil {
+		return err
+	}
+	runtime.SourceReader = nil
+	entries, err := runtime.integrationArtifactsPhase("apply")
+	if err != nil {
+		return err
+	}
+	before, _ := json.Marshal(prepared.entries)
+	current, _ := json.Marshal(entries)
+	if !slices.Equal(before, current) {
+		return domain.ErrPlanStale
+	}
+	return runtime.applyIntegrations(ctx, prepared.plan, prepared)
+}
+
 func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPlan) error {
+	return runtime.applyIntegrations(ctx, plan, nil)
+}
+
+func (runtime Runtime) applyIntegrations(ctx context.Context, plan IntegrationPlan, prepared *PreparedIntegrations) error {
 	fresh, observed, err := runtime.observeIntegrationsPhase(ctx, "apply")
 	if err != nil {
 		return err
 	}
-	if err := CheckIntegrationPlan(plan, fresh); err != nil {
+	compared := fresh
+	if prepared != nil {
+		compared, err = runtime.ProjectIntegrationPlanAfterProfileActivation(ctx, plan, fresh)
+		if err != nil {
+			return err
+		}
+	}
+	if err := CheckIntegrationPlan(plan, compared); err != nil {
 		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
@@ -826,6 +913,22 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	}
 	if !fresh.Changed {
 		return nil
+	}
+	execution := runtime
+	executionCompleted := false
+	if prepared != nil && prepared.sources != nil {
+		execution, err = runtime.materializedIntegrationExecution(ctx, prepared.sources)
+		if err != nil {
+			return err
+		}
+		// A failed opaque command may retain descendants. Its exact marked
+		// stage remains bounded and cannot be removed as a quiescence claim.
+		defer func() {
+			if !executionCompleted && prepared.sources.stageBinding != "" {
+				prepared.sources.retain.Store(true)
+			}
+			prepared.sources.Close()
+		}()
 	}
 	if err := runtime.retireIntegrationServices(ctx); err != nil {
 		return err
@@ -837,9 +940,14 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 			}
 		}
 	}
-	entries, err := runtime.integrationArtifactsPhase("apply")
-	if err != nil {
-		return err
+	var entries []integrationArtifact
+	if prepared != nil {
+		entries = prepared.entries
+	} else {
+		entries, err = runtime.integrationArtifactsPhase("apply")
+		if err != nil {
+			return err
+		}
 	}
 	expectedInventory := ""
 	if observed.Initial {
@@ -848,37 +956,62 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
 		return err
 	}
-	if err := runtime.RefreshConfigs(ctx); err != nil {
-		return err
-	}
-	definitions, err := runtime.integrationDefinitions()
-	if err != nil {
-		return err
-	}
-	skipped := []string{}
-	for _, definition := range definitions {
-		if definition.Lifecycle != nil {
-			skipped = append(skipped, definition.Name)
+	skipped := ""
+	if prepared != nil {
+		var configErr error
+		if prepared.sources != nil {
+			configErr = runtime.applyPreparedConfigs(ctx, prepared.configs, false)
+		} else {
+			configErr = runtime.ApplyPreparedConfigs(ctx, prepared.configs)
 		}
+		if err := configErr; err != nil {
+			return err
+		}
+		skipped = prepared.skipped
+	} else {
+		if err := runtime.RefreshConfigs(ctx); err != nil {
+			return err
+		}
+		definitions, err := runtime.integrationDefinitions()
+		if err != nil {
+			return err
+		}
+		names := []string{}
+		for _, definition := range definitions {
+			if definition.Lifecycle != nil {
+				names = append(names, definition.Name)
+			}
+		}
+		skipped = strings.Join(names, " ")
 	}
-	if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_INTEGRATION_LIFECYCLES": strings.Join(skipped, " ")}, "reconcile-integrations.sh"); err != nil {
+	if err := execution.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_INTEGRATION_LIFECYCLES": skipped}, "reconcile-integrations.sh"); err != nil {
 		return err
 	}
-	if err := runtime.applyIntegrationLifecycles(ctx, fresh); err != nil {
+	if err := execution.applyIntegrationLifecycles(ctx, fresh); err != nil {
 		return err
 	}
 	// Keep the inventory pending until hooks succeed so the same requested
 	// selection remains retryable after a transient hook failure.
-	if err := runtime.captureProvisionedProjectHooks(ctx); err != nil {
+	if err := execution.captureProvisionedProjectHooks(ctx); err != nil {
 		return err
 	}
-	if err := runtime.RunProjectHooks(ctx); err != nil {
+	if err := execution.RunProjectHooks(ctx); err != nil {
 		return err
 	}
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
 		return err
 	}
-	verified, _, err := runtime.observeIntegrationsPhase(ctx, "verify")
+	if prepared != nil && prepared.sources != nil {
+		// Refuse changed live source without ever launching its observe handler.
+		// Verification itself consumes the same retained executable/input bytes.
+		if err := runtime.checkMaterializedIntegrationSources(prepared.sources); err != nil {
+			return err
+		}
+		if err := runtime.CheckPreparedConfigs(ctx, prepared.configs); err != nil {
+			return err
+		}
+	}
+	verified, _, err := execution.observeIntegrationsPhase(ctx, "verify")
 	if err != nil {
 		return err
 	}
@@ -886,5 +1019,6 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
 			profile.IntegrationDefinition{}, "verify", "convergence-failed")
 	}
+	executionCompleted = true
 	return nil
 }

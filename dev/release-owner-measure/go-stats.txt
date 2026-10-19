@@ -1,0 +1,25 @@
+// Developer-only snapshot instrumentation. Counters include reporting overhead.
+var measureInitial measureRuntime.MemStats
+
+func measureStart() { measureRuntime.ReadMemStats(&measureInitial) }
+
+func measureReport(final bool) {
+	directory := os.Getenv("SUBYARD_MEASURE_STATS_DIR")
+	if directory == "" { return }
+	var current measureRuntime.MemStats
+	measureRuntime.ReadMemStats(&current)
+	file, err := os.CreateTemp(directory, "go-"+fmt.Sprint(os.Getpid())+"-*.json")
+	if err != nil { return }
+	defer file.Close()
+	fmt.Fprintf(file, "{\"schema_version\":1,\"runtime\":\"go\",\"pid\":%d,\"final\":%t,\"mallocs_since_runtime_start\":%d,\"total_alloc_bytes_since_runtime_start\":%d,\"mallocs_main_delta\":%d,\"total_alloc_bytes_main_delta\":%d,\"gc_cycles_since_runtime_start\":%d,\"gc_pause_nanoseconds_since_runtime_start\":%d,\"gc_cycles_main_delta\":%d,\"gc_pause_nanoseconds_main_delta\":%d}\n", os.Getpid(), final, current.Mallocs, current.TotalAlloc, current.Mallocs-measureInitial.Mallocs, current.TotalAlloc-measureInitial.TotalAlloc, current.NumGC, current.PauseTotalNs, current.NumGC-measureInitial.NumGC, current.PauseTotalNs-measureInitial.PauseTotalNs)
+}
+
+func measureExit(code int) { measureReport(true); os.Exit(code) }
+
+type measureWriter struct { file *os.File }
+
+func (writer measureWriter) Write(payload []byte) (int, error) {
+	n, err := writer.file.Write(payload)
+	measureReport(false)
+	return n, err
+}

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/credentialruntime"
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
@@ -54,10 +56,17 @@ type IncusReader interface {
 }
 
 type Runtime struct {
+	ownerSources       *preparedOwnerSourceExecution
 	LegacyContinuation *domain.LegacyContinuation
 	RepositoryRoot     string
+	// LogicalRepositoryRoot labels durable recipes while RepositoryRoot may be
+	// the helper's own retained descriptor used only for physical source reads.
+	LogicalRepositoryRoot string
 	// SourceReader is read-only prospective desired input; nil uses normal asset policy.
 	SourceReader func(config.MaterializedAsset) ([]byte, error)
+	// PreparedSources retains only owning prospective file provenance. Its
+	// pinned root proves an approved virtual asset's actual publication.
+	PreparedSources *config.ProspectiveFiles
 	// TeardownResources is the approved pre-consent reset inventory; nil is unprepared.
 	TeardownResources []ports.TeardownResource
 	TeardownServices  []uninstall.RecoveryService
@@ -218,34 +227,11 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		}
 		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
-		operator, err := runtime.operatorIdentity()
-		if err != nil {
-			return err
-		}
-		return runtime.runScriptEnvironment(ctx, runtime.Stderr,
-			map[string]string{"SUBYARD_USER": operator.Username},
-			"install-power-reconciler.sh", "--yes")
+		return runtime.ApplyHostPowerRuntime(ctx)
 	case ports.ReconcileStageFinalize:
 		return runtime.finalizePowerState(ctx)
 	case ports.ReconcileStageTestVMs:
-		intent, err := runtime.powerService().Ensure(ctx, runtime.Yard)
-		if err != nil {
-			return err
-		}
-		if runtime.Yard.NestedE2EVMs {
-			if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-				"SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE": runtime.environmentValue(
-					"SUBYARD_DISPATCHER_PATH",
-				),
-			}, "install-test-vms-host-sink.sh", "--yes"); err != nil {
-				return err
-			}
-		}
-		backend, err := runtime.testVMBackend(intent.Desired)
-		if err != nil {
-			return err
-		}
-		return backend.Apply(ctx)
+		return runtime.ApplyTestVMBrokerRuntime(ctx)
 	case ports.ReconcileStageKeys:
 		if err := runtime.runScript(ctx, runtime.Stderr, "install-key-tools.sh", "--yes"); err != nil {
 			return err
@@ -335,6 +321,7 @@ func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage port
 }
 
 func (runtime Runtime) scriptConverged(ctx context.Context, name string, arguments ...string) (bool, error) {
+	ctx = ports.WithoutNativeOperationObserver(ctx)
 	return probeConverged(runtime.runScript(ctx, nil, name, arguments...))
 }
 
@@ -1260,16 +1247,17 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 		return nil, err
 	}
 	return &testvmsruntime.Backend{
-		RepositoryRoot: runtime.RepositoryRoot,
-		DataHome:       runtime.Yard.Paths.DataHome,
-		Dispatcher:     environment["SUBYARD_DISPATCHER_PATH"],
-		Project:        runtime.Yard.IncusProject,
-		Instance:       runtime.Yard.YardInstanceName,
-		YardName:       runtime.Yard.YardName,
-		DesiredPower:   desired,
-		HostMemory:     extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1",
-		Environment:    environment,
-		Output:         runtime.Stderr,
+		RepositoryRoot:        runtime.RepositoryRoot,
+		LogicalRepositoryRoot: runtime.LogicalRepositoryRoot,
+		DataHome:              runtime.Yard.Paths.DataHome,
+		Dispatcher:            environment["SUBYARD_DISPATCHER_PATH"],
+		Project:               runtime.Yard.IncusProject,
+		Instance:              runtime.Yard.YardInstanceName,
+		YardName:              runtime.Yard.YardName,
+		DesiredPower:          desired,
+		HostMemory:            extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1",
+		Environment:           environment,
+		Output:                runtime.Stderr,
 		Start: func(ctx context.Context) error {
 			return runtime.withNetworkStart(ctx, func() error {
 				return runtime.runScript(ctx, runtime.Stderr,
@@ -2185,16 +2173,68 @@ func (runtime Runtime) runPathEnvironment(
 	path string,
 	arguments ...string,
 ) error {
+	childRoot := runtime.RepositoryRoot
+	if strings.HasPrefix(childRoot, "/proc/self/fd/") {
+		// A script interpreter reopens its named script after exec has closed
+		// our CLOEXEC repository descriptor. Qualify only this retained root;
+		// the helper owns it throughout every read-only probe. Mutations use
+		// their separately retained immutable execution tree.
+		childRoot = strings.Replace(childRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)
+		path = replaceRepositoryLabel(path, runtime.RepositoryRoot, childRoot)
+		environment = append([]string(nil), environment...)
+		for index := range environment {
+			environment[index] = replaceRepositoryLabel(environment[index], runtime.RepositoryRoot, childRoot)
+		}
+	}
 	command := exec.CommandContext(ctx, path, arguments...)
-	command.Dir = runtime.RepositoryRoot
+	command.Dir = childRoot
 	command.Env = environment
 	command.Stdin = runtime.Stdin
 	command.Stdout = output
 	command.Stderr = output
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err)
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		home := runtime.Yard.Paths.DataHome
+		if home == "" {
+			home = runtime.environmentValue("SUBYARD_HOME")
+		}
+		owner, err := uninstall.BorrowOwnerLock(home)
+		if err != nil {
+			return err
+		}
+		if owner == nil {
+			return errors.New("native host installer requires its original owner barrier")
+		}
+		defer owner.Close()
+		if filepath.Base(path) == "install-power-reconciler.sh" || filepath.Base(path) == "install-test-vms-host-sink.sh" {
+			// Only these stdin-free fixed privileged installers use fd0. Their
+			// root entry validates it after sudo before effects.
+			command.Stdin = owner
+			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_STDIN=1")
+		} else {
+			// Unprivileged component transports retain the original OFD as an
+			// inherited descriptor while the parent helper may disappear.
+			command.ExtraFiles = append(command.ExtraFiles, owner)
+			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1")
+		}
 	}
-	return nil
+	if ports.NativeOperationObserverFrom(ctx) != nil {
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error {
+			if command.Process == nil {
+				return nil
+			}
+			return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		}
+		command.WaitDelay = 2 * time.Second
+	}
+	finish, err := runtime.beginNativeCommand(ctx, "component-script", path, command.Env, arguments)
+	if err != nil {
+		return err
+	}
+	if err := command.Run(); err != nil {
+		return finish(fmt.Errorf("reconcile adapter %s: %w", strings.Join(arguments, " "), err))
+	}
+	return finish(nil)
 }
 
 func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, error) {
@@ -2275,4 +2315,36 @@ func firstTeardownPool(pool, srvPool string) string {
 		return pool
 	}
 	return srvPool
+}
+
+// ApplyHostPowerRuntime is the fixed host-power component operation. Its ordinary
+// stage caller and the release native helper share the same implementation.
+func (runtime Runtime) ApplyHostPowerRuntime(ctx context.Context) error {
+	operator, err := runtime.operatorIdentity()
+	if err != nil {
+		return err
+	}
+	return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_USER": operator.Username}, "install-power-reconciler.sh", "--yes")
+}
+
+// ApplyTestVMBrokerRuntime owns broker configuration semantics, not release order.
+func (runtime Runtime) ApplyTestVMBrokerRuntime(ctx context.Context) error {
+	intent, err := runtime.powerService().Ensure(ctx, runtime.Yard)
+	if err != nil {
+		return err
+	}
+	if runtime.Yard.NestedE2EVMs {
+		if err := runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
+			"SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE": runtime.environmentValue(
+				"SUBYARD_DISPATCHER_PATH",
+			),
+		}, "install-test-vms-host-sink.sh", "--yes"); err != nil {
+			return err
+		}
+	}
+	backend, err := runtime.testVMBackend(intent.Desired)
+	if err != nil {
+		return err
+	}
+	return backend.Apply(ctx)
 }

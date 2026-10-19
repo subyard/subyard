@@ -76,6 +76,9 @@ type incusOperation struct {
 	cancelled chan struct{}
 	stdinDone chan struct{}
 	cancel    sync.Once
+	resource  map[string][]string
+	mu        sync.Mutex
+	terminal  map[string]any
 }
 
 func NewIncusServer(root string) (*IncusServer, error) {
@@ -427,6 +430,7 @@ func (fake *IncusServer) startExec(writer http.ResponseWriter, request *http.Req
 	operation := &incusOperation{
 		id: id, step: step, callIndex: len(fake.execCalls) - 1,
 		cancelled: make(chan struct{}), stdinDone: make(chan struct{}),
+		resource: map[string][]string{"instances": {"/1.0/instances/" + name + "?project=" + request.URL.Query().Get("project")}},
 	}
 	fake.operations[id] = operation
 	fake.mu.Unlock()
@@ -452,6 +456,15 @@ func (fake *IncusServer) serveOperation(writer http.ResponseWriter, request *htt
 		return
 	}
 	switch {
+	case request.Method == http.MethodGet && suffix == "":
+		operation.mu.Lock()
+		terminal := operation.terminal
+		operation.mu.Unlock()
+		if terminal != nil {
+			writeIncusSync(writer, terminal)
+		} else {
+			writeIncusSync(writer, operationMetadata(operation, "Running", 103, "", nil))
+		}
 	case request.Method == http.MethodGet && suffix == "websocket":
 		fake.serveOperationWebsocket(writer, request, operation)
 	case request.Method == http.MethodGet && suffix == "wait":
@@ -528,10 +541,17 @@ func (fake *IncusServer) waitOperation(
 	request *http.Request,
 	operation *incusOperation,
 ) {
+	final := func(status string, code int, message string) {
+		metadata := operationMetadata(operation, status, code, message, nil)
+		operation.mu.Lock()
+		operation.terminal = metadata
+		operation.mu.Unlock()
+		writeIncusSync(writer, metadata)
+	}
 	select {
 	case <-operation.stdinDone:
 	case <-operation.cancelled:
-		writeIncusSync(writer, operationMetadata(operation, "Cancelled", 401, "operation cancelled", nil))
+		final("Cancelled", 401, "operation cancelled")
 		return
 	case <-request.Context().Done():
 		return
@@ -540,7 +560,7 @@ func (fake *IncusServer) waitOperation(
 		select {
 		case <-operation.step.Release:
 		case <-operation.cancelled:
-			writeIncusSync(writer, operationMetadata(operation, "Cancelled", 401, "operation cancelled", nil))
+			final("Cancelled", 401, "operation cancelled")
 			return
 		case <-request.Context().Done():
 			return
@@ -548,15 +568,15 @@ func (fake *IncusServer) waitOperation(
 	}
 	select {
 	case <-operation.cancelled:
-		writeIncusSync(writer, operationMetadata(operation, "Cancelled", 401, "operation cancelled", nil))
+		final("Cancelled", 401, "operation cancelled")
 		return
 	default:
 	}
 	if operation.step.OperationError != "" {
-		writeIncusSync(writer, operationMetadata(operation, "Failure", 400, operation.step.OperationError, nil))
+		final("Failure", 400, operation.step.OperationError)
 		return
 	}
-	writeIncusSync(writer, operationMetadata(operation, "Success", 200, "", nil))
+	final("Success", 200, "")
 }
 
 func operationMetadata(
@@ -573,7 +593,7 @@ func operationMetadata(
 	return map[string]any{
 		"id": operation.id, "class": "websocket", "description": "Executing command",
 		"created_at": time.Unix(100, 0).UTC(), "updated_at": time.Unix(100, 0).UTC(),
-		"status": status, "status_code": statusCode, "resources": map[string][]string{},
+		"status": status, "status_code": statusCode, "resources": operation.resource,
 		"metadata": metadata, "may_cancel": true, "err": errorMessage,
 	}
 }

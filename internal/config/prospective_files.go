@@ -17,6 +17,10 @@ type ProspectiveFiles struct {
 	// ReadPreparedInput keeps uncaptured paths on their native reader. Captured
 	// snapshots retain the same bounds and identity validation as ReadSnapshot.
 	ReadPreparedInput func(string) (PersistentFileSnapshot, bool, error)
+	// PinnedRoot is supplied only by the native component owner. It keeps all
+	// persistent identity revalidation on the same opened root used for capture
+	// and guarded CAS. Ordinary callers retain path-based validation.
+	PinnedRoot *os.File
 }
 
 func (files *ProspectiveFiles) snapshot(path string) (PersistentFileSnapshot, bool, error) {
@@ -56,7 +60,13 @@ func (files *ProspectiveFiles) snapshot(path string) (PersistentFileSnapshot, bo
 		return PersistentFileSnapshot{}, true, errors.New("invalid prospective configuration snapshot")
 	}
 	if identity != (PersistentFileIdentity{}) {
-		current, err := ReadPersistentFileSnapshot(root, path)
+		var current PersistentFileSnapshot
+		var err error
+		if files.PinnedRoot != nil {
+			current, err = ReadPersistentSnapshotAt(files.PinnedRoot, strings.TrimPrefix(path, root+string(filepath.Separator)))
+		} else {
+			current, err = ReadPersistentFileSnapshot(root, path)
+		}
 		if err != nil {
 			return PersistentFileSnapshot{}, true, err
 		}
@@ -65,6 +75,34 @@ func (files *ProspectiveFiles) snapshot(path string) (PersistentFileSnapshot, bo
 		}
 	}
 	return snapshot, true, nil
+}
+
+func (files *ProspectiveFiles) fallbackReset(root, yard string) (bool, error) {
+	path := YardResetMarkerPath(root, yard)
+	marker, handled, err := files.snapshot(path)
+	if err != nil {
+		return false, err
+	}
+	if !handled {
+		return YardFallbackReset(root, yard)
+	}
+	if !marker.Exists {
+		return false, nil
+	}
+	if marker.Identity.Mode&0o777 != 0o600 || string(marker.Content) != yardResetMarkerContent {
+		return false, errors.New("unsafe prospective yard reset marker")
+	}
+	return true, nil
+}
+func (files *ProspectiveFiles) pendingTransaction(root string) (bool, error) {
+	value, handled, err := files.snapshot(filepath.Join(root, ".sync", "transaction.json"))
+	if err != nil {
+		return false, err
+	}
+	if !handled {
+		return PendingConfigurationTransaction(root)
+	}
+	return value.Exists, nil
 }
 
 func (files *ProspectiveFiles) readFile(path string) ([]byte, error) {

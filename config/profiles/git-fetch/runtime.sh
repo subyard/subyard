@@ -12,5 +12,8 @@ binding="$({
 case "${1:-}" in
   observe) [ "$#" = 1 ]; exec "$profile/owner.sh" --observe "$binding" ;;
   apply) [ "$#" = 4 ]; exec "$profile/owner.sh" --refresh "$binding" "${@:2}" ;;
+  custody-observe) [ "$#" = 1 ]; exec "$profile/owner.sh" --custody-observe "$binding" ;;
+  custody-apply) [ "$#" = 6 ]; exec "$profile/owner.sh" --custody-refresh "$binding" "${@:2}" ;;
+  custody-fence) [ "$#" = 4 ]; exec "$profile/owner.sh" --custody-fence "$binding" "${@:2}" ;;
   *) exit 2 ;;
 esac

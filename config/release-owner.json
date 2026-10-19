@@ -1,0 +1,1 @@
+{"schemaVersion":1,"kind":"rust-release-owner","protocolVersion":1,"owner":"bin/subyard-release-owner","helper":"bin/yard-engine","schema":"config/release-owner.schema.json","buildInputs":"config/release-owner-build.json"}

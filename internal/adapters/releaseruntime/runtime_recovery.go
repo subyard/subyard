@@ -26,10 +26,11 @@ func (runtime *Runtime) inspectActivationRecovery(
 		return protected, nil
 	}
 	journal := protected.journal
-	if journal.Checkpoint != releasetransition.JournalReconciling ||
+	rustOwner := releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil
+	if !rustOwner && (journal.Checkpoint != releasetransition.JournalReconciling ||
 		journal.Goal.Direction != releasetransition.DirectionActivateTarget ||
 		journal.SourceIngress != nil || len(journal.Steps) != 0 || protected.owner != protected.target ||
-		!protected.activationReconciliationOwned || releasetransition.IsRecoveryTransaction(journal.Transaction) {
+		!protected.activationReconciliationOwned || releasetransition.IsRecoveryTransaction(journal.Transaction)) {
 		return protected, nil
 	}
 	observed, err := runtime.inspectRuntimeLinks(protected.request.RuntimeRoot)
@@ -42,12 +43,15 @@ func (runtime *Runtime) inspectActivationRecovery(
 		from := journal.Releases.From
 		expectedPrevious = &from
 	}
-	if actual.Active != journal.Goal.Target || !sameRecoveryReleaseIDs(actual.Previous, expectedPrevious) {
+	if !rustOwner && (actual.Active != journal.Goal.Target || !sameRecoveryReleaseIDs(actual.Previous, expectedPrevious)) {
 		return protected, nil
 	}
 	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2,
 		Mode: releasetransition.RecoveryProcessLifecycleCapabilities}
 	capabilities, probeErr := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
+	if rustOwner && probeErr != nil {
+		return nil, probeErr
+	}
 	if probeErr != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -139,6 +143,9 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	}
 	if err := runtime.pinCandidateRoot(owner); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, err
+	}
+	if releaseOwnerRoutingEnabled && owner.releaseOwner != nil {
+		return runtime.invokeRustRecoveryTransition(ctx, owner, runtimeRoot, request, grant)
 	}
 	payload, err := releasetransition.MarshalRecoveryProcessRequest(request)
 	if err != nil {
