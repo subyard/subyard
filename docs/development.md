@@ -142,15 +142,29 @@ leaf publishes recovery facts before importing config and later switches shell e
 not authorize, activate or roll back a release. An interruption resumes from the protected outer
 journal and observed facts.
 
-Native Paseo builds retain npm downloads in `.build/paseo-npm-cache`, with separate
-CI caches per architecture and pinned build inputs. Network downloads use bounded
-retries; dependency integrity, version and native-module failures still stop the build.
-Registry requests and archive transfers allow five minutes each; archive connections
-allow one minute. Paseo jobs allow 90 minutes for slow downloads and bounded retries.
-Failed npm attempts retain safe error codes and public registry request diagnostics
-under `.build/paseo-diagnostics`. Both Paseo workflows upload those diagnostics on
-failure with seven-day retention. The cache, raw npm debug logs, configuration and
-environment values are excluded from diagnostic artifacts.
+Native Paseo builds keep downloads, npm cache and logs in operation-owned disk
+scratch under `.build/paseo-operation-<uid>`. A private temporary mount catches direct
+`/tmp`, `/var/tmp` and `/dev/shm` writes. One build runs per checkout and user;
+completion removes scratch, and the next invocation removes leftovers with a valid
+durable ownership receipt after SIGKILL or reboot. Incomplete initialization or
+ambiguous ownership is preserved and refused for inspection. Old `.build/paseo-npm-cache` and diagnostic directories are left
+untouched. Safe npm records go to stderr, capped at 8 KiB per attempt. Network
+retries remain bounded; version, integrity and native-module failures stop the build.
+The build needs Linux user/mount/PID namespace support and verified disk storage.
+
+Profile extraction uses the same lifecycle in guest disk storage under
+`/var/lib/subyard/profile-operation`, with one operation per guest. Controller stderr
+is drained with a 64 KiB capture limit. An optional profile `provision-tmp-paths`
+file lists exact existing temporary directories needed by migration hooks; symlinks
+are refused. Other temporary files remain private. The original guest `/proc` stays
+visible for guards that inspect existing workloads.
+Hooks that call `systemctl` need the guest's existing system bus; the worker sets
+the [documented `SYSTEMCTL_FORCE_BUS=1` route](https://github.com/systemd/systemd/blob/v257.13/docs/ENVIRONMENT.md)
+across the PID namespace, preserving
+existing bus addresses. This does not install or start a bus.
+Descendant cleanup covers spawned processes, including detached sessions; intentional work requested through
+external daemons retains those daemons' lifecycle. No per-operation RAM, byte or
+inode quota is imposed; the existing yard RAM boundary still applies.
 
 After activation or rollback and configuration refresh, `yard update` reinspects the exact selected
 release without fetching another version. Its final human-readable summary reports readiness and

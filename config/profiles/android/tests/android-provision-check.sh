@@ -237,4 +237,23 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
 print('ok: bounded Android downloads recover or fail without publishing partial inputs')
 PYDOWNLOAD
 
+# The declaration keeps the pre-existing migration target visible to the generic runner.
+python3 - "$ROOT/config/profiles/android" "$tmp" <<'PYLEGACY'
+import pathlib, subprocess, sys
+profile, fixture = map(pathlib.Path, sys.argv[1:])
+paths = (profile / 'provision-tmp-paths').read_text().splitlines()
+assert paths == ['/tmp/subyard-android']
+legacy = fixture / 'legacy'
+legacy.mkdir()
+source = (profile / 'pool-install.sh').read_text()
+start = source.index('if [ -d /tmp/subyard-android ]')
+block = source[start:source.index('\nfi', start) + 3]
+# Run the actual migration block against fixture-owned files, without installation.
+block = block.replace('/tmp/subyard-android', str(legacy))
+subprocess.run(['bash', '-euc', block], env={'PROFILE_DIR':str(profile), 'PATH':'/usr/bin:/bin'}, check=True)
+for name in ('emulator-run.sh', 'emulator-control.sh'):
+    assert (legacy / name).read_bytes() == (profile / name).read_bytes()
+    assert (legacy / name).stat().st_mode & 0o777 == 0o755
+PYLEGACY
+
 printf 'ok: Android provision check\n'

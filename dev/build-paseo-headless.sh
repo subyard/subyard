@@ -41,13 +41,17 @@ for input in \
     || { printf 'build-paseo-headless: missing regular input %s\n' "$input" >&2; exit 2; }
 done
 
+# Re-enter only after the runner has installed actual private PID/tmp namespaces.
+helper="$REPO/scripts/lib/producer-run.py"
+if ! python3 "$helper" inside 2>/dev/null; then
+  case "$OUTPUT_DIR" in /*) ;; *) OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;; esac
+  exec python3 "$helper" launch paseo "$REPO" \
+    /bin/bash "$SCRIPT_DIR/build-paseo-headless.sh" --output-dir "$OUTPUT_DIR" --arch "$TARGET_ARCH"
+fi
 temporary="$(mktemp -d /tmp/subyard-paseo-build.XXXXXX)"
-cleanup() { rm -rf -- "$temporary"; }
-trap cleanup EXIT HUP INT TERM
-npm_cache="$REPO/.build/paseo-npm-cache"
-mkdir -p "$REPO/.build/paseo-diagnostics"
-npm_diagnostics="$(mktemp -d "$REPO/.build/paseo-diagnostics/$TARGET_ARCH.XXXXXX")"
-mkdir -p "$npm_cache" "$temporary/npm-home" "$temporary/npm-logs"
+npm_cache="$temporary/npm-cache"
+npm_diagnostics="$temporary/npm-diagnostics"
+mkdir -p "$npm_cache" "$npm_diagnostics" "$temporary/npm-home" "$temporary/npm-logs"
 : >"$temporary/npm-user.npmrc"
 : >"$temporary/npm-global.npmrc"
 
@@ -96,10 +100,10 @@ npm_ci() {
         }
       }
     ' "${logs[@]}" >"$diagnostic.records"
-    sort -u "$diagnostic.records" >>"$diagnostic"
+    sort -u "$diagnostic.records" >"$diagnostic.sorted"
+    head -c 8192 "$diagnostic.sorted" >>"$diagnostic"
     rm -f -- "$diagnostic.records"
     cat "$diagnostic" >&2
-    printf 'build-paseo-headless: npm diagnostics: %s\n' "$diagnostic" >&2
     [ "$status" -ne 0 ] || return 0
     error_code="$(awk '/^npm (error|ERR!) code [A-Za-z0-9_]+$/ { code = $NF } END { print code }' "$console")"
     case "$error_code" in
@@ -120,7 +124,7 @@ curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.
   -o "$temporary/$node_archive"
 [ "$(sha256sum "$temporary/$node_archive" | cut -d' ' -f1)" = "$node_sha" ] \
   || { printf 'build-paseo-headless: Node checksum mismatch\n' >&2; exit 1; }
-tar -xJf "$temporary/$node_archive" -C "$temporary"
+tar --no-same-owner -xJf "$temporary/$node_archive" -C "$temporary"
 node_root="$temporary/node-v$NODE_VERSION-linux-$node_arch"
 
 upstream_archive="$temporary/paseo-$PASEO_REVISION.tar.gz"
@@ -130,7 +134,7 @@ curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.
   "https://github.com/getpaseo/paseo/archive/$PASEO_REVISION.tar.gz" \
   -o "$upstream_archive"
 mkdir "$temporary/upstream"
-tar -xzf "$upstream_archive" -C "$temporary/upstream" --strip-components=1
+tar --no-same-owner -xzf "$upstream_archive" -C "$temporary/upstream" --strip-components=1
 [ "$(sha256sum "$temporary/upstream/package-lock.json" | cut -d' ' -f1)" = "$UPSTREAM_LOCK_SHA256" ] \
   || { printf 'build-paseo-headless: upstream lock checksum mismatch\n' >&2; exit 1; }
 jq -e '
@@ -217,7 +221,7 @@ stage="$temporary/stage"
 install -d "$stage/node/bin" "$stage/app/libexec" "$stage/package/bin"
 install -m 0755 "$node_root/bin/node" "$stage/node/bin/node"
 install -m 0644 "$node_root/LICENSE" "$stage/node/LICENSE"
-cp -a "$app/package.json" "$app/package-lock.json" "$app/node_modules" "$stage/app/"
+cp -al "$app/package.json" "$app/package-lock.json" "$app/node_modules" "$stage/app/"
 install -m 0755 "$PACKAGE_DIR/sync-projects.mjs" "$stage/app/libexec/paseo-sync-projects.mjs"
 install -m 0644 "$PACKAGE_DIR/config.json" "$stage/package/config.json"
 install -m 0644 "$PACKAGE_DIR/paseo.service.in" "$stage/package/paseo.service.in"

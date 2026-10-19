@@ -25,6 +25,17 @@ adapter_cwd="$tmp/adapter-cwd"
 trap 'chmod 0700 "$adapter_cwd" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/fake-bin" "$tmp/home" "$adapter_cwd"
 
+# Developer provisioning must not require or change a user manager.
+export SUBYARD_DEV_MANAGER_LOG="$tmp/manager-invocations"
+for tool in loginctl systemctl; do
+  cat > "$tmp/fake-bin/$tool" <<'SH'
+#!/bin/sh
+: > "${SUBYARD_DEV_MANAGER_LOG:?}"
+exit 99
+SH
+  chmod +x "$tmp/fake-bin/$tool"
+done
+
 cat > "$tmp/fake-bin/apt-get" <<'APT'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SUBYARD_DEV_APT_LOG"
@@ -231,4 +242,5 @@ if [ "$(id -u)" -ne 0 ]; then
   grep -Fq 'must run as root' "$tmp/non-root.out" || fail "root requirement is unclear"
 fi
 
+[ ! -e "$SUBYARD_DEV_MANAGER_LOG" ] || fail "provision invoked a user manager command"
 printf 'ok: subyard-dev provision\n'

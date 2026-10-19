@@ -79,13 +79,12 @@ jobs:
           ref: ${{ inputs.commit }}
           persist-credentials: false
       - name: Install native bundle tools
-        run: sudo apt-get update -qq && sudo apt-get install -y binutils build-essential jq xz-utils
-      - name: Cache pinned npm downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .build/paseo-npm-cache
-          key: paseo-npm-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('config/agents/paseo/bundle/package-lock.json', 'dev/build-paseo-headless.sh') }}
-          restore-keys: paseo-npm-${{ runner.os }}-${{ matrix.arch }}-
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils build-essential jq xz-utils
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: Build pinned Paseo headless bundle
         run: |
           artifact="$(dev/build-paseo-headless.sh --arch "${{ matrix.arch }}" --output-dir .build/paseo)"
@@ -95,14 +94,6 @@ jobs:
           name: paseo-headless-${{ matrix.arch }}-${{ github.run_attempt }}
           path: .build/paseo/*
           if-no-files-found: error
-      - name: Preserve failed Paseo download diagnostics
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: release-paseo-diagnostics-${{ matrix.arch }}-${{ github.run_attempt }}
-          path: .build/paseo-diagnostics/
-          retention-days: 7
-          if-no-files-found: ignore
 
   prepare:
     needs: [native-engine-arm64, paseo-headless]
@@ -120,7 +111,12 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: Complete shipped profile acceptance inventory
         run: bash dev/test-profiles.sh --e2e --list
       - name: Verify release candidate

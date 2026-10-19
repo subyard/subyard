@@ -73,6 +73,25 @@ the selected guest. Its next normal stop/start restores the image's original mou
 policy. Do not stop the live mount during rollback. Repeating `yard init` restores
 the Subyard policy.
 
+The focused producer lifecycle lane exercises operation-owned disk scratch, PID
+namespace cancellation (including detached children), stale recovery, real Incus
+controller loss and profile status rendering. It also builds and smoke-tests the
+native amd64 Paseo artifact. Run its local prerequisites before allocation:
+
+```sh
+bash tests/provision-profile-check.sh
+bash config/profiles/android/tests/android-provision-check.sh
+bash dev/e2e/producer-lifecycle.sh --preflight
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose producer-lifecycle -- \
+  timeout --signal=TERM --kill-after=60 5400 bash dev/e2e/producer-lifecycle.sh
+```
+
+This requires Linux user/mount/PID namespaces locally, one standard disposable VM,
+passwordless guest root helpers, and the existing Incus platform fixture. It creates
+one marker-owned nested container and removes it before the native build. It does
+not impose per-operation memory, byte or inode quotas, and does not cover ARM or
+release acceptance.
+
 ## Operator setup
 
 Register a yard with the profile:
