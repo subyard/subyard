@@ -136,6 +136,10 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 	if owner == nil || owner.root == nil || owner.engine == nil || owner.registryDigest == "" {
 		return releasetransition.RecoveryProcessResponse{}, errors.New("verified recovery owner is unavailable")
 	}
+	if !releaseOwnerRoutingEnabled && owner.releaseOwner != nil {
+		return releasetransition.RecoveryProcessResponse{}, markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime"))
+	}
+
 	capabilityProbe := request.Mode == releasetransition.RecoveryProcessCapabilities || request.Mode == releasetransition.RecoveryProcessLifecycleCapabilities || request.Mode == releasetransition.RecoveryProcessRuntimeCapabilities || request.Mode == releasetransition.RecoveryProcessMigrationOwnerCapabilities
 	if !capabilityProbe &&
 		(request.RegistryDigest != owner.registryDigest || request.ArtifactDigest != owner.manifestDigest || request.Target != owner.candidate.release) {

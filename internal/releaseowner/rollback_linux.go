@@ -24,7 +24,7 @@ func (s *session) captureRollbackSupport(ctx context.Context, request Request, f
 			return Reply{}, errors.New("native rollback owner syntax")
 		}
 	}
-	if repositories.Source.Release != string(s.context.Releases.From) || repositories.Target.Release != s.context.Target || repositories.Target.Release != string(s.context.Releases.Target) || repositories.Source.Release == repositories.Target.Release || !domain.SafeID(repositories.Source.Release) || !fingerprint(repositories.Source.ArtifactDigest) || repositories.Target.ArtifactDigest != s.context.Artifact || (repositories.Target.Root != s.context.Repository && s.context.Direction != releasetransition.DirectionActivatePrevious) {
+	if repositories.Source.Release != string(s.context.Releases.From) || repositories.Target.Release != s.context.Target || repositories.Target.Release != string(s.context.Releases.Target) || (repositories.Source.Release == repositories.Target.Release && (s.context.Direction != releasetransition.DirectionActivatePrevious || repositories.Source != repositories.Target)) || !domain.SafeID(repositories.Source.Release) || !fingerprint(repositories.Source.ArtifactDigest) || repositories.Target.ArtifactDigest != s.context.Artifact || (repositories.Target.Root != s.context.Repository && s.context.Direction != releasetransition.DirectionActivatePrevious) {
 		return Reply{}, errors.New("native rollback repository binding")
 	}
 	retained := []*os.File{}

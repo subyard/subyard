@@ -20,6 +20,15 @@ INSTALLER_SHA = 'eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d
 
 
 class ActivationIdentityTest(unittest.TestCase):
+    def test_loss_modes_are_closed_before_candidate_preparation(self):
+        controller = GUEST.with_name('release-activation.sh')
+        for arguments in (['--native-loss', 'invalid'], ['--native-loss'],
+                          ['--native-loss', 'owner', '--native-loss', 'group']):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(['bash', str(controller), '--slot', '1', *arguments],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+
     def identity(self, version='0.21.0', baseline='0.20.0', **changes):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             metadata = Path(temporary)/'candidate.json'

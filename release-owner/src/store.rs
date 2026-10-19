@@ -230,6 +230,16 @@ pub(crate) fn read_at(parent: &impl AsFd, name: &str, staging: bool) -> Result<S
     Ok(Snapshot { bytes: Some(bytes) })
 }
 impl Store {
+    pub(crate) fn pinned(root: OwnedFd, reader: crate::legacy::FrozenReader) -> Result<Self> {
+        checked(&root, true, false, false)?;
+        Ok(Self {
+            reader: crate::legacy::Reader::Frozen(reader),
+            root: Some(root),
+            retirement_capture_failed: std::cell::Cell::new(false),
+            #[cfg(test)]
+            cut: None,
+        })
+    }
     /// Complete historical reader is mandatory for the future production owner.
     pub fn open_with_reader(path: &Path, reader: crate::legacy::FrozenReader) -> Result<Self> {
         let mut store = Self::open_canonical_fixture(path)?;

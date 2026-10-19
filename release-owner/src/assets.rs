@@ -1,6 +1,6 @@
 //! Physical facts for closed retained releases. Release policy stays in Owner.
 use crate::{
-    digest, inventory,
+    codec, digest, inventory,
     record::{self, require},
     store, Error, Result,
 };
@@ -8,7 +8,10 @@ use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    os::fd::{AsFd, OwnedFd},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    },
 };
 fn regular(fd: &impl AsFd) -> Result<()> {
     let s = store::io(fs::fstat(fd))?;
@@ -27,17 +30,23 @@ fn directory(fd: &impl AsFd) -> Result<()> {
     )
 }
 fn open(parent: &impl AsFd, path: &str) -> Result<OwnedFd> {
+    open_bytes(parent, path.as_bytes())
+}
+fn open_bytes(parent: &impl AsFd, path: &[u8]) -> Result<OwnedFd> {
     require(
-        !path.is_empty() && !path.starts_with('/') && !path.contains('\\') && path.len() <= 4096,
+        !path.is_empty()
+            && !path.starts_with(b"/")
+            && !path.contains(&b'\\')
+            && !path.contains(&0)
+            && path.len() <= 4096,
     )?;
     let mut fd = store::io(rustix::io::dup(parent))?;
-    let parts = path.split('/').collect::<Vec<_>>();
-    require(parts.len() <= 64)?;
+    let parts = path.split(|b| *b == b'/').collect::<Vec<_>>();
     for (i, p) in parts.iter().enumerate() {
-        require(!p.is_empty() && !matches!(*p, "." | ".."))?;
+        require(!p.is_empty() && !matches!(*p, b"." | b".."))?;
         fd = store::io(fs::openat(
             &fd,
-            *p,
+            std::ffi::OsStr::from_bytes(p),
             OFlags::RDONLY
                 | store::flags()
                 | if i + 1 < parts.len() {
@@ -65,7 +74,7 @@ struct VerifiedInventory {
     identity: crate::native::Identity,
     manifest: String,
     _root: OwnedFd,
-    entries: BTreeMap<String, String>,
+    entries: Entries,
 }
 impl VerificationPhase {
     pub(crate) fn new() -> Self {
@@ -78,7 +87,7 @@ impl VerificationPhase {
         release: &str,
         root: &OwnedFd,
         manifest: &str,
-    ) -> Result<&BTreeMap<String, String>> {
+    ) -> Result<&Entries> {
         require(record::safe_id(release) && record::fingerprint(manifest))?;
         let identity = crate::native::Identity::capture(root)?;
         let index = if let Some(index) = self.inventories.iter().position(|proof| {
@@ -102,7 +111,23 @@ impl VerificationPhase {
         Ok(&self.inventories[index].entries)
     }
 }
-pub(crate) fn verify(root: &OwnedFd, expected: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) struct Entries(BTreeMap<Vec<u8>, String>);
+impl Entries {
+    pub(crate) fn get(&self, fixed: &str) -> Option<&String> {
+        self.0.get(fixed.as_bytes())
+    }
+    pub(crate) fn contains_key(&self, fixed: &str) -> bool {
+        self.0.contains_key(fixed.as_bytes())
+    }
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+pub(crate) fn verify(root: &OwnedFd, expected: &str) -> Result<Entries> {
+    Ok(Entries(verify_bytes(root, expected)?))
+}
+pub(crate) fn verify_bytes(root: &OwnedFd, expected: &str) -> Result<BTreeMap<Vec<u8>, String>> {
     require(record::fingerprint(expected))?;
     directory(root)?;
     let manifest = open(root, "runtime-files.sha256")?;
@@ -117,20 +142,19 @@ pub(crate) fn verify(root: &OwnedFd, expected: &str) -> Result<BTreeMap<String, 
             && raw.last() == Some(&b'\n')
             && digest(&raw) == expected,
     )?;
-    let text = std::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
     let mut entries = BTreeMap::new();
-    for line in text[..text.len() - 1].split('\n') {
-        require(line.len() >= 68 && line.get(64..68) == Some("  ./"))?;
-        let hash = &line[..64];
+    for line in raw[..raw.len() - 1].split(|b| *b == b'\n') {
+        require(line.len() >= 68 && line.get(64..68) == Some(b"  ./"))?;
+        let hash = std::str::from_utf8(&line[..64]).map_err(|_| Error::Invalid)?;
         require(hash.bytes().all(|b| b.is_ascii_hexdigit()))?;
         let name = &line[68..];
-        let fd = open(root, name)?;
-        if matches!(name, "bin/yard-engine" | "bin/subyard-release-owner") {
+        let fd = open_bytes(root, name)?;
+        if matches!(name, b"bin/yard-engine" | b"bin/subyard-release-owner") {
             require(store::io(fs::fstat(&fd))?.st_mode & 0o111 != 0)?;
         }
         require(
             entries
-                .insert(name.to_owned(), hash.to_ascii_lowercase())
+                .insert(name.to_vec(), hash.to_ascii_lowercase())
                 .is_none(),
         )?;
         use sha2::{Digest, Sha256};
@@ -167,25 +191,29 @@ pub(crate) fn verify(root: &OwnedFd, expected: &str) -> Result<BTreeMap<String, 
     }
     fn walk(
         root: &OwnedFd,
-        prefix: &str,
-        remaining: &mut BTreeSet<String>,
+        prefix: &[u8],
+        remaining: &mut BTreeSet<Vec<u8>>,
         count: &mut usize,
         depth: usize,
     ) -> Result<()> {
-        require(depth <= 64)?;
-        let names = inventory::names(root, *count)?;
+        require(depth <= 2048)?;
+        let names = inventory::byte_names(root, *count)?;
         *count = count.checked_sub(names.len()).ok_or(Error::Bound)?;
         for name in names {
             let path = if prefix.is_empty() {
                 name.clone()
             } else {
-                format!("{prefix}/{name}")
+                [prefix, b"/", name.as_slice()].concat()
             };
-            let s = store::io(fs::statat(root, &name, AtFlags::SYMLINK_NOFOLLOW))?;
+            let s = store::io(fs::statat(
+                root,
+                std::ffi::OsStr::from_bytes(&name),
+                AtFlags::SYMLINK_NOFOLLOW,
+            ))?;
             if FileType::from_raw_mode(s.st_mode) == FileType::Directory {
                 let fd = store::io(fs::openat(
                     root,
-                    &name,
+                    std::ffi::OsStr::from_bytes(&name),
                     OFlags::RDONLY | OFlags::DIRECTORY | store::flags(),
                     Mode::empty(),
                 ))?;
@@ -194,32 +222,37 @@ pub(crate) fn verify(root: &OwnedFd, expected: &str) -> Result<BTreeMap<String, 
             } else {
                 require(
                     FileType::from_raw_mode(s.st_mode) == FileType::RegularFile
-                        && (path == "runtime-files.sha256" || remaining.remove(&path)),
+                        && (path == b"runtime-files.sha256" || remaining.remove(&path)),
                 )?;
             }
         }
         Ok(())
     }
     let mut remaining = entries.keys().cloned().collect();
-    walk(root, "", &mut remaining, &mut 32768, 0)?;
+    walk(root, b"", &mut remaining, &mut 32768, 0)?;
     require(remaining.is_empty())?;
     Ok(entries)
 }
 
-#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct Input {
-    present: bool,
-    device: u64,
-    inode: u64,
-    links: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
+    pub(crate) present: bool,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) links: u64,
+    pub(crate) mode: u32,
+    #[serde(rename = "UID")]
+    pub(crate) uid: u32,
+    #[serde(rename = "GID")]
+    pub(crate) gid: u32,
 }
-fn metadata(fd: &impl AsFd) -> Result<Input> {
-    let s = store::io(fs::fstat(fd))?;
-    Ok(Input {
+pub(crate) fn metadata(fd: &impl AsFd) -> Result<Input> {
+    Ok(input(store::io(fs::fstat(fd))?))
+}
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn input(s: fs::Stat) -> Input {
+    Input {
         present: true,
         device: s.st_dev,
         inode: s.st_ino,
@@ -227,27 +260,39 @@ fn metadata(fd: &impl AsFd) -> Result<Input> {
         mode: s.st_mode,
         uid: s.st_uid,
         gid: s.st_gid,
-    })
+    }
 }
-pub(crate) fn inputs(
-    root: &OwnedFd,
-    logical: &str,
-    manifest: &str,
-) -> Result<BTreeMap<String, Input>> {
-    require(logical.starts_with('/') && !logical.ends_with('/'))?;
-    let entries = verify(root, manifest)?;
-    let capture = || -> Result<BTreeMap<String, Input>> {
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct Inputs(pub(crate) BTreeMap<Vec<u8>, Input>);
+impl Inputs {
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+    pub(crate) fn fingerprint(&self) -> Result<String> {
+        codec::source_hash_with(|out| codec::write_source_map(out, &self.0))
+    }
+}
+pub(crate) fn inputs(root: &OwnedFd, logical: &str, manifest: &str) -> Result<Inputs> {
+    inputs_bytes(root, logical.as_bytes(), manifest)
+}
+pub(crate) fn inputs_bytes(root: &OwnedFd, logical: &[u8], manifest: &str) -> Result<Inputs> {
+    require(logical.starts_with(b"/") && !logical.ends_with(b"/"))?;
+    let entries = verify_bytes(root, manifest)?;
+    let capture = || -> Result<Inputs> {
         let mut values = BTreeMap::new();
-        values.insert(logical.into(), metadata(root)?);
-        for name in
-            std::iter::once("runtime-files.sha256").chain(entries.keys().map(String::as_str))
+        values.insert(logical.to_vec(), metadata(root)?);
+        for name in std::iter::once(b"runtime-files.sha256".as_slice())
+            .chain(entries.keys().map(Vec::as_slice))
         {
-            values.insert(format!("{logical}/{name}"), metadata(&open(root, name)?)?);
+            values.insert(
+                [logical, b"/", name].concat(),
+                metadata(&open_bytes(root, name)?)?,
+            );
         }
-        Ok(values)
+        Ok(Inputs(values))
     };
     let before = capture()?;
-    verify(root, manifest)?;
+    verify_bytes(root, manifest)?;
     require(before == capture()?)?;
     Ok(before)
 }
@@ -266,6 +311,12 @@ pub(crate) fn read(root: &OwnedFd, path: &str, limit: usize) -> Result<Vec<u8>> 
 }
 pub(crate) fn registry(root: &OwnedFd) -> Result<Vec<u8>> {
     read(root, "config/release-transition.json", 1 << 20)
+}
+pub(crate) fn source_engine(root: &OwnedFd) -> Result<std::fs::File> {
+    Ok(std::fs::File::from(open(root, "bin/yard-engine")?))
+}
+pub(crate) fn original_v1_registry(root: &OwnedFd) -> Result<OwnedFd> {
+    open(root, "config/migrations.json")
 }
 
 #[cfg(test)]

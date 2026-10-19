@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -62,5 +63,68 @@ func TestInstalledRecipeTransferRetainsExactOriginalAndRefusesConflicts(t *testi
 	request.RecipeHash = digest([]byte("different"))
 	if _, err := s.installedRecipe(context.Background(), request); err == nil {
 		t.Fatal("interleaved recipe admitted")
+	}
+}
+
+type targetRecipeFixture struct {
+	installedRecipeFixture
+	target *Target
+}
+
+func (f *targetRecipeFixture) BindInstalledRuntimeRecipeForTarget(_ context.Context, hash string, raw []byte, target Target) error {
+	if digest(raw) != hash || !bytes.Equal(raw, f.raw) {
+		return errors.New("original bytes changed")
+	}
+	f.target = &target
+	f.bound = bytes.Clone(raw)
+	return nil
+}
+func TestInstalledRecipeOriginalTargetOnlyOnFinalChunk(t *testing.T) {
+	f := &targetRecipeFixture{installedRecipeFixture: installedRecipeFixture{raw: bytes.Repeat([]byte("x"), installedRecipeChunkSize+3)}}
+	hash := digest(f.raw)
+	target := Target{PreparedRecipe: hash, InstanceUUID: "absent", Owner: "original-owner", Source: digest([]byte("source"))}
+	request := Request{Op: "bind-installed-recipe", RecipeHash: hash, Total: uint64(len(f.raw)), Content: base64.StdEncoding.EncodeToString(f.raw[:installedRecipeChunkSize]), Target: &target}
+	s := &session{components: f}
+	if _, err := s.installedRecipe(context.Background(), request); err == nil || s.installedTransfer != nil || f.target != nil {
+		t.Fatal("early target gained authority")
+	}
+	request.Target = nil
+	if _, err := s.installedRecipe(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Offset = installedRecipeChunkSize
+	request.Content = base64.StdEncoding.EncodeToString(f.raw[installedRecipeChunkSize:])
+	request.Target = &target
+	if _, err := s.installedRecipe(context.Background(), request); err != nil || f.target == nil || *f.target != target || !bytes.Equal(f.bound, f.raw) {
+		t.Fatal("final original target/body lost", err)
+	}
+	wrong := target
+	wrong.PreparedRecipe = digest([]byte("foreign"))
+	request.Offset = 0
+	request.Target = &wrong
+	if _, err := s.installedRecipe(context.Background(), request); err == nil {
+		t.Fatal("foreign recipe target accepted")
+	}
+}
+
+func TestInstalledRecipeTargetPassesStrictSessionAdmission(t *testing.T) {
+	s, b, _ := nativeFactFixture(t)
+	root, err := IdentityOf(s.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.context.Root = root
+	f := &targetRecipeFixture{installedRecipeFixture: installedRecipeFixture{raw: []byte("original body")}}
+	s.components = f
+	hash := digest(f.raw)
+	target := Target{PreparedRecipe: hash, InstanceUUID: "absent"}
+	raw, _ := json.Marshal(Request{Op: "bind-installed-recipe", Session: b.Session, RecipeHash: hash, Total: uint64(len(f.raw)), Content: base64.StdEncoding.EncodeToString(f.raw), Target: &target})
+	if reply, err := s.handle(context.Background(), raw, nil); err != nil || reply.InstalledChunk == nil || !reply.InstalledChunk.Complete || f.target == nil || *f.target != target {
+		t.Fatal("final target refused at strict admission", err)
+	}
+	f.target = nil
+	raw, _ = json.Marshal(Request{Op: "bind-installed-recipe", Session: b.Session, RecipeHash: hash, Total: uint64(len(f.raw) + 1), Content: base64.StdEncoding.EncodeToString(f.raw), Target: &target})
+	if _, err = s.handle(context.Background(), raw, nil); err == nil || f.target != nil || s.installedTransfer != nil {
+		t.Fatal("nonfinal target passed strict admission")
 	}
 }

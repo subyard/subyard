@@ -293,6 +293,98 @@ impl Resolution {
         completed.get(&self.retry.ordinal).copied()
     }
 }
+impl store::Store {
+    /// Select only the original invocation or its explicit protected retry
+    /// edges. Directory order and resource names never select a producer.
+    pub(crate) fn owner_result_producers(
+        &self,
+        base: &Binding,
+        request: &Request,
+        expected: &str,
+        desired: &str,
+        source: &str,
+    ) -> Result<Vec<Binding>> {
+        match request {
+            Request::ApplyOwner {
+                binding,
+                before,
+                token,
+            } => {
+                require(
+                    binding == base
+                        && token.len() == 32
+                        && token
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                )?;
+                before.validate()?;
+            }
+            _ => return Err(Error::Invalid),
+        }
+        let recipe = request.recipe_fingerprint()?;
+        let mut binding = base.clone();
+        let mut chain = Vec::new();
+        loop {
+            binding.validate()?;
+            let read = |kind| {
+                self.read(&Address::native(
+                    &binding.transaction,
+                    binding.ordinal,
+                    kind,
+                )?)
+            };
+            let raw = read("intent")?;
+            let accepted = read("accepted")?;
+            let terminal = read("terminal")?;
+            let Some(bytes) = raw.bytes() else {
+                require(accepted.bytes().is_none() && terminal.bytes().is_none())?;
+                return Ok(chain);
+            };
+            let intent: Intent = codec::decode_canonical(bytes, true)?;
+            require(
+                intent.version == 1
+                    && intent.binding == binding
+                    && intent.owner == "owner-registration"
+                    && intent.resource == "test-yard"
+                    && intent.recipe == recipe
+                    && intent.expected == expected
+                    && intent.desired == desired
+                    && intent.source == source,
+            )?;
+            let Some(accepted) = accepted.bytes() else {
+                require(terminal.bytes().is_none())?;
+                return Ok(chain);
+            };
+            let accepted: native::Terminal = codec::decode_canonical(accepted, true)?;
+            require(
+                accepted.version == 1
+                    && accepted.binding == binding
+                    && accepted.owner == intent.owner
+                    && accepted.resource == intent.resource
+                    && accepted.state == "accepted",
+            )?;
+            let terminal: native::Terminal =
+                codec::decode_canonical(terminal.bytes().ok_or(Error::Unknown)?, true)?;
+            require(
+                terminal.version == 1
+                    && terminal.binding == binding
+                    && terminal.owner == intent.owner
+                    && terminal.resource == intent.resource
+                    && matches!(terminal.state.as_str(), "complete" | "failed"),
+            )?;
+            self.validate_owner_producer(&binding)?;
+            chain.push(binding.clone());
+            let recovery = read("recovery")?;
+            if terminal.state == "complete" || recovery.bytes().is_none() {
+                return Ok(chain);
+            }
+            let recovery =
+                Resolution::checked(recovery.bytes().ok_or(Error::Unknown)?, &intent, bytes)?;
+            require(recovery.fence.is_none())?;
+            binding = recovery.retry;
+        }
+    }
+}
 impl Owner {
     pub(crate) fn needs_native_continuation(
         &self,
@@ -525,6 +617,109 @@ impl Owner {
 mod tests {
     use super::*;
     use crate::custody::tests::{fixture, terminal, write, Fixture};
+    #[test]
+    fn owner_results_follow_only_original_closed_retry_edges() {
+        let (f, s, _, base) = fixture();
+        let before = crate::work::OwnerBefore {
+            state: "legacy-flat".into(),
+            registration: "a".repeat(64),
+            overrides: "b".repeat(64),
+            controller: "c".repeat(64),
+            shared_images: false,
+            prepared_recipe: "d".repeat(64),
+        };
+        let request = Request::ApplyOwner {
+            binding: base.clone(),
+            before: before.clone(),
+            token: "e".repeat(32),
+        };
+        let recipe = request.recipe_fingerprint().unwrap();
+        let expected = before.fingerprint().unwrap();
+        let desired = before.desired().fingerprint().unwrap();
+        let make = |binding: &Binding| Intent {
+            version: 1,
+            binding: binding.clone(),
+            owner: "owner-registration".into(),
+            resource: "test-yard".into(),
+            expected: expected.clone(),
+            desired: desired.clone(),
+            source: before.controller.clone(),
+            recipe: recipe.clone(),
+        };
+        assert!(s
+            .owner_result_producers(&base, &request, &expected, &desired, &before.controller)
+            .unwrap()
+            .is_empty());
+        let mut first = base.clone();
+        first.ordinal = 2050;
+        let mut second = base.clone();
+        second.ordinal = 2051;
+        for (binding, state) in [(&base, "failed"), (&first, "failed"), (&second, "complete")] {
+            top(&f, binding, &make(binding), Some(state));
+        }
+        for (binding, retry) in [(&base, &first), (&first, &second)] {
+            let intent = make(binding);
+            write(
+                &f,
+                binding,
+                &format!("{:03}.recovery.json", binding.ordinal),
+                &Resolution {
+                    version: 1,
+                    binding: binding.clone(),
+                    intent: digest(&codec::encode(&intent, true).unwrap()),
+                    retry: retry.clone(),
+                    fence: None,
+                },
+            );
+        }
+        for binding in [&base, &first, &second] {
+            s.lock().unwrap().close_native(binding).unwrap();
+        }
+        let mut unrelated = base.clone();
+        unrelated.ordinal = 3000;
+        top(&f, &unrelated, &make(&unrelated), None);
+        let directory =
+            f.0.join("migrations/native-custody/v1")
+                .join(&base.transaction);
+        let snapshot = || {
+            let mut files = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            files.sort();
+            files
+        };
+        let before_read = snapshot();
+        let chain = s
+            .owner_result_producers(&base, &request, &expected, &desired, &before.controller)
+            .unwrap();
+        assert_eq!(snapshot(), before_read);
+        assert_eq!(
+            chain.iter().map(|b| b.ordinal).collect::<Vec<_>>(),
+            vec![1, 2050, 2051]
+        );
+        assert!(s
+            .owner_result_producers(&base, &request, &expected, &desired, &"f".repeat(64))
+            .is_err());
+        let mut wrong = base.clone();
+        wrong.transaction = "wrong-transaction".into();
+        assert!(s
+            .owner_result_producers(&wrong, &request, &expected, &desired, &before.controller)
+            .is_err());
+        let name =
+            f.0.join("migrations/native-custody/v1")
+                .join(&base.transaction)
+                .join("2051.terminal.json");
+        std::fs::remove_file(name).unwrap();
+        assert_eq!(
+            s.owner_result_producers(&base, &request, &expected, &desired, &before.controller)
+                .err(),
+            Some(Error::Unknown)
+        );
+    }
     fn top(f: &Fixture, binding: &Binding, intent: &Intent, state: Option<&str>) {
         write(
             f,
@@ -573,6 +768,7 @@ mod tests {
     fn target() -> native::Target {
         native::Target {
             prepared_recipe: String::new(),
+            after_owner: String::new(),
             scope: String::new(),
             reported_actual: "a".repeat(64),
             reported_desired: "b".repeat(64),

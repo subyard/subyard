@@ -51,6 +51,10 @@ pub(crate) enum Kind {
     Native,
     CheckpointCapability,
     ConfigLayout,
+    LegacyV1Transaction,
+    SourceCapability,
+    LegacyV1Registry,
+    LegacyV1RouteConsumers,
 }
 pub(crate) trait Historical: DeserializeOwned + Serialize {
     const KIND: Kind;
@@ -159,68 +163,75 @@ fn transfer(stream: &mut UnixStream, bytes: &mut [u8], write: bool, end: Instant
     }
     Ok(())
 }
+pub(crate) fn sealed_image(mut input: File) -> Result<(File, String)> {
+    capture_image(&mut input, false)
+}
+pub(crate) fn sealed_source_image(mut input: File) -> Result<(File, String)> {
+    capture_image(&mut input, true)
+}
+fn capture_image(input: &mut File, released: bool) -> Result<(File, String)> {
+    use rustix::fs::{self, FileType, MemfdFlags, Mode, SealFlags};
+    let stat = fs::fstat(&input).map_err(|_| Error::Io)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+        || (stat.st_uid != rustix::process::getuid().as_raw() && !(released && stat.st_uid == 0))
+        || !(stat.st_nlink == 1
+            || stat.st_nlink == 0
+                && stat.st_mode & 0o777 == 0o500
+                && fs::fcntl_get_seals(&input).is_ok_and(|seals| {
+                    seals.contains(
+                        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+                    )
+                }))
+        || (!released && stat.st_mode & 0o022 != 0)
+        || stat.st_size <= 0
+        || stat.st_size > 128 << 20
+    {
+        return Err(Error::Protected);
+    }
+    input.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+    let mut image = if stat.st_nlink == 0 {
+        input.try_clone().map_err(|_| Error::Io)?
+    } else {
+        let fd = fs::memfd_create("subyard-frozen-codec", MemfdFlags::ALLOW_SEALING)
+            .map_err(|_| Error::Io)?;
+        let mut image = File::from(fd);
+        let copied =
+            std::io::copy(&mut input.take((128 << 20) + 1), &mut image).map_err(|_| Error::Io)?;
+        if copied != stat.st_size as u64 {
+            return Err(Error::Stale);
+        }
+        fs::fchmod(&image, Mode::from_raw_mode(0o500)).map_err(|_| Error::Io)?;
+        fs::fcntl_add_seals(
+            &image,
+            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+        )
+        .map_err(|_| Error::Io)?;
+        image
+    };
+    image.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut block = [0u8; 65536];
+    loop {
+        let n = image.read(&mut block).map_err(|_| Error::Io)?;
+        if n == 0 {
+            break;
+        };
+        hasher.update(&block[..n]);
+    }
+    let image_digest = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok((image, image_digest))
+}
 impl Peer {
     fn spawn(input: File) -> Result<Self> {
         Self::spawn_mode(input, "_release-owner-codec-v1")
     }
-    fn spawn_mode(mut input: File, mode: &'static str) -> Result<Self> {
-        use rustix::fs::{self, FileType, MemfdFlags, Mode, SealFlags};
-        let stat = fs::fstat(&input).map_err(|_| Error::Io)?;
-        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
-            || stat.st_uid != rustix::process::getuid().as_raw()
-            || !(stat.st_nlink == 1
-                || stat.st_nlink == 0
-                    && stat.st_mode & 0o777 == 0o500
-                    && fs::fcntl_get_seals(&input).is_ok_and(|seals| {
-                        seals.contains(
-                            SealFlags::WRITE
-                                | SealFlags::GROW
-                                | SealFlags::SHRINK
-                                | SealFlags::SEAL,
-                        )
-                    }))
-            || stat.st_mode & 0o022 != 0
-            || stat.st_size <= 0
-            || stat.st_size > 128 << 20
-        {
-            return Err(Error::Protected);
-        }
-        input.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
-        let mut image = if stat.st_nlink == 0 {
-            input
-        } else {
-            let fd = fs::memfd_create("subyard-frozen-codec", MemfdFlags::ALLOW_SEALING)
-                .map_err(|_| Error::Io)?;
-            let mut image = File::from(fd);
-            let copied = std::io::copy(&mut input.take((128 << 20) + 1), &mut image)
-                .map_err(|_| Error::Io)?;
-            if copied != stat.st_size as u64 {
-                return Err(Error::Stale);
-            }
-            fs::fchmod(&image, Mode::from_raw_mode(0o500)).map_err(|_| Error::Io)?;
-            fs::fcntl_add_seals(
-                &image,
-                SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
-            )
-            .map_err(|_| Error::Io)?;
-            image
-        };
-        image.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        let mut block = [0u8; 65536];
-        loop {
-            let n = image.read(&mut block).map_err(|_| Error::Io)?;
-            if n == 0 {
-                break;
-            };
-            hasher.update(&block[..n]);
-        }
-        let image_digest = hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+    fn spawn_mode(input: File, mode: &'static str) -> Result<Self> {
+        let (image, image_digest) = sealed_image(input)?;
         // The executable path refers to this actual sealed FD, never a reopened path.
         let (mut stream, native) = UnixStream::pair().map_err(|_| Error::Io)?;
         let admission = stream.try_clone().map_err(|_| Error::Io)?;
@@ -826,7 +837,13 @@ mod tests {
                             k, sequence, &bytes, false, false,
                         )
                         .is_ok(),
-                    Kind::Native | Kind::CheckpointCapability | Kind::ConfigLayout => {
+                    Kind::Native
+                    | Kind::CheckpointCapability
+                    | Kind::ConfigLayout
+                    | Kind::LegacyV1Transaction
+                    | Kind::SourceCapability
+                    | Kind::LegacyV1Registry
+                    | Kind::LegacyV1RouteConsumers => {
                         panic!("operation ingress kinds are not frozen historical corpus kinds")
                     }
                     Kind::Owner => proof
@@ -946,6 +963,7 @@ mod tests {
             offset: 8,
             total: 13,
             content: "aGVsbG8=".into(),
+            target: None,
         };
         assert!(reader.native(&request, vec![]).is_err());
         assert!(reader.peer.borrow().poisoned);

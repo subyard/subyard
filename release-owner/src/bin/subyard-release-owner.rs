@@ -172,6 +172,14 @@ fn capabilities() -> Result<(File, File, File, File)> {
 }
 fn run() -> Result<()> {
     if std::env::args().collect::<Vec<_>>()
+        == [
+            std::env::args().next().ok_or(Error::Invalid)?,
+            "_release-owner-source-v1".into(),
+        ]
+    {
+        return subyard_release_owner::source_query::run();
+    }
+    if std::env::args().collect::<Vec<_>>()
         != [
             std::env::args().next().ok_or(Error::Invalid)?,
             "_release-owner-operation-v1".into(),

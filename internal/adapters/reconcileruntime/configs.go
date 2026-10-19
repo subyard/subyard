@@ -58,6 +58,15 @@ func (p *PreparedConfigs) Binding() string {
 	}
 	return p.binding
 }
+
+// InstanceUUID returns the physical instance identity captured with the payloads.
+func (p *PreparedConfigs) InstanceUUID() string {
+	if p == nil {
+		return ""
+	}
+	return p.instance
+}
+
 func configBindingEnvironment(environment []string) []string {
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {

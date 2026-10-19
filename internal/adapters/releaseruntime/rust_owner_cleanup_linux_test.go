@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/uninstall"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -194,12 +196,37 @@ func testRustOwnerRealCleanupRetry(t *testing.T, runtime *Runtime, owner, target
 	if after, err := os.ReadFile(archive); err != nil || string(after) != string(original) {
 		t.Fatal("failed or lost cleanup changed the retained original archive", err)
 	}
+	// Exercise the actual finite query against genuine completed Rust history,
+	// while the original account OFD is still held. A closed local failure can
+	// supply source admission; helper loss has no quiescence proof and must refuse.
+	query := NewSourceInspector(owner.candidate.root, runtime.config.Stderr)
+	defer query.Close()
+	checkSourceQuery := func(accepted bool) {
+		t.Helper()
+		before := rustCleanupQueryState(t, request.ConfigHome, session.options.DataHome)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		proof, err := query.InspectSourceAdmission(ctx, request.RuntimeRoot, request.ConfigHome)
+		if accepted {
+			if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Transaction != journal.Transaction || !lowerSHA256(proof.Binding) {
+				t.Fatal("closed failed cleanup lost readonly source admission", err)
+			}
+		} else if err == nil {
+			t.Fatal("unresolved or changed cleanup acquired source admission")
+		}
+		if !reflect.DeepEqual(before, rustCleanupQueryState(t, request.ConfigHome, session.options.DataHome)) {
+			t.Fatal("readonly source query changed protected history or original archives")
+		}
+		checkContender()
+	}
+	checkSourceQuery(scenario != "cleanup-helper-loss")
 	older := filepath.Join(request.RuntimeRoot, "releases", string(journal.Releases.From)+"-previous")
 	if scenario == "cleanup-missing-previous" {
 		expired := filepath.Join(root, "temporarily-unavailable-previous")
 		if err := os.Rename(older, expired); err != nil {
 			t.Fatal(err)
 		}
+		checkSourceQuery(false)
 		_, err := runtime.invokeRustOwnerTransition(context.Background(), owner, owner, target, request, nil, "")
 		var selected selectedRustOwnerError
 		if err == nil || !errors.As(err, &selected) || allowsCompletedMetadataAdmission(nil, err) {
@@ -240,6 +267,7 @@ func testRustOwnerRealCleanupRetry(t *testing.T, runtime *Runtime, owner, target
 			t.Fatal(err)
 		}
 		testkit.WriteFile(t, path, append(append([]byte{}, body...), '\n'), 0o644)
+		checkSourceQuery(false)
 		resume.grant = ""
 		if outcome, err := resume.Execute(context.Background(), pending.Plan, inheritedBarrier); err == nil && outcome.ReachedGoal {
 			t.Fatal("changed original source bytes admitted terminal cleanup")
@@ -272,6 +300,7 @@ func testRustOwnerRealCleanupRetry(t *testing.T, runtime *Runtime, owner, target
 	if raw, err := os.ReadFile(journalPath); err != nil || string(raw) != string(completed) {
 		t.Fatal("terminal cleanup rewrote frozen completed journal", err)
 	}
+	checkSourceQuery(true)
 	if directory := os.Getenv("SUBYARD_RUST_DELIVERY_EVIDENCE_DIR"); directory != "" {
 		evidence := struct {
 			Scenario              string
@@ -291,6 +320,35 @@ func testRustOwnerRealCleanupRetry(t *testing.T, runtime *Runtime, owner, target
 		testkit.WriteFile(t, filepath.Join(directory, "cleanup-"+scenario+"-observations.json"), append(raw, '\n'), 0600)
 	}
 
+}
+
+func rustCleanupQueryState(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	for _, root := range roots {
+		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			value := info.Mode().String()
+			if info.Mode().IsRegular() {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				value += fmt.Sprintf("/%x", sha256.Sum256(body))
+			}
+			result[path] = value
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
 }
 
 func TestRustRetainedReferencesRequireExplicitClosedList(t *testing.T) {

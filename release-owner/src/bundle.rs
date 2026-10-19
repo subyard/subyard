@@ -239,6 +239,196 @@ impl UpdateLease<'_> {
     }
 }
 impl Store {
+    fn wire_owner_noop(&self, index: &Index, wire: &Wire) -> Result<bool> {
+        let owners = wire
+            .work
+            .iter()
+            .enumerate()
+            .filter_map(|(n, w)| {
+                if let StoredRecipe::Owner { value } = &w.recipe {
+                    Some((n, w, value))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if owners.len() != 1 {
+            return Ok(false);
+        }
+        let (n, work, before) = owners[0];
+        if !crate::after_owner::owner_noop(before, &work.intent.expected, &work.intent.desired)? {
+            return Ok(false);
+        }
+        for target in wire.targets.iter().filter(|t| !t.after_owner.is_empty()) {
+            target.validate()?;
+            require(
+                crate::after_owner::AfterOwnerActivation::parse(&target.after_owner)?.1
+                    == target.prepared_recipe
+                    && target.state != "stale",
+            )?;
+        }
+        self.no_owner_invocation(&native::Binding {
+            session: wire.session.clone(),
+            transaction: wire.transaction.clone(),
+            plan: index.plan.clone(),
+            journal: index.journal.clone(),
+            artifact: wire.plan.artifact_digest.clone(),
+            helper: wire.helper.clone(),
+            ordinal: n as u64 + 1,
+        })
+    }
+    pub(crate) fn require_after_owner_resolutions(
+        &self,
+        tx: &str,
+        names: &[String],
+        complete: bool,
+    ) -> Result<()> {
+        if !self.has_bundle(tx)? {
+            return Ok(());
+        }
+        let (index, wire) = self.read_bundle_wire(tx)?;
+        if !wire.targets.iter().any(|t| !t.after_owner.is_empty()) {
+            return Ok(());
+        }
+        let no_op = self.wire_owner_noop(&index, &wire)?;
+        for (n, _) in wire
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.after_owner.is_empty())
+        {
+            let ordinal = wire.work.len() + n + 1;
+            let required = complete && !no_op
+                || names.iter().any(|name| {
+                    *name == format!("{ordinal:03}.intent.json")
+                        || *name == format!(".{ordinal:03}.intent.json.pending")
+                });
+            if required
+                && !names
+                    .iter()
+                    .any(|name| *name == format!("{ordinal:03}.after-owner.json"))
+            {
+                return Err(Error::Unknown);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn pending_after_owner_capacity(&self) -> Result<Vec<crate::after_owner::Capacity>> {
+        let Some(root) = &self.root else {
+            return Ok(vec![]);
+        };
+        let Some(parent) = crate::store::directory(
+            root,
+            &["migrations".into(), "native-custody".into(), "v1".into()],
+            false,
+        )?
+        else {
+            return Ok(vec![]);
+        };
+        let retiring = self.native_retirement()?;
+        let mut values = vec![];
+        for tx in crate::inventory::names(&parent, 256)? {
+            if retiring.as_deref() == Some(&tx) || !self.has_bundle(&tx)? {
+                continue;
+            }
+            let (index, wire) = self.read_bundle_wire(&tx)?;
+            if !wire.targets.iter().any(|t| !t.after_owner.is_empty()) {
+                continue;
+            }
+            if self.wire_owner_noop(&index, &wire)? {
+                continue;
+            }
+            for (n, target) in wire
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.after_owner.is_empty())
+            {
+                let a = Address::at(
+                    vec![
+                        "migrations".into(),
+                        "native-custody".into(),
+                        "v1".into(),
+                        tx.clone(),
+                    ],
+                    format!("{:03}.after-owner.json", wire.work.len() + n + 1),
+                    true,
+                );
+                if self.read(&a)?.bytes().is_none() {
+                    let recipe = wire
+                        .installed
+                        .get(&target.prepared_recipe)
+                        .ok_or(Error::Protected)?;
+                    values.push(recipe.after_owner_capacity(self)?);
+                }
+            }
+        }
+        Ok(values)
+    }
+    pub(crate) fn after_owner_original(
+        &self,
+        binding: &native::Binding,
+        owner_ordinal: u64,
+    ) -> Result<(native::Target, crate::installed_recipe::PackedRecipe)> {
+        let (index, wire) = self.read_bundle_wire(&binding.transaction)?;
+        require(
+            index.plan == binding.plan
+                && index.journal == binding.journal
+                && wire.session == binding.session
+                && wire.helper == binding.helper
+                && wire.plan.artifact_digest == binding.artifact,
+        )?;
+        let n = usize::try_from(binding.ordinal).map_err(|_| Error::Invalid)?;
+        let target = wire
+            .targets
+            .get(n.checked_sub(wire.work.len() + 1).ok_or(Error::Invalid)?)
+            .ok_or(Error::Invalid)?
+            .clone();
+        let (_, hash) = crate::after_owner::AfterOwnerActivation::parse(&target.after_owner)?;
+        require(target.prepared_recipe == hash)?;
+        let recipe = wire.installed.get(hash).ok_or(Error::Protected)?.clone();
+        require(recipe.fingerprint(self)? == hash)?;
+        let owner = wire
+            .work
+            .get(
+                usize::try_from(owner_ordinal)
+                    .map_err(|_| Error::Invalid)?
+                    .checked_sub(1)
+                    .ok_or(Error::Invalid)?,
+            )
+            .ok_or(Error::Protected)?;
+        let StoredRecipe::Owner { value: before } = &owner.recipe else {
+            return Err(Error::Protected);
+        };
+        require(
+            wire.work
+                .iter()
+                .filter(|w| matches!(w.recipe, StoredRecipe::Owner { .. }))
+                .count()
+                == 1,
+        )?;
+        let mut base = binding.clone();
+        base.ordinal = owner_ordinal;
+        let snap = self.read(&Address::native(
+            &binding.transaction,
+            owner_ordinal,
+            "intent",
+        )?)?;
+        let intent: crate::custody::Intent =
+            codec::decode_canonical(snap.bytes().ok_or(Error::Unknown)?, true)?;
+        require(
+            intent.binding == base
+                && intent.owner == "owner-registration"
+                && intent.resource == "test-yard"
+                && intent.expected == owner.intent.expected
+                && intent.desired == owner.intent.desired
+                && intent.source == before.controller
+                && before.fingerprint()? == owner.intent.expected
+                && before.desired().fingerprint()? == owner.intent.desired,
+        )?;
+        require(owner.intent.expected != owner.intent.desired)?;
+        Ok((target, recipe))
+    }
     pub(crate) fn has_bundle(&self, tx: &str) -> Result<bool> {
         Ok(self.read(&address(tx, None)?)?.bytes().is_some())
     }
@@ -302,16 +492,25 @@ impl Store {
             let dir = crate::store::directory(&parent, std::slice::from_ref(&tx), false)?
                 .ok_or(Error::Stale)?;
             let names = crate::inventory::names(&dir, 8192)?;
+            self.require_after_owner_resolutions(&tx, &names, false)?;
+            if names
+                .iter()
+                .any(|n| n.starts_with('.') && n.ends_with(".after-owner.json.pending"))
+            {
+                return Ok(None);
+            }
             let has = names
                 .iter()
                 .any(|n| n.starts_with("bundle.") || n.starts_with(".bundle."));
             if !has {
+                require(!names.iter().any(|n| n.ends_with(".after-owner.json")))?;
                 continue;
             }
             if !self.has_bundle(&tx)? {
                 return Ok(None);
             }
             let (_, wire) = self.read_bundle_wire(&tx)?;
+            refs.extend(self.after_owner_references(&tx, &names)?);
             crate::installed_recipe::validate(
                 self,
                 &wire.installed,

@@ -30,6 +30,10 @@ reject_before_broker --slot 7 --lane ''
 reject_before_broker --slot 7 --lane invalid
 reject_before_broker --slot 7 --lane --slot 8
 reject_before_broker --slot 7 --lane bootstrap --unknown
+reject_before_broker --slot 7 --native-loss invalid
+reject_before_broker --slot 7 --native-loss group
+reject_before_broker --slot 7 --lane projects --native-loss helper
+reject_before_broker --slot 7 --lane bootstrap --native-loss owner --native-loss group
 
 cat > "$tmp/expected" <<'CALLS'
 --slot 7 --vm-count 1 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
@@ -71,6 +75,18 @@ PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 --lane projects > "$
 [ "$rc" -eq 23 ]
 sed -n '4p' "$tmp/expected" > "$tmp/expected-lane"
 diff -u "$tmp/expected-lane" "$PROFILE_CONTROLLER_CALLS"
+mkdir -p "$tmp/tests/helpers"
+cat > "$tmp/tests/helpers/profile-native-loss.py" <<'PY'
+import os, pathlib, sys
+assert sys.argv[1:] == ['--preflight', '--bundle', '/frozen/bundle', '--bundle-sha256', 'a'*64]
+pathlib.Path(os.environ['PROFILE_CONTROLLER_CALLS']).with_name('preflight-checked').touch()
+PY
+: > "$PROFILE_CONTROLLER_CALLS"
+SUBYARD_E2E_CANDIDATE_BUNDLE=/frozen/bundle SUBYARD_E2E_CANDIDATE_SHA256="$(printf 'a%.0s' {1..64})" \
+  bash "$tmp/$controller" --slot 7 --lane bootstrap --native-loss group
+[ -f "$tmp/preflight-checked" ]
+printf '%s\n' '--slot 7 --vm-count 1 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_NATIVE_LOSS=group bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' > "$tmp/loss-expected"
+diff -u "$tmp/loss-expected" "$PROFILE_CONTROLLER_CALLS"
 python3 -B - "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" <<'PY'
 import importlib.util
 import shlex

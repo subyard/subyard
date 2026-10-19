@@ -10,7 +10,7 @@ export TMPDIR=/tmp
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.build/release-owner-delivery/target}"
 version=1.0.0-release-owner-delivery
 for arch in amd64 arm64; do
-  ./dev/package-engine.sh --version "$version" --arch "$arch" --output-dir "$out/$arch"
+  ./dev/package-engine.sh --experimental-release-owner --version "$version" --arch "$arch" --output-dir "$out/$arch"
   bundle="$out/$arch/subyard-$version-linux-$arch.tar.gz"
   python3 - "$bundle" "$arch" "$ROOT" <<'PY'
 import hashlib, json, pathlib, sys, tarfile
@@ -80,6 +80,12 @@ SUBYARD_RUST_DELIVERY_RUNTIME_ROOT="$fixture/runtime" \
   go test -count=1 ./internal/adapters/releaseruntime -run '^(TestReleaseOwnerRealPublishedCandidate|TestRustOwnerRealPackagedRetainedSession|TestRustOwnerRealPackagedArtifactTamper)$'
 SUBYARD_RUST_DELIVERY_RUNTIME_ROOT="$fixture/runtime" \
   go test -count=1 ./internal/cli -run '^TestRustOwnerFrozenFacadeProcess$'
+SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT="$fixture/runtime/current" \
+  go test -count=1 ./internal/adapters/releaseruntime \
+    -run '^TestRustSourceQuery(VerifiedTooling|ToolingIdentityGuards)$'
+SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT="$fixture/runtime/current" \
+  go test -race -count=1 ./internal/cli \
+    -run '^(TestConfigAliasRepair|TestQueuedSourceRepair|TestQueuedHostRename|TestPendingSourceRenameRecovery|TestCompletedSourceAuthoringFixture|TestRustCompletedRollbackAdmitsProfileInitThroughCLI)'
 env -i PATH="$fixture/no-toolchain" HOME="$fixture/home" bash -c '
   for tool in go cargo rustc; do ! command -v "$tool" >/dev/null || exit 91; done
   "$1" --version

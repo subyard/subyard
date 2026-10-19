@@ -151,6 +151,9 @@ func TestCriticalShellCallerGraphIsExact(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	expected := map[string][]string{
 		"install-power-reconciler.sh": {
+			"internal/adapters/reconcileruntime/host_install_custody.go",
+			"internal/adapters/reconcileruntime/prepared_host_power.go",
+			"internal/adapters/reconcileruntime/prepared_host_sources.go",
 			"internal/adapters/reconcileruntime/runtime.go",
 		},
 		"lifecycle-guard.sh": {
@@ -243,6 +246,8 @@ func TestPhysicalShellConsumesOnlyPreparedControlPlaneState(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	allowedSources := map[string]bool{
 		"runtime.sh": true, "engine-context.sh": true, "ui.sh": true,
+		"instance-create.sh": true, "project-config.sh": true,
+		"native-install-custody.sh": true, "native-installed-stage.sh": true,
 		"lib-power.sh": true, "host.sh": true, "ssh-config.sh": true,
 		"ssh-listener.sh":          true,
 		"teardown-session.sh":      true,
@@ -358,19 +363,23 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 	goReconcile := "internal/adapters/reconcileruntime/runtime.go"
 	goPrepared := "internal/cli/prepared_command.go"
 	contracts := map[string]shellContract{
-		"scripts/lib/owner-address.sh":        {"library", "scripts/lib/preview-proxy.sh", `owner-address.sh`},
-		"scripts/lib/preview-proxy.sh":        {"library", "scripts/prepare-preview-route.sh", `lib/preview-proxy.sh`},
-		"config/agents/ccusage/provision.sh":  {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
-		"config/agents/codex/provision.sh":    {"profile", "config/agents.env", `agents/codex/provision.sh`},
-		"config/agents/opencode/provision.sh": {"profile", "config/agents.env", `agents/opencode/provision.sh`},
-		"config/agents/paseo/cleanup.sh":      {"profile", "config/agents.env", `agents/paseo/cleanup.sh`},
-		"config/agents/paseo/provision.sh":    {"profile", "config/agents.env", `agents/paseo/provision.sh`},
-		"scripts/01-install-incus.sh":         {"leaf", goReconcile, `"01-install-incus.sh"`},
-		"scripts/02-create-project.sh":        {"leaf", goReconcile, `"02-create-project.sh"`},
-		"scripts/03-create-subyard.sh":        {"leaf", goReconcile, `"03-create-subyard.sh"`},
-		"scripts/04-provision-subyard.sh":     {"leaf", goReconcile, `"04-provision-subyard.sh"`},
-		"scripts/prepare-preview-route.sh":    {"leaf", goReconcile, `preparePreviewRoute`},
-		"scripts/reconcile-integrations.sh":   {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
+		"scripts/lib/instance-create.sh":        {"library", "scripts/03-create-subyard.sh", `lib/instance-create.sh`},
+		"scripts/lib/project-config.sh":         {"library", "scripts/02-create-project.sh", `lib/project-config.sh`},
+		"scripts/lib/native-install-custody.sh": {"library", "scripts/install-power-reconciler.sh", `lib/native-install-custody.sh`},
+		"scripts/lib/native-installed-stage.sh": {"library", "scripts/refresh-installed-guest-runtime.sh", `lib/native-installed-stage.sh`},
+		"scripts/lib/owner-address.sh":          {"library", "scripts/lib/preview-proxy.sh", `owner-address.sh`},
+		"scripts/lib/preview-proxy.sh":          {"library", "scripts/prepare-preview-route.sh", `lib/preview-proxy.sh`},
+		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
+		"config/agents/codex/provision.sh":      {"profile", "config/agents.env", `agents/codex/provision.sh`},
+		"config/agents/opencode/provision.sh":   {"profile", "config/agents.env", `agents/opencode/provision.sh`},
+		"config/agents/paseo/cleanup.sh":        {"profile", "config/agents.env", `agents/paseo/cleanup.sh`},
+		"config/agents/paseo/provision.sh":      {"profile", "config/agents.env", `agents/paseo/provision.sh`},
+		"scripts/01-install-incus.sh":           {"leaf", goReconcile, `"01-install-incus.sh"`},
+		"scripts/02-create-project.sh":          {"leaf", goReconcile, `"02-create-project.sh"`},
+		"scripts/03-create-subyard.sh":          {"leaf", goReconcile, `"03-create-subyard.sh"`},
+		"scripts/04-provision-subyard.sh":       {"leaf", goReconcile, `"04-provision-subyard.sh"`},
+		"scripts/prepare-preview-route.sh":      {"leaf", goReconcile, `preparePreviewRoute`},
+		"scripts/reconcile-integrations.sh":     {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
 		"scripts/refresh-installed-guest-runtime.sh": {
 			"leaf", "internal/adapters/reconcileruntime/installed_runtime.go", `"refresh-installed-guest-runtime.sh"`,
 		},

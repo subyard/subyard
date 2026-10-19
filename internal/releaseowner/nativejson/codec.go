@@ -141,8 +141,7 @@ func nativeJSONStrings(v reflect.Value, encode bool, depth int) (reflect.Value, 
 		}
 		if v.Kind() == reflect.Slice {
 			if v.IsNil() {
-				_, err := nativeJSONStrings(reflect.New(t.Elem()).Elem(), encode, depth+1)
-				return result, err
+				return result, nil
 			}
 			result.Set(reflect.MakeSlice(t, v.Len(), v.Len()))
 		}

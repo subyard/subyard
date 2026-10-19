@@ -103,14 +103,16 @@ vm_storage_attach() {
   local volume
   [ "$YARD_KIND" = vm ] && [ -n "${SRV_VOLUME_SIZE:-}" ] \
     || die 'block SRV_VOLUME_TYPE requires a VM and SRV_VOLUME_SIZE'
+  subyard_srv_create_config || die 'invalid original SRV settings'
   if volume="$(vm_storage_volume 2>/dev/null)"; then
     jq -e --arg size "$SRV_VOLUME_SIZE" '.content_type == "block" and
       .config.size == $size and .config["user.subyard.storage"] == "v1"' \
       >/dev/null <<<"$volume" || die 'refusing an unowned or differently sized VM state volume'
   else
-    incus storage volume create "$SRV_POOL" "$SRV_VOLUME" --type=block \
-      "size=$SRV_VOLUME_SIZE" user.subyard.storage=v1 user.subyard.format=pending \
-      --project "$INCUS_PROJECT" >/dev/null
+    [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" != 1 ] && [ -z "${SUBYARD_PREPARED_OWNER_VOLUME_TOKEN:-}" ] || die 'original owner-created SRV volume is missing'
+    subyard_srv_create_config || die 'invalid original SRV create settings'
+    incus storage volume create "$SRV_POOL" "$SRV_VOLUME" --type="$SUBYARD_SRV_CONTENT_TYPE" \
+      "${SUBYARD_SRV_CREATE_CONFIG[@]}" --project "$INCUS_PROJECT" >/dev/null
   fi
   if device_exists srv; then
     [ "$(device_get srv type)" = disk ] && [ "$(device_get srv pool)" = "$SRV_POOL" ] \
@@ -119,7 +121,7 @@ vm_storage_attach() {
       || die 'refusing to replace a conflicting VM srv device'
   else
     incus config device add "$YARD_INSTANCE_NAME" srv disk --project "$INCUS_PROJECT" \
-      pool="$SRV_POOL" source="$SRV_VOLUME" io.bus=virtio-scsi >/dev/null
+      "${SUBYARD_SRV_DEVICE_CONFIG[@]:1}" >/dev/null
   fi
 }
 
@@ -177,4 +179,23 @@ GUEST
     || die 'VM state filesystem identity differs from its owner marker'
   incus storage volume set "$SRV_POOL" "$SRV_VOLUME" user.subyard.format=ready \
     user.subyard.uuid="$uuid" --project "$INCUS_PROJECT" >/dev/null
+}
+
+# Pure original SRV create settings, shared with the owner recipe renderer.
+subyard_srv_create_config() {
+  SUBYARD_SRV_CREATE_CONFIG=()
+  SUBYARD_SRV_DEVICE_CONFIG=(type=disk "pool=$SRV_POOL" "source=$SRV_VOLUME")
+  case "${SRV_VOLUME_TYPE:-filesystem}" in
+    filesystem) SUBYARD_SRV_CONTENT_TYPE=filesystem; SUBYARD_SRV_DEVICE_CONFIG+=(path=/srv) ;;
+    block)
+      [ "$YARD_KIND" = vm ] && [ -n "${SRV_VOLUME_SIZE:-}" ] || return 2
+      SUBYARD_SRV_CONTENT_TYPE=block
+      SUBYARD_SRV_DEVICE_CONFIG+=(io.bus=virtio-scsi)
+      SUBYARD_SRV_CREATE_CONFIG=("size=$SRV_VOLUME_SIZE" user.subyard.storage=v1 user.subyard.format=pending) ;;
+    *) return 2 ;;
+  esac
+}
+subyard_srv_config_render() {
+  subyard_srv_create_config || return
+  printf '%s\0' "$SUBYARD_SRV_CONTENT_TYPE" "${SUBYARD_SRV_CREATE_CONFIG[@]}" '' "${SUBYARD_SRV_DEVICE_CONFIG[@]}"
 }

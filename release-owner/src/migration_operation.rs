@@ -83,29 +83,27 @@ impl Owner {
                 release: previous.release.clone(),
                 artifact: previous.artifact_digest.clone(),
                 registry: digest(&raw_source),
-                inputs: digest(&codec::encode_inventory(&inputs)?),
+                inputs: inputs.fingerprint()?,
             });
             Some(inputs)
         } else {
             None
         };
-        #[derive(serde::Serialize)]
-        struct Assets<'a> {
-            #[serde(rename = "Old")]
-            old: &'a std::collections::BTreeMap<String, crate::assets::Input>,
-            #[serde(rename = "Candidate")]
-            candidate: &'a std::collections::BTreeMap<String, crate::assets::Input>,
-            #[serde(rename = "Source")]
-            source: &'a std::collections::BTreeMap<String, crate::assets::Input>,
-            #[serde(rename = "Previous")]
-            previous: &'a Option<std::collections::BTreeMap<String, crate::assets::Input>>,
-        }
-        let assets = digest(&codec::encode_inventory(&Assets {
-            old: &old_inputs,
-            candidate: &candidate_inputs,
-            source: &source_inputs,
-            previous: &previous_inputs,
-        })?);
+        let assets = codec::source_hash_with(|out| {
+            out.write_all(b"{\"Old\":").map_err(|_| Error::Io)?;
+            codec::write_source_map(out, &old_inputs.0)?;
+            out.write_all(b",\"Candidate\":").map_err(|_| Error::Io)?;
+            codec::write_source_map(out, &candidate_inputs.0)?;
+            out.write_all(b",\"Source\":").map_err(|_| Error::Io)?;
+            codec::write_source_map(out, &source_inputs.0)?;
+            out.write_all(b",\"Previous\":").map_err(|_| Error::Io)?;
+            if let Some(previous) = &previous_inputs {
+                codec::write_source_map(out, &previous.0)?;
+            } else {
+                out.write_all(b"null").map_err(|_| Error::Io)?;
+            }
+            out.write_all(b"}").map_err(|_| Error::Io)
+        })?;
         Ok((assets, raw_source, previous_source))
     }
     fn migration_review(&self, request: m::MigrationOwnerReplacementRequest) -> Result<Review> {

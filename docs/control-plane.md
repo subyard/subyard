@@ -427,6 +427,9 @@ authorization binding, protected evidence, per-domain epoch advancement, stable 
 forward recovery and post-activation reconciliation. A completed one-time migration is durable
 history and is never reopened to repair later drift.
 
+Rust release ownership is experimental and explicitly built/checked. Ordinary builds,
+packages, CI and releases continue to use the Go owner without Rust tooling.
+
 The Rust release owner in [`release-owner/`](../release-owner) implements the whole
 release operation: inspection, release policy, consent admission, update lease, protected
 history and journals, link publication, activation, recovery and retirement. Go retains

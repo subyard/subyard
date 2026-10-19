@@ -106,7 +106,7 @@ func pendingSourceRenameFixture(t *testing.T, sealed bool) (*CLI, config.Loaded,
 	root, home, configHome, environment := configCommandFixture(t)
 	if sealed {
 		runtimeRoot := aliasRepairRuntimeFixture(t, home)
-		root = filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+		root = sourceAdmissionToolingFixture(t, runtimeRoot)
 		environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	}
 	source := configSourceGitRepository(t, "owner-a", "YARD_IMAGE=images:debian/13\n")

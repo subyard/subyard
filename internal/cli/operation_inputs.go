@@ -16,6 +16,7 @@ import (
 // Owner inputs remain private. Protected file contents are never read here;
 // their path, ownership and filesystem identity bind the later native transfer.
 type ownerInputBaseline struct {
+	ownerSource *preparedOwnerChildInputView
 	projected   *preparedOwnerInputProjection
 	initial     config.Loaded
 	preset      string
@@ -133,9 +134,12 @@ func (baseline *ownerInputBaseline) binding() string {
 	}{baseline.initial.Context, baseline.initial.Settings, baseline.files, baseline.peers})
 }
 
-func (baseline *ownerInputBaseline) check(_ context.Context, cli *CLI) error {
+func (baseline *ownerInputBaseline) check(ctx context.Context, cli *CLI) error {
 	if baseline == nil {
 		return nil
+	}
+	if baseline.ownerSource != nil {
+		return baseline.ownerSource.check(ctx, cli, baseline)
 	}
 	fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
 		OperatorHome: baseline.initial.Context.Paths.OperatorHome, YardName: baseline.initial.Context.YardName,

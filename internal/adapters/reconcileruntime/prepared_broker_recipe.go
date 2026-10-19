@@ -95,7 +95,7 @@ func (runtime Runtime) bindBrokerRecipe(ctx context.Context, r installedRecipe, 
 	if r.Profile != "" || r.Handler != "" || r.Launcher != "" || r.HookBefore != "" || len(r.Leaves) != 0 || len(r.Native) != 0 || r.Runtime != runtime.configRuntimeBinding() || r.Resources != runtime.installedResourceBinding() {
 		return nil, domain.ErrPlanStale
 	}
-	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}, executionFiles: map[string][]byte{}}
+	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}, executionFiles: map[string][]byte{}, afterOwner: r.AfterOwner}
 	previous := ""
 	for _, f := range r.Files {
 		if f.Path <= previous {
@@ -113,6 +113,13 @@ func (runtime Runtime) bindBrokerRecipe(ctx context.Context, r installedRecipe, 
 	canonical, _ := json.Marshal(d)
 	if !bytes.Equal(canonical, p.files[brokerMetadataPath]) || d.Version != 1 || d.Source != p.source || d.Runtime != p.runtime {
 		return nil, domain.ErrPlanStale
+	}
+	if runtime.afterOwnerBroker != nil {
+		value := runtime.afterOwnerBroker
+		d.Apply.Native = value.Native
+		d.Apply.Binding = value.ApplyBinding
+		d.Sink = value.Sink
+		d.Binding = value.Binding
 	}
 	_, paths, err := runtime.hostInstallerSourcePaths("test-vms-host-sink")
 	if err != nil {

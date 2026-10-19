@@ -35,6 +35,9 @@ func (client *Client) PrepareImageProject(ctx context.Context, project string, s
 	if err != nil {
 		return p, normalizeError("prepare owner project", err)
 	}
+	if actual == nil || actual.Name != project {
+		return p, domain.ErrPlanStale
+	}
 	p.Config = maps.Clone(actual.Config)
 	if p.Config["features.images"] != "" && p.Config["features.images"] != "true" && p.Config["features.images"] != "false" || shared != (p.Config["features.images"] == "false") {
 		return p, domain.ErrPlanStale
@@ -54,7 +57,7 @@ func (client *Client) ApplyPreparedImageProject(ctx context.Context, p ports.Pre
 	}
 	actual, _, err := server.GetProject(p.Project)
 	if !p.Absent {
-		if err != nil || !maps.Equal(actual.Config, p.Config) {
+		if err != nil || actual == nil || actual.Name != p.Project || !maps.Equal(actual.Config, p.Config) {
 			return domain.ErrPlanStale
 		}
 		return nil
@@ -111,6 +114,9 @@ func (client *Client) PrepareTemporaryStop(ctx context.Context, project, instanc
 	if err != nil {
 		return p, normalizeError("prepare temporary stop", err)
 	}
+	if actual == nil || actual.Name != instance {
+		return p, domain.ErrPlanStale
+	}
 	p.UUID = actual.Config["volatile.uuid"]
 	if p.UUID == "" {
 		p.UUID = actual.ExpandedConfig["volatile.uuid"]
@@ -136,6 +142,9 @@ func (client *Client) ApplyPreparedTemporaryStop(ctx context.Context, p ports.Pr
 	actual, _, err := server.GetInstance(p.Instance)
 	if err != nil {
 		return normalizeError("read prepared temporary stop", err)
+	}
+	if actual == nil || actual.Name != p.Instance {
+		return domain.ErrPlanStale
 	}
 	uuid := actual.Config["volatile.uuid"]
 	if uuid == "" {

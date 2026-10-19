@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, os::fd::OwnedFd};
 pub(crate) const CHUNK: usize = 512 << 10;
 const MAX: usize = 128 << 20;
-const FILE_MAX: usize = 32 << 20;
+pub(crate) const FILE_MAX: usize = 32 << 20;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Index {
@@ -80,6 +80,9 @@ pub(crate) struct Usage {
     pub pieces: usize,
 }
 impl Store {
+    pub(crate) fn has_prepared_payload(&self, hash: &str) -> Result<bool> {
+        Ok(read_index(self, hash)?.is_some())
+    }
     pub(crate) fn payload_usage(&self) -> Result<Usage> {
         let mut usage = Usage {
             raw: 0,
@@ -264,7 +267,13 @@ pub(crate) fn references<'a>(
     values: impl Iterator<Item = &'a super::installed_recipe::PackedRecipe>,
 ) -> BTreeSet<String> {
     values
-        .flat_map(|v| v.files.iter().flatten().filter_map(|f| f.content.clone()))
+        .flat_map(|v| {
+            v.files
+                .iter()
+                .flatten()
+                .filter_map(|f| f.content.clone())
+                .chain((!v.after_owner.is_empty()).then(|| v.after_owner.clone()))
+        })
         .collect()
 }
 

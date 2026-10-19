@@ -13,6 +13,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 const MAX: usize = 96 << 20;
+const AFTER_OWNER_MAX: usize = crate::prepared_payload::FILE_MAX;
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Recipe {
@@ -31,6 +32,8 @@ struct Recipe {
     handler: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     native: Vec<NativeInput>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    after_owner: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +59,8 @@ pub(crate) struct PackedRecipe {
     handler: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     native: Vec<NativeInput>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_owner: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,8 +90,16 @@ impl Recipe {
             profile: self.profile.clone(),
             handler: self.handler.clone(),
             native: self.native.clone(),
+            after_owner: String::new(),
         }
         .validate()?;
+        if !self.after_owner.is_empty() {
+            require(self.after_owner.len() <= AFTER_OWNER_MAX.div_ceil(3) * 4)?;
+            let bytes = STANDARD
+                .decode(&self.after_owner)
+                .map_err(|_| Error::Codec)?;
+            require(bytes.len() <= AFTER_OWNER_MAX && STANDARD.encode(bytes) == self.after_owner)?;
+        }
         require(self.files.as_ref().is_none_or(|files| {
             files.len() <= 8192
                 && files.windows(2).all(|p| p[0].path < p[1].path)
@@ -104,8 +117,69 @@ impl Recipe {
         }
         Ok(())
     }
+    fn after_owner_capacity(&self) -> Result<crate::after_owner::Capacity> {
+        let metadata = &self.after_owner;
+        let raw = STANDARD.decode(metadata).map_err(|_| Error::Codec)?;
+        let mut capacity = crate::after_owner::Capacity::checked(&raw)?;
+        capacity.sources.insert(digest(&raw), raw.len());
+        let mut total = 0usize;
+        for file in self
+            .files
+            .iter()
+            .flatten()
+            .filter_map(|f| f.content.as_ref())
+        {
+            let bytes = STANDARD.decode(file).map_err(|_| Error::Codec)?;
+            total = total.checked_add(bytes.len()).ok_or(Error::Bound)?;
+            capacity.sources.insert(digest(&bytes), bytes.len());
+        }
+        require(
+            total <= 64 << 20
+                && codec::encode_native_recipe(self)?.len() - metadata.len()
+                    + capacity.metadata_bytes().div_ceil(3) * 4
+                    <= MAX,
+        )?;
+        Ok(capacity)
+    }
 }
 impl PackedRecipe {
+    #[cfg(test)]
+    pub(crate) fn pack_fixture(lease: &UpdateLease<'_>, raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= MAX)?;
+        let wire: Recipe = serde_json::from_slice(raw).map_err(|_| Error::Codec)?;
+        wire.validate_shape()?;
+        require(codec::encode_native_recipe(&wire)? == raw)?;
+        Self::pack(lease, wire)
+    }
+    pub(crate) fn after_owner_capacity(
+        &self,
+        store: &Store,
+    ) -> Result<crate::after_owner::Capacity> {
+        require(record::fingerprint(&self.after_owner))?;
+        crate::after_owner::Capacity::checked(&store.prepared_payload(&self.after_owner)?)
+    }
+    pub(crate) fn after_owner_metadata(&self, original: &Self, store: &Store) -> Result<String> {
+        require(record::fingerprint(&self.after_owner))?;
+        let mut copy = self.clone();
+        let hash = self.after_owner.clone();
+        require(
+            store.prepared_payload(&hash)?.len()
+                <= original.after_owner_capacity(store)?.metadata_bytes(),
+        )?;
+        copy.after_owner = original.after_owner.clone();
+        require(codec::encode_bundle(&copy)? == codec::encode_bundle(original)?)?;
+        Ok(hash)
+    }
+    pub(crate) fn with_after_owner_metadata(&self, hash: &str) -> Result<Self> {
+        require(record::fingerprint(hash) && record::fingerprint(&self.after_owner))?;
+        let mut value = self.clone();
+        value.after_owner = hash.into();
+        value.validate()?;
+        Ok(value)
+    }
+    pub(crate) fn fingerprint(&self, store: &Store) -> Result<String> {
+        Ok(digest(&self.raw(store)?))
+    }
     fn pack(lease: &UpdateLease<'_>, wire: Recipe) -> Result<Self> {
         wire.validate_shape()?;
         let mut total = 0usize;
@@ -146,13 +220,23 @@ impl PackedRecipe {
             profile: wire.profile,
             handler: wire.handler,
             native: wire.native,
+            after_owner: if wire.after_owner.is_empty() {
+                String::new()
+            } else {
+                lease.publish_prepared_payload(
+                    &STANDARD
+                        .decode(&wire.after_owner)
+                        .map_err(|_| Error::Codec)?,
+                )?
+            },
         };
         packed.validate()?;
         Ok(packed)
     }
     fn validate(&self) -> Result<()> {
         require(
-            self.version == 1
+            (self.after_owner.is_empty() || record::fingerprint(&self.after_owner))
+                && self.version == 1
                 && record::safe_id(&self.owner)
                 && [&self.source, &self.runtime, &self.resources]
                     .iter()
@@ -221,6 +305,13 @@ impl PackedRecipe {
             profile: self.profile.clone(),
             handler: self.handler.clone(),
             native: self.native.clone(),
+            after_owner: if self.after_owner.is_empty() {
+                String::new()
+            } else {
+                let bytes = store.prepared_payload(&self.after_owner)?;
+                require(bytes.len() <= AFTER_OWNER_MAX)?;
+                STANDARD.encode(bytes)
+            },
         })?;
         require(raw.len() <= MAX)?;
         Ok(raw)
@@ -232,6 +323,10 @@ pub(crate) fn validate<'a>(
     targets: &'a [native::Target],
     owner_hashes: impl Iterator<Item = &'a str>,
 ) -> Result<()> {
+    for target in targets.iter().filter(|t| !t.after_owner.is_empty()) {
+        let (_, hash) = crate::after_owner::AfterOwnerActivation::parse(&target.after_owner)?;
+        require(hash == target.prepared_recipe)?;
+    }
     let expected: BTreeSet<_> = targets
         .iter()
         .filter(|t| !t.prepared_recipe.is_empty())
@@ -259,6 +354,12 @@ fn accepted<T>(owner: &Owner, value: Result<T>) -> Result<T> {
     value
 }
 impl Owner {
+    pub(crate) fn after_owner_recipe_capacity(
+        &self,
+        hash: &str,
+    ) -> Result<crate::after_owner::Capacity> {
+        self.installed_recipe_wire(hash)?.after_owner_capacity()
+    }
     pub(crate) fn capture_installed_recipes(
         &self,
         lease: &UpdateLease<'_>,
@@ -277,54 +378,7 @@ impl Owner {
             if recipes.contains_key(hash) {
                 continue;
             }
-            let mut raw = vec![];
-            let mut total = None;
-            loop {
-                let reply = self.call(native::Request::ReadInstalledRecipe {
-                    session: self.session.clone(),
-                    recipe_hash: hash.to_owned(),
-                    offset: raw.len() as u64,
-                })?;
-                let chunk = reply.installed_chunk.ok_or(Error::Invalid)?;
-                let bytes = STANDARD.decode(&chunk.content).map_err(|_| Error::Codec)?;
-                accepted(
-                    self,
-                    (|| {
-                        require(
-                            chunk.recipe_hash == hash
-                                && chunk.offset == raw.len() as u64
-                                && chunk.total > 0
-                                && chunk.total <= MAX as u64
-                                && total.is_none_or(|t| t == chunk.total)
-                                && bytes.len()
-                                    == crate::prepared_payload::CHUNK
-                                        .min(chunk.total as usize - raw.len())
-                                && STANDARD.encode(&bytes) == chunk.content
-                                && chunk.complete
-                                    == (raw.len() + bytes.len() == chunk.total as usize),
-                        )?;
-                        Ok(())
-                    })(),
-                )?;
-                total = Some(chunk.total);
-                raw.extend(bytes);
-                if chunk.complete {
-                    break;
-                }
-            }
-            let wire: Recipe = accepted(
-                self,
-                (|| {
-                    require(digest(&raw) == hash)?;
-                    let wire: Recipe = serde_json::from_slice(&raw).map_err(|_| Error::Codec)?;
-                    wire.validate_shape()?;
-                    require(codec::encode_native_recipe(&wire)? == raw)?;
-                    Ok(wire)
-                })(),
-            )?;
-            drop(raw);
-            let packed = PackedRecipe::pack(lease, wire)?;
-            packed.validate()?;
+            let packed = self.capture_installed_recipe(lease, hash)?;
             recipes.insert(hash.to_owned(), packed);
         }
         validate(
@@ -335,7 +389,100 @@ impl Owner {
         )?;
         Ok(recipes)
     }
+    fn installed_recipe_wire(&self, hash: &str) -> Result<Recipe> {
+        let mut raw = vec![];
+        let mut total = None;
+        loop {
+            let reply = self.call(native::Request::ReadInstalledRecipe {
+                session: self.session.clone(),
+                recipe_hash: hash.to_owned(),
+                offset: raw.len() as u64,
+            })?;
+            let chunk = reply.installed_chunk.ok_or(Error::Invalid)?;
+            let bytes = STANDARD.decode(&chunk.content).map_err(|_| Error::Codec)?;
+            accepted(
+                self,
+                (|| {
+                    require(
+                        chunk.recipe_hash == hash
+                            && chunk.offset == raw.len() as u64
+                            && chunk.total > 0
+                            && chunk.total <= MAX as u64
+                            && total.is_none_or(|t| t == chunk.total)
+                            && bytes.len()
+                                == crate::prepared_payload::CHUNK
+                                    .min(chunk.total as usize - raw.len())
+                            && STANDARD.encode(&bytes) == chunk.content
+                            && chunk.complete == (raw.len() + bytes.len() == chunk.total as usize),
+                    )?;
+                    Ok(())
+                })(),
+            )?;
+            total = Some(chunk.total);
+            raw.extend(bytes);
+            if chunk.complete {
+                break;
+            }
+        }
+        let wire: Recipe = accepted(
+            self,
+            (|| {
+                require(digest(&raw) == hash)?;
+                let wire: Recipe = serde_json::from_slice(&raw).map_err(|_| Error::Codec)?;
+                wire.validate_shape()?;
+                require(codec::encode_native_recipe(&wire)? == raw)?;
+                Ok(wire)
+            })(),
+        )?;
+        Ok(wire)
+    }
+    pub(crate) fn capture_installed_recipe(
+        &self,
+        lease: &UpdateLease<'_>,
+        hash: &str,
+    ) -> Result<PackedRecipe> {
+        self.capture_recipe(lease, hash, None)
+    }
+    pub(crate) fn capture_after_owner_recipe(
+        &self,
+        lease: &UpdateLease<'_>,
+        hash: &str,
+        original: &PackedRecipe,
+    ) -> Result<PackedRecipe> {
+        self.capture_recipe(lease, hash, Some(original))
+    }
+    fn capture_recipe(
+        &self,
+        lease: &UpdateLease<'_>,
+        hash: &str,
+        original: Option<&PackedRecipe>,
+    ) -> Result<PackedRecipe> {
+        let mut wire = self.installed_recipe_wire(hash)?;
+        if let Some(original) = original {
+            let metadata = std::mem::take(&mut wire.after_owner);
+            let bytes = STANDARD.decode(&metadata).map_err(|_| Error::Codec)?;
+            require(
+                !metadata.is_empty()
+                    && bytes.len() <= original.after_owner_capacity(&self.store)?.metadata_bytes(),
+            )?;
+            wire.after_owner = STANDARD.encode(self.store.prepared_payload(&original.after_owner)?);
+            require(codec::encode_native_recipe(&wire)? == original.raw(&self.store)?)?;
+            wire.after_owner = metadata;
+        }
+        let packed = PackedRecipe::pack(lease, wire)?;
+        packed.validate()?;
+        Ok(packed)
+    }
     pub(crate) fn bind_installed_recipe(&self, hash: &str, recipes: &Recipes) -> Result<()> {
+        self.bind_installed_recipe_target(hash, recipes, None)
+    }
+    pub(crate) fn bind_installed_recipe_target(
+        &self,
+        hash: &str,
+        recipes: &Recipes,
+        target: Option<&native::Target>,
+    ) -> Result<()> {
+        require(target.is_none_or(|t| t.prepared_recipe == hash))?;
         if hash.is_empty() {
             return Ok(());
         }
@@ -350,6 +497,7 @@ impl Owner {
                 offset: offset as u64,
                 total: raw.len() as u64,
                 content: STANDARD.encode(part),
+                target: target.filter(|_| offset + part.len() == raw.len()).cloned(),
             })?;
             let chunk = reply.installed_chunk.ok_or(Error::Invalid)?;
             require(
@@ -397,15 +545,90 @@ mod tests {
             ]),
             profile: "sample".into(),
             handler: "owner.sh".into(),
+            after_owner: String::new(),
             native: vec![NativeInput {
                 path: "opaque-native-path".into(),
                 before: "d".repeat(64),
             }],
         }
     }
+    #[test]
+    fn conditional_header_keeps_file_and_content_capacity_and_exact_references() {
+        let mut wire = wire();
+        let ordinary = codec::encode_native_recipe(&wire).unwrap();
+        assert!(!String::from_utf8(ordinary.clone())
+            .unwrap()
+            .contains("afterOwner"));
+        wire.files = Some(
+            (0..8192)
+                .map(|n| File {
+                    path: format!("payload-{n:04}"),
+                    content: None,
+                })
+                .collect(),
+        );
+        wire.after_owner = STANDARD.encode(vec![b'x'; AFTER_OWNER_MAX]);
+        wire.validate_shape().unwrap();
+        let raw = codec::encode_native_recipe(&wire).unwrap();
+        let (_f, store, _, _) = fixture();
+        let lease = store.lock().unwrap();
+        let packed = PackedRecipe::pack_fixture(&lease, &raw).unwrap();
+        assert_eq!(packed.files.as_ref().unwrap().len(), 8192);
+        assert_eq!(packed.raw(&store).unwrap(), raw);
+        assert_eq!(
+            crate::prepared_payload::references(std::iter::once(&packed)),
+            BTreeSet::from([packed.after_owner.clone()])
+        );
+        assert_eq!(
+            store.prepared_payload(&packed.after_owner).unwrap().len(),
+            AFTER_OWNER_MAX
+        );
+        drop(lease);
+        wire.after_owner = STANDARD.encode(vec![b'x'; AFTER_OWNER_MAX + 1]);
+        assert!(wire.validate_shape().is_err());
+        wire.after_owner = "eA".into();
+        assert!(wire.validate_shape().is_err());
+        wire.after_owner = STANDARD.encode(b"bounded metadata");
+        wire.files.as_mut().unwrap().push(File {
+            path: "payload-8192".into(),
+            content: None,
+        });
+        assert!(wire.validate_shape().is_err());
+        let content = STANDARD.encode(vec![0; 32 << 20]);
+        wire.files = Some(vec![
+            File {
+                path: "a".into(),
+                content: Some(content.clone()),
+            },
+            File {
+                path: "b".into(),
+                content: Some(content),
+            },
+        ]);
+        wire.validate_shape().unwrap();
+        wire.after_owner = STANDARD.encode(codec::encode(&serde_json::json!({
+            "version":1,"phase":"template","metadataBytes":AFTER_OWNER_MAX,"descriptorBytes":AFTER_OWNER_MAX
+        }),false).unwrap());
+        // The original source is admitted, but its declared possible resolution
+        // cannot fit the existing canonical recipe capacity before consent.
+        assert!(wire.after_owner_capacity().is_err());
+        wire.files.as_mut().unwrap().push(File {
+            path: "c".into(),
+            content: Some(STANDARD.encode([0])),
+        });
+        assert!(wire.validate_shape().is_err());
+        wire.files = None;
+        wire.after_owner.clear();
+        assert!(
+            !String::from_utf8(codec::encode_native_recipe(&wire).unwrap())
+                .unwrap()
+                .contains("afterOwner")
+        );
+    }
     fn target(hash: &str) -> native::Target {
         native::Target {
             prepared_recipe: hash.into(),
+            after_owner: String::new(),
             scope: "".into(),
             reported_actual: "a".repeat(64),
             reported_desired: "b".repeat(64),
@@ -623,6 +846,7 @@ mod tests {
                         offset: (index * crate::prepared_payload::CHUNK) as u64,
                         total: raw.len() as u64,
                         content: STANDARD.encode(chunk),
+                        target: None,
                     },
                     vec![],
                 )
@@ -699,14 +923,19 @@ mod tests {
     #[test]
     fn lossless_null_empty_binary_and_referenced_bundle_keep_payloads() {
         let (f, s, _, _) = fixture();
-        let raw = codec::encode_native_recipe(&wire()).unwrap();
+        let recipe = || {
+            let mut value = wire();
+            value.after_owner = STANDARD.encode(b"retained conditional header");
+            value
+        };
+        let raw = codec::encode_native_recipe(&recipe()).unwrap();
         let hash = digest(&raw);
-        let packed = PackedRecipe::pack(&s.lock().unwrap(), wire()).unwrap();
+        let packed = PackedRecipe::pack(&s.lock().unwrap(), recipe()).unwrap();
         assert_eq!(packed.raw(&s).unwrap(), raw);
-        assert_eq!(s.payload_usage().unwrap().roots, 2);
-        let again = PackedRecipe::pack(&s.lock().unwrap(), wire()).unwrap();
+        assert_eq!(s.payload_usage().unwrap().roots, 3);
+        let again = PackedRecipe::pack(&s.lock().unwrap(), recipe()).unwrap();
         assert_eq!(again.raw(&s).unwrap(), raw);
-        assert_eq!(s.payload_usage().unwrap().roots, 2);
+        assert_eq!(s.payload_usage().unwrap().roots, 3);
         let targets = vec![target(&hash)];
         let recipes = BTreeMap::from([(hash.clone(), packed)]);
         let binding = crate::bundle::binding(&[], &targets).unwrap();
@@ -746,7 +975,7 @@ mod tests {
             .publish_bundle(&journal, plan.wire(), &h, &[], &targets, &h, &recipes)
             .unwrap();
         s.lock().unwrap().cleanup_prepared_payloads().unwrap();
-        assert_eq!(s.payload_usage().unwrap().roots, 2);
+        assert_eq!(s.payload_usage().unwrap().roots, 3);
         let address = crate::store::Address::journal();
         s.lock()
             .unwrap()
@@ -757,7 +986,7 @@ mod tests {
             )
             .unwrap();
         s.lock().unwrap().cleanup_native_transactions().unwrap();
-        assert_eq!(s.payload_usage().unwrap().roots, 2);
+        assert_eq!(s.payload_usage().unwrap().roots, 3);
         std::fs::remove_file(f.0.join("release-transition/v2/journal.json")).unwrap();
         s.lock().unwrap().cleanup_native_transactions().unwrap();
         assert_eq!(s.payload_usage().unwrap().roots, 0);

@@ -35,10 +35,6 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 	}
 	engine := []byte("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) cat >/dev/null; printf '%s' '" + string(reply) + "';; *) exit 99;; esac\n")
 	testkit.WriteFile(t, filepath.Join(root, "bin/yard-engine"), engine, 0o700)
-	manifestPath := filepath.Join(root, "runtime-files.sha256")
-	manifest := mustReadConfigFixture(t, manifestPath)
-	end := bytes.IndexByte(manifest, '\n')
-	manifest = append([]byte(fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine))), manifest[end+1:]...)
 	for _, assets := range extraAssets {
 		for relative, content := range assets {
 			mode := os.FileMode(0o600)
@@ -46,10 +42,9 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 				mode = 0o700
 			}
 			writeProfileTestFile(t, filepath.Join(root, relative), []byte(content), mode)
-			manifest = append(manifest, []byte(fmt.Sprintf("%x  ./%s\n", sha256.Sum256([]byte(content)), relative))...)
 		}
 	}
-	testkit.WriteFile(t, manifestPath, manifest, 0o600)
+	manifest := sourceFixtureManifest(t, root)
 	registryPayload := mustReadConfigFixture(t, filepath.Join(root, "config/release-transition.json"))
 	registry, _, err := releasetransition.ParseRegistryV2(registryPayload, releasetransition.BuiltinCapabilityCatalog())
 	if err != nil {
@@ -67,27 +62,53 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 		t.Fatal(err)
 	}
 	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), payload, 0o600)
-	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect,
-		RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: "1.2.3-owner",
-		Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))}
-	actor := &processDriftReconciler{failOnce: true}
-	invoke := func() releasetransition.ProcessResponse {
-		response, err := executeReleaseTransitionRequest(context.Background(), root, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{actor}, releaseTransitionOwnerFixture{}, nil)
-		if err != nil {
-			t.Fatal(err)
+	// Frozen historical-Go fixture data: no assessed plan or reducer executes.
+	// The owning codec validates the explicit empty intent and real asset hashes.
+	catalog := releasetransition.BuiltinCapabilityCatalog()
+	_, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureDigest := releasetransition.Fingerprint(strings.Repeat("a", 64))
+	journal := releasetransition.JournalRecord{
+		SchemaVersion: 2, Transaction: "tx-0123456789abcdef",
+		Goal:              releasetransition.Goal{Target: "1.2.3-owner", Direction: releasetransition.DirectionActivateTarget},
+		Releases:          releasetransition.ReleasePair{From: "1.2.3-owner", Target: "1.2.3-owner"},
+		AuthorizationPlan: releasetransition.PlanToken("plan-v1-" + string(fixtureDigest)),
+		ResumePlan:        releasetransition.PlanToken("resume-v1-" + strings.Repeat("b", 64)),
+		ArtifactDigest:    releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest))),
+		RegistryDigest:    registryDigest, CatalogDigest: catalog.Digest(),
+		ObservationScope: fixtureDigest, AuthorizationDigest: fixtureDigest,
+		Checkpoint: releasetransition.JournalReconciling, Steps: []releasetransition.JournalStep{},
+	}
+	intent, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken   `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken   `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint `json:"observationScope"`
+		Steps             []struct{}                    `json:"steps"`
+	}{journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, []struct{}{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.IntentDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(intent)))
+	payload, err = releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/journal.json"), payload, 0600)
+	// Current tooling reads historical Go-owned data; it does not become the
+	// journal owner. Preserve the original current link and Go-only inventory.
+	root = sourceAdmissionToolingFixture(t, runtimeRoot)
+	for _, assets := range extraAssets {
+		for relative, content := range assets {
+			mode := os.FileMode(0600)
+			if strings.HasSuffix(relative, ".sh") {
+				mode = 0700
+			}
+			writeProfileTestFile(t, filepath.Join(root, relative), []byte(content), mode)
 		}
-		return response
 	}
-	inspection := invoke()
-	if inspection.Inspection == nil {
-		t.Fatal("missing activation inspection")
-	}
-	request.Mode = releasetransition.ProcessConverge
-	request.Execution = &releasetransition.Execution{Plan: inspection.Inspection.Plan, Authorization: "fixture-grant"}
-	result := invoke()
-	if result.Outcome == nil || result.Outcome.Status != releasetransition.StatusRecovering {
-		t.Fatalf("missing interrupted activation: %#v", result)
-	}
+	sourceFixtureManifest(t, root)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	return root, configHome, filepath.Join(configHome, "config.env"), environment
 }
@@ -389,6 +410,9 @@ func completedSelectionAuthoringFixture(t *testing.T, migrateSSH ...bool) (*CLI,
 
 func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets map[string]string) (*CLI, string, string) {
 	t.Helper()
+	if os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT") != "" {
+		return completedRustSourceAuthoringFixture(t, migrateSSH, extraAssets)
+	}
 	f := newConfigApplyRepairFixture(t, false)
 	oldRoot := f.cli.options.RepositoryRoot
 	runtimeRoot := f.cli.env["YARD_RUNTIME_ROOT"]
@@ -663,7 +687,7 @@ func TestCompletedSelectionAuthoringPreservesHistoryAndDefersActivation(t *testi
 			if _, err := os.Stat(ready); !os.IsNotExist(err) {
 				t.Fatal("source authoring materialized intermediate expansion")
 			}
-			platform := program.options.InitPlatform.(*initPlatformFixture)
+			platform := sourceAuthoringPlatformFixture(t, program.options.InitPlatform)
 			if len(platform.applied) != 0 || platform.projectHooks != 0 {
 				t.Fatal("source authoring ran hooks/runtime reconciliation")
 			}
@@ -813,7 +837,7 @@ func TestCompletedScalarAuthoringUsesPreparedLocalSourceBoundary(t *testing.T) {
 					t.Fatalf("approved scalar intent or captured SSH setting changed: %v", err)
 				}
 			}
-			platform := options.InitPlatform.(*initPlatformFixture)
+			platform := sourceAuthoringPlatformFixture(t, options.InitPlatform)
 			if physical.mutations != 0 || len(options.Config.(*recordingConfigApplier).yards) != 0 || len(platform.applied) != 0 || platform.projectHooks != 0 {
 				t.Fatal("scalar source authoring performed activation or reconciliation")
 			}
@@ -896,7 +920,7 @@ func TestCompletedSelectionAuthoringRejectsExpansionAndStaleAuthority(t *testing
 			if strings.Contains(scenario, "after consent") && len(prompt.requests) != 1 {
 				t.Fatalf("did not reach bound consent guard: prompts=%d %s", len(prompt.requests), stderr.String())
 			}
-			if platform, ok := options.InitPlatform.(*initPlatformFixture); ok && (len(platform.applied) != 0 || platform.projectHooks != 0) {
+			if platform := sourceAuthoringPlatformFixture(t, options.InitPlatform); len(platform.applied) != 0 || platform.projectHooks != 0 {
 				t.Fatal("rejected source write ran activation")
 			}
 		})
@@ -996,7 +1020,8 @@ func TestCompletedSelectionAuthoringAdmitsIntegrationOnlyDriftWithCurrentFiles(t
 						t.Fatalf("file contrast: %#v %v", assessment, err)
 					}
 					actor := &materializedConfigActivationReconciler{cli: &native, yard: "default", configHome: home, scopeResolved: true}
-					observation, err := actor.Observe(context.Background(), releasetransition.ReleasePair{From: "1.2.3-aaaaaaaaaaaa", Target: "1.2.3-aaaaaaaaaaaa"}, releasetransition.ReleaseLinks{Active: "1.2.3-aaaaaaaaaaaa"})
+					release := releasetransition.ReleaseID(filepath.Base(program.options.RepositoryRoot))
+					observation, err := actor.Observe(context.Background(), releasetransition.ReleasePair{From: release, Target: release}, releasetransition.ReleaseLinks{Active: release})
 					if err != nil || observation.Converged || !actor.integrationPlans["default"].Changed || physical.serviceObservations == 0 {
 						t.Fatalf("native integration-only activation not pending: %#v %v", observation, err)
 					}

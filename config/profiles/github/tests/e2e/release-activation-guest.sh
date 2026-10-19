@@ -60,12 +60,19 @@ if [ "${1:-}" = --candidate-identity ]; then
   exit
 fi
 BASELINE=0.19.0
+NATIVE_LOSS=''
 MODE="${1:-normal}"
-case "$MODE:$#" in
-  normal:0|--local-probe:1) ;;
-  --baseline:2) BASELINE="$2"; MODE=normal ;;
-  *) die 'guest takes only optional --local-probe or --baseline VERSION' ;;
-esac
+if [ "$MODE" != --local-probe ]; then
+  MODE=normal
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --baseline) [ "$#" -ge 2 ] || exit 2; BASELINE="$2"; shift 2 ;;
+      --native-loss) [ "$#" -ge 2 ] && [ -z "$NATIVE_LOSS" ] || exit 2; NATIVE_LOSS="$2"; shift 2 ;;
+      *) die 'guest takes --local-probe or --baseline VERSION [--native-loss owner|helper|group]' ;;
+    esac
+  done
+else [ "$#" = 1 ] || exit 2; fi
+case "$NATIVE_LOSS" in ''|owner|helper|group) ;; *) exit 2 ;; esac
 if [ "$MODE" = normal ]; then
   [ "${SUBYARD_E2E_VM:-}" = 1 ] && [ -r /run/subyard-e2e-lease.json ] || die 'allocated disposable VM1 required'
   [ "$(id -un)" = dev ] || die 'allocated dev user required'
@@ -158,6 +165,7 @@ cleanup_image_probe() {
 }
 cleanup() {
   local original=$? failed=0 yard project marker safe_units=1 unit path mutated_units=0
+  local cleanup_loss="${NATIVE_LOSS:-}"
   trap - EXIT INT TERM
   set +e
   if [ "$original" != 0 ]; then
@@ -198,8 +206,12 @@ PY
         failed=1
         continue
       fi
-      fresh timeout --signal=TERM --kill-after=10 75 "$YARD_BIN" -Y "$yard" teardown --yes \
-        > "$STATE/cleanup-$yard.log" 2>&1 || failed=1
+      if [ -n "$cleanup_loss" ] && [ "$cleanup_loss" != owner ] && [ -f "$STATE/native-loss/after-cut.json" ]; then
+        printf 'release_activation_pending_fixture_cleanup=allocation-release yard=%s\n' "$yard"
+      else
+        fresh timeout --signal=TERM --kill-after=10 75 "$YARD_BIN" -Y "$yard" teardown --yes \
+          > "$STATE/cleanup-$yard.log" 2>&1 || failed=1
+      fi
     fi
   done
   for unit in "$UNIT" "$NAMED_UNIT" subyard-keys-sync.timer subyard-keys-sync.service; do
@@ -222,7 +234,7 @@ PY
     printf 'release_activation_log=%s\n' "${log##*/}"
     cat "$log"
   done
-  if [ "$failed" = 0 ]; then
+  if [ "$failed" = 0 ] && { [ -z "$cleanup_loss" ] || [ "$cleanup_loss" = owner ] || [ ! -f "$STATE/native-loss/after-cut.json" ]; }; then
     [[ "$STATE" = /tmp/subyard-release-activation.* ]] && [ ! -L "$STATE" ] \
       && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || { [ "$original" != 0 ] && exit "$original"; exit 3; }
     find "$STATE" -depth -delete || { [ "$original" != 0 ] && exit "$original"; exit 3; }
@@ -819,11 +831,19 @@ old_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
 old_hash="$(hash "/proc/$old_pid/exe")"
 wanted="$(hash "$FINAL_SOURCE/config/profiles/github/bin/broker")"
 [ "$old_hash" != "$wanted" ] || die 'predecessor fixture does not have old loaded broker code'
-interrupt_driver "$STATE" "$YARD_BIN" "$FINAL_RELEASE" "$CANDIDATE" "$UNIT" "$old_pid" "$old_hash" "$wanted"
-touch "$STATE/allow-restart"
-claim_units
-stage native-recovery-with-fresh-consent
-PATH="$STATE/wrappers:$PATH" update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
+if [ -f "$FINAL_SOURCE/config/release-owner.json" ]; then
+  # release_candidate_prepare has checked this explicit target declaration and
+  # its entire manifest. Actual Rust routing is proved by the separate loss case.
+  stage rust-normal-upgrade-without-opaque-interruption
+  touch "$STATE/allow-restart"
+  update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
+else
+  interrupt_driver "$STATE" "$YARD_BIN" "$FINAL_RELEASE" "$CANDIDATE" "$UNIT" "$old_pid" "$old_hash" "$wanted"
+  touch "$STATE/allow-restart"
+  claim_units
+  stage historical-go-native-recovery-with-fresh-consent
+  PATH="$STATE/wrappers:$PATH" update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/recovery.log" 2>&1
+fi
 claim_units
 verify_runtime "$FINAL_SOURCE"
 ready
@@ -929,3 +949,69 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/absent-timer.log" 2>&1
   || die 'release activation recreated absent timer units'
 ready
 printf 'ok: authentic %s upgrade/recovery/refusal and synthetic B-to-A rollback; broker loaded identities, core helpers, deferred yard, credentials and disabled timer verified\n' "$BASELINE"
+if [ -n "$NATIVE_LOSS" ]; then
+  stage "separate-final-rust-native-loss-$NATIVE_LOSS"
+  loss_case="$STATE/native-loss"
+  install -d -m 0700 "$loss_case" "$loss_case/bin"
+  printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
+  python3 - "$loss_case" "$UNIT" <<'PY'
+from pathlib import Path
+import shlex,sys
+case,unit=sys.argv[1:]
+script='#!/bin/bash\nset -euo pipefail\ncase='+shlex.quote(case)+'\nunit='+shlex.quote(unit)+'\n'+r'''
+if [ "${1:-}" = --user ] && [ "${2:-}" = restart ] && [ "${3:-}" = "$unit" ]; then
+  printf 'restart\n' >> "$case/calls"
+  printf '%s\n' "$$" > "$case/paused"
+  while [ ! -e "$case/release" ]; do sleep .05; done
+fi
+exec /usr/bin/systemctl "$@"
+'''
+path=Path(case)/'bin/systemctl';path.write_text(script);path.chmod(0o700)
+PY
+  # Owned delivered bytes drift while the loaded broker remains usable. The
+  # ordinary runtime handler must restore them before its actual restart call.
+  printf '\nfixture-owned loss drift\n' >> "$SUBYARD_HOME/github-broker/default-engine"
+  loss_observe() {
+    fresh /usr/bin/python3 -B "$ROOT/tests/helpers/profile-native-loss.py" \
+      --runtime "$(readlink -f "$STATE/runtime/current")" \
+      --manifest-sha256 "$(hash "$FINAL_SOURCE/runtime-files.sha256")" \
+      --case-root "$loss_case" --mode "$NATIVE_LOSS" --successor "$SYNTHETIC_RELEASE" \
+      --current-version "$CANDIDATE" --activation-id github-runtime "$@"
+  }
+  PATH="$loss_case/bin:$PATH" loss_observe > "$STATE/native-loss.log" 2>&1
+  claim_units
+  loss_resources() {
+    hash "$SUBYARD_HOME/github-broker/default-engine"
+    hash "$UNIT_DIR/$UNIT"
+    systemctl_user show "$UNIT" --property=MainPID,ActiveState
+    readlink "$STATE/runtime/current"
+    readlink "$STATE/runtime/previous"
+    guest sha256sum /usr/local/libexec/subyard/github-client
+  }
+  loss_resources > "$loss_case/resources.before"
+  if [ "$NATIVE_LOSS" = owner ]; then
+    cp "$loss_case/calls" "$loss_case/calls.drained"
+    PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-recover.log" 2>&1
+    cmp "$loss_case/calls.drained" "$loss_case/calls" || die 'owner recovery replayed the drained GitHub mutation'
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'owner recovery changed the drained profile resources'
+    ready
+    verify_runtime "$FINAL_SOURCE"
+  else
+    loss_observe --verify-unknown >> "$STATE/native-loss.log" 2>&1
+    if PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-same-goal.log" 2>&1; then
+      die 'opaque native loss replayed the original goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'same-goal refusal changed GitHub resources'
+    if PATH="$loss_case/bin:$PATH" update "$SYNTHETIC" "$SYNTHETIC_RELEASE" --yes > "$STATE/native-loss-new-goal.log" 2>&1; then
+      die 'opaque native loss admitted a replacement goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'replacement refusal changed GitHub resources'
+    loss_observe --verify-unknown >> "$STATE/native-loss.log" 2>&1
+  fi
+  printf 'ok: separate Rust GitHub %s loss kept native exit, original custody, no replay and exact final outcome\n' "$NATIVE_LOSS"
+fi

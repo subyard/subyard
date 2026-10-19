@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -39,6 +40,9 @@ func (runtime Runtime) brokerSinkFiles() (string, error) {
 }
 
 func (runtime Runtime) PrepareTestVMBrokerRuntime(ctx context.Context) (*PreparedTestVMBroker, error) {
+	return runtime.prepareTestVMBrokerRuntime(ctx, true)
+}
+func (runtime Runtime) prepareTestVMBrokerRuntime(ctx context.Context, physical bool) (*PreparedTestVMBroker, error) {
 	intent, err := runtime.powerService().Intent(ctx, runtime.Yard)
 	if err != nil {
 		return nil, err
@@ -47,7 +51,12 @@ func (runtime Runtime) PrepareTestVMBrokerRuntime(ctx context.Context) (*Prepare
 	if err != nil {
 		return nil, err
 	}
-	prepared, err := backend.PrepareApply(ctx)
+	var prepared *testvmsruntime.PreparedApply
+	if physical {
+		prepared, err = backend.PrepareApply(ctx)
+	} else {
+		prepared, err = backend.PrepareApplySources(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +71,11 @@ func (runtime Runtime) PrepareTestVMBrokerRuntime(ctx context.Context) (*Prepare
 		return nil, err
 	}
 	if runtime.Yard.NestedE2EVMs {
-		if p.sink, err = runtime.brokerSinkFiles(); err != nil {
+		p.sink = strings.Repeat("0", 64)
+		if physical {
+			p.sink, err = runtime.brokerSinkFiles()
+		}
+		if err != nil {
 			return nil, err
 		}
 	}

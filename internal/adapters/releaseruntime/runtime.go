@@ -370,6 +370,9 @@ func (runtime *Runtime) inspectProtectedTransition(
 			)
 		}
 	}
+	if !releaseOwnerRoutingEnabled && (verifiedOwner.releaseOwner != nil || verifiedTarget.releaseOwner != nil) {
+		return nil, publicCandidateFailure(markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime")))
+	}
 	selectedRust = releaseOwnerRoutingEnabled && verifiedOwner.releaseOwner != nil
 	request := releasetransition.ProcessRequest{
 		SchemaVersion:       releasetransition.ProcessProtocolSchemaV1,
@@ -1388,6 +1391,10 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
+	if !releaseOwnerRoutingEnabled && (owner.releaseOwner != nil || target.releaseOwner != nil) {
+		return Prepared{}, markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime"))
+	}
+
 	rustOwner := releaseOwnerRoutingEnabled && owner.releaseOwner != nil
 	if outcome, err := func() (*releasetransition.Outcome, error) {
 		if rustOwner {

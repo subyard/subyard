@@ -74,9 +74,32 @@ func (backend *Backend) inputBinding() string {
 
 func (backend *Backend) bindingPath(value string) string {
 	if backend.LogicalRepositoryRoot != "" && backend.RepositoryRoot != "" && backend.LogicalRepositoryRoot != backend.RepositoryRoot {
-		return strings.ReplaceAll(value, backend.RepositoryRoot, backend.LogicalRepositoryRoot)
+		if strings.HasPrefix(backend.RepositoryRoot, "/proc/self/fd/") {
+			alias := strings.Replace(backend.RepositoryRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)
+			value = replaceBackendRoot(value, alias, backend.LogicalRepositoryRoot)
+		}
+		return replaceBackendRoot(value, backend.RepositoryRoot, backend.LogicalRepositoryRoot)
 	}
 	return value
+}
+
+func replaceBackendRoot(value, physical, logical string) string {
+	var result strings.Builder
+	for {
+		i := strings.Index(value, physical)
+		if i < 0 {
+			result.WriteString(value)
+			return result.String()
+		}
+		end := i + len(physical)
+		result.WriteString(value[:i])
+		if (i == 0 || strings.ContainsRune("=:\"'\n\r\t [,(", rune(value[i-1]))) && (end == len(value) || strings.ContainsRune("/\"'\n\r\t ", rune(value[end]))) {
+			result.WriteString(logical)
+		} else {
+			result.WriteString(physical)
+		}
+		value = value[end:]
+	}
 }
 
 func (backend *Backend) nativeBinding(ctx context.Context) (string, error) {
@@ -104,6 +127,15 @@ func (backend *Backend) nativeBinding(ctx context.Context) (string, error) {
 }
 
 func (backend *Backend) PrepareApply(ctx context.Context) (*PreparedApply, error) {
+	return backend.prepareApply(ctx, true)
+}
+
+// PrepareApplySources captures only original source/state/engine inputs. The
+// native placeholder is inert and must be resolved before any dispatch.
+func (backend *Backend) PrepareApplySources(ctx context.Context) (*PreparedApply, error) {
+	return backend.prepareApply(ctx, false)
+}
+func (backend *Backend) prepareApply(ctx context.Context, physical bool) (*PreparedApply, error) {
 	state, err := backend.state()
 	if err != nil {
 		return nil, err
@@ -111,9 +143,12 @@ func (backend *Backend) PrepareApply(ctx context.Context) (*PreparedApply, error
 	if backend.Runner == nil {
 		backend.Runner = ProcessRunner{}
 	}
-	native, err := backend.nativeBinding(ctx)
-	if err != nil {
-		return nil, err
+	native := strings.Repeat("0", 64)
+	if physical {
+		native, err = backend.nativeBinding(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	engine, err := os.Open(backend.Dispatcher)
 	if err != nil {
@@ -144,16 +179,50 @@ func (backend *Backend) PrepareApply(ctx context.Context) (*PreparedApply, error
 	}
 	p.engine.Close()
 	p.engine = sealed
-	raw, err := json.Marshal(struct {
+	p.binding = p.calculateBinding()
+	ok = true
+	return p, nil
+}
+
+func (p *PreparedApply) calculateBinding() string {
+	raw, _ := json.Marshal(struct {
 		Inputs, Native, Marker        string
 		Provision, Download, Manifest string
-	}{p.inputs, p.native, state.marker, fmt.Sprintf("%x", sha256.Sum256(p.provision)), fmt.Sprintf("%x", sha256.Sum256(p.download)), fmt.Sprintf("%x", sha256.Sum256(p.manifest))})
+	}{p.inputs, p.native, p.state.marker, fmt.Sprintf("%x", sha256.Sum256(p.provision)), fmt.Sprintf("%x", sha256.Sum256(p.download)), fmt.Sprintf("%x", sha256.Sum256(p.manifest))})
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
+}
+
+// ResolvePreparedApply measures only the physical native guard. Every source
+// byte, state field and pinned engine remains the original captured authority.
+func (backend *Backend) ResolvePreparedApply(ctx context.Context, original *PreparedApply) (*PreparedApply, error) {
+	if original == nil || original.inputs != backend.inputBinding() {
+		return nil, domain.ErrPlanStale
+	}
+	if backend.Runner == nil {
+		backend.Runner = ProcessRunner{}
+	}
+	state, err := backend.state()
 	if err != nil {
 		return nil, err
 	}
-	p.binding = fmt.Sprintf("%x", sha256.Sum256(raw))
-	ok = true
-	return p, nil
+	if state != original.state {
+		return nil, domain.ErrPlanStale
+	}
+	if err := original.checkEngine(); err != nil {
+		return nil, err
+	}
+	native, err := backend.nativeBinding(ctx)
+	if err != nil {
+		return nil, err
+	}
+	record, files, err := original.Record(backend)
+	if err != nil {
+		return nil, err
+	}
+	copy := &PreparedApply{state: original.state, inputs: original.inputs, native: native, provision: original.provision, download: original.download, recipes: original.recipes, manifest: original.manifest}
+	record.Native = native
+	record.Binding = copy.calculateBinding()
+	return backend.RestorePreparedApply(ctx, record, files)
 }
 
 func (p *PreparedApply) checkEngine() error {

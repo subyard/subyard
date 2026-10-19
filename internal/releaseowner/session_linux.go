@@ -22,18 +22,24 @@ import (
 )
 
 type session struct {
-	image             string
-	effectContext     context.Context
-	factory           Factory
-	context           *Context
-	root              *os.File
-	repository        *os.File
-	components        Components
-	leases            []*os.File
-	binding           *Binding
-	ownerRelease      func()
-	installedTransfer *installedRecipeTransfer
-	installedRead     *installedRecipeTransfer
+	ownerOrigins           map[string]*invocationObserver
+	ownerCompleted         *Binding
+	ownerCompletedTerminal string
+	ownerResultsPayload    string
+	ownerResultsRecipe     string
+	ownerResultsSource     string
+	image                  string
+	effectContext          context.Context
+	factory                Factory
+	context                *Context
+	root                   *os.File
+	repository             *os.File
+	components             Components
+	leases                 []*os.File
+	binding                *Binding
+	ownerRelease           func()
+	installedTransfer      *installedRecipeTransfer
+	installedRead          *installedRecipeTransfer
 }
 
 func (s *session) releaseLeases() {
@@ -87,8 +93,9 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		return Reply{}, err
 	}
 	allowed := map[string][]string{
-		"capture-ingress": {"session", "bindingIngress"}, "observe-ingress": {"session", "step"}, "verify-ingress": {"session", "step"}, "apply-ingress": {"binding", "step"},
-		"initialize": {"context"}, "capture-inventory": {"session"}, "capture-yard": {"session", "yard", "resolved"}, "prepare-settings": {"session", "yard", "edits"}, "capture-owner": {"session"}, "capture-activation": {"session", "owner", "fresh"},
+		"capture-ingress": {"session", "bindingIngress", "legacyRust"}, "observe-ingress": {"session", "step"}, "verify-ingress": {"session", "step"}, "apply-ingress": {"binding", "step"},
+		"observe-legacy-checkpoint": {"session", "originalV1"},
+		"initialize":                {"context"}, "capture-inventory": {"session"}, "capture-yard": {"session", "yard", "resolved"}, "prepare-settings": {"session", "yard", "edits"}, "capture-owner": {"session"}, "capture-activation": {"session", "owner", "fresh"},
 		"claim-lease": {"binding", "update", "owner"}, "observe-settings": {"session", "recipe"}, "capture-settings": {"session", "recipe"}, "project-settings": {"session", "recipe", "edits"}, "apply-settings": {"binding", "recipe"}, "apply-owner": {"binding", "before", "token"}, "cleanup-owner": {"binding", "before", "token"}, "query-owner-cleanup": {"binding", "before", "token"}, "apply-activation": {"binding", "target"}, "query-invocation": {"binding"}, "release-lease": {"session"},
 		"fence-activation":         {"binding", "target", "successor"},
 		"capture-config-layout":    {"session"},
@@ -96,7 +103,10 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		"project-activation":       {"session", "before"},
 		"capture-rollback-support": {"session", "rollbackRepositories", "targetOwners"},
 		"read-installed-recipe":    {"session", "recipeHash", "offset"},
-		"bind-installed-recipe":    {"session", "recipeHash", "offset", "total", "content"},
+		"bind-installed-recipe":    {"session", "recipeHash", "offset", "total", "content", "target"},
+		"bind-owner-results":       {"session", "binding", "producer", "before", "token"},
+		"resolve-owner-target":     {"session", "binding", "target"},
+		"resolve-after-owner":      {"session", "binding", "target"},
 	}
 	keys, ok := allowed[request.Op]
 	if !ok {
@@ -162,7 +172,7 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		return Reply{Code: "stale"}, nil
 	}
 
-	if request.Op != "claim-lease" && request.Op != "capture-rollback-support" && len(files) != 0 {
+	if request.Op != "claim-lease" && request.Op != "capture-rollback-support" && request.Op != "observe-legacy-checkpoint" && len(files) != 0 {
 		return Reply{}, errors.New("unexpected native descriptors")
 	}
 	if request.Binding == nil {
@@ -172,6 +182,9 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 	}
 	if request.Op == "capture-rollback-support" {
 		return s.captureRollbackSupport(ctx, request, files)
+	}
+	if request.Op == "observe-legacy-checkpoint" {
+		return s.observeLegacyCheckpoint(ctx, request, files)
 	}
 	if request.Op == "claim-lease" {
 		b := request.Binding
@@ -266,7 +279,19 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		}
 		return Reply{Layout: &ConfigLayoutSnapshot{Exists: value.Exists, Raw: base64.StdEncoding.EncodeToString(value.Content), Digest: digest(value.Content)}}, nil
 	case "capture-ingress":
-		value, err := s.components.CaptureIngress(ctx, request.IngressBinding)
+		var value IngressFacts
+		var err error
+		if request.LegacyRust {
+			reader, ok := s.components.(interface {
+				CaptureRustIngress(context.Context, *IngressBinding) (IngressFacts, error)
+			})
+			if !ok {
+				return Reply{}, errors.New("native Rust ingress reader unavailable")
+			}
+			value, err = reader.CaptureRustIngress(ctx, request.IngressBinding)
+		} else {
+			value, err = s.components.CaptureIngress(ctx, request.IngressBinding)
+		}
 		if err != nil {
 			return unavailable(err)
 		}
@@ -433,6 +458,35 @@ func (s *session) handle(ctx context.Context, raw []byte, files []*os.File) (Rep
 		}
 		target := *request.Target
 		return s.apply(ctx, request, target.Owner, target.Yard, func() error { return component.FenceActivation(s.effectContext, target, request.Successor) })
+	case "resolve-after-owner":
+		return s.resolveAfterOwner(ctx, request)
+	case "resolve-owner-target":
+		if request.Target == nil || s.ownerResultsPayload == "" {
+			return Reply{Code: "unavailable"}, nil
+		}
+		if request.Binding != nil {
+			if err := s.checkOwnerResultEffectBinding(*request.Binding); err != nil {
+				return Reply{}, err
+			}
+		}
+		resolver, ok := s.components.(interface {
+			ResolveOwnerTarget(context.Context, Target) (Target, error)
+		})
+		if !ok {
+			return Reply{Code: "unavailable"}, nil
+		}
+		target, err := resolver.ResolveOwnerTarget(ctx, *request.Target)
+		if err != nil {
+			return unavailable(err)
+		}
+		comparison := target
+		comparison.InstanceUUID = request.Target.InstanceUUID
+		if comparison != *request.Target || target.InstanceUUID == "" || request.Target.InstanceUUID != "absent" && target.InstanceUUID != request.Target.InstanceUUID {
+			return Reply{}, errors.New("owner target projection differs")
+		}
+		return Reply{Targets: []Target{target}}, nil
+	case "bind-owner-results":
+		return s.bindOwnerResults(ctx, request)
 	case "query-invocation":
 		return s.queryInvocation(ctx, *request.Binding)
 	case "release-lease":
@@ -450,6 +504,14 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 	}
 	if ctx.Err() != nil {
 		return Reply{Code: "unavailable"}, nil
+	}
+	if err := s.checkOwnerResultEffectBinding(*request.Binding); err != nil {
+		return Reply{}, err
+	}
+	if request.Target != nil && request.Target.AfterOwner != "" {
+		if _, err := s.ownerCompletion(); err != nil {
+			return Reply{Code: "unknown"}, nil
+		}
 	}
 	if _, e := s.readTerminal(*request.Binding); e == nil {
 		return Reply{Code: "stale"}, nil
@@ -477,7 +539,7 @@ func (s *session) apply(ctx context.Context, request Request, owner, resource st
 	if err := s.writeFact(*request.Binding, "accepted", accepted); err != nil {
 		return Reply{}, err
 	}
-	observer := &invocationObserver{session: s, binding: *request.Binding}
+	observer := &invocationObserver{session: s, binding: *request.Binding, ownerToken: request.Token}
 	// Owner EOF closes admission but must not kill a local CLI transport while
 	// its remote script is still running. Accepted work keeps its own bounded
 	// drain budget. Release refresh already permits up to 75 minutes (the

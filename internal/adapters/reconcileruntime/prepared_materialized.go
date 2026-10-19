@@ -343,9 +343,27 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 	if p.owner == "materialized-files" && original.Integrations != nil {
 		return nil, errors.New("unexpected integration metadata")
 	}
+	if err := p.overlayAfterOwnerConfigs(&original); err != nil {
+		return nil, err
+	}
+	if p.afterOwnerConfigs != nil || p.afterOwnerConfigSource {
+		if (p.owner != "materialized-files" && p.owner != "materialized-integrations") || p.afterOwner == nil {
+			return nil, domain.ErrPlanStale
+		}
+	}
 	// The selector is only a scope/guard oracle. Its newly read payloads are
 	// discarded; the returned handle below is populated from original bytes.
-	fresh, err := runtime.PrepareConfigs(ctx)
+	var fresh *PreparedConfigs
+	if p.afterOwnerConfigSource {
+		if original.Configs.Instance != afterOwnerConfigInstance {
+			return nil, domain.ErrPlanStale
+		}
+		fresh, err = runtime.prepareConfigPayloads(afterOwnerConfigInstance)
+	} else if p.afterOwnerConfigs != nil {
+		fresh, err = runtime.afterOwnerPhysicalConfigs(ctx)
+	} else {
+		fresh, err = runtime.PrepareConfigs(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +384,7 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 		}
 		current.Identity = guard.Identity
 	}
-	if installedRuntimeDigest(description) != installedRuntimeDigest(original.Configs) || p.owner == "materialized-files" && p.source != original.Configs.sourceBinding() {
+	if installedRuntimeDigest(description) != installedRuntimeDigest(original.Configs) || p.owner == "materialized-files" && p.afterOwnerConfigs == nil && p.source != original.Configs.sourceBinding() {
 		return nil, domain.ErrPlanStale
 	}
 	for index, file := range original.Configs.Files {
@@ -405,7 +423,7 @@ func (runtime Runtime) bindMaterializedRecipe(ctx context.Context, r installedRe
 	if r.Profile != "" || r.Handler != "" || r.Launcher != "" || r.HookBefore != "" || len(r.Native) != 0 || len(r.Leaves) != 0 || (r.Owner != "materialized-files" && r.Owner != "materialized-integrations") {
 		return nil, errors.New("invalid materialized recipe scope")
 	}
-	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}}
+	p := &PreparedInstalledRuntime{owner: r.Owner, source: r.Source, runtime: r.Runtime, resources: r.Resources, files: map[string][]byte{}, afterOwnerConfigs: runtime.afterOwnerConfigs, afterOwnerConfigSource: runtime.afterOwnerConfigSource, afterOwner: r.AfterOwner, afterOwnerIntegrations: runtime.afterOwnerIntegrations}
 	previous := ""
 	for _, file := range r.Files {
 		if file.Path <= previous || len(file.Path) > 512 || filepath.Clean(file.Path) != file.Path || filepath.IsAbs(file.Path) {

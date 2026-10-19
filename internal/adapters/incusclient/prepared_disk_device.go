@@ -71,10 +71,14 @@ func (client *Client) readPreparedReadOnlyDisk(ctx context.Context, p ports.Prep
 	if uuid == "" {
 		uuid = actual.ExpandedConfig["volatile.uuid"]
 	}
-	if uuid != p.UUID || !maps.Equal(actual.Devices[p.Device], p.Before) {
+	// A drained partial apply may already have installed exactly the captured
+	// desired device. Never replace the original Before with a new baseline.
+	current, present := actual.Devices[p.Device]
+	before := !present && p.Before == nil || present && p.Before != nil && maps.Equal(current, p.Before)
+	if uuid != p.UUID || actual.Name != p.Instance || actual.Project != "" && actual.Project != p.Project || etag == "" || !before && !maps.Equal(current, readOnlyDisk(p)) {
 		return nil, nil, "", domain.ErrPlanStale
 	}
-	if inherited, ok := actual.ExpandedDevices[p.Device]; ok && !maps.Equal(inherited, p.Before) {
+	if inherited, ok := actual.ExpandedDevices[p.Device]; ok && !maps.Equal(inherited, current) {
 		return nil, nil, "", domain.ErrPlanStale
 	}
 	return server, actual, etag, nil
@@ -90,7 +94,7 @@ func (client *Client) ApplyPreparedReadOnlyDisk(ctx context.Context, p ports.Pre
 	if err != nil {
 		return err
 	}
-	if maps.Equal(p.Before, readOnlyDisk(p)) {
+	if maps.Equal(actual.Devices[p.Device], readOnlyDisk(p)) {
 		return nil
 	}
 	if actual.Devices == nil {

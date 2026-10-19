@@ -19,6 +19,7 @@ done
 engine_stale() {
   [ "$FORCE" = 1 ] && return 0
   [ -x "$OUTPUT" ] || return 0
+  [ "$("$OUTPUT" --version 2>/dev/null)" = "$(basename "$OUTPUT") $VERSION" ] || return 0
   [ "$REPO/go.mod" -nt "$OUTPUT" ] || [ "$REPO/go.sum" -nt "$OUTPUT" ] || \
     find "$REPO/cmd" "$REPO/internal" -type f -name '*.go' ! -name '*_test.go' \
       -newer "$OUTPUT" -print -quit | grep -q .

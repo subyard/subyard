@@ -12,8 +12,11 @@ synthetic_address_active=''
 occupied_pid=''
 secondary_name=''
 kind=${1:-container}
-[ "$#" -le 2 ] && { [ "$kind" = container ] || [ "$kind" = vm ]; } || exit 2
+[ "$#" -le 3 ] && { [ "$kind" = container ] || [ "$kind" = vm ]; } || exit 2
 auth_only=${2:-}
+native_loss=${3:-}
+case "$native_loss" in ''|owner|helper|group) ;; *) exit 2 ;; esac
+[ -z "$native_loss" ] || { [ -z "$auth_only" ] && [ "$kind" = container ]; } || exit 2
 case "$auth_only" in ""|auth-only|teardown-only|dependency-only|network-only|pull-diagnostic) ;; *) exit 2 ;; esac
 [ "$auth_only" != network-only ] || [ "$kind" = container ] || exit 2
 [ "$auth_only" != pull-diagnostic ] || [ "$kind" = container ] || exit 2
@@ -45,8 +48,8 @@ incus() {
 }
 reexec_with_incus_group() {
   local command
-  printf -v command 'exec env SUBYARD_E2E_VM=%q bash %q %q %q' \
-    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/openlit/tests/e2e/owner.sh" "$kind" "$auth_only"
+  printf -v command 'exec env SUBYARD_E2E_VM=%q bash %q %q %q %q' \
+    "$SUBYARD_E2E_VM" "$ROOT/config/profiles/openlit/tests/e2e/owner.sh" "$kind" "$auth_only" "$native_loss"
   exec sg incus-admin -c "$command"
 }
 
@@ -115,6 +118,10 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   printf 'openlit_e2e_cleanup_entry trigger=%s elapsed_seconds=%s exit_code=%s\n' "${1:-EXIT}" "$SECONDS" "$rc" >&2
+  if { [ "$native_loss" = helper ] || [ "$native_loss" = group ]; } && [ -f "$STATE/native-loss/after-cut.json" ]; then
+    printf 'openlit_e2e_pending_fixture_cleanup=allocation-release original_exit=%s\n' "$original_rc" >&2
+    exit "$original_rc"
+  fi
   if [ "$rc" -ne 0 ] && [ -n "$YARD_NAME" ]; then
     printf 'openlit_e2e_failure_exit=%s kind=%s\n' "$rc" "$kind" >&2
     incus list "yard-$YARD_NAME" --project "subyard-$YARD_NAME" -f csv -c ns >&2
@@ -660,3 +667,71 @@ printf 'openlit_e2e_stage=final-disable elapsed_seconds=%s\n' "$SECONDS"
 yard profile disable openlit --yes
 printf 'openlit_e2e_stage=final-disable-complete elapsed_seconds=%s\n' "$SECONDS"
 printf 'ok: OpenLIT default off, enable without root-visible CLIs, receiver CAS update/rollback, repeat init/config apply, native logs+metrics+traces ingestion, disable and retained data after re-enable\n'
+if [ -n "$native_loss" ]; then
+  yard profile enable openlit --yes
+  candidate migrate --check --json | jq -e '.outcome.status=="ready" and .outcome.reachedGoal==true' >/dev/null
+  loss_case="$STATE/native-loss"
+  install -d -m 0700 "$loss_case" "$loss_case/bin"
+  printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
+  python3 - "$loss_case" "$instance" <<'PY'
+from pathlib import Path
+import shlex,sys
+case,instance=sys.argv[1:]
+script='#!/bin/bash\nset -euo pipefail\ncase='+shlex.quote(case)+'\ninstance='+shlex.quote(instance)+'\n'+r'''
+if [ "${1:-}" = config ] && [ "${2:-}" = set ] && [ "${3:-}" = "$instance" ] &&
+   [ "${4:-}" = user.subyard.openlit_dashboard ]; then
+  /usr/bin/incus "$@"
+  printf 'dashboard-marker\n' >> "$case/calls"
+  printf '%s\n' "$$" > "$case/paused"
+  while [ ! -e "$case/release" ]; do sleep .05; done
+  exit 0
+fi
+exec /usr/bin/incus "$@"
+'''
+path=Path(case)/'bin/incus';path.write_text(script);path.chmod(0o700)
+PY
+  # Retain the exact owned receipt but remove its device, requiring the actual
+  # profile to republish host metadata after checking the healthy guest stack.
+  incus config device remove "$instance" openlit-dashboard --project "$project"
+  loss_observe() {
+    openlit_candidate_command /usr/bin/python3 -B "$ROOT/tests/helpers/profile-native-loss.py" \
+      --runtime "$(readlink -f "$STATE/runtime/current")" \
+      --manifest-sha256 "$(sha256sum "$ROOT/.subyard-acceptance/runtime/runtime-files.sha256" | cut -d' ' -f1)" \
+      --case-root "$loss_case" --mode "$native_loss" --successor "$ROOT/.subyard-acceptance/fixture-b" \
+      --current-version "$(jq -r .version "$ROOT/.subyard-acceptance/candidate.json")" --activation-id openlit-runtime "$@"
+  }
+  successor_version="$(loss_observe --preflight | jq -er .version)"
+  PATH="$loss_case/bin:$PATH" loss_observe | tee "$STATE/native-loss.log"
+  loss_resources() {
+    incus config get "$instance" user.subyard.openlit_dashboard --project "$project"
+    incus config device show "$instance" --project "$project" | sha256sum
+    incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json
+    readlink "$STATE/runtime/current"
+  }
+  loss_resources > "$loss_case/resources.before"
+  if [ "$native_loss" = owner ]; then
+    cp "$loss_case/calls" "$loss_case/calls.drained"
+    PATH="$loss_case/bin:$PATH" candidate migrate --yes > "$STATE/native-loss-recover.log" 2>&1
+    cmp "$loss_case/calls.drained" "$loss_case/calls" || die 'owner recovery replayed the drained OpenLIT mutation'
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'owner recovery changed the drained profile resources'
+    candidate migrate --check --json | jq -e '.outcome.status=="ready" and .outcome.reachedGoal==true' >/dev/null
+  else
+    loss_observe --verify-unknown
+    if PATH="$loss_case/bin:$PATH" candidate migrate --yes > "$STATE/native-loss-same-goal.log" 2>&1; then
+      die 'opaque native loss replayed the original OpenLIT goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'same-goal refusal changed OpenLIT resources'
+    if PATH="$loss_case/bin:$PATH" YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/fixture-b" \
+      candidate update --offline --version "$successor_version" --yes > "$STATE/native-loss-new-goal.log" 2>&1; then
+      die 'opaque native loss admitted a replacement OpenLIT goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'replacement refusal changed OpenLIT resources'
+    loss_observe --verify-unknown
+  fi
+  printf 'ok: separate installed Rust OpenLIT %s loss contract\n' "$native_loss"
+fi

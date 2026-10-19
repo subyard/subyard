@@ -100,6 +100,8 @@ impl Binding {
 pub(crate) struct Target {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prepared_recipe: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_owner: String,
     pub scope: String,
     pub reported_actual: String,
     pub reported_desired: String,
@@ -118,7 +120,26 @@ pub(crate) struct Target {
     pub source: String,
 }
 impl Target {
+    pub(crate) fn resolved(&self, targets: &[Self]) -> Result<Self> {
+        require(targets.len() == 1)?;
+        let resolved = &targets[0];
+        resolved.validate()?;
+        let mut expected = self.clone();
+        if resolved.instance_uuid != self.instance_uuid {
+            require(
+                self.instance_uuid == "absent"
+                    && resolved.instance_uuid != "absent"
+                    && record::safe_id(&resolved.instance_uuid),
+            )?;
+            expected.instance_uuid = resolved.instance_uuid.clone();
+        }
+        require(*resolved == expected)?;
+        Ok(resolved.clone())
+    }
     pub(crate) fn validate(&self) -> Result<()> {
+        if !self.after_owner.is_empty() {
+            crate::after_owner::AfterOwnerActivation::parse(&self.after_owner)?;
+        }
         require(
             (self.prepared_recipe.is_empty() || record::fingerprint(&self.prepared_recipe))
                 && record::safe_id(&self.owner)
@@ -157,8 +178,15 @@ pub(crate) enum Request {
     },
     CaptureIngress {
         session: String,
+        #[serde(rename = "legacyRust")]
+        legacy_rust: bool,
         #[serde(rename = "bindingIngress")]
         binding: Option<IngressBinding>,
+    },
+    ObserveLegacyCheckpoint {
+        session: String,
+        #[serde(rename = "originalV1")]
+        original_v1: OriginalV1,
     },
     ObserveIngress {
         session: String,
@@ -194,6 +222,26 @@ pub(crate) enum Request {
         session: String,
         before: OwnerBefore,
     },
+    BindOwnerResults {
+        session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        binding: Option<Binding>,
+        producer: Binding,
+        before: OwnerBefore,
+        token: String,
+    },
+    ResolveOwnerTarget {
+        session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        binding: Option<Binding>,
+        target: Target,
+    },
+    ResolveAfterOwner {
+        session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        binding: Option<Binding>,
+        target: Target,
+    },
     ReadInstalledRecipe {
         session: String,
         #[serde(rename = "recipeHash")]
@@ -207,6 +255,8 @@ pub(crate) enum Request {
         offset: u64,
         total: u64,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
     },
     CaptureActivation {
         session: String,
@@ -323,6 +373,8 @@ impl Request {
 #[derive(Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Reply {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resolved_recipe: String,
     #[serde(default)]
     pub installed_chunk: Option<InstalledChunk>,
     #[serde(default)]
@@ -352,7 +404,27 @@ impl Reply {
         if !self.code.is_empty() {
             return require(self.installed_chunk.is_none());
         }
+        if !matches!(request, Request::ResolveAfterOwner { .. }) {
+            require(self.resolved_recipe.is_empty())?;
+        }
         match request {
+            Request::ResolveAfterOwner { target, .. } => {
+                require(self.installed_chunk.is_none() && self.terminal.is_none())?;
+                require(
+                    self.targets.len() == 1
+                        && self.targets[0].prepared_recipe == self.resolved_recipe,
+                )?;
+                crate::after_owner::physical_target(target, &self.targets[0])
+            }
+            Request::BindOwnerResults { .. } => require(
+                self.installed_chunk.is_none()
+                    && self.targets.is_empty()
+                    && self.terminal.is_none(),
+            ),
+            Request::ResolveOwnerTarget { target, .. } => {
+                require(self.installed_chunk.is_none() && self.terminal.is_none())?;
+                target.resolved(&self.targets).map(|_| ())
+            }
             Request::ProjectActivation { .. } => require(
                 self.installed_chunk.is_none()
                     && !self.yards.is_empty()
@@ -364,6 +436,9 @@ impl Reply {
                 self.installed_chunk.is_none()
                     && matches!(self.actual.as_str(), "expected" | "in-progress" | "desired"),
             ),
+            Request::ObserveLegacyCheckpoint { .. } => {
+                require(self.installed_chunk.is_none() && record::fingerprint(&self.actual))
+            }
             Request::ReadInstalledRecipe {
                 recipe_hash,
                 offset,
@@ -388,12 +463,16 @@ impl Reply {
                 offset,
                 total,
                 content,
+                target,
                 ..
             } => {
                 let c = self.installed_chunk.as_ref().ok_or(Error::Invalid)?;
                 let size = STANDARD.decode(content).map_err(|_| Error::Codec)?.len() as u64;
                 require(
-                    c.recipe_hash == *recipe_hash
+                    target.as_ref().is_none_or(|t| {
+                        t.prepared_recipe == *recipe_hash
+                            && offset.checked_add(size) == Some(*total)
+                    }) && c.recipe_hash == *recipe_hash
                         && c.offset == *offset
                         && c.total == *total
                         && c.content.is_empty()
@@ -561,6 +640,19 @@ pub(crate) struct IngressBinding {
     pub releases: crate::wire::journal_v2::ReleasePair,
     pub steps: Vec<IngressBoundStep>,
 }
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OriginalV1Record {
+    pub identity: FileIdentity,
+    pub digest: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OriginalV1 {
+    pub expectation: crate::legacy_import::Expectation,
+    pub journal: OriginalV1Record,
+    pub registry: OriginalV1Record,
+}
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct IngressBoundStep {
@@ -601,6 +693,119 @@ pub(crate) struct IngressOperation {
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
+    #[test]
+    fn owner_result_projection_only_resolves_the_original_absent_uuid() {
+        let original = Target {
+            prepared_recipe: "a".repeat(64),
+            after_owner: String::new(),
+            scope: "scope".into(),
+            reported_actual: String::new(),
+            reported_desired: String::new(),
+            before: String::new(),
+            class: "profile-runtime".into(),
+            scope_state: String::new(),
+            stage: String::new(),
+            owner: "synthetic-runtime".into(),
+            yard: "yard".into(),
+            project: "project".into(),
+            instance: "instance".into(),
+            instance_uuid: "absent".into(),
+            state: "stale".into(),
+            actual: "b".repeat(64),
+            desired: "c".repeat(64),
+            source: "d".repeat(64),
+        };
+        let approved = crate::codec::encode(&original, false).unwrap();
+        let bind = |target| Request::BindInstalledRecipe {
+            session: "a".repeat(64),
+            recipe_hash: original.prepared_recipe.clone(),
+            offset: 0,
+            total: 1,
+            content: STANDARD.encode([0]),
+            target,
+        };
+        assert!(serde_json::to_value(bind(None))
+            .unwrap()
+            .get("target")
+            .is_none());
+        let reply = Reply {
+            installed_chunk: Some(InstalledChunk {
+                recipe_hash: original.prepared_recipe.clone(),
+                offset: 0,
+                total: 1,
+                content: String::new(),
+                complete: true,
+            }),
+            ..Default::default()
+        };
+        reply.protocol(&bind(Some(original.clone()))).unwrap();
+        let mut nonfinal = bind(Some(original.clone()));
+        if let Request::BindInstalledRecipe { total, .. } = &mut nonfinal {
+            *total = 2;
+        }
+        let nonfinal_reply = Reply {
+            installed_chunk: Some(InstalledChunk {
+                recipe_hash: original.prepared_recipe.clone(),
+                offset: 0,
+                total: 2,
+                content: String::new(),
+                complete: false,
+            }),
+            ..Default::default()
+        };
+        assert!(nonfinal_reply.protocol(&nonfinal).is_err());
+        if let Request::BindInstalledRecipe { target, .. } = &mut nonfinal {
+            *target = None;
+        }
+        nonfinal_reply.protocol(&nonfinal).unwrap();
+        assert!(original.resolved(std::slice::from_ref(&original)).is_ok());
+        let mut resolved = original.clone();
+        resolved.instance_uuid = "01234567-89ab-cdef-0123-456789abcdef".into();
+        assert!(original.resolved(std::slice::from_ref(&resolved)).is_ok());
+        let mut existing_grammar = resolved.clone();
+        existing_grammar.instance_uuid = "original-created-uuid".into();
+        assert!(original.resolved(&[existing_grammar]).is_ok());
+        assert_eq!(crate::codec::encode(&original, false).unwrap(), approved);
+        assert!(original.resolved(&[]).is_err());
+        assert!(original
+            .resolved(&[resolved.clone(), resolved.clone()])
+            .is_err());
+        let mut changed = resolved.clone();
+        changed.instance_uuid = "11234567-89ab-cdef-0123-456789abcdef".into();
+        assert!(resolved.resolved(&[changed]).is_err());
+        for field in [
+            "preparedRecipe",
+            "scope",
+            "class",
+            "owner",
+            "yard",
+            "project",
+            "instance",
+            "actual",
+            "desired",
+            "source",
+            "before",
+            "state",
+        ] {
+            let mut value = serde_json::to_value(&resolved).unwrap();
+            value[field] = serde_json::Value::String(
+                if matches!(field, "preparedRecipe" | "actual" | "desired" | "source") {
+                    "f".repeat(64)
+                } else if field == "state" {
+                    "current".into()
+                } else {
+                    "other".into()
+                },
+            );
+            let changed: Target = serde_json::from_value(value).unwrap();
+            assert!(original.resolved(&[changed]).is_err(), "{field}");
+        }
+        assert!(resolved.resolved(std::slice::from_ref(&original)).is_err());
+        for invalid in [String::new(), "a".repeat(129), "../invalid".into()] {
+            resolved.instance_uuid = invalid;
+            assert!(original.resolved(std::slice::from_ref(&resolved)).is_err());
+        }
+    }
     #[test]
     fn owner_progress_is_a_closed_success_projection() {
         let request = Request::ObserveOwner {

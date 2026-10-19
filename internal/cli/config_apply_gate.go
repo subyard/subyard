@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
@@ -171,6 +172,29 @@ func (cli *CLI) prepareActivationRepair(
 		return nil, nil
 	}
 	var sourceBinding, toolingBinding string
+	if configApplyRepairRustGateShape(outcome) {
+		// The completed Rust drift status retains its original transaction.
+		// Authenticate the original bytes, then distinguish a fresh drift plan
+		// from the original terminal-cleanup continuation before admitting edits.
+		reader := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
+		defer reader.Close()
+		proof, proofErr := cli.inspectConfigSourceAdmission(ctx, reader)
+		if proofErr != nil || proof.Metadata.Journal == nil {
+			return nil, nil
+		}
+		raw, marshalErr := releasetransition.MarshalJournal(*proof.Metadata.Journal)
+		if marshalErr != nil || !bytes.Equal(raw, snapshot.Payload) {
+			return nil, nil
+		}
+		owner := releaseruntime.New(releaseruntime.Config{Inputs: cli.commandInputs,
+			Context: releaseruntime.RuntimeContext{OperatorHome: firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), DataHome: options.DataHome, ConfigHome: options.ConfigHome, RuntimeRoot: options.RuntimeRoot, OperationID: cli.env["SUBYARD_OPERATION_ID"]}, Stderr: cli.options.Stderr})
+		defer owner.Close()
+		inspection, inspectErr := owner.InspectMutationGateInspection(ctx, options.RuntimeRoot, options.ConfigHome, "default")
+		if inspectErr != nil || !configApplyRepairRustInspectionMatches(journal, outcome, inspection, profileInit) {
+			return nil, nil
+		}
+		sourceBinding = proof.Binding
+	}
 	if cleanupID != "" {
 		sourceBinding, toolingBinding, err = cli.integrationCleanupRecoveryAuthority(ctx, cleanupID, outcome, journal)
 		if err != nil {
@@ -680,10 +704,23 @@ func (cli *CLI) checkConfigApplyRepairHistory(permit *configApplyRepairPermit) e
 }
 
 func configApplyRepairGateShape(outcome releasetransition.Outcome) bool {
-	return outcome.Status == releasetransition.StatusMigrationRequired &&
-		outcome.Code == releasetransition.CodeTransitionRequired &&
-		!outcome.ReachedGoal && outcome.Transaction == nil && outcome.Retry != "" &&
-		outcome.Active != "" && outcome.Active == outcome.Target
+	return !outcome.ReachedGoal && outcome.Retry != "" && outcome.Active != "" && outcome.Active == outcome.Target &&
+		(outcome.Status == releasetransition.StatusMigrationRequired && outcome.Code == releasetransition.CodeTransitionRequired && outcome.Transaction == nil ||
+			configApplyRepairRustGateShape(outcome))
+}
+
+func configApplyRepairRustGateShape(outcome releasetransition.Outcome) bool {
+	return outcome.Status == releasetransition.StatusRecovering && outcome.Code == releasetransition.CodeRecoveryPending &&
+		outcome.Transaction != nil && *outcome.Transaction != ""
+}
+
+// The caller obtains this inspection from the verified owner's frozen reader.
+// A cleanup admission is a durable continuation, never source-edit authority.
+func configApplyRepairRustInspectionMatches(journal releasetransition.JournalRecord, outcome releasetransition.Outcome, inspection *releasetransition.Inspection, profileInit bool) bool {
+	journalMatches := configApplyRepairJournalMatches(journal, outcome) || profileInit && profileInitRepairRollbackJournalMatches(journal, outcome)
+	return configApplyRepairGateShape(outcome) && configApplyRepairRustGateShape(outcome) &&
+		journalMatches && inspection != nil && inspection.Resume == nil &&
+		inspection.Outcome != nil && sameConfigApplyGate(outcome, *inspection.Outcome)
 }
 
 func configApplyRepairJournalMatches(
@@ -692,7 +729,8 @@ func configApplyRepairJournalMatches(
 ) bool {
 	return journal.Checkpoint == releasetransition.JournalComplete &&
 		journal.Goal.Direction == releasetransition.DirectionActivateTarget &&
-		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active
+		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active &&
+		(!configApplyRepairRustGateShape(outcome) || *outcome.Transaction == journal.Transaction)
 }
 
 func profileInitRepairRollbackJournalMatches(
@@ -701,7 +739,8 @@ func profileInitRepairRollbackJournalMatches(
 ) bool {
 	return journal.Checkpoint == releasetransition.JournalComplete &&
 		journal.Goal.Direction == releasetransition.DirectionActivatePrevious &&
-		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active
+		journal.Goal.Target == outcome.Target && journal.Goal.Target == outcome.Active &&
+		(!configApplyRepairRustGateShape(outcome) || *outcome.Transaction == journal.Transaction)
 }
 
 func sameConfigApplyReleaseID(

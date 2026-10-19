@@ -118,3 +118,40 @@ func TestRollbackSupportUsesExactRepositoryRolesAndBoundObservations(t *testing.
 		}
 	}
 }
+
+func TestRollbackSupportCompletedSameReleaseRequiresExactOriginalTuple(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "asset"), []byte("retained"), 0600)
+	file, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	identity, _ := IdentityOf(file)
+	hash := strings.Repeat("a", 64)
+	original := RollbackRepository{Release: "retained", ArtifactDigest: hash, Root: identity}
+	for _, change := range []string{"same-retained", "forward", "different-digest", "different-root"} {
+		t.Run(change, func(t *testing.T) {
+			calls := 0
+			c := Context{Session: hash, Target: "retained", Artifact: hash, Repository: identity, Direction: releasetransition.DirectionActivatePrevious, Releases: releasetransition.ReleasePair{From: "retained", Target: "retained"}}
+			repositories := RollbackRepositories{Source: original, Target: original}
+			switch change {
+			case "forward":
+				c.Direction = releasetransition.DirectionActivateTarget
+			case "different-digest":
+				repositories.Source.ArtifactDigest = strings.Repeat("b", 64)
+			case "different-root":
+				repositories.Source.Root.Inode++
+			}
+			s := session{context: &c, components: rollbackReaderFixture{calls: &calls}}
+			reply, err := s.captureRollbackSupport(context.Background(), Request{RollbackRepositories: &repositories}, []*os.File{file, file})
+			if change == "same-retained" {
+				if err != nil || reply.RollbackSupport == nil || calls != 1 {
+					t.Fatal("completed exact readonly tuple refused", err)
+				}
+			} else if err == nil || calls != 0 {
+				t.Fatal("foreign same-release tuple reached component")
+			}
+		})
+	}
+}

@@ -213,7 +213,7 @@ func (runtime Runtime) applyPreparedHostPowerRuntime(ctx context.Context, prepar
 	if environment == nil {
 		environment = map[string]string{}
 	}
-	if len(cached) == 1 {
+	if len(cached) == 1 && execution.ownerSources == nil {
 		environment["SUBYARD_PREPARED_INSTALLED_CLEANUP"] = "1"
 	}
 	environment["SUBYARD_USER"] = prepared.operator

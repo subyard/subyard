@@ -37,6 +37,13 @@ initialize_yard() {
   incus config set "$INSTANCE" user.subyard.git-fetch-fixture "$STATE" --project "$PROJECT"
 }
 TOKEN="$(date +%s)$$"
+case "${1:-}:$#" in :0|--preflight:1|--native-loss:2) ;; *) exit 2 ;; esac
+NATIVE_LOSS=''
+if [ "${1:-}" = --native-loss ]; then
+  [ "$#" = 2 ] || exit 2
+  NATIVE_LOSS="$2"
+  case "$NATIVE_LOSS" in owner|helper|group) ;; *) exit 2 ;; esac
+fi
 [[ "$TOKEN" =~ ^[0-9]+$ ]] || die 'allocation token must be numeric'
 if [ "${1:-}" = --preflight ]; then
   probe="$(mktemp -d /tmp/subyard-git-fetch-preflight.XXXXXX)"
@@ -75,6 +82,7 @@ chmod 0600 "$STATE/.marker"
 claimed=0
 initialized=0
 init_attempted=0
+loss_unknown=0
 incus() { sudo -n /usr/bin/incus "$@"; }
 fresh() {
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
@@ -91,6 +99,10 @@ cleanup() {
   local original=$? failed=0 names instance
   trap - EXIT INT TERM
   set +e
+  if [ "$loss_unknown" = 1 ]; then
+    printf 'git_fetch_pending_fixture_cleanup=allocation-release original_exit=%s\n' "$original" >&2
+    exit "$original"
+  fi
   if [ "$claimed" = 0 ] && [ "$init_attempted" = 1 ] && incus project show "$PROJECT" >/dev/null 2>&1; then
     printf 'git-fetch-activation: preserving unclaimed partial init project\n' >&2
     failed=1
@@ -208,3 +220,132 @@ timer_state | grep -Fxq ActiveState=inactive
 timer_state | grep -Fxq UnitFileState=disabled
 migrate --check --json | jq -e '.outcome.status=="ready"' >/dev/null
 printf 'PASS: installed candidate normal init/start/migrate, worker identity, repeat, selected disabled and deselected intent\n'
+if [ -n "$NATIVE_LOSS" ]; then
+  loss_case="$STATE/native-loss"
+  guest_loss="/tmp/subyard-fetch-loss-$TOKEN"
+  install -d -m 0700 "$loss_case" "$loss_case/bin"
+  printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
+  # BASH_ENV pauses the actual shipped Python entry only after its archive has
+  # arrived, before its original generation claim and lifecycle-lock acquisition.
+  guest bash -se -- "$guest_loss" <<'SH'
+set -euo pipefail
+root=$1
+install -d -m 0700 "$root"
+printf 'subyard-git-fetch-loss-v1\n' > "$root/.marker"
+printf -v quoted '%q' "$root"
+printf 'loss_root=%s\n' "$quoted" > "$root/environment"
+cat >> "$root/environment" <<'BASH_ENV'
+python3() {
+  local argument refresh=0 status
+  for argument in "$@"; do [ "$argument" != custody-refresh ] || refresh=1; done
+  if [ "$refresh" = 1 ]; then
+    printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" > "$loss_root/paused"
+    while [ ! -e "$loss_root/release" ]; do sleep .05; done
+    if command python3 "$@"; then status=0; else status=$?; fi
+    printf '%s\n' "$status" > "$loss_root/terminal"
+    return "$status"
+  fi
+  command python3 "$@"
+}
+BASH_ENV
+chmod 0600 "$root/environment"
+SH
+  python3 - "$loss_case" "$guest_loss" "$INSTANCE" "$PROJECT" <<'PY'
+from pathlib import Path
+import shlex,sys
+case,guest,instance,project=sys.argv[1:]
+script='#!/bin/bash\nset -euo pipefail\n'+''.join(key+'='+shlex.quote(value)+'\n' for key,value in
+    [('case',case),('guest',guest),('instance',instance),('project',project)])+r'''
+refresh=0
+for argument in "$@"; do [ "$argument" != custody-refresh ] || refresh=1; done
+if [ "$refresh" = 1 ]; then
+  printf 'custody-refresh\n' >> "$case/calls"
+  if [ ! -e "$case/paused" ]; then
+    arguments=("$@")
+    for index in "${!arguments[@]}"; do
+      if [ "${arguments[$index]}" = -- ]; then
+        arguments=("${arguments[@]:0:$index}" --env "BASH_ENV=$guest/environment" "${arguments[@]:$index}")
+        break
+      fi
+    done
+    /usr/bin/incus "${arguments[@]}" <&0 & client=$!
+    while ! /usr/bin/incus exec "$instance" --project "$project" -- test -f "$guest/paused" </dev/null; do sleep .05; done
+    printf '%s\n' "$$" > "$case/paused"
+    while [ ! -e "$case/release" ]; do sleep .05; done
+    /usr/bin/incus exec "$instance" --project "$project" -- touch "$guest/release" </dev/null
+    wait "$client"
+    exit "$?"
+  fi
+fi
+exec /usr/bin/incus "$@"
+'''
+path=Path(case)/'bin/incus';path.write_text(script);path.chmod(0o700)
+PY
+  drift
+  generation_before="$(guest cat /var/lib/subyard/.git-fetch.native-custody.json | jq -er .generation)"
+  loss_observe() {
+    fresh /usr/bin/python3 -B "$ROOT/tests/helpers/profile-native-loss.py" \
+      --runtime "$(readlink -f "$STATE/runtime/current")" \
+      --manifest-sha256 "$(sha256sum "$SOURCE/runtime-files.sha256" | cut -d' ' -f1)" \
+      --case-root "$loss_case" --mode "$NATIVE_LOSS" --successor "$ROOT/.subyard-acceptance/fixture-b" \
+      --current-version "$(jq -r .version "$ROOT/.subyard-acceptance/candidate.json")" --activation-id git-fetch-runtime "$@"
+  }
+  successor_version="$(loss_observe --preflight | jq -er .version)"
+  PATH="$loss_case/bin:$PATH" loss_observe | tee "$STATE/native-loss.log"
+  loss_resources() {
+    guest sha256sum "$worker"
+    guest cat /var/lib/subyard/.git-fetch.native-custody.json
+    timer_state
+    readlink "$STATE/runtime/current"
+  }
+  loss_resources > "$loss_case/resources.before"
+  cp "$loss_case/calls" "$loss_case/calls.drained"
+  generation_drained="$(guest cat /var/lib/subyard/.git-fetch.native-custody.json | jq -er .generation)"
+  # A guest generation is evidence only through the product's supported fence;
+  # no fixture writes a generation, terminal receipt or replacement journal.
+  if PATH="$loss_case/bin:$PATH" migrate --yes > "$STATE/native-loss-fence.log" 2>&1; then
+    generation_after="$(guest cat /var/lib/subyard/.git-fetch.native-custody.json | jq -er .generation)"
+    if [ "$NATIVE_LOSS" = owner ]; then
+      cmp "$loss_case/calls.drained" "$loss_case/calls" || die 'owner recovery replayed the drained git-fetch mutation'
+      [ "$generation_after" = "$generation_drained" ] || die 'owner recovery replaced the drained git-fetch generation'
+      loss_resources > "$loss_case/resources.after"
+      cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'owner recovery changed drained git-fetch resources'
+    else
+      [ "$generation_after" != "$generation_before" ] || die 'native recovery lacked a fresh guest generation'
+    fi
+    if [ "$NATIVE_LOSS" = group ]; then
+      # The original guest request must still be alive at its first claim.
+      guest bash -se -- "$guest_loss" <<'SH'
+set -euo pipefail
+read -r pid start < "$1/paused"
+[ "$(awk '{print $22}' "/proc/$pid/stat")" = "$start" ]
+touch "$1/release"
+SH
+      for _ in {1..200}; do
+        guest test ! -f "$guest_loss/terminal" || break
+        sleep .05
+      done
+      original_guest_exit="$(guest cat "$guest_loss/terminal")"
+      [ "$original_guest_exit" != 0 ] || die 'delayed original native generation was accepted after fencing'
+      [ "$(guest cat /var/lib/subyard/.git-fetch.native-custody.json | jq -er .generation)" = "$generation_after" ] \
+        || die 'delayed original request changed the successor generation'
+    fi
+    assert_current
+    printf 'git_fetch_native_loss=%s supported_fence=closed delayed_claim=%s\n' "$NATIVE_LOSS" "${original_guest_exit:-not-delayed}"
+  else
+    loss_unknown=1
+    loss_observe --verify-unknown
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'UNKNOWN refusal changed git-fetch resources'
+    if PATH="$loss_case/bin:$PATH" YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/fixture-b" \
+      fresh "$YARD_BIN" update --offline --version "$successor_version" --yes > "$STATE/native-loss-new-goal.log" 2>&1; then
+      die 'unclosed native git-fetch work admitted a replacement goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'UNKNOWN refusal changed git-fetch resources'
+    loss_observe --verify-unknown
+    printf 'git_fetch_native_loss=%s supported_fence=unproved outcome=UNKNOWN delayed_claim_rejection=not-proved\n' "$NATIVE_LOSS"
+  fi
+fi

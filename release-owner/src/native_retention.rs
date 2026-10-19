@@ -111,6 +111,15 @@ impl Closure {
                 && matches!(terminal.state.as_str(), "complete" | "failed")
                 && value.commands.len() <= 256
                 && terminal.operations.len() <= 256
+                && terminal
+                    .operations
+                    .iter()
+                    .all(|o| crate::custody::operation_shape(o, false))
+                && (terminal.state != "complete"
+                    || terminal
+                        .operations
+                        .iter()
+                        .all(crate::custody::operation_success))
                 && value.facts.len() == terminal.operations.len() * 3 + value.commands.len() * 2
                 && value.facts.windows(2).all(|p| p[0].name < p[1].name),
         )?;
@@ -373,9 +382,10 @@ impl UpdateLease<'_> {
             let mut commands = vec![];
             let prefix = format!("{:03}.", binding.ordinal);
             for name in inventory::names(&directory, MAX_FILES)? {
-                let nested = name
-                    .strip_prefix(&prefix)
-                    .is_some_and(|n| n.starts_with("operation-") || n.starts_with("command-"));
+                let nested = name.strip_prefix(&prefix).is_some_and(|n| {
+                    (n.starts_with("operation-") || n.starts_with("command-"))
+                        && !crate::custody::create_fact(n)
+                });
                 if !nested {
                     continue;
                 }

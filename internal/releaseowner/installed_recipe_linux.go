@@ -3,6 +3,7 @@ package releaseowner
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 )
 
@@ -50,9 +51,15 @@ func (s *session) installedRecipe(ctx context.Context, r Request) (Reply, error)
 	if r.Total == 0 || r.Total > installedRecipeMaximum || len(r.Content) > base64.StdEncoding.EncodedLen(installedRecipeChunkSize) {
 		return Reply{}, errors.New("installed recipe transfer bound")
 	}
+	if r.Target != nil && (r.Op != "bind-installed-recipe" || r.Target.PreparedRecipe != r.RecipeHash) {
+		return Reply{}, errors.New("installed recipe target binding")
+	}
 	payload, err := base64.StdEncoding.Strict().DecodeString(r.Content)
 	if err != nil || len(payload) == 0 || base64.StdEncoding.EncodeToString(payload) != r.Content || len(payload) > installedRecipeChunkSize || r.Offset+uint64(len(payload)) > r.Total {
 		return Reply{}, errors.New("installed recipe chunk")
+	}
+	if r.Target != nil && r.Offset+uint64(len(payload)) != r.Total {
+		return Reply{}, errors.New("installed recipe target requires final chunk")
 	}
 	if r.Offset+uint64(len(payload)) < r.Total && len(payload) != installedRecipeChunkSize {
 		return Reply{}, errors.New("short installed recipe chunk")
@@ -74,8 +81,50 @@ func (s *session) installedRecipe(ctx context.Context, r Request) (Reply, error)
 		if digest(t.bytes) != t.hash {
 			return Reply{}, errors.New("installed recipe digest")
 		}
-		if err := components.BindInstalledRuntimeRecipe(ctx, t.hash, t.bytes); err != nil {
+		if r.Target != nil {
+			binder, ok := s.components.(interface {
+				BindInstalledRuntimeRecipeForTarget(context.Context, string, []byte, Target) error
+			})
+			if !ok {
+				return Reply{}, errors.New("installed target recipe capability")
+			}
+			if r.Target.AfterOwner != "" {
+				_, original, err := ParseAfterOwner(r.Target.AfterOwner)
+				if err != nil {
+					return Reply{}, err
+				}
+				if original != r.RecipeHash {
+					complete, err := s.ownerCompletion()
+					if err != nil {
+						return Reply{Code: "unknown"}, nil
+					}
+					receiver, ok := s.components.(interface {
+						BindAfterOwnerCompletion(AfterOwnerCompletion) error
+					})
+					if !ok {
+						return Reply{}, errors.New("after-owner completion capability")
+					}
+					if err := receiver.BindAfterOwnerCompletion(complete); err != nil {
+						return Reply{}, err
+					}
+				}
+			}
+			if err := binder.BindInstalledRuntimeRecipeForTarget(ctx, t.hash, t.bytes, *r.Target); err != nil {
+				return Reply{}, err
+			}
+		} else if err := components.BindInstalledRuntimeRecipe(ctx, t.hash, t.bytes); err != nil {
 			return Reply{}, err
+		}
+		var header struct {
+			Owner string `json:"owner"`
+		}
+		if json.Unmarshal(t.bytes, &header) == nil && header.Owner == "owner-registration" {
+			s.ownerOrigins = nil
+			s.ownerCompleted = nil
+			s.ownerCompletedTerminal = ""
+			s.ownerResultsPayload = ""
+			s.ownerResultsRecipe = ""
+			s.ownerResultsSource = ""
 		}
 	}
 	return Reply{InstalledChunk: &InstalledRecipeChunk{RecipeHash: r.RecipeHash, Offset: r.Offset, Total: r.Total, Complete: complete}}, nil

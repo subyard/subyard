@@ -25,6 +25,12 @@ UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
 UPGRADE_TARGET="${SUBYARD_E2E_ORCA_UPGRADE_TARGET:-}"
 HANDLER_ACCEPTANCE="${SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE:-}"
+NATIVE_LOSS="${SUBYARD_E2E_ORCA_NATIVE_LOSS:-}"
+case "$NATIVE_LOSS" in ''|owner|helper|group) ;; *) exit 2 ;; esac
+if [ -n "$NATIVE_LOSS" ]; then
+  [ "$SSH_AGENT" = 0 ] && [ "$CODEX_CONFIG" = 0 ] && [ "$CODEX_PERMISSIONS" = 0 ] &&
+    [ -z "$UPGRADE_FROM" ] && [ -z "$HANDLER_ACCEPTANCE" ] && [ -z "$RESUME_STATE" ] || exit 2
+fi
 
 stage() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; }
 die() { printf 'orca-bootstrap-e2e: %s\n' "$*" >&2; exit 1; }
@@ -469,6 +475,10 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   [ "$FIXTURE_READY" = 1 ] || exit "$rc"
+  if { [ "$NATIVE_LOSS" = helper ] || [ "$NATIVE_LOSS" = group ]; } && [ -f "$STATE/native-loss/after-cut.json" ]; then
+    stage "pending native fixture retained for allocation release; original exit $original_rc"
+    exit "$original_rc"
+  fi
   if [ "$SSH_AGENT" = 1 ]; then
     if declare -F ssh_agent_cleanup >/dev/null; then
       ssh_agent_cleanup || { rc=3; cleanup_failed=1; }
@@ -1764,3 +1774,72 @@ fi
 client_status "$pairing" paired-client
 
 printf 'ok: fresh Orca bootstrap reconciled the yard and preserved its endpoint and grant\n'
+if [ -n "$NATIVE_LOSS" ]; then
+  yard migrate --check --json | jq -e '.outcome.status=="ready" and .outcome.reachedGoal==true' >/dev/null
+  loss_case="$STATE/native-loss"
+  install -d -m 0700 "$loss_case" "$loss_case/bin"
+  printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
+  python3 - "$loss_case" "$INSTANCE" <<'PY'
+from pathlib import Path
+import shlex,sys
+case,instance=sys.argv[1:]
+script='#!/bin/bash\nset -euo pipefail\ncase='+shlex.quote(case)+'\ninstance='+shlex.quote(instance)+'\n'+r'''
+if [ "${1:-}" = file ] && [ "${2:-}" = push ] && [[ "${4:-}" = "$instance/tmp/subyard-orca."* ]]; then
+  printf 'registration-push\n' >> "$case/calls"
+  /usr/bin/incus "$@"
+  if [ ! -e "$case/paused" ]; then
+    printf '%s\n' "$$" > "$case/paused"
+    while [ ! -e "$case/release" ]; do sleep .05; done
+  fi
+  exit 0
+fi
+exec /usr/bin/incus "$@"
+'''
+path=Path(case)/'bin/incus';path.write_text(script);path.chmod(0o700)
+PY
+  guest_root sh -c 'printf "\n# fixture-owned native loss drift\n" >> /usr/local/libexec/subyard/orca-registration/reconcile.py'
+  loss_observe() {
+    local command
+    printf -v command '%q ' /usr/bin/python3 -B "$ROOT/tests/helpers/profile-native-loss.py" \
+      --runtime "$(readlink -f "$SUBYARD_HOME/runtime/current")" \
+      --manifest-sha256 "$(sha256sum "$ROOT/.subyard-acceptance/runtime/runtime-files.sha256" | cut -d' ' -f1)" \
+      --case-root "$loss_case" --mode "$NATIVE_LOSS" --successor "$ROOT/.subyard-acceptance/fixture-b" \
+      --current-version "$release_version" --activation-id orca-runtime "$@"
+    sg incus-admin -c "exec $command"
+  }
+  successor_version="$(loss_observe --preflight | jq -er .version)"
+  PATH="$loss_case/bin:$PATH" loss_observe | tee "$STATE/native-loss.log"
+  loss_resources() {
+    guest_root sha256sum /usr/local/libexec/subyard/orca-registration/reconcile.py /usr/local/libexec/subyard/orca-registration.sha256
+    incus --project "$PROJECT" config get "$INSTANCE" user.subyard.resource.orca-server
+    incus --project "$PROJECT" config device show "$INSTANCE" | sha256sum
+    readlink "$SUBYARD_HOME/runtime/current"
+  }
+  loss_resources > "$loss_case/resources.before"
+  if [ "$NATIVE_LOSS" = owner ]; then
+    cp "$loss_case/calls" "$loss_case/calls.drained"
+    PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-recover.log" 2>&1
+    cmp "$loss_case/calls.drained" "$loss_case/calls" || die 'owner recovery replayed the drained Orca mutation'
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'owner recovery changed the drained profile resources'
+    yard migrate --check --json | jq -e '.outcome.status=="ready" and .outcome.reachedGoal==true' >/dev/null
+    assert_orca_readiness
+  else
+    loss_observe --verify-unknown
+    if PATH="$loss_case/bin:$PATH" yard migrate --yes > "$STATE/native-loss-same-goal.log" 2>&1; then
+      die 'opaque native loss replayed the original Orca goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'same-goal refusal changed Orca resources'
+    if PATH="$loss_case/bin:$PATH" YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/fixture-b" \
+      yard update --offline --version "$successor_version" --yes > "$STATE/native-loss-new-goal.log" 2>&1; then
+      die 'opaque native loss admitted a replacement Orca goal'
+    fi
+    loss_observe --verify-unchanged
+    loss_resources > "$loss_case/resources.after"
+    cmp "$loss_case/resources.before" "$loss_case/resources.after" || die 'replacement refusal changed Orca resources'
+    loss_observe --verify-unknown
+  fi
+  printf 'ok: separate installed Rust Orca %s loss contract\n' "$NATIVE_LOSS"
+fi

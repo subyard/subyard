@@ -56,9 +56,19 @@ type IncusReader interface {
 }
 
 type Runtime struct {
-	ownerSources       *preparedOwnerSourceExecution
-	LegacyContinuation *domain.LegacyContinuation
-	RepositoryRoot     string
+	ownerInitPlanning           bool
+	ownerSources                *preparedOwnerSourceExecution
+	afterOwnerConfigs           *afterOwnerConfigPhysical
+	afterOwnerConfigSource      bool
+	afterOwnerBroker            *afterOwnerBrokerPhysical
+	afterOwnerRoutes            *afterOwnerRoutePhysical
+	afterOwnerIntegrationSource bool
+	afterOwnerIntegrations      *afterOwnerIntegrationPhysical
+	ownerProject                *ownerProjectExecution
+	ownerInstance               *ownerInstanceExecution
+	ownerVolume                 *ownerVolumeExecution
+	LegacyContinuation          *domain.LegacyContinuation
+	RepositoryRoot              string
 	// LogicalRepositoryRoot labels durable recipes while RepositoryRoot may be
 	// the helper's own retained descriptor used only for physical source reads.
 	LogicalRepositoryRoot string
@@ -193,6 +203,9 @@ func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileSt
 }
 
 func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if runtime.ownerInitPlanning {
+		return domain.ErrPlanStale
+	}
 	if err := runtime.checkLegacyContinuation(ctx); err != nil {
 		return err
 	}
@@ -200,6 +213,9 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 	case ports.ReconcileStageProject:
 		if runtime.LegacyContinuation != nil {
 			return runtime.checkLegacyContinuation(ctx)
+		}
+		if ports.NativeOperationObserverFrom(ctx) != nil {
+			return runtime.applyOwnerProjectPortions(ctx)
 		}
 		return runtime.runScript(ctx, runtime.Stderr, "02-create-project.sh", "--yes")
 	case ports.ReconcileStageInstance:
@@ -921,6 +937,9 @@ func (runtime Runtime) Preflight(ctx context.Context, fresh bool) error {
 }
 
 func (runtime Runtime) Teardown(ctx context.Context) error {
+	if runtime.ownerInitPlanning {
+		return domain.ErrPlanStale
+	}
 	if runtime.LegacyContinuation != nil {
 		return errors.New("legacy continuation cannot authorize reset or teardown")
 	}
@@ -1051,7 +1070,11 @@ func (runtime Runtime) importPowerState(ctx context.Context) error {
 }
 
 func (runtime Runtime) powerService() application.PowerService {
-	return application.PowerService{Instances: runtime.Incus, Config: runtime.ConfigWriter}
+	config := runtime.ConfigWriter
+	if runtime.ownerInstance != nil && runtime.ownerInstance.created != nil {
+		config = ownerCreatedPowerWriter{runtime}
+	}
+	return application.PowerService{Instances: runtime.Incus, Config: config}
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
@@ -1084,6 +1107,22 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 	desired := application.InitialPower(runtime.Yard)
 	vmWeight := runtime.environmentValue("VM_CPU_WEIGHT")
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+	if runtime.ownerInstance != nil {
+		if err == nil {
+			if runtime.ownerInstance.created == nil {
+				return domain.ErrPlanStale
+			}
+			original := runtime.ownerInstance.original
+			if runtime.ownerInstance.resolved != nil {
+				original = *runtime.ownerInstance.resolved
+			}
+			if runtime.checkCreatedOwnerInstance(ctx, original, *runtime.ownerInstance.created) != nil {
+				return domain.ErrPlanStale
+			}
+		} else if !errors.Is(err, ports.ErrInstanceNotFound) {
+			return err
+		}
+	}
 	if err == nil {
 		if vmWeight == "" {
 			vmWeight = instance.Config["user.subyard.vm_cpu_weight"]
@@ -1107,11 +1146,11 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 		return err
 	}
 	if err := runtime.withNetworkStart(ctx, func() error {
-		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{
-			"SUBYARD_POWER_DESIRED":           string(desired),
-			"SUBYARD_PREPARED_INCUS_APPARMOR": appArmor,
-			"VM_CPU_WEIGHT":                   vmWeight,
-		}, "03-create-subyard.sh", "--yes")
+		environment := map[string]string{"SUBYARD_POWER_DESIRED": string(desired), "SUBYARD_PREPARED_INCUS_APPARMOR": appArmor, "VM_CPU_WEIGHT": vmWeight}
+		if ports.NativeOperationObserverFrom(ctx) != nil {
+			return runtime.applyOwnerInstancePortions(ctx, environment)
+		}
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--yes")
 	}); err != nil {
 		return err
 	}

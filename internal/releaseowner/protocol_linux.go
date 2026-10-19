@@ -138,6 +138,7 @@ type OwnerBefore struct {
 }
 type Target struct {
 	PreparedRecipe  string `json:"preparedRecipe,omitempty"`
+	AfterOwner      string `json:"afterOwner,omitempty"`
 	Scope           string `json:"scope"`
 	ReportedActual  string `json:"reportedActual"`
 	ReportedDesired string `json:"reportedDesired"`
@@ -171,6 +172,9 @@ type Terminal struct {
 	Observed     string                  `json:"observed"`
 }
 type Request struct {
+	Producer             *Binding              `json:"producer,omitempty"`
+	OriginalV1           *OriginalV1Checkpoint `json:"originalV1,omitempty"`
+	LegacyRust           bool                  `json:"legacyRust,omitempty"`
 	RecipeHash           string                `json:"recipeHash,omitempty"`
 	Offset               uint64                `json:"offset,omitempty"`
 	Total                uint64                `json:"total,omitempty"`
@@ -205,6 +209,7 @@ type RollbackRepositories struct {
 	Target RollbackRepository `json:"target"`
 }
 type Reply struct {
+	ResolvedRecipe  string                 `json:"resolvedRecipe,omitempty"`
 	InstalledChunk  *InstalledRecipeChunk  `json:"installedChunk,omitempty"`
 	RollbackSupport *ports.RollbackSupport `json:"rollbackSupport,omitempty"`
 	Code            string                 `json:"code"`
@@ -393,10 +398,11 @@ func Serve(ctx context.Context, input *os.File, output io.Writer, factory Factor
 	nativeContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan struct{})
-	defer close(done)
+	watchDone := make(chan struct{})
+	defer func() { close(done); <-watchDone }()
 	// Poll never consumes stream bytes or ancillary descriptors. Only the framed
 	// reader calls recvmsg. Owner EOF closes admission and cancels native work.
-	go watchNativeOwner(input, done, cancel, unix.Poll)
+	go func() { defer close(watchDone); watchNativeOwner(input, done, cancel, unix.Poll) }()
 	defer session.close()
 	for sequence := uint64(1); sequence != 0; sequence++ {
 		header, files, err := receiveHeader(input)
@@ -410,7 +416,7 @@ func Serve(ctx context.Context, input *os.File, output io.Writer, factory Factor
 			defer closeFiles(files)
 			size := binary.BigEndian.Uint32(header[48:])
 			kind := header[5]
-			if !bytes.Equal(header[:4], []byte("SYC1")) || header[4] != 1 || header[6] != 0 || header[7] != 0 || binary.BigEndian.Uint64(header[8:16]) != sequence || size == 0 || size > MaxRequest || kind < 1 || kind > 17 || kind != 15 && len(files) != 0 {
+			if !bytes.Equal(header[:4], []byte("SYC1")) || header[4] != 1 || header[6] != 0 || header[7] != 0 || binary.BigEndian.Uint64(header[8:16]) != sequence || size == 0 || size > MaxRequest || !nativeFrameKind(kind) || kind != 15 && len(files) != 0 {
 				return errors.New("native frame refusal")
 			}
 			raw := make([]byte, size)
@@ -457,6 +463,14 @@ func Serve(ctx context.Context, input *os.File, output io.Writer, factory Factor
 		}
 	}
 	return errors.New("native sequence exhausted")
+}
+
+func nativeFrameKind(kind byte) bool {
+	switch kind {
+	case 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21:
+		return true
+	}
+	return false
 }
 
 type IngressBinding struct {

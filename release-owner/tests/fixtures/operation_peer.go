@@ -102,6 +102,12 @@ func (c *components) CaptureInventory(context.Context) ([]string, []string, erro
 func (c *components) CaptureIngress(context.Context, *releaseowner.IngressBinding) (releaseowner.IngressFacts, error) {
 	return releaseowner.IngressFacts{Yards: slices.Clone(c.input.Yards), Operations: []releaseowner.IngressOperation{}, Decisions: []releasetransition.RedactedDecision{}, Blockers: []releasetransition.Blocker{}}, nil
 }
+
+// CaptureRustIngress is the explicit source-only component contract. These
+// immutable fixture facts perform no legacy discovery or release assessment.
+func (c *components) CaptureRustIngress(context.Context, *releaseowner.IngressBinding) (releaseowner.IngressFacts, error) {
+	return releaseowner.IngressFacts{Yards: slices.Clone(c.input.Yards), Operations: []releaseowner.IngressOperation{}, Decisions: []releasetransition.RedactedDecision{}, Blockers: []releasetransition.Blocker{}}, nil
+}
 func (*components) ObserveIngress(context.Context, releaseowner.IngressStep) (string, error) {
 	return "", errors.New("unexpected ingress")
 }

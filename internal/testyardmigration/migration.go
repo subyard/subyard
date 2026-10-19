@@ -38,15 +38,18 @@ type Options struct {
 	RunYard          func(context.Context, string, io.Writer, ...string) error
 	// RouteDevices is a native caller's original exact device authority. Nil
 	// preserves the existing standalone migration command contract.
-	RouteDevices            *PreparedRouteDevices
-	ApplyRouteDevice        func(context.Context, ports.PreparedReadOnlyDisk) error
-	CheckRouteDevices       func(context.Context, *PreparedRouteDevices) error
-	fault                   func(string) error
-	syncRegistrationFile    func(*os.File) error
-	openRegistrationStaging func(int, string) (int, error)
-	syncOwnerDirectory      func(string, int) error
-	RecoveryToken           string
-	TerminalCleanup         bool
+	RouteDevices              *PreparedRouteDevices
+	ApplyRouteDevice          func(context.Context, ports.PreparedReadOnlyDisk) error
+	CheckRouteDevices         func(context.Context, *PreparedRouteDevices) error
+	EnsureImageProject        func(context.Context, string, bool) error
+	RestoreLegacyStop         func(context.Context) error
+	RecordRegistrationRestore func(PreparedOwnerMember) error
+	fault                     func(string) error
+	syncRegistrationFile      func(*os.File) error
+	openRegistrationStaging   func(int, string) (int, error)
+	syncOwnerDirectory        func(string, int) error
+	RecoveryToken             string
+	TerminalCleanup           bool
 }
 
 type State string
@@ -1518,6 +1521,9 @@ func temporarilyStartStoppedLegacyYard(
 		return nil, false, fmt.Errorf("temporarily start legacy test yard: %w", err)
 	}
 	return func() error {
+		if options.RestoreLegacyStop != nil {
+			return options.RestoreLegacyStop(ctx)
+		}
 		// The guarded start preserves desired=running. Stop only the live
 		// instance here so the preflight restores the exact inconsistent state
 		// it inspected; the product stop command would also persist
@@ -1649,6 +1655,9 @@ func sharedImageNamespace(ctx context.Context, options Options, yard string) (bo
 }
 
 func ensureProject(ctx context.Context, options Options, yard string, sharedImages bool) error {
+	if options.EnsureImageProject != nil {
+		return options.EnsureImageProject(ctx, yard, sharedImages)
+	}
 	projects, err := inspectProjects(ctx, options)
 	if err != nil {
 		return err

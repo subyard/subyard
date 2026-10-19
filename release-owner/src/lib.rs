@@ -2,6 +2,7 @@
 //! Release owner with an inert private operation entrypoint. No product writer
 //! capability or default route is enabled.
 mod activation;
+mod after_owner;
 mod assets;
 mod bundle;
 pub mod codec;
@@ -16,6 +17,7 @@ pub mod inventory;
 pub mod lease;
 mod ledger_execution;
 pub mod legacy;
+mod legacy_import;
 pub mod links;
 pub mod migration_owner;
 mod native;
@@ -36,6 +38,8 @@ mod rollback;
 mod settings;
 pub mod source;
 pub mod source_admission;
+pub mod source_query;
+mod source_v1;
 pub mod store;
 pub mod wire;
 mod work;

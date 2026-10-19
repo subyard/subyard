@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -434,4 +435,85 @@ func rewriteReleaseOwnerManifest(t *testing.T, candidate publishedCandidate) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(candidate.root, "runtime-files.sha256"), []byte(manifest.String()), 0o600)
+}
+
+// The Go release must work without Rust tooling and must never reinterpret an
+// explicitly Rust-owned artifact through the Go metadata policy.
+func TestGoSourceAdmissionDoesNotAdoptExperimentalOwner(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		t.Run(fmt.Sprint(declared), func(t *testing.T) {
+			root, home := testkit.TempDir(t), testkit.TempDir(t)
+			candidate := writeReleaseOwnerCandidate(t, root, "#!/bin/sh\n[ \"$1\" = --version ] || exit 99\nprintf 'yard-engine 1.2.3\\n'\n")
+			next := filepath.Join(root, "releases", "1.2.3-owner")
+			if err := os.Rename(candidate.root, next); err != nil {
+				t.Fatal(err)
+			}
+			candidate.root = next
+			candidate.release = "1.2.3-owner"
+			testkit.WriteFile(t, filepath.Join(next, "config/release-transition.json"), []byte(sourceAdmissionRegistry), 0600)
+			if !declared {
+				for _, name := range []string{releaseOwnerDeclarationPath, releaseOwnerSchemaPath, releaseOwnerBuildPath, releaseOwnerImagePath} {
+					if err := os.Remove(filepath.Join(next, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			rewriteReleaseOwnerManifest(t, candidate)
+			if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(root, "current")); err != nil {
+				t.Fatal(err)
+			}
+			runtime := New(Config{RepositoryRoot: filepath.Join(root, "no-rust-tooling")})
+			defer runtime.Close()
+			proof, err := runtime.InspectSourceAdmission(context.Background(), root, home)
+			if declared {
+				if err == nil || proof.Binding != "" || !strings.Contains(fmt.Sprint(errors.Unwrap(err)), "experimental Rust owner") {
+					t.Fatal("Go adopted Rust ownership", proof, err)
+				}
+			} else if err != nil || !lowerSHA256(proof.Binding) {
+				t.Fatal("Go metadata required Rust tooling", proof, err)
+			}
+		})
+	}
+}
+
+func TestGoTransitionsRefuseExperimentalOwnerBeforeInvocation(t *testing.T) {
+	root := testkit.TempDir(t)
+	marker := filepath.Join(root, "effect")
+	candidate := writeReleaseOwnerCandidate(t, root, fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'yard-engine 1.2.3\\n'; else : > %q; exit 99; fi\n", marker))
+	runtime := New(Config{})
+	defer runtime.Close()
+	verified, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	goRoot := testkit.TempDir(t)
+	goCandidate := writeDelegateRuntimeFixture(t, goRoot, "1.2.3-go", "Go owner", []byte(sourceAdmissionRegistry), "#!/bin/sh\n[ \"$1\" = --version ] || exit 99\nprintf 'yard-engine 1.2.3\\n'\n")
+	goOwner, err := runtime.verifyPublishedCandidate(context.Background(), goCandidate, goRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer goOwner.Close()
+	for _, pair := range [][2]*verifiedPublishedCandidate{{goOwner, verified}, {verified, goOwner}} {
+		_, err := runtime.prepareVerifiedTransition(context.Background(), options{}, pair[0], pair[1], releasetransition.ProcessRequest{}, nil)
+		if err == nil || (!strings.Contains(err.Error(), "experimental Rust release ownership is disabled") || allowsCompletedMetadataAdmission(nil, err)) {
+			t.Fatal("Go preparation adopted Rust target/owner", err)
+		}
+	}
+	for _, mode := range []releasetransition.ProcessMode{releasetransition.ProcessInspect, releasetransition.ProcessConverge} {
+		_, err := runtime.invokeVerifiedCandidateTransition(context.Background(), verified, releasetransition.ProcessRequest{Mode: mode}, "unconsumed-grant")
+		if err == nil || (!strings.Contains(err.Error(), "experimental Rust release ownership is disabled") || allowsCompletedMetadataAdmission(nil, err)) {
+			t.Fatal("ordinary Go dispatch adopted Rust", mode, err)
+		}
+	}
+	_, err = runtime.invokeVerifiedRecoveryTransition(context.Background(), verified, root, releasetransition.RecoveryProcessRequest{Mode: releasetransition.RecoveryProcessCapabilities}, "")
+	if err == nil || (!strings.Contains(err.Error(), "experimental Rust release ownership is disabled") || allowsCompletedMetadataAdmission(nil, err)) {
+		t.Fatal("Go recovery adopted Rust", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("held owner executed before refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "migrations/update.lock")); !os.IsNotExist(err) {
+		t.Fatal("refusal acquired update lock", err)
+	}
 }

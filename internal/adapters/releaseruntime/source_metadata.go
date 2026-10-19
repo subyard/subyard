@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/migration"
+	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -79,9 +80,198 @@ func (err sourceAdmissionError) Error() string {
 }
 func (err sourceAdmissionError) Unwrap() error { return err.cause }
 
-// InspectSourceAdmission avoids ordinary operational inspection. An unfinished
-// activation requires a capability-only probe of the ORIGINAL sealed owner.
-func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (proof SourceAdmission, result error) {
+// InspectSourceAdmission uses the selected production owner. Rust query failures
+// never fall back to Go; the experimental query remains explicitly callable.
+func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (SourceAdmission, error) {
+	if releaseOwnerRoutingEnabled {
+		return runtime.InspectRustSourceAdmission(ctx, root, configHome)
+	}
+	return runtime.inspectGoSourceAdmission(ctx, root, configHome)
+}
+
+// InspectRustSourceAdmission delegates the complete protected-history decision to
+// finite sealed Rust tooling. Go captures authenticated physical artifact facts
+// and decodes only the returned frozen journal; it does not inspect the graph.
+func (runtime *Runtime) InspectRustSourceAdmission(ctx context.Context, root, configHome string) (proof SourceAdmission, result error) {
+	phase := "assets"
+	defer func() {
+		if result != nil {
+			result = sourceAdmissionError{phase, result}
+		}
+	}()
+	tooling, revalidateTooling, err := runtime.sourceQueryTooling(ctx)
+	if err != nil {
+		return proof, err
+	}
+	defer tooling.Close()
+	configRoot, err := openSourceQueryRoot(configHome)
+	if err != nil {
+		return proof, err
+	}
+	defer configRoot.Close()
+	runtimeRoot, err := openSourceQueryRoot(root)
+	if err != nil {
+		return proof, err
+	}
+	defer runtimeRoot.Close()
+	configIdentity, err := releaseowner.IdentityOf(configRoot)
+	if err != nil {
+		return proof, err
+	}
+	runtimeIdentity, err := releaseowner.IdentityOf(runtimeRoot)
+	if err != nil {
+		return proof, err
+	}
+	links, err := runtime.inspectRuntimeLinks(root)
+	if err != nil {
+		return proof, err
+	}
+	actual := releaseLinksFromRuntimeSnapshot(links)
+	active, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: actual.Active, root: filepath.Join(root, "releases", string(actual.Active))}, root, nil)
+	if err != nil {
+		return proof, err
+	}
+	defer active.Close()
+	fact, err := verifiedRustArtifactFact(active)
+	if err != nil {
+		return proof, err
+	}
+	request := rustSourceQuery{ConfigHome: []byte(configHome), RuntimeRoot: []byte(root), ConfigIdentity: configIdentity, RuntimeIdentity: runtimeIdentity, Active: fact}
+	// The frozen codec yields IDs for optional physical capture. It does not
+	// authorize source repair or decide which owner/history is admissible.
+	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	if err != nil {
+		return proof, err
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil {
+		return proof, err
+	}
+	if snapshot.Exists {
+		journal, err := releasetransition.ParseJournal(snapshot.Payload)
+		if err != nil {
+			return proof, err
+		}
+		capture := func(id releasetransition.ReleaseID) (*rustArtifactFact, error) {
+			candidate, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: id, root: filepath.Join(root, "releases", string(id))}, root, nil)
+			if err != nil {
+				return nil, err
+			}
+			defer candidate.Close()
+			value, err := verifiedRustArtifactFact(candidate)
+			return &value, err
+		}
+		if journal.RegistryDigest != active.registryDigest {
+			request.OriginalOwner, err = capture(journal.Releases.From)
+			if err != nil {
+				return proof, err
+			}
+		}
+		if source, err := capture(journal.Releases.From); err == nil {
+			request.OriginalSources = &rustMigrationSources{Source: *source}
+			if journal.Releases.Previous != nil {
+				request.OriginalSources.Previous, _ = capture(*journal.Releases.Previous)
+			}
+		}
+	}
+	phase = "protected metadata"
+	reply, err := runtime.queryRustSource(ctx, tooling, request, configRoot, runtimeRoot)
+	if err != nil {
+		return proof, err
+	}
+	if err := revalidateTooling(); err != nil {
+		return proof, err
+	}
+	if reply.JournalRaw != nil {
+		journal, err := releasetransition.ParseJournal(reply.JournalRaw)
+		if err != nil {
+			return proof, err
+		}
+		proof.Metadata.Journal = &journal
+	}
+	proof.Metadata.Binding = releasetransition.Fingerprint(reply.MetadataBinding)
+	proof.Binding = reply.Binding
+	return proof, nil
+}
+
+type sourceCandidateInput struct {
+	Present              bool
+	Device, Inode, Links uint64
+	Mode, UID, GID       uint32
+}
+
+func sourceInputInfo(info os.FileInfo) (sourceCandidateInput, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return sourceCandidateInput{}, errors.New("sealed input identity is unavailable")
+	}
+	return sourceCandidateInput{true, uint64(stat.Dev), stat.Ino, uint64(stat.Nlink), stat.Mode, stat.Uid, stat.Gid}, nil
+}
+func sourceCandidateInputs(verified *verifiedPublishedCandidate) (map[string]sourceCandidateInput, error) {
+	manifest, err := openCandidateFile(int(verified.root.Fd()), "runtime-files.sha256")
+	if err != nil {
+		return nil, err
+	}
+	payload, err := io.ReadAll(io.LimitReader(manifest, 1<<20+1))
+	manifest.Close()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseCandidateManifest(payload)
+	if err != nil {
+		return nil, err
+	}
+	inputs := map[string]sourceCandidateInput{}
+	manifestDigest := sha256.Sum256(payload)
+	if releasetransition.Fingerprint(hex.EncodeToString(manifestDigest[:])) != verified.manifestDigest {
+		return nil, errors.New("sealed manifest changed during admission")
+	}
+	digests := map[string][sha256.Size]byte{"runtime-files.sha256": manifestDigest}
+	paths := []string{"runtime-files.sha256"}
+	for _, entry := range entries {
+		paths = append(paths, entry.path)
+		digests[entry.path] = entry.digest
+	}
+	info, err := verified.root.Stat()
+	if err != nil {
+		return nil, err
+	}
+	inputs[verified.candidate.root], err = sourceInputInfo(info)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		file, err := openCandidateFile(int(verified.root.Fd()), path)
+		if err != nil {
+			return nil, err
+		}
+		info, err := file.Stat()
+		if err != nil {
+			file.Close()
+			return nil, err
+		}
+		before, err := sourceInputInfo(info)
+		if err == nil {
+			err = verifyCandidateFile(file, digests[path])
+		}
+		afterInfo, statErr := file.Stat()
+		file.Close()
+		if err != nil || statErr != nil {
+			return nil, errors.New("sealed input changed during admission")
+		}
+		after, err := sourceInputInfo(afterInfo)
+		if err != nil || before != after {
+			return nil, errors.New("sealed input identity changed during admission")
+		}
+		inputs[filepath.Join(verified.candidate.root, path)] = before
+		if err != nil {
+			return nil, err
+		}
+	}
+	return inputs, nil
+}
+
+func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, configHome string) (proof SourceAdmission, result error) {
 	phase := "links"
 	defer func() {
 		if result != nil {
@@ -132,6 +322,9 @@ func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, config
 		return proof, err
 	}
 	defer verified.Close()
+	if verified.releaseOwner != nil {
+		return proof, errors.New("experimental Rust owner cannot be admitted by the Go reader")
+	}
 	if !strings.HasPrefix(string(selected), verified.version+"-") {
 		return proof, errors.New("sealed release identity is inconsistent")
 	}
@@ -149,6 +342,9 @@ func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, config
 			return proof, err
 		}
 		defer original.Close()
+		if original.releaseOwner != nil {
+			return proof, errors.New("experimental Rust owner cannot be admitted by the Go reader")
+		}
 		if original.registryDigest != journal.RegistryDigest || !strings.HasPrefix(string(owner), original.version+"-") {
 			return proof, errors.New("sealed original owner does not match protected history")
 		}
@@ -239,81 +435,4 @@ func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, config
 	binding := sha256.Sum256(payload)
 	proof.Binding = hex.EncodeToString(binding[:])
 	return proof, nil
-}
-
-type sourceCandidateInput struct {
-	Present              bool
-	Device, Inode, Links uint64
-	Mode, UID, GID       uint32
-}
-
-func sourceInputInfo(info os.FileInfo) (sourceCandidateInput, error) {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return sourceCandidateInput{}, errors.New("sealed input identity is unavailable")
-	}
-	return sourceCandidateInput{true, uint64(stat.Dev), stat.Ino, uint64(stat.Nlink), stat.Mode, stat.Uid, stat.Gid}, nil
-}
-func sourceCandidateInputs(verified *verifiedPublishedCandidate) (map[string]sourceCandidateInput, error) {
-	manifest, err := openCandidateFile(int(verified.root.Fd()), "runtime-files.sha256")
-	if err != nil {
-		return nil, err
-	}
-	payload, err := io.ReadAll(io.LimitReader(manifest, 1<<20+1))
-	manifest.Close()
-	if err != nil {
-		return nil, err
-	}
-	entries, err := parseCandidateManifest(payload)
-	if err != nil {
-		return nil, err
-	}
-	inputs := map[string]sourceCandidateInput{}
-	manifestDigest := sha256.Sum256(payload)
-	if releasetransition.Fingerprint(hex.EncodeToString(manifestDigest[:])) != verified.manifestDigest {
-		return nil, errors.New("sealed manifest changed during admission")
-	}
-	digests := map[string][sha256.Size]byte{"runtime-files.sha256": manifestDigest}
-	paths := []string{"runtime-files.sha256"}
-	for _, entry := range entries {
-		paths = append(paths, entry.path)
-		digests[entry.path] = entry.digest
-	}
-	info, err := verified.root.Stat()
-	if err != nil {
-		return nil, err
-	}
-	inputs[verified.candidate.root], err = sourceInputInfo(info)
-	if err != nil {
-		return nil, err
-	}
-	for _, path := range paths {
-		file, err := openCandidateFile(int(verified.root.Fd()), path)
-		if err != nil {
-			return nil, err
-		}
-		info, err := file.Stat()
-		if err != nil {
-			file.Close()
-			return nil, err
-		}
-		before, err := sourceInputInfo(info)
-		if err == nil {
-			err = verifyCandidateFile(file, digests[path])
-		}
-		afterInfo, statErr := file.Stat()
-		file.Close()
-		if err != nil || statErr != nil {
-			return nil, errors.New("sealed input changed during admission")
-		}
-		after, err := sourceInputInfo(afterInfo)
-		if err != nil || before != after {
-			return nil, errors.New("sealed input identity changed during admission")
-		}
-		inputs[filepath.Join(verified.candidate.root, path)] = before
-		if err != nil {
-			return nil, err
-		}
-	}
-	return inputs, nil
 }

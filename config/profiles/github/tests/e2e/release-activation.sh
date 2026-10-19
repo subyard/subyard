@@ -2,22 +2,25 @@
 # One standard disposable owner VM; the guest owns bounded native cleanup.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
-usage() { printf 'Usage: release-activation.sh --slot N [--baseline 0.19.0|0.20.0] [--preflight]\n'; }
+usage() { printf 'Usage: release-activation.sh --slot N [--baseline 0.19.0|0.20.0] [--native-loss owner|helper|group] [--preflight]\n'; }
 slot=''
 baseline=0.19.0
 preflight=0
+native_loss=''
 STARTED="$(date +%s)"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] && [ -z "$slot" ] || { usage >&2; exit 2; }; slot="$2"; shift 2 ;;
     --baseline) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; baseline="$2"; shift 2 ;;
     --preflight) preflight=1; shift ;;
+    --native-loss) [ "$#" -ge 2 ] && [ -z "$native_loss" ] || exit 2; native_loss="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
 [[ "$slot" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
 case "$baseline" in 0.19.0|0.20.0) ;; *) usage >&2; exit 2 ;; esac
+case "$native_loss" in ''|owner|helper|group) ;; *) usage >&2; exit 2 ;; esac
 for command in go jq python3 shellcheck tar timeout sha256sum; do
   command -v "$command" >/dev/null || { printf 'release-activation: missing %s\n' "$command" >&2; exit 2; }
 done
@@ -25,8 +28,13 @@ bash -n "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/co
 shellcheck -S warning "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh"
 bash "$ROOT/config/profiles/github/tests/run.sh" --preflight
 python3 -B "$ROOT/config/profiles/github/tests/release-observation-test.py"
+python3 -B "$ROOT/config/profiles/github/tests/native-loss-test.py"
 bash "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh" --local-probe
 if [ "$preflight" = 1 ]; then
+  if [ -n "$native_loss" ]; then
+    python3 -B "$ROOT/tests/helpers/profile-native-loss.py" --preflight \
+      --bundle "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" --bundle-sha256 "${SUBYARD_E2E_CANDIDATE_SHA256:-}"
+  fi
   printf 'ok: release activation local fixture prerequisites; no lease acquired\n'
   exit 0
 fi
@@ -65,6 +73,7 @@ read -r candidate synthetic baseline_installer_sha < <(bash "$ROOT/config/profil
   || { printf 'release-activation: frozen candidate identity is invalid\n' >&2; exit 2; }
 [ "$("$engine" --version)" = "yard-engine $candidate" ] \
   || { printf 'release-activation: frozen candidate engine version differs from metadata\n' >&2; exit 2; }
+if [ -z "$native_loss" ]; then
 mkdir "$WORK/source-b"
 bash "$ROOT/tests/helpers/source-files.sh" "$WORK/source-a" \
   | tar -C "$WORK/source-a" --null -T - -cf - | tar -C "$WORK/source-b" -xf -
@@ -78,6 +87,12 @@ sha256sum "$WORK/source-a/config/profiles/github/SKILL.md" "$WORK/source-b/confi
 timeout --signal=TERM --kill-after=30 600 "$WORK/source-b/dev/package-engine.sh" \
   --version "$synthetic" --output-dir "$WORK/source-a/.subyard-acceptance/fixture-b"
 sha256sum "$WORK/source-a/.subyard-acceptance/fixture-b/subyard-$synthetic-linux-"*.tar.gz
+else
+  # Loss gates reuse the one coordinator-frozen compatible successor. Never
+  # rebuild a moving checkout or substitute a missing different-goal control.
+  python3 -B "$ROOT/tests/helpers/profile-native-loss.py" --preflight \
+    --bundle "$SUBYARD_E2E_CANDIDATE_BUNDLE" --bundle-sha256 "$SUBYARD_E2E_CANDIDATE_SHA256"
+fi
 # Revalidate the original A archive/metadata after adding the transport-only sidecar.
 release_candidate_prepare "$WORK/source-a" >/dev/null
 jq -c '{version,runtime_file,runtime_sha256}' "$WORK/source-a/.subyard-acceptance/candidate.json"
@@ -85,6 +100,10 @@ tar -C "$WORK/source-a" -czf "$WORK/fixture-bundle.tar.gz" .
 SUBYARD_E2E_CANDIDATE_BUNDLE="$WORK/fixture-bundle.tar.gz"
 SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | cut -d' ' -f1)"
 export SUBYARD_E2E_CANDIDATE_BUNDLE SUBYARD_E2E_CANDIDATE_SHA256
+if [ -n "$native_loss" ]; then
+  python3 -B "$ROOT/tests/helpers/profile-native-loss.py" --preflight \
+    --bundle "$SUBYARD_E2E_CANDIDATE_BUNDLE" --bundle-sha256 "$SUBYARD_E2E_CANDIDATE_SHA256"
+fi
 printf 'release_activation_composed_transport_sha256=%s\n' "$SUBYARD_E2E_CANDIDATE_SHA256"
 # The lifecycle includes authentic predecessor install and supported rollback.
 # Keep a one-hour work bound; outer ownership and cleanup deadlines remain intact.
@@ -92,6 +111,8 @@ remaining=$((3600 - $(date +%s) + STARTED))
 [ "$remaining" -ge 300 ] || { printf 'release-activation: work deadline exhausted before VM allocation\n' >&2; exit 2; }
 printf 'release_activation_budget work_seconds=3600 controller_elapsed_seconds=%s guest_timeout_seconds=%s guest_kill_after_seconds=360 snapshot=before-allocation\n' \
   "$((3600 - remaining))" "$remaining"
+loss_arguments=()
+[ -z "$native_loss" ] || loss_arguments=(--native-loss "$native_loss")
 bash "$ROOT/dev/agent-e2e.sh" --slot "$slot" --vm-count 1 --vm 1 \
   --purpose github-release-activation -- timeout --signal=TERM --kill-after=360 "$remaining" \
-  bash config/profiles/github/tests/e2e/release-activation-guest.sh --baseline "$baseline"
+  bash config/profiles/github/tests/e2e/release-activation-guest.sh --baseline "$baseline" "${loss_arguments[@]}"

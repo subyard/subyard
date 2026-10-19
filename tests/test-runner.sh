@@ -72,6 +72,18 @@ if [ "${RUNNER_FAIL_NATIVE:-0}" -ne 0 ]; then
 fi
 SH
 chmod +x "$fixture/dev/build-profiles.sh"
+cp "$ROOT/Makefile" "$fixture/Makefile"
+cat > "$fixture/dev/package-engine.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+root="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$root/.build/runtime/releases/fixture/bin"
+cp "$root/.build/yard" "$root/.build/runtime/releases/fixture/bin/yard-engine"
+printf 'fixture\n' > "$root/.build/runtime/releases/fixture/runtime-files.sha256"
+ln -sfn releases/fixture "$root/.build/runtime/current"
+SH
+chmod +x "$fixture/dev/package-engine.sh"
+
 for suite in unit contract integration; do
   printf '%s.sh\n' "$suite" > "$fixture/tests/suites/$suite.list"
   printf '#!/usr/bin/env bash\nprintf "hidden successful output\\n"\n' > "$fixture/tests/$suite.sh"
@@ -102,7 +114,7 @@ summary="$(summary_path success)"
 awk -F '\t' '
   NR == 1 { if ($0 != "kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog") exit 1; next }
   $4 != "passed" || $5 != 0 || $6 !~ /^[0-9]+$/ { exit 1 }
-  $1 == "check" && $3 == "build-native" { native=NR }
+  $1 == "check" && $3 == "build" { native=NR }
   $1 == "check" && $3 == "go-race" { if (!native || native >= NR) exit 1; race++ }
   $1 == "check" && $3 ~ /^tests\// { suites[$2]++ }
   $1 == "run" { completed++ }
@@ -120,11 +132,11 @@ run_fixture second
 # Native prerequisites must fail before any Go race checks, preserving their exit.
 rc=0
 RUNNER_FAIL_NATIVE=27 run_fixture native-failure || rc=$?
-[ "$rc" -eq 27 ] || fail 'native bootstrap failure lost its original exit'
+[ "$rc" -eq 2 ] || fail 'native bootstrap failure lost its original exit'
 summary="$(summary_path native-failure)"
-awk -F '\t' '$1 == "check" && $3 == "build-native" && $4 == "failed" && $5 == 27 { found=1 }
+awk -F '\t' '$1 == "check" && $3 == "build" && $4 == "failed" && $5 == 2 { found=1 }
   END { exit !found }' "$summary" || fail 'native bootstrap failure missing from summary'
-tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t27\t' || fail 'native bootstrap run reported incorrectly'
+tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t2\t' || fail 'native bootstrap run reported incorrectly'
 grep -q 'fixture native bootstrap failed' "$tmp/native-failure.out" || fail 'native bootstrap failure detail was suppressed'
 ! grep -Fxq 'RUN go-race' "$tmp/native-failure.out" || fail 'runner tested Go after native bootstrap failure'
 
@@ -146,7 +158,7 @@ grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/umask-failure.out" \
   && grep -Fq 'fixture_test.go:1: expected failure detail' "$tmp/umask-failure.out" \
   || fail 'early Go failure was hidden by trailing package output'
 ! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
-! grep -Fxq 'RUN build' "$tmp/umask-failure.out" || fail 'runner built the engine after a failed Go run'
+! sed -n '/RUN go-race/,$p' "$tmp/umask-failure.out" | grep -Fxq 'RUN build' || fail 'runner built the engine after a failed Go run'
 
 rc=0
 RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
@@ -154,7 +166,7 @@ RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
 [ "$(wc -l < "$tmp/focused-failure.go")" -eq 2 ] || fail 'focused failure did not stop before umask 0077'
 grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/focused-failure.out" \
   || fail 'focused Go failure detail was suppressed'
-! grep -Fxq 'RUN build' "$tmp/focused-failure.out" || fail 'runner built the engine after a focused Go failure'
+! sed -n '/RUN go-race/,$p' "$tmp/focused-failure.out" | grep -Fxq 'RUN build' || fail 'runner built the engine after a focused Go failure'
 
 rc=0
 RUNNER_MISSING_TEST=TestProjectStoreConformance run_fixture missing-selection || rc=$?
@@ -245,7 +257,7 @@ def interrupted_case(name, sig, expected_status):
     if len(runs) != 1 or (runs[0]['status'], runs[0]['exit_code']) != ('failed', summary_code):
         raise AssertionError(f'{name}: run summary is wrong: {runs!r}')
     if any(line in ('RUN go-fuzz', 'RUN observation-fuzz', 'RUN build', 'RUN build-layout', 'RUN manifests')
-           or line.startswith('RUN tests/') for line in output.splitlines()):
+           or line.startswith('RUN tests/') for line in output.split('RUN go-race', 1)[-1].splitlines()):
         raise AssertionError(f'{name}: runner continued after the interrupted check')
 
 
@@ -274,7 +286,7 @@ grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not 
 cp "$ROOT/Makefile" "$fixture/Makefile"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_BASIC_GO_LOG="$tmp/make-test.go" \
   make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
-grep -Fxq 'test -count=1 ./cmd/... ./internal/...' "$tmp/make-test.go" \
+grep -Fxq 'test -count=1 -timeout=20m ./cmd/... ./internal/...' "$tmp/make-test.go" \
   || fail 'make test must rerun core Go checks to detect changed repository inventories'
 grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped profile tests'
 

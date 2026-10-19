@@ -2,8 +2,7 @@
 
 This is the production release-owner crate. Its private operation entrypoint is not
 selected by the product facade and advertises no writer capability. Existing Go owners
-remain the default production readers, writers and recovery owners. The native [pilot](../dev/release-owner-pilot/README.md)
-remains a separate disposable fixture; its record is never imported here.
+remain the default production readers, writers and recovery owners.
 
 Run `bash release-owner/check.sh` (or `make verify-release-owner-foundation`). It exports
 the existing Go constructors/codecs into ignored `.build/release-owner-foundation`,
@@ -12,8 +11,14 @@ compiler controls and the unchanged exhaustive history comparison, and cross-com
 the library for both Linux musl architectures. It requires Rust stable with those std
 targets. It does not install a toolchain. ARM execution remains a CI responsibility.
 
-`history` is the single pure kernel previously exercised by the history comparison;
-the development crate now re-exports it. Borrowed checked contents cannot be mutated;
+`history` is the single pure kernel. The required foundation, recovery, legacy and runtime
+checks export 70 cases from Go's independent bitset oracle and compare production Rust
+directly through `tests/history_oracle.rs`. These cover registry/frontier rejection,
+all short trace sequences at each generated history cut, semantic binding, registry
+identity and projection. Plain Cargo tests visibly ignore this generated-input consumer;
+the owning scripts produce the corpus and explicitly run it with `--ignored`. It refuses
+missing or incomplete input. No development binary or separate history implementation
+is built. Borrowed checked contents cannot be mutated;
 consuming semantic edges express local advancement. Re-evaluating an immutable history
 is legitimate and grants no authorization. Private checked record constructors validate
 the actual registry/catalog, migration history, ledger/checkpoint prefix and projection
@@ -367,3 +372,22 @@ This slice remains incomplete: full replacement/recovery and rollback acceptance
 fault cases, complete operation parity, final facade/delivery and required physical
 acceptance are pending. No default routing, whole-release readiness or performance
 improvement is claimed by these checks.
+
+## Experimental delivery
+
+Ordinary `make build`, `make package`, CI and release verification remain Go-only.
+`make build-experimental-release-owner VERSION=0.22.0-test` and
+`dev/package-engine.sh --experimental-release-owner` explicitly stage Rust assets;
+these commands do not enable production routing. A declared Rust runtime is refused
+by the held Go transition/recovery path, including completed-metadata fallback.
+
+The authentic predecessor / Rust candidate recovery scenario remains a separate gate:
+
+```sh
+SUBYARD_RUST_PREDECESSOR_ASSETS=/path/to/verified/predecessors bash tests/engine-release.sh
+```
+
+It uses exact published Go predecessors and the experimental packaging option.
+It is deferred while Rust production routing is held; its failure is never replaced
+by the ordinary synthetic Go-owner fixture. Existing `check*.sh` and delivery targets
+remain explicit experimental checks, with their Rust toolchain and input requirements.

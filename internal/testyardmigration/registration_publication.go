@@ -547,9 +547,27 @@ func restorePreparedRegistration(options Options, prepared Prepared) error {
 		return err
 	}
 	defer object.close()
-	return renameBoundObject(options, object, object.parentFD, filepath.Base(archive.source), archive.flags(),
+	member := -1
+	if options.RecordRegistrationRestore != nil {
+		member, err = retainedArchiveMember(object, archive.directory, prepared)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(member)
+	}
+	if err := renameBoundObject(options, object, object.parentFD, filepath.Base(archive.source), archive.flags(),
 		func(fd int) error { return archive.validateFD(fd, prepared, -1) },
-		"after-compensation-registration-validation-before-restore", "registration-restore", "after-compensation-registration-recreation")
+		"after-compensation-registration-validation-before-restore", "registration-restore", "after-compensation-registration-recreation"); err != nil {
+		return err
+	}
+	if options.RecordRegistrationRestore != nil {
+		result, err := retainedOwnerMember(member, prepared)
+		if err != nil {
+			return err
+		}
+		return options.RecordRegistrationRestore(result)
+	}
+	return nil
 }
 
 func cleanupPreparedOwnerArchives(options Options, prepared Prepared) error {

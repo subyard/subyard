@@ -10,10 +10,17 @@ Plain source copies need no Git metadata. Native integration helper bytes bind
 assessments: rebuild before planning and obtain a fresh plan after rebuilding.
 Observation does not build a missing helper.
 
+The same build also stages normal Go tooling under `.build/runtime/`.
+It reuses the runtime packager's complete asset inventory and sealed-image
+verification; `.build/runtime/current` selects an immutable versioned stage. The stage's
+Go helper must match `.build/yard` exactly. Ordinary source admission uses the Go read-only implementation and needs no Rust executable.
+The explicit experimental stage also supports Rust queries over historical Go data.
+The tooling program never changes which exact release owns a transition.
+
 ## Toolchain
 
 `go.mod` is authoritative: the module's minimum language baseline is Go 1.25.6 and its `toolchain`
-directive selects Go 1.26.5 for development and CI. A recent Go bootstrap can fetch that toolchain
+directive selects Go 1.26.6 for development and CI. A recent Go bootstrap can fetch that toolchain
 automatically. CI uses `actions/setup-go` with `go-version-file: go.mod`; it does not carry a second
 version constant.
 
@@ -21,28 +28,41 @@ On Debian, install the normal build prerequisites with:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y golang-go gcc make shellcheck jq systemd
+sudo apt-get install -y golang-go gcc make shellcheck jq ripgrep binutils curl ca-certificates systemd
 ```
 
 Inside a yard dedicated to Subyard development, enable the `subyard-dev` profile and run `yard
-provision subyard-dev` from the owner host. The profile installs the Debian Go bootstrap and
-ShellCheck in L1, while `go.mod` still selects the exact compiler and shared Go caches live under
+provision subyard-dev` from the owner host. The profile installs the Debian Go bootstrap,
+ShellCheck and Go build prerequisites in L1. The direct provision hook's `--rust` option
+(and `--check --rust`) explicitly adds experimental Rust/musl tooling. Existing distro Rust is preserved. When Rustup is
+missing, its official installer is downloaded and SHA-256 verified, then run as the developer.
+Rustup uses Cargo and Rustup
+homes beneath that developer's home; its readiness check reads installed toolchains without
+downloading them. `go.mod` still selects the exact Go compiler and shared Go caches live under
 `/srv/cache`.
 
 Debian 13 currently ships an older bootstrap Go than the Incus client requires. That is acceptable
 for source development because Go follows the module's `toolchain` directive. Confirm the selected
 compiler with `go version` after the first build.
 
-## Rust release owner
+## Experimental Rust release owner
 
-Runtime packages include `bin/subyard-release-owner`, its exact Go native helper
+Ordinary runtime packages remain Go-owned and exclude Rust assets.
+`dev/package-engine.sh --experimental-release-owner` explicitly includes `bin/subyard-release-owner`, its exact Go native helper
 `bin/yard-engine`, and the manifest-bound declaration `config/release-owner.json`.
-The installed host needs neither a Go nor a Rust toolchain. Building packages requires
+The installed host needs neither a Go nor a Rust toolchain. Only experimental Rust packaging requires
 Go from `go.mod`, the root stable Rust toolchain, Cargo, musl target standard libraries,
 and `readelf` from binutils. Dependencies build with `Cargo.lock` and `--locked`;
 fixture-only Cargo features are excluded from shipped binaries.
 
-`dev/build-release-owner.sh` builds the normal owner for Linux amd64 or arm64 musl.
+For manual setup, install Rustup as your developer user following its
+[installation guide](https://rust-lang.github.io/rustup/installation/), then install the
+musl standard libraries with `rustup target add x86_64-unknown-linux-musl
+aarch64-unknown-linux-musl`. Normal runtime and tooling builds reject Go build tags;
+test-only oracle or fixture images cannot serve as development tooling.
+
+`make build-experimental-release-owner VERSION=0.22.0-test` stages the experimental runtime.
+It does not enable production routing. `dev/build-release-owner.sh` builds the owner for Linux amd64 or arm64 musl.
 `dev/package-engine.sh` uses it when assembling a runtime. The manifest-listed build
 sidecar records the actual compiler, Cargo target, lockfile and source input hashes,
 features, executable digest and static ELF checks. The stable toolchain channel does
@@ -58,14 +78,15 @@ native plan, grant and durable journal bytes. Scripted component peers establish
 reducer comparison, while normal sealed packages and real component effects have separate gates.
 `dev/check-release-owner-delivery.sh` packages both architectures and checks inventory,
 sealing, the retained session, artifact tampering and execution without toolchains.
-Standalone Go unit tests remain usable without building Rust; package and process gates
+Standalone Go domain tests remain usable without building Rust; package and process gates
 require both toolchains. Preserve absolute `CARGO_HOME` and `RUSTUP_HOME` when a test
 isolates `HOME`.
 
-The dev-only history and native-owner pilots remain comparison fixtures. Their passes
-do not replace the normal packaged owner, released-caller compatibility, component
-acceptance or VM gates. Production routing and release acceptance remain gated until
-the complete owner candidate has passed those checks.
+The owning Rust checks compare production history directly against 70 generated cases
+from Go's independent bitset oracle. No separate history or native-owner pilot is built.
+The current owner/native process checks retain consent, source-CAS, custody and process-loss
+coverage. These checks do not replace normal packaged-owner, released-caller, component
+or VM acceptance. Production routing remains gated until the complete candidate passes.
 
 ## Build and test
 
@@ -80,7 +101,11 @@ make verify
 ```
 
 `make build` writes the ignored developer candidate `.build/yard` atomically and builds declared
-profile binaries under `.build/profiles/<name>/`. `make verify` runs core and profile host-free
+profile binaries under `.build/profiles/<name>/`. It also publishes the complete Go tooling
+runtime under `.build/runtime/current`. `make test` and `make verify` stage a source-compatible test version before Go consumers;
+targeted source-repair tests require `make build VERSION=0.22.0-test` first. A delivery gate may instead supply its
+once-built normal runtime through `SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT`.
+`make verify` runs core and profile host-free
 checks together. Packaging builds the same declared binaries for the target architecture, excluding
 profile Go sources and test directories from runtime bundles. Packaging enumerates current public
 files using the repository ignore rules, including uncommitted and untracked public inputs; it also

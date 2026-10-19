@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 slot=''
 kind=''
 auth_only=''
-usage() { printf 'Usage: config/profiles/openlit/tests/e2e/acceptance.sh --slot N [--kind container|vm] [--auth-only | --teardown-only | --dependency-only | --network-only | --pull-diagnostic | --migration]\n'; }
+native_loss=''
+usage() { printf 'Usage: config/profiles/openlit/tests/e2e/acceptance.sh --slot N [--kind container|vm] [--native-loss owner|helper|group] [--auth-only | --teardown-only | --dependency-only | --network-only | --pull-diagnostic | --migration]\n'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot)
@@ -19,6 +20,7 @@ while [ "$#" -gt 0 ]; do
       case "$2" in container|vm) ;; *) usage >&2; exit 2 ;; esac
       kind="$2"; shift 2 ;;
     --auth-only|--teardown-only|--dependency-only|--network-only|--pull-diagnostic|--migration) [ -z "$auth_only" ] || exit 2; auth_only=${1#--}; shift ;;
+    --native-loss) [ "$#" -ge 2 ] && [ -z "$native_loss" ] || exit 2; native_loss="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -27,6 +29,12 @@ done
 [ "$auth_only" != network-only ] || [ "${kind:-container}" = container ] || { usage >&2; exit 2; }
 [ "$auth_only" != pull-diagnostic ] || [ "${kind:-container}" = container ] || { usage >&2; exit 2; }
 [ "$auth_only" != migration ] || [ -z "$kind" ] || { usage >&2; exit 2; }
+case "$native_loss" in ''|owner|helper|group) ;; *) usage >&2; exit 2 ;; esac
+if [ -n "$native_loss" ]; then
+  [ -z "$auth_only" ] && [ "${kind:-container}" = container ] || { usage >&2; exit 2; }
+  python3 -B "$ROOT/tests/helpers/profile-native-loss.py" --preflight \
+    --bundle "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" --bundle-sha256 "${SUBYARD_E2E_CANDIDATE_SHA256:-}"
+fi
 
 if [ "$auth_only" = migration ]; then
   # One independent owner/stack avoids copying nested Docker stores into the
@@ -38,6 +46,7 @@ fi
 arguments=()
 [ -z "$kind" ] || arguments=("$kind")
 [ -z "$auth_only" ] || arguments=("${kind:-container}" "$auth_only")
+[ -z "$native_loss" ] || arguments=(container '' "$native_loss")
 # Complete lifecycle acceptance includes cold provisioning, repeat initialization
 # and retained-data re-enable; reserve time for its owned cleanup as well.
 timeout_seconds=3600

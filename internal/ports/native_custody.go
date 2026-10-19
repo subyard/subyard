@@ -33,6 +33,30 @@ type NativeOperationObserver interface {
 	CommandTerminal(uint64) error
 }
 
+// NativeOwnerMember is the one registration member retained across the owning
+// compensation rename. Its path is fixed by the original owner recipe.
+type NativeOwnerMember struct {
+	Device          uint64 `json:"device"`
+	Inode           uint64 `json:"inode"`
+	UID             uint32 `json:"uid"`
+	GID             uint32 `json:"gid"`
+	Mode            uint32 `json:"mode"`
+	Links           uint64 `json:"links"`
+	Size            int64  `json:"size"`
+	ModifiedSeconds int64  `json:"modifiedSeconds"`
+	ModifiedNanos   int64  `json:"modifiedNanos"`
+	ChangedSeconds  int64  `json:"changedSeconds"`
+	ChangedNanos    int64  `json:"changedNanos"`
+	Digest          string `json:"digest"`
+}
+
+// NativeOwnerRestorationObserver records an owning rename result, not native
+// quiescence. Missing or conflicting results never confer retry authority.
+type NativeOwnerRestorationObserver interface {
+	RecordOwnerRestoration(token, source string, member NativeOwnerMember) error
+	ReadOwnerRestoration(token, source string) (NativeOwnerMember, error)
+}
+
 // NativeOperationFailure is returned only after the exact accepted operation has
 // a durably recorded final failure/cancellation. It proves that operation closed;
 // an arbitrary transport or component error provides no such proof.

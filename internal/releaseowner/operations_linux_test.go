@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -246,6 +247,128 @@ func TestNativeFactPublicationRetriesOnlyExactPendingBytes(t *testing.T) {
 			}
 			if _, err := os.Lstat(pending); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("published pending fact retained")
+			}
+		})
+	}
+}
+
+func TestNativeImageToken401ClosesOnlyExactOriginalTokenKinds(t *testing.T) {
+	for _, role := range []string{"current", "legacy", "recreate"} {
+		for _, choice := range []string{"primary", "fallback"} {
+			kind := "owner-image-secret-" + role + "-" + choice
+			t.Run(kind, func(t *testing.T) {
+				s, b, _ := nativeFactFixture(t)
+				observer := &invocationObserver{session: s, binding: b}
+				operation := ports.NativeOperation{Kind: kind, Server: b.Artifact, Project: "source", Resource: strings.Repeat("a", 64)}
+				if err := observer.Before(operation); err != nil {
+					t.Fatal(err)
+				}
+				operation.ID = "11111111-2222-3333-4444-555555555555"
+				if err := observer.Accepted(operation); err != nil {
+					t.Fatal(err)
+				}
+				operation.Status = 401
+				if err := observer.Terminal(operation); err != nil {
+					t.Fatal(err)
+				}
+				if err := observer.closed(); err != nil {
+					t.Fatal("exact token terminal lost closure", err)
+				}
+				if observer.failed(&ports.NativeOperationFailure{Operation: operation, Cause: errors.New("token consumed")}) {
+					t.Fatal("consumed token became component failure")
+				}
+				for _, changed := range []ports.NativeOperation{
+					{Kind: kind + "-extra", ID: operation.ID, Resource: operation.Resource, Status: 401},
+					{Kind: "owner-create-instance", ID: operation.ID, Resource: operation.Resource, Status: 401},
+					{Kind: kind, ID: "operation-1", Resource: operation.Resource, Status: 401},
+					{Kind: kind, ID: strings.ToUpper("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), Resource: operation.Resource, Status: 401},
+					{Kind: kind, ID: operation.ID, Resource: "image", Status: 401},
+					{Kind: kind, ID: operation.ID, Resource: strings.Repeat("A", 64), Status: 401},
+				} {
+					if nativeOperationSucceeded(changed) {
+						t.Fatal("foreign 401 accepted", changed.Kind)
+					}
+				}
+			})
+		}
+	}
+}
+
+type ownerTokenDrainFixture struct {
+	Components
+	calls   int
+	bounded bool
+	result  ports.NativeOperation
+	failure error
+}
+
+func (f *ownerTokenDrainFixture) DrainOwnerImageSecret(ctx context.Context, original ports.NativeOperation) (ports.NativeOperation, error) {
+	f.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		f.bounded = time.Until(deadline) > 0 && time.Until(deadline) <= 30*time.Second
+	}
+	if f.failure != nil {
+		return ports.NativeOperation{}, f.failure
+	}
+	value := f.result
+	if value.Kind == "" {
+		value = original
+		value.Status = 401
+	}
+	return value, nil
+}
+func TestNativeTokenRecoveryRequiresBothOriginalLeasesAndRetainsOuterUnknown(t *testing.T) {
+	for _, mode := range []string{"none", "update-only", "missing-owner-registration", "both", "foreign-uuid", "missing-remote"} {
+		t.Run(mode, func(t *testing.T) {
+			s, b, _ := nativeFactFixture(t)
+			if err := s.writeFact(b, "accepted", Terminal{Version: 1, Binding: b, Owner: "owner-registration", Resource: "test-yard", State: "accepted", Operations: []ports.NativeOperation{}}); err != nil {
+				t.Fatal(err)
+			}
+			observer := &invocationObserver{session: s, binding: b}
+			operation := ports.NativeOperation{Kind: "owner-image-secret-current-primary", Server: b.Artifact, Project: "source", Resource: strings.Repeat("a", 64)}
+			if err := observer.Before(operation); err != nil {
+				t.Fatal(err)
+			}
+			operation.ID = "11111111-2222-3333-4444-555555555555"
+			if err := observer.Accepted(operation); err != nil {
+				t.Fatal(err)
+			}
+			fixture := &ownerTokenDrainFixture{}
+			s.components = fixture
+			if mode != "none" {
+				s.leases = []*os.File{s.root}
+			}
+			if mode != "none" && mode != "update-only" {
+				s.leases = append(s.leases, s.root)
+			}
+			if mode != "missing-owner-registration" {
+				s.ownerRelease = func() {}
+			}
+			if mode == "foreign-uuid" {
+				fixture.result = operation
+				fixture.result.ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+				fixture.result.Status = 401
+			}
+			if mode == "missing-remote" {
+				fixture.failure = errors.New("original operation unavailable")
+			}
+			reply, err := s.queryInvocation(context.Background(), b)
+			if err != nil || reply.Code != "unknown" {
+				t.Fatal("missing outer terminal became complete", reply.Code, err)
+			}
+			allowed := mode == "both" || mode == "foreign-uuid" || mode == "missing-remote"
+			if (fixture.calls != 0) != allowed {
+				t.Fatal("token DELETE admission ignored original leases")
+			}
+			if allowed && !fixture.bounded {
+				t.Fatal("token cleanup lost fixed30s deadline")
+			}
+			if mode == "both" {
+				if reply.Terminal == nil || reply.Terminal.State != "unknown" || len(reply.Terminal.Operations) != 1 || reply.Terminal.Operations[0].Status != 401 {
+					t.Fatal("exact token terminal lost")
+				}
+			} else if reply.Terminal != nil {
+				t.Fatal("foreign or unproven operation got terminal")
 			}
 		})
 	}

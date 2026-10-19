@@ -4,10 +4,14 @@ cd "$(dirname "$0")/.."
 export TMPDIR=/tmp
 out="$PWD/.build/release-owner-runtime"
 mkdir -p "$out"
-if [[ -x .build/migrationhistory-pilot/toolchain/cargo/bin/cargo ]]; then
- export CARGO_HOME="$PWD/.build/migrationhistory-pilot/toolchain/cargo"
- export RUSTUP_HOME="$PWD/.build/migrationhistory-pilot/toolchain/rustup"
- export PATH="$CARGO_HOME/bin:$PATH"
+# Prefer the configured stable toolchain; retain the existing task cache only
+# as a compatibility fallback. This cache has no source-tree pilot dependency.
+if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
+ if [[ -x .build/migrationhistory-pilot/toolchain/cargo/bin/cargo ]]; then
+  export CARGO_HOME="$PWD/.build/migrationhistory-pilot/toolchain/cargo"
+  export RUSTUP_HOME="$PWD/.build/migrationhistory-pilot/toolchain/rustup"
+  export PATH="$CARGO_HOME/bin:$PATH"
+ fi
 fi
 export CARGO_TARGET_DIR="$out/target"
 export SUBYARD_RUST_RUNTIME_CORPUS="$out/runtime-corpus.json"
@@ -28,6 +32,9 @@ go build -o "$SUBYARD_RUST_CODEC_FAULT_PEER" release-owner/tests/fixtures/codec_
 go build -o "$SUBYARD_RUST_OPERATION_PEER" release-owner/tests/fixtures/operation_peer.go
 go version
 rustc --version
+export SUBYARD_RUST_HISTORY_CORPUS="$out/history-corpus.json"
+go test -race -count=1 -v ./internal/migrationhistory -run '^TestRustHistoryOracleCorpus$'
+cargo test --locked --manifest-path release-owner/Cargo.toml --test history_oracle -- --ignored --nocapture
 cargo fmt --manifest-path release-owner/Cargo.toml -- --check
 go test -count=1 -v ./internal/releasetransition -run '^TestRustOwner((RuntimeFacts|SettingsFacts|LinksFacts|ReducerFacts|InspectionFacts)Corpus|ActivationFailureCorpus|MigrationEntryFixture)$'
 go test -count=1 -v ./internal/cli -run '^TestRustOwnerActivationFactsCorpus$'

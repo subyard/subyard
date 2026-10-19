@@ -782,6 +782,9 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 		return releasetransition.ProcessResponse{},
 			errors.New("verified published runtime is unavailable")
 	}
+	if !releaseOwnerRoutingEnabled && (assets.releaseOwner != nil || engine.releaseOwner != nil) {
+		return releasetransition.ProcessResponse{}, markSelectedRustOwnerError(errors.New("experimental Rust release ownership is disabled; use an ordinary Go runtime"))
+	}
 	if assets.registryDigest == "" {
 		return releasetransition.ProcessResponse{},
 			errors.New("published runtime manifest does not bind release transition registry")

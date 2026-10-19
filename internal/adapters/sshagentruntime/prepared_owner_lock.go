@@ -17,7 +17,7 @@ const preparedOwnerLockRecordLimit = 4096
 // columns preserve arbitrary Go pathname bytes and the existing expiry JSON;
 // neither key material nor an observation recipe crosses this boundary.
 type preparedOwnerLockRecord struct {
-	Version                            int
+	Version                             int
 	Directory, Identity, State, Expires []byte
 }
 

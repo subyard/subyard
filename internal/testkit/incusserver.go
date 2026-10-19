@@ -376,7 +376,8 @@ func (fake *IncusServer) setPower(writer http.ResponseWriter, request *http.Requ
 	close(stdinDone)
 	operation := &incusOperation{
 		id: id, cancelled: make(chan struct{}), stdinDone: stdinDone, callIndex: -1,
-		step: IncusServerExecStep{OperationError: operationError},
+		step:     IncusServerExecStep{OperationError: operationError},
+		resource: map[string][]string{"instances": {"/1.0/instances/" + name + "?project=" + project}},
 	}
 	fake.operations[id] = operation
 	fake.mu.Unlock()

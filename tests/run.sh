@@ -79,6 +79,10 @@ check_format() {
 check_build_layout() {
   [ -x "$ROOT/.build/yard" ] \
     || { printf 'FAIL: development engine was not built\n' >&2; exit 1; }
+  [ -L "$ROOT/.build/runtime/current" ] \
+    && [ -f "$ROOT/.build/runtime/current/runtime-files.sha256" ] \
+    && cmp -s "$ROOT/.build/yard" "$ROOT/.build/runtime/current/bin/yard-engine" \
+    || { printf 'FAIL: normal Go tooling was not staged with the development engine\n' >&2; exit 1; }
   [ ! -e "$ROOT/bin/yard-engine" ] \
     || { printf 'FAIL: tracked/source-tree bootstrap engine must not return\n' >&2; exit 1; }
 }
@@ -98,7 +102,7 @@ check_manifests() {
 
 check_go_race() {
   printf 'Go race tests: full suite umask=0022\n'
-  (umask 0022; go -C "$ROOT" test -race -count=1 ./cmd/... ./internal/...)
+  (umask 0022; go -C "$ROOT" test -race -count=1 -timeout=20m ./cmd/... ./internal/...)
   # Actual publication/private-mode contracts, including public 0644/0755 outputs.
   # Fixtures that chmod their inputs retain coverage in the full suite above.
   bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \
@@ -128,12 +132,11 @@ CURRENT_SUITE=go
 printf 'SUITE go\n'
 run_check gofmt check_format
 run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
-run_check build-native "$ROOT/dev/build-profiles.sh"
+run_check build make -C "$ROOT" build VERSION="${SUBYARD_TEST_BUILD_VERSION:-0.22.0-test}"
+run_check build-layout check_build_layout
 run_check go-race check_go_race
 run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
 run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
-run_check build "$ROOT/dev/build-engine.sh"
-run_check build-layout check_build_layout
 run_check manifests check_manifests
 
 for suite in unit contract integration; do

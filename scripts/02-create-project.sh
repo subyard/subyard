@@ -15,12 +15,24 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib-vm-page-reporting.sh
 . "$SCRIPT_DIR/lib-vm-page-reporting.sh"
+# shellcheck source=scripts/lib/project-config.sh
+. "$SCRIPT_DIR/lib/project-config.sh"
 
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 RESTRICTED_DISK_PATHS="${RESTRICTED_DISK_PATHS:-}"
 ROOT_POOL="${ROOT_POOL:-${SRV_POOL:-default}}"
 INCUS_NETWORK="${INCUS_NETWORK:-${INCUS_BRIDGE:-incusbr0}}"
 
+owner_phase=whole
+case "${1:-}" in
+  --owner-before-project) owner_phase=before-project ;;
+  --owner-after-project) owner_phase=after-project ;;
+esac
+if [ "$owner_phase" != whole ]; then
+  [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'
+fi
+
+if [ "$owner_phase" != after-project ]; then
 # --- preconditions -----------------------------------------------------------
 incus_preflight
 if vm_page_reporting_required; then
@@ -42,15 +54,23 @@ announce_confirm "Subyard Phase 1 — create restricted Incus project" \
   "$project_policy_summary" \
   "Reversible: 'incus project delete $INCUS_PROJECT' removes it."
 
+fi
+[ "$owner_phase" != before-project ] || exit 0
+
 # --- 1. create project (idempotent) ------------------------------------------
 echo "Project:"
 created_project=0
 if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
   ok "project '$INCUS_PROJECT' exists"
 else
+  [ "$owner_phase" = whole ] || die 'original owner project is missing'
   env INCUS_PROJECT=default incus project create "$INCUS_PROJECT" </dev/null >/dev/null
   created_project=1
   ok "created project '$INCUS_PROJECT'"
+fi
+
+if [ "$owner_phase" = after-project ] && [ -n "${SUBYARD_PREPARED_OWNER_PROJECT_TOKEN:-}" ]; then
+  [ "$(incus project get "$INCUS_PROJECT" user.subyard.owner_create)" = "$SUBYARD_PREPARED_OWNER_PROJECT_TOKEN" ] || die 'original owner project token differs'
 fi
 
 # Persist the exact installation boundary while the project may still be
@@ -67,14 +87,8 @@ if [ -n "$existing_installation" ]; then
     && [ "$(incus project get "$INCUS_PROJECT" user.subyard.config_home)" = "$SUBYARD_CONFIG_HOME" ] \
     || die "project belongs to another or unknown installation"
 fi
-incus project set "$INCUS_PROJECT" \
-  user.subyard.installation=1 "user.subyard.operator_uid=$operator_uid" \
-  "user.subyard.context=${SUBYARD_INSTALLATION_CONTEXT:?}" \
-  "user.subyard.data_home=$SUBYARD_HOME" "user.subyard.config_home=$SUBYARD_CONFIG_HOME" \
-  "user.subyard.yard_name=${YARD_NAME:-default}" "user.subyard.instance_name=${YARD_INSTANCE_NAME:?}" \
-  "user.subyard.host_base=$HOST_BASE" "user.subyard.bridge=$INCUS_NETWORK" \
-  "user.subyard.srv_pool=$SRV_POOL" "user.subyard.srv_volume=$SRV_VOLUME" \
-  "user.subyard.storage_pool=${STORAGE_POOL:-$SRV_POOL}" "user.subyard.storage_path=$STORAGE_PATH" </dev/null
+subyard_project_owner_config "$operator_uid"
+incus project set "$INCUS_PROJECT" "${SUBYARD_PROJECT_OWNER_CONFIG[@]}" </dev/null
 
 
 # --- 2. apply restricted.* policy --------------------------------------------
@@ -84,25 +98,10 @@ set_key() {
   incus project set "$INCUS_PROJECT" "$1" "$2" </dev/null
   ok "$1=$2"
 }
-set_key restricted true
-set_key restricted.containers.nesting allow
-set_key restricted.containers.privilege unprivileged
-if vm_page_reporting_required; then
-  [ "${YARD_KIND:-}" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
-  # Incus 6.0.6 groups raw.qemu.conf under this broad project permission.
-  # Only the owner adapter writes the fixed balloon override; the guest never
-  # receives the Incus socket or project credentials.
-  set_key restricted.virtual-machines.lowlevel allow
-fi
-# Device-cgroup BPF interception is required only when this trusted test yard hosts
-# a nested Incus VM lab. Keep the project-level permission explicitly blocked for
-# every normal yard; allowing it broadens the L0/L1 syscall boundary.
-if [ "${NESTED_E2E_VMS:-0}" = 1 ]; then
-  set_key restricted.containers.interception allow
-else
-  set_key restricted.containers.interception block
-fi
-set_key restricted.devices.disk allow
+subyard_project_policy_config
+for entry in "${SUBYARD_PROJECT_POLICY_HEAD[@]}"; do
+  set_key "${entry%%=*}" "${entry#*=}"
+done
 # No Incus source-path allowlist: a restricted disk path forbids `shift` (idmapped
 # mounts), which the host mounts need. Tooling keeps sources under $RESTRICTED_DISK_PATHS.
 if incus project get "$INCUS_PROJECT" restricted.devices.disk.paths 2>/dev/null | grep -q .; then
@@ -111,8 +110,9 @@ if incus project get "$INCUS_PROJECT" restricted.devices.disk.paths 2>/dev/null 
 else
   ok "restricted.devices.disk.paths empty (any source; shift works)"
 fi
-set_key restricted.devices.unix-char allow
-set_key restricted.devices.proxy allow
+for entry in "${SUBYARD_PROJECT_POLICY_TAIL[@]}"; do
+  set_key "${entry%%=*}" "${entry#*=}"
+done
 
 # --- 3. seed the project's default profile (root disk + nic) -----------------
 # restricted.devices.nic defaults to "managed", so a managed bridge ('$INCUS_NETWORK') is allowed.

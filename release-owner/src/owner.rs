@@ -1118,11 +1118,7 @@ impl Owner {
                     .as_ref()
                     .is_none_or(|j| j.wire().checkpoint == "complete")
             {
-                source_blocker = Some(blocker(
-                    "precondition-blocked",
-                    "transition.source",
-                    "the source release requires a supported transition bridge",
-                ));
+                source_blocker = Some(legacy_source_blocker());
             }
         }
         drop(initial_artifacts);
@@ -1195,10 +1191,17 @@ impl Owner {
         let ingress = self
             .call(N::CaptureIngress {
                 session: self.session.clone(),
+                legacy_rust: true,
                 binding: None,
             })?
             .ingress
             .ok_or(Error::Invalid)?;
+        require(
+            ingress
+                .operations
+                .iter()
+                .all(|o| o.kind != "legacy-v1-import"),
+        )?;
         inventory.yards = ingress.yards.clone();
         require(
             inventory.yards.len() <= 128
@@ -1472,6 +1475,24 @@ impl Owner {
             before = Snapshot::captured(Some(bytes));
             authority = edge.into_after();
         }
+        if let Some(current) = journal.as_ref().filter(|j| {
+            j.wire().goal.target == goal.target
+                && j.wire().goal.direction == goal.direction
+                && j.wire().artifact_digest == self.options.artifact_digest
+                && j.wire().registry_digest == self.registry_digest
+                && j.wire().catalog_digest == self.catalog.digest()
+        }) {
+            if self.store.has_bundle(&current.wire().transaction)? {
+                let original = self.store.bundle(current, &self.registry)?;
+                require(
+                    original.session == self.session && original.helper == self.helper_digest(),
+                )?;
+                if self.restore_owner_results(current.wire(), &original, None)? {
+                    self.project_owner_activation(&original.work)?;
+                    self.restore_after_owner(current.wire(), &original)?;
+                }
+            }
+        }
         self.project_owner_activation(&work)?;
         let mut targets = vec![];
         let mut activation_scope = vec![];
@@ -1586,6 +1607,7 @@ impl Owner {
                 .checked_add(targets.len())
                 .is_some_and(|n| n <= 2048),
         )?;
+        self.after_owner_preflight(&targets, &work)?;
         // Rehash all actual release bytes after native capture. Never reuse
         // the initial inventories across that capture boundary.
         let mut final_artifacts = crate::assets::VerificationPhase::new();
@@ -1818,6 +1840,15 @@ fn blocker(code: &str, resource: &str, message: &str) -> p::Blocker {
         retry: "run yard update --check".into(),
     }
 }
+fn legacy_source_blocker() -> p::Blocker {
+    p::Blocker {
+        code: "precondition-blocked".into(),
+        resource: "transition.source".into(),
+        message: "Sources before v0.11.0 are unsupported.".into(),
+        retry: "Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data. Review and confirm its removal plan. After verified cleanup, install a new version separately.".into(),
+    }
+}
+
 fn ssh_inheritance(yard: &settings::YardSettings) -> Result<String> {
     let mut inputs = BTreeMap::new();
     for source in &yard.sources {
@@ -1898,4 +1929,24 @@ fn same_intents(j: &j::Record, f: &f::PlanFacts) -> bool {
                 && s.expected == i.expected
                 && s.desired == i.desired
         })
+}
+
+#[cfg(test)]
+mod source_guidance_tests {
+    #[test]
+    fn legacy_source_guidance_keeps_full_uninstall_and_clean_install_direction() {
+        let blocker = super::legacy_source_blocker();
+        assert_eq!(blocker.code, "precondition-blocked");
+        assert_eq!(blocker.resource, "transition.source");
+        assert!(crate::record::action(&blocker.retry));
+        for text in [
+            "--publish-only",
+            "bin/yard uninstall --full",
+            "owned data",
+            "confirm",
+            "install a new version separately",
+        ] {
+            assert!(blocker.retry.contains(text));
+        }
+    }
 }

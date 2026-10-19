@@ -162,6 +162,27 @@ func (runtime Runtime) bindOwnerRuntimeSources(ctx context.Context, r installedR
 		return nil, domain.ErrPlanStale
 	}
 	current.files = original.files
+	// Guard construction may read equal current bytes, but those reads do not
+	// become execution authority. Reattach every source and rendered payload to
+	// the original durable file table after the full descriptor comparison.
+	for i, file := range old.Configs.Files {
+		if file.Payload != "" {
+			current.configs.payloads[current.configs.files[i].destination] = original.files[file.Payload]
+		}
+	}
+	for _, source := range old.Configs.Sources {
+		for key := range current.configs.sources {
+			if key.follow == source.Follow && bytes.Equal([]byte(runtime.bindingPath(key.path)), source.Path) {
+				current.configs.sources[key] = configSourceBytes{payload: original.files[source.Payload], exists: source.Exists}
+			}
+		}
+	}
+	for _, source := range old.Integrations.Sources {
+		current.executionFiles[source.Layout] = original.files[source.Payload]
+	}
+	for _, source := range old.Integrations.Environment {
+		current.executionFiles[source.Payload] = original.files[source.Payload]
+	}
 	current.binding = installedRuntimeDigest(json.RawMessage(raw))
 	return current, nil
 }
@@ -201,6 +222,9 @@ func (runtime Runtime) OwnerSourceRuntime(ctx context.Context, p *PreparedInstal
 		return Runtime{}, err
 	}
 	execution.ownerSources = proof
+	if execution.ownerInstance != nil {
+		execution.ownerInstance.sources = p
+	}
 	execution.HookPlan = original.Integrations.Hooks.restore()
 	return execution, nil
 }
@@ -213,6 +237,17 @@ func (p *PreparedInstalledRuntime) FinishOwnerSources(err error) error {
 		p.retain.Store(true)
 	}
 	return p.Close()
+}
+
+// ApplyOwnerHostPower uses the original host-power baseline and engine role,
+// while its wrapper/template reads come from the checked owner source capsule.
+func (runtime Runtime) ApplyOwnerHostPower(ctx context.Context, prepared *PreparedHostPower, sources *PreparedInstalledRuntime) error {
+	execution, err := runtime.OwnerSourceRuntime(ctx, sources)
+	if err != nil {
+		return errors.Join(err, sources.Close())
+	}
+	err = runtime.applyPreparedHostPowerRuntime(ctx, prepared, nil, execution)
+	return errors.Join(err, sources.FinishOwnerSources(err))
 }
 func (proof *preparedOwnerSourceExecution) check() error {
 	info, err := os.Lstat(proof.root)

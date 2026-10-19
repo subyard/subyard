@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -431,6 +433,18 @@ else:raise SystemExit('unexpected readonly fixture Incus command')
 		// Clean/no-op history must remain readable after its normal expiry.
 		if err := os.Rename(filepath.Join(runtimeRoot, "releases", sourceID+"-previous"), filepath.Join(root, "expired-original-previous")); err != nil {
 			t.Fatal(err)
+		}
+		query := NewSourceInspector(verified.candidate.root, diagnostics)
+		defer query.Close()
+		before := rustCleanupQueryState(t, configHome, dataHome)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		proof, err := query.InspectSourceAdmission(ctx, runtimeRoot, configHome)
+		if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete || !lowerSHA256(proof.Binding) {
+			t.Fatal("closed cleanup source admission required expired original assets", err)
+		}
+		if !reflect.DeepEqual(before, rustCleanupQueryState(t, configHome, dataHome)) {
+			t.Fatal("closed cleanup source query changed original history")
 		}
 	}
 	release()

@@ -4,9 +4,13 @@ package ports
 // effect can create that exact absent project with the approved image policy.
 type PreparedImageProject struct {
 	Project      string
+	Server       string `json:",omitempty"`
 	Absent       bool
 	SharedImages bool
 	Config       map[string]string
+	// InitialConfig is the original fixed 02 renderer's NUL-framed byte output.
+	// Nil retains an image-only namespace; it never adopts an unrelated project.
+	InitialConfig []byte
 }
 
 // PreparedTemporaryStop binds restoration of an originally stopped legacy

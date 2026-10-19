@@ -5,10 +5,14 @@ export TMPDIR=/tmp
 out="$PWD/.build/release-owner-legacy"
 build="$PWD/.build/release-owner-recovery/target"
 mkdir -p "$out"
-if [[ -x .build/migrationhistory-pilot/toolchain/cargo/bin/cargo ]]; then
- export CARGO_HOME="$PWD/.build/migrationhistory-pilot/toolchain/cargo"
- export RUSTUP_HOME="$PWD/.build/migrationhistory-pilot/toolchain/rustup"
- export PATH="$CARGO_HOME/bin:$PATH"
+# Prefer the configured stable toolchain; retain the existing task cache only
+# as a compatibility fallback. This cache has no source-tree pilot dependency.
+if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
+ if [[ -x .build/migrationhistory-pilot/toolchain/cargo/bin/cargo ]]; then
+  export CARGO_HOME="$PWD/.build/migrationhistory-pilot/toolchain/cargo"
+  export RUSTUP_HOME="$PWD/.build/migrationhistory-pilot/toolchain/rustup"
+  export PATH="$CARGO_HOME/bin:$PATH"
+ fi
 fi
 export SUBYARD_RUST_CODEC_HELPER="$out/yard"
 export SUBYARD_RUST_CODEC_FAULT_PEER="$out/codec-faults"
@@ -18,6 +22,9 @@ export SUBYARD_RUST_OWNER_CORPUS="$out/owner-corpus.json"
 bash -n release-owner/check-legacy.sh
 go version
 rustc --version
+export SUBYARD_RUST_HISTORY_CORPUS="$out/history-corpus.json"
+go test -race -count=1 -v ./internal/migrationhistory -run '^TestRustHistoryOracleCorpus$'
+cargo test --locked --manifest-path release-owner/Cargo.toml --target-dir "$build" --test history_oracle -- --ignored --nocapture
 cargo fmt --manifest-path release-owner/Cargo.toml -- --check
 go build -o "$SUBYARD_RUST_CODEC_HELPER" ./cmd/yard
 go build -o "$SUBYARD_RUST_CODEC_FAULT_PEER" release-owner/tests/fixtures/codec_faults.go

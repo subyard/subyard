@@ -3,11 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,97 +46,59 @@ func (runtime *cleanupRecoveryRuntime) IntegrationPlan(context.Context) (reconci
 
 func cleanupRecoveryCLIFixture(t *testing.T, arguments []string, scenarios ...string) (*CLI, *cleanupRecoveryRuntime, string, *bytes.Buffer) {
 	t.Helper()
-	program, readyMarker, home := completedSelectionAuthoringFixture(t)
-	root := program.options.RepositoryRoot
-	agents := filepath.Join(root, "config/agents.env")
-	testkit.WriteFile(t, agents, append(mustReadConfigFixture(t, agents), []byte("\nAGENT_widget_COMMAND=synthetic-widget\nAGENT_widget_CLEANUP=${SUBYARD_CONFIG_DIR}/widget-cleanup.sh\n")...), 0o600)
-	testkit.WriteFile(t, filepath.Join(root, "config/widget-cleanup.sh"), []byte("#!/bin/sh\nexit 99\n"), 0o600)
-	writeProfileTestFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# persistent deselection\nCODING_TOOL_INTEGRATIONS=''\n"), 0o600)
-	journalPath := filepath.Join(home, "release-transition/v2/journal.json")
-	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, journalPath))
-	if err != nil {
-		t.Fatal(err)
-	}
 	scenario := ""
 	if len(scenarios) != 0 {
 		scenario = scenarios[0]
 	}
-	if scenario == "unfinished" {
-		journal.Checkpoint = releasetransition.JournalReconciling
-	}
-	response := releasetransition.ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true,
-		Inspection: &releasetransition.Inspection{Plan: releasetransition.PlanToken("plan-v1-" + strings.Repeat("a", 64)),
-			Assessment: domain.ActionAssessment{Action: "release.transition.v2", Effect: domain.ActionMutation, Changed: true,
-				Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible, Consequences: []string{"inspect the explicit bounded cleanup plan"}},
-			Blockers: []releasetransition.Blocker{{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.materialized-config", Message: "synthetic ownership conflict", Retry: "inspect integration cleanup"}},
-			Outcome: &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Active: journal.Goal.Target,
-				Previous: releaseIDForConfigApply("release-a"), Target: journal.Goal.Target, Code: releasetransition.CodeDependencyUnavailable,
-				Message: "synthetic ownership conflict", Retry: "inspect integration cleanup", Transaction: &journal.Transaction}}}
-	if scenario == "nonmaterialized" {
-		response.Inspection.Blockers[0].Resource = "activation.route-consumers"
-	}
-	if scenario == "multiple-blockers" {
-		response.Inspection.Blockers = append(response.Inspection.Blockers, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.other", Message: "another contract is unavailable", Retry: "inspect the other contract"})
-	}
-	if scenario == "missing-handler" {
-		testkit.WriteFile(t, agents, []byte(strings.ReplaceAll(string(mustReadConfigFixture(t, agents)), "AGENT_widget_CLEANUP=${SUBYARD_CONFIG_DIR}/widget-cleanup.sh\n", "")), 0o600)
+	agents := "CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\nAGENT_codex_RULES=${SUBYARD_CONFIG_DIR}/fixture.rules\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\nAGENT_claude_COMMAND=synthetic-cli\nAGENT_widget_COMMAND=synthetic-widget\n"
+	if scenario != "missing-handler" {
+		agents += "AGENT_widget_CLEANUP=${SUBYARD_CONFIG_DIR}/widget-cleanup.sh\n"
 	}
 	if scenario == "required" {
-		testkit.WriteFile(t, agents, append(mustReadConfigFixture(t, agents), []byte("AGENT_claude_DEPENDS=widget\n")...), 0o600)
+		agents += "AGENT_claude_DEPENDS=widget\n"
 	}
-	payload, err := json.Marshal(response)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readyInspection := *response.Inspection
-	readyOutcome := *readyInspection.Outcome
-	readyOutcome.Status, readyOutcome.Code, readyOutcome.ReachedGoal, readyOutcome.Retry = releasetransition.StatusReady, releasetransition.CodeReady, true, ""
-	readyInspection.Outcome, readyInspection.Blockers = &readyOutcome, nil
-	readyInspection.Assessment.Changed, readyInspection.Assessment.Consequences = false, nil
-	readyPayload, err := json.Marshal(releasetransition.ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true, Inspection: &readyInspection})
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in\n --version) printf 'yard-engine 1.2.3\\n' ;;\n _release-transition) cat >/dev/null; if [ -e %q ]; then printf '%%s\\n' %q; else printf '%%s\\n' %q; fi ;;\n *) exit 64 ;;\nesac\n", readyMarker, readyPayload, payload)
-	testkit.WriteFile(t, filepath.Join(root, "bin/yard-engine"), []byte(engine), 0o700)
-	manifest := ""
-	for _, tree := range []string{"bin", "config", "scripts"} {
-		if err := filepath.WalkDir(filepath.Join(root, tree), func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				return nil
-			}
-			relative, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			manifest += fmt.Sprintf("%x  ./%s\n", sha256.Sum256(mustReadConfigFixture(t, path)), filepath.ToSlash(relative))
-			return nil
-		}); err != nil {
+	program, readyMarker, home, server := completedRustSourceAuthoringRuntimeFixture(t, false, map[string]string{
+		"config/agents.env": agents, "config/fixture.rules": "allow_rule()\n", "config/widget-cleanup.sh": "#!/bin/sh\nexit 99\n",
+	})
+	writeProfileTestFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# persistent deselection\nCODING_TOOL_INTEGRATIONS=''\n"), 0600)
+	if scenario == "unfinished" {
+		path := filepath.Join(home, "release-transition/v2/journal.json")
+		journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, path))
+		if err != nil {
 			t.Fatal(err)
 		}
+		// This is a negative corruption of genuine completed history, not a
+		// manufactured resumable Rust transaction.
+		journal.Checkpoint = releasetransition.JournalReconciling
+		raw, err := releasetransition.MarshalJournal(journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, raw, 0600)
 	}
-	testkit.WriteFile(t, filepath.Join(root, "runtime-files.sha256"), []byte(manifest), 0o600)
-	journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256([]byte(manifest))))
-	journalPayload, err := releasetransition.MarshalJournal(journal)
-	if err != nil {
-		t.Fatal(err)
+	if scenario == "nonmaterialized" || scenario == "multiple-blockers" {
+		testkit.WriteFile(t, filepath.Join(filepath.Dir(readyMarker), "physical-profile-unavailable"), nil, 0600)
 	}
-	testkit.WriteFile(t, journalPath, journalPayload, 0o600)
-	cleanup := &cleanupRecoveryRuntime{integrationCleanupFixture: &integrationCleanupFixture{integrationRuntimeFixture: &integrationRuntimeFixture{},
-		plan: reconcileruntime.IntegrationCleanupPlan{Fingerprint: strings.Repeat("b", 64), Changed: true, Steps: []string{"Archive only the captured synthetic service; preserve user data"}}}, conflict: "widget"}
+	// The SDK fixture returns only the owning guest command's conflict. The
+	// normal Rust process derives its whole inspection and blockers itself.
+	server.SetExecResponder(func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
+		if _, err := os.Stat(readyMarker); os.IsNotExist(err) && scenario != "nonmaterialized" && len(call.Command) >= 5 && call.Command[0] == "python3" && strings.Contains(call.Command[3], "Version 1 records observed ownership only") {
+			raw, _ := json.Marshal(map[string]string{"Reason": "legacy integration artifact has no ownership evidence", "Path": "/home/dev/.codex/rules/repo.rules"})
+			return testkit.IncusServerExecStep{ExitCode: 1, Stderr: raw}
+		}
+		return completedSourceNativeObservation(program, readyMarker, call)
+	})
+	cleanup := &cleanupRecoveryRuntime{integrationCleanupFixture: &integrationCleanupFixture{integrationRuntimeFixture: &integrationRuntimeFixture{}, plan: reconcileruntime.IntegrationCleanupPlan{Fingerprint: strings.Repeat("b", 64), Changed: true, Steps: []string{"Archive only the captured synthetic service; preserve user data"}}}, conflict: "widget"}
 	cleanup.afterApply = func() {
 		cleanup.conflict = ""
 		cleanup.plan.Changed = false
-		testkit.WriteFile(t, readyMarker, []byte("ready\n"), 0o600)
+		testkit.WriteFile(t, readyMarker, []byte("ready\n"), 0600)
 	}
 	var output bytes.Buffer
 	options := program.options
 	options.Arguments, options.Stdout, options.Stderr = arguments, &output, &output
 	options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return cleanup }
-	program, err = New(options)
+	program, err := New(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +170,7 @@ func TestIntegrationCleanupRecoveryThroughFullCLI(t *testing.T) {
 			if !bytes.Equal(before, mustReadConfigFixture(t, journalPath)) || !bytes.Equal(selection, mustReadConfigFixture(t, selectionPath)) {
 				t.Fatal("cleanup rewrote history or selection")
 			}
-			if runtime.integrationRuntimeFixture.applied != 0 || len(program.options.InitPlatform.(*initPlatformFixture).applied) != 0 || program.options.InitPlatform.(*initPlatformFixture).projectHooks != 0 {
+			if runtime.integrationRuntimeFixture.applied != 0 || len(sourceAuthoringPlatformFixture(t, program.options.InitPlatform).applied) != 0 || sourceAuthoringPlatformFixture(t, program.options.InitPlatform).projectHooks != 0 {
 				t.Fatal("cleanup invoked ordinary integration or activation hooks")
 			}
 		})
@@ -390,7 +350,7 @@ func TestIntegrationCleanupRecoveryNamedYardRequiresOtherYardsCurrent(t *testing
 			if got, err := os.Readlink(previousPath); err != nil || got != previous {
 				t.Fatal("cleanup switched previous release")
 			}
-			platform := program.options.InitPlatform.(*initPlatformFixture)
+			platform := sourceAuthoringPlatformFixture(t, program.options.InitPlatform)
 			if len(platform.applied) != 0 || platform.projectHooks != 0 {
 				t.Fatal("cleanup applied release activation or hooks")
 			}
@@ -487,7 +447,7 @@ func nativeCleanupRecoveryInvariants(t *testing.T, program *CLI, home string) fu
 				t.Fatal("native cleanup changed release links")
 			}
 		}
-		platform := program.options.InitPlatform.(*initPlatformFixture)
+		platform := sourceAuthoringPlatformFixture(t, program.options.InitPlatform)
 		if len(platform.applied) != 0 || platform.projectHooks != 0 {
 			t.Fatal("native cleanup invoked activation/hooks")
 		}

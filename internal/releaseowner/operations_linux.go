@@ -9,7 +9,9 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"golang.org/x/sys/unix"
+	"strings"
 	"sync"
+	"time"
 )
 
 // The invocation intent precedes every POST. SDK IDs are recorded immediately
@@ -18,12 +20,16 @@ type invocationObserver struct {
 	mu              sync.Mutex
 	session         *session
 	binding         Binding
+	ownerToken      string
+	restored        bool
 	accepted        []ports.NativeOperation
 	started         []ports.NativeOperation
 	terminal        map[string]ports.NativeOperation
 	fault           error
 	commands        []commandFact
 	commandTerminal map[uint64]bool
+	creates         map[ports.NativeOwnerCreateRef]ownerCreateIntent
+	created         map[ports.NativeOwnerCreateRef]bool
 }
 
 // queryInvocation only refreshes identities that were durably accepted. It does
@@ -36,9 +42,6 @@ func (s *session) queryInvocation(ctx context.Context, binding Binding) (Reply, 
 	reader, ok := s.components.(interface {
 		QueryOperation(context.Context, ports.NativeOperation) (ports.NativeOperation, error)
 	})
-	if !ok {
-		return Reply{Code: "unknown"}, nil
-	}
 	directory, err := s.factsDirectory(binding)
 	if err != nil {
 		return Reply{Code: "unknown"}, nil
@@ -78,12 +81,27 @@ func (s *session) queryInvocation(ctx context.Context, binding Binding) (Reply, 
 		}
 		projection := accepted
 		projection.ID = ""
-		if projection != intent || !domain.SafeID(accepted.ID) {
+		if projection != intent || !domain.SafeID(accepted.ID) || nativeImageToken(accepted.Kind) && (!nativeTokenUUID(accepted.ID) || !nativeTokenFingerprint(accepted.Resource)) {
 			return Reply{Code: "unknown"}, nil
 		}
 		err = read(fmt.Sprintf("operation-%03d-terminal", ordinal), &terminal)
 		if errors.Is(err, unix.ENOENT) {
-			terminal, err = reader.QueryOperation(ctx, accepted)
+			if nativeImageToken(accepted.Kind) {
+				drain, available := s.components.(interface {
+					DrainOwnerImageSecret(context.Context, ports.NativeOperation) (ports.NativeOperation, error)
+				})
+				if len(s.leases) != 2 || s.ownerRelease == nil || !available {
+					return Reply{Code: "unknown"}, nil
+				}
+				cleanup, cancel := context.WithTimeout(ctx, 30*time.Second)
+				terminal, err = drain.DrainOwnerImageSecret(cleanup, accepted)
+				cancel()
+			} else {
+				if !ok {
+					return Reply{Code: "unknown"}, nil
+				}
+				terminal, err = reader.QueryOperation(ctx, accepted)
+			}
 			projection = terminal
 			projection.Status = 0
 			if err != nil || projection != accepted {
@@ -158,7 +176,7 @@ func (o *invocationObserver) Before(value ports.NativeOperation) (err error) {
 			o.fault = err
 		}
 	}()
-	if o.fault != nil || !operationSizeValid(value) || value.ID != "" || value.Status != 0 || !domain.SafeID(value.Kind) || !domain.SafeName(value.Project) || !domain.SafeName(value.Resource) || !fingerprint(value.Server) || len(o.started) >= 256 || len(o.started) != len(o.accepted) {
+	if o.fault != nil || !operationSizeValid(value) || value.ID != "" || value.Status != 0 || !domain.SafeID(value.Kind) || !domain.SafeName(value.Project) || !domain.SafeName(value.Resource) || !fingerprint(value.Server) || nativeImageToken(value.Kind) && !nativeTokenFingerprint(value.Resource) || len(o.started) >= 256 || len(o.started) != len(o.accepted) {
 		return errors.New("native operation intent binding")
 	}
 	o.started = append(o.started, value)
@@ -173,7 +191,7 @@ func (o *invocationObserver) Accepted(value ports.NativeOperation) (err error) {
 			o.fault = err
 		}
 	}()
-	if !operationSizeValid(value) || !domain.SafeID(value.ID) || !domain.SafeID(value.Kind) || !domain.SafeName(value.Project) || !domain.SafeName(value.Resource) || !fingerprint(value.Server) || value.Status != 0 || len(o.accepted) >= 256 {
+	if !operationSizeValid(value) || !domain.SafeID(value.ID) || !domain.SafeID(value.Kind) || !domain.SafeName(value.Project) || !domain.SafeName(value.Resource) || !fingerprint(value.Server) || value.Status != 0 || nativeImageToken(value.Kind) && (!nativeTokenFingerprint(value.Resource) || !nativeTokenUUID(value.ID)) || len(o.accepted) >= 256 {
 		return errors.New("native operation identity")
 	}
 	before := value
@@ -232,13 +250,47 @@ func (o *invocationObserver) localOnly() bool {
 	return o.fault == nil && len(o.started) == 0 && len(o.accepted) == 0 && len(o.terminal) == 0 && len(o.commands) == 0 && len(o.commandTerminal) == 0
 }
 
+func nativeImageToken(kind string) bool {
+	switch kind {
+	case "owner-image-secret-current-primary", "owner-image-secret-current-fallback",
+		"owner-image-secret-legacy-primary", "owner-image-secret-legacy-fallback",
+		"owner-image-secret-recreate-primary", "owner-image-secret-recreate-fallback":
+		return true
+	}
+	return false
+}
+
+func nativeTokenFingerprint(value string) bool {
+	return len(value) == 64 && strings.Trim(value, "0123456789abcdef") == ""
+}
+
+func nativeTokenUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+		} else if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeOperationSucceeded(operation ports.NativeOperation) bool {
+	return operation.Status == 200 || operation.Status == 401 && nativeImageToken(operation.Kind) && nativeTokenFingerprint(operation.Resource) && nativeTokenUUID(operation.ID)
+}
+
 func (o *invocationObserver) failed(err error) bool {
 	for err != nil {
 		if failure, ok := err.(*ports.NativeOperationFailure); ok {
 			o.mu.Lock()
 			defer o.mu.Unlock()
 			terminal, found := o.terminal[failure.Operation.ID]
-			return o.fault == nil && found && terminal == failure.Operation && terminal.Status != 200 && len(o.started) == len(o.accepted) && len(o.accepted) == len(o.terminal) && len(o.commands) == len(o.commandTerminal)
+			return o.fault == nil && found && terminal == failure.Operation && !nativeOperationSucceeded(terminal) && len(o.started) == len(o.accepted) && len(o.accepted) == len(o.terminal) && len(o.commands) == len(o.commandTerminal) && len(o.creates) == len(o.created)
 		}
 		wrapped, ok := err.(interface{ Unwrap() error })
 		if !ok {
@@ -257,8 +309,11 @@ func (o *invocationObserver) closed() error {
 	if len(o.started) != len(o.accepted) || len(o.accepted) != len(o.terminal) || len(o.commands) != len(o.commandTerminal) {
 		return errors.New("native operation remains unresolved")
 	}
+	if len(o.creates) != len(o.created) {
+		return errors.New("native owner create result remains unresolved")
+	}
 	for _, terminal := range o.terminal {
-		if terminal.Status != 200 {
+		if !nativeOperationSucceeded(terminal) {
 			return errors.New("native operation did not succeed")
 		}
 	}

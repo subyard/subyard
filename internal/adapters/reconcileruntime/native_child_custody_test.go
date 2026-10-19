@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -53,19 +54,31 @@ func TestNativeFixedTransportRetainsOriginalOwnerAfterHelperDeath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	installBarrier, err := filepath.Abs("../../../scripts/lib/native-install-custody.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mode := range []string{"component", "profile"} {
 		t.Run(mode, func(t *testing.T) {
-			home := testkit.TempDir(t)
+			home := filepath.Join(testkit.TempDir(t), "owner-\xff")
+			if err := os.Mkdir(home, 0700); err != nil {
+				t.Fatal(err)
+			}
 			script := `#!/bin/sh
 set -eu
 python3 -B -c 'import importlib.util,sys;s=importlib.util.spec_from_file_location("barrier",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);assert m.inherited_owner_descriptors()==(3,)' "$BARRIER_HELPER"
+SUBYARD_NATIVE_OWNER_STDIN=1 python3 -B "$INSTALL_BARRIER_HELPER" owner-barrier host-power /fixture-unused <&3
 : >"$READY"
 while [ ! -f "$RELEASE" ]; do sleep .01; done
 `
 			testkit.WriteFile(t, filepath.Join(home, "handler.sh"), []byte(script), 0o755)
 			ready, release := filepath.Join(home, "ready"), filepath.Join(home, "release")
 			child := exec.Command(os.Args[0], "-test.run=^TestNativeFixedTransportRetainsOriginalOwnerAfterHelperDeath$")
-			child.Env = append(os.Environ(), "SUBYARD_NATIVE_CHILD_CUSTODY="+mode, "SUBYARD_NATIVE_CHILD_HOME="+home, "BARRIER_HELPER="+helper, "READY="+ready, "RELEASE="+release)
+			child.Env = append(os.Environ(), "SUBYARD_NATIVE_CHILD_CUSTODY="+mode, "SUBYARD_NATIVE_CHILD_HOME="+home, "BARRIER_HELPER="+helper, "INSTALL_BARRIER_HELPER="+installBarrier, "SUBYARD_USER="+account.Username, "READY="+ready, "RELEASE="+release)
 			if err := child.Start(); err != nil {
 				t.Fatal(err)
 			}

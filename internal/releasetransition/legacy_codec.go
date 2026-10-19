@@ -60,6 +60,14 @@ func legacyCodecTarget(kind byte) any {
 				Path string `json:"path"`
 			} `json:"files"`
 		})
+	case 18:
+		return new(legacyV1Transaction)
+	case 19:
+		return new(sourceCapabilitySyntax)
+	case 20:
+		return new(legacyV1Registry)
+	case 21:
+		return new(legacyV1RouteConsumers)
 	default:
 		return nil
 	}

@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -886,5 +890,158 @@ func TestConfigApplyActivationObservationRequiresTypedFixedPoint(t *testing.T) {
 		Actual: "short", Desired: digest, Converged: true,
 	}) {
 		t.Fatal("malformed activation fingerprint was admitted")
+	}
+}
+
+func TestCompletedConfigRepairKeepsRustDriftDistinctFromCleanup(t *testing.T) {
+	transaction := releasetransition.TransactionID("tx-" + strings.Repeat("a", 32))
+	target := releasetransition.ReleaseID("1.2.3-current")
+	baseJournal := releasetransition.JournalRecord{Checkpoint: releasetransition.JournalComplete, Transaction: transaction, Goal: releasetransition.Goal{Target: target, Direction: releasetransition.DirectionActivateTarget}}
+	base := releasetransition.Outcome{Status: releasetransition.StatusRecovering, Code: releasetransition.CodeRecoveryPending, Active: target, Target: target, Transaction: &transaction, Retry: "run yard migrate"}
+	for _, scenario := range []string{"drift", "wrong transaction", "incomplete", "wrong target", "wrong direction", "rollback profile init", "rollback wrong transaction", "cleanup ticket", "different observed outcome", "reached goal"} {
+		t.Run(scenario, func(t *testing.T) {
+			journal, outcome := baseJournal, base
+			observed := outcome
+			inspection := &releasetransition.Inspection{Outcome: &observed}
+			switch scenario {
+			case "wrong transaction":
+				wrong := releasetransition.TransactionID("tx-" + strings.Repeat("b", 32))
+				outcome.Transaction = &wrong
+				observed = outcome
+			case "incomplete":
+				journal.Checkpoint = releasetransition.JournalReconciling
+			case "wrong target":
+				outcome.Target = "1.2.3-other"
+				observed = outcome
+			case "wrong direction":
+				journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+			case "rollback profile init":
+				journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+			case "rollback wrong transaction":
+				journal.Goal.Direction = releasetransition.DirectionActivatePrevious
+				wrong := releasetransition.TransactionID("tx-" + strings.Repeat("b", 32))
+				outcome.Transaction = &wrong
+				observed = outcome
+			case "cleanup ticket":
+				inspection.Resume = &transaction
+			case "different observed outcome":
+				observed.Retry = "different original operation"
+			case "reached goal":
+				outcome.ReachedGoal = true
+				observed = outcome
+			}
+			if got := configApplyRepairRustInspectionMatches(journal, outcome, inspection, strings.HasPrefix(scenario, "rollback")); got != (scenario == "drift" || scenario == "rollback profile init") {
+				t.Fatalf("completed repair admission=%t", got)
+			}
+		})
+	}
+	historical := base
+	historical.Status = releasetransition.StatusMigrationRequired
+	historical.Code = releasetransition.CodeTransitionRequired
+	historical.Transaction = nil
+	if !configApplyRepairGateShape(historical) || !configApplyRepairJournalMatches(baseJournal, historical) {
+		t.Fatal("historical completed drift contract changed")
+	}
+	if configApplyRepairRustInspectionMatches(baseJournal, historical, &releasetransition.Inspection{Outcome: &historical}, false) {
+		t.Fatal("historical outcome acquired Rust continuation authority")
+	}
+}
+
+// The physical component fixture changes its observed files only after the
+// ordinary init pipeline reaches its approved finalization stage.
+type rollbackSourceInitPlatform struct {
+	*completedSourcePlatformFixture
+	ready    string
+	physical *selectionOnlyIntegrationExecutor
+}
+
+func (fixture *rollbackSourceInitPlatform) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if err := fixture.initPlatformFixture.ApplyStage(ctx, stage); err != nil {
+		return err
+	}
+	if stage == ports.ReconcileStageProfileRuntimes {
+		fixture.physical.staleFiles = false
+		return os.WriteFile(fixture.ready, []byte("ready\n"), 0600)
+	}
+	return nil
+}
+
+func TestRustCompletedRollbackAdmitsProfileInitThroughCLI(t *testing.T) {
+	if os.Getenv("SUBYARD_RUST_SOURCE_QUERY_TOOLING_ROOT") == "" {
+		t.Skip("explicit experimental Rust tooling supplied by delivery gate")
+	}
+	program, ready, home, _ := completedRustSourceAuthoringRuntimeFixture(t, false, nil, releasetransition.DirectionActivatePrevious)
+	journalPath := filepath.Join(home, "release-transition/v2/journal.json")
+	raw := mustReadConfigFixture(t, journalPath)
+	journal, err := releasetransition.ParseJournal(raw)
+	if err != nil || journal.Checkpoint != releasetransition.JournalComplete || journal.Goal.Direction != releasetransition.DirectionActivatePrevious {
+		t.Fatal("actual Rust rollback did not publish COMPLETE", err)
+	}
+	reader := releaseruntime.NewSourceInspector(program.options.RepositoryRoot, program.options.Stderr)
+	defer reader.Close()
+	proof, err := reader.InspectSourceAdmission(context.Background(), program.env["YARD_RUNTIME_ROOT"], home)
+	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Transaction != journal.Transaction {
+		t.Fatal("actual rollback source proof unavailable", err)
+	}
+	request, err := json.Marshal(releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect,
+		RuntimeRoot: program.env["YARD_RUNTIME_ROOT"], ConfigHome: home, Yard: "default", Target: journal.Goal.Target,
+		Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join(program.options.RepositoryRoot, "bin/yard-engine"), "_release-transition")
+	command.Env, command.Stdin = program.options.Environment, bytes.NewReader(request)
+	var responseBytes, responseErrors bytes.Buffer
+	command.Stdout, command.Stderr = &responseBytes, &responseErrors
+	if err := command.Run(); err != nil {
+		t.Fatalf("actual rollback frozen inspection failed: %v %s", err, responseErrors.String())
+	}
+	var response releasetransition.ProcessResponse
+	if err := json.Unmarshal(responseBytes.Bytes(), &response); err != nil {
+		t.Fatal("actual rollback frozen response rejected", err)
+	}
+	if response.Inspection == nil || response.Inspection.Resume != nil || response.Inspection.Outcome == nil || response.Inspection.Outcome.Transaction == nil || *response.Inspection.Outcome.Transaction != journal.Transaction || releasetransition.ValidateProcessInspection(journal.Goal, *response.Inspection) != nil {
+		t.Fatal("actual rollback inspection did not preserve the original no-Resume transaction")
+	}
+	gate, err := program.inspectMutationGate(context.Background(), "default")
+	if err != nil || gate == nil || gate.Transaction == nil || *gate.Transaction != journal.Transaction || !configApplyRepairRustGateShape(*gate) {
+		t.Fatalf("actual rollback drift gate missing: %#v %v", gate, err)
+	}
+	loaded, err := program.loadSelectionRepair("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	incus := program.options.Incus.(*testkit.Incus)
+	instance := incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName]
+	instance.Config = map[string]string{"volatile.uuid": "source-authoring-default", "user.subyard.managed": "true"}
+	incus.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = instance
+	incus.Reconcile = ports.ReconcileState{InstanceFound: true, Instance: instance}
+	physical := &selectionOnlyIntegrationExecutor{source: loaded.Environment["AGENT_codex_RULES"], staleFiles: true}
+	platform := &rollbackSourceInitPlatform{completedSourcePlatformFixture: program.options.InitPlatform.(*completedSourcePlatformFixture), ready: ready, physical: physical}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	// Materialized files are stale, so the owning refresh stage must apply.
+	platform.converged[ports.ReconcileStageProfileRuntimes] = false
+	platform.hooksApplicable = false
+	options := program.options
+	options.InitPlatform, options.Executor = platform, physical
+	options.Arguments = []string{"init", "--yes"}
+	var output rustOwnerOutput
+	options.Stdout, options.Stderr = &output, &output
+	history := activationRepairHistory(t, options.RepositoryRoot, home)
+	repair, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := repair.Run(context.Background()); code != 0 {
+		t.Fatalf("profile init after actual Rust rollback: %d %s", code, output.String())
+	}
+	permit := repair.profileInitRepair
+	if permit == nil || !permit.profileInit || permit.cleanupID != "" || permit.gate.Transaction == nil || *permit.gate.Transaction != journal.Transaction || permit.sourceBinding != proof.Binding || !bytes.Equal(permit.journal.Payload, raw) {
+		t.Fatal("ordinary init did not consume the exact completed rollback repair proof")
+	}
+	if len(platform.applied) == 0 || physical.staleFiles || !bytes.Equal(raw, mustReadConfigFixture(t, journalPath)) || !reflect.DeepEqual(history, activationRepairHistory(t, options.RepositoryRoot, home)) {
+		t.Fatalf("profile init physical/history result: applied=%d stale=%t journalSame=%t historySame=%t", len(platform.applied), physical.staleFiles, bytes.Equal(raw, mustReadConfigFixture(t, journalPath)), reflect.DeepEqual(history, activationRepairHistory(t, options.RepositoryRoot, home)))
 	}
 }

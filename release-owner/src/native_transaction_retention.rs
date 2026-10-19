@@ -670,6 +670,41 @@ mod tests {
         }
     }
     #[test]
+    fn owner_create_retirement_reconstructs_causality_and_refuses_missing_result() {
+        for fixture in [
+            crate::custody::tests::created_owner,
+            crate::custody::tests::created_owner_with_fingerprint,
+            crate::custody::tests::created_owner_with_image_token,
+        ] {
+            let (f, s, _, b) = fixture();
+            s.lock().unwrap().close_native(&b).unwrap();
+            let result =
+                f.0.join("migrations/native-custody/v1")
+                    .join(&b.transaction)
+                    .join("001.command-001-create-result.json");
+            let raw = stdfs::read(&result).unwrap();
+            stdfs::remove_file(&result).unwrap();
+            assert_eq!(
+                s.native_retireable_transaction(&b.transaction),
+                Err(Error::Unknown)
+            );
+            assert!(s.lock().unwrap().cleanup_native_transactions().is_err());
+            stdfs::write(&result, raw).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            stdfs::set_permissions(&result, stdfs::Permissions::from_mode(0o600)).unwrap();
+            child(&f, "after-native-transaction-unlink");
+            let fresh = Store::open_canonical_fixture(&f.0).unwrap();
+            fresh.native_inventory(None, false).unwrap();
+            fresh.lock().unwrap().cleanup_native_transactions().unwrap();
+            assert!(!f
+                .0
+                .join("migrations/native-custody/v1")
+                .join(b.transaction)
+                .exists());
+            assert!(stage(&fresh).unwrap().is_none());
+        }
+    }
+    #[test]
     fn active_reference_unknown_and_foreign_residual_never_authorize_deletion() {
         let (f, s, j, b) = completed();
         let path =

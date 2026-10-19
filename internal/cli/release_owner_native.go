@@ -45,6 +45,7 @@ type releaseSettingsPrepared struct {
 	files    []config.PersistentPrecondition
 }
 type releaseActivationPrepared struct {
+	originalTarget     *releaseowner.Target
 	value              releaseowner.Target
 	platform           ports.InitPlatform
 	runtime            ports.RuntimeObservation
@@ -61,6 +62,14 @@ type releaseActivationPrepared struct {
 	stage              ports.ReconcileStageID
 }
 type releaseOwnerComponents struct {
+	afterOwnerOriginals  map[string]releaseAfterOwner
+	afterOwnerViews      map[string]releaseAfterOwner
+	afterOwnerCompletion *releaseowner.AfterOwnerCompletion
+	ownerResultsRecipe   string
+	ownerResultReader    interface {
+		ReadOwnerCreated(ports.NativeOwnerCreateRef) (ports.NativeOwnerCreated, error)
+	}
+	ownerResults     []ports.NativeOwnerCreated
 	ownerChildren    *preparedOwnerChildren
 	cli              *CLI
 	context          releaseowner.Context
@@ -72,6 +81,7 @@ type releaseOwnerComponents struct {
 	prepared         map[string]releaseSettingsPrepared
 	activation       map[string]releaseActivationPrepared
 	ingress          releasetransition.V2Ingress
+	ingressRust      bool
 	prospective      releasetransition.V2SettingsSnapshotView
 	activationDraft  *sourceActivationDraft
 	activationOwner  *releasetransition.OwnerRegistrationObservation
@@ -224,6 +234,9 @@ func (c *releaseOwnerComponents) CaptureInventory(ctx context.Context) ([]string
 	c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
 	c.installedBound = map[string]bool{}
 	c.ownerChildren = nil
+	c.afterOwnerOriginals = nil
+	c.afterOwnerViews = nil
+	c.afterOwnerCompletion = nil
 	c.prospective = nil
 	c.activationDraft = nil
 	c.activationOwner = nil
@@ -618,7 +631,12 @@ func (c *releaseOwnerComponents) CleanupOwner(ctx context.Context, before releas
 func (c *releaseOwnerComponents) request() releasetransition.ProcessRequest {
 	return releasetransition.ProcessRequest{SchemaVersion: 1, RuntimeRoot: c.context.RuntimeRoot, ConfigHome: c.context.ConfigHome, Yard: c.context.Yard, Target: releasetransition.ReleaseID(c.context.Target), ArtifactDigest: releasetransition.Fingerprint(c.context.Artifact), Direction: c.context.Direction, SourceIngress: c.context.SourceIngress}
 }
-func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner string, fresh bool) ([]releaseowner.Target, error) {
+func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner string, fresh bool) (values []releaseowner.Target, resultErr error) {
+	defer func() {
+		if resultErr == nil {
+			values, resultErr = c.observeAfterOwnerViews(ctx, owner, values)
+		}
+	}()
 	// Each component recipe binds only its own complete source read set.
 	// Earlier migration/consumer reads must not make the initial capture differ
 	// from a fresh reconstruction of the same approved component inputs.
@@ -640,7 +658,7 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 	if !slices.Contains(append(c.cli.profileRuntimeIDs(), "core-guest-runtime", "key-tools-runtime"), owner) {
 		return c.captureCoreActivation(ctx, owner)
 	}
-	values := []releaseowner.Target{}
+	values = []releaseowner.Target{}
 	for _, yard := range c.activationYards() {
 		loaded, err := c.loadActivation(yard)
 		if err != nil {
@@ -732,13 +750,27 @@ func (c *releaseOwnerComponents) CaptureActivation(ctx context.Context, owner st
 				}
 			}
 		}
+		prepared := releaseActivationPrepared{value: value, platform: platform, runtime: actual, nativeInstalled: installed}
+		if c.needsAfterOwner(yard) && actual.State != ports.RuntimeStateCurrent && actual.State != ports.RuntimeStateStale {
+			prepared, err = c.prepareAfterOwnerRuntime(ctx, prepared)
+			if err != nil {
+				return nil, err
+			}
+			value = prepared.value
+		}
 		values = append(values, value)
-		c.activation[owner+":"+yard+":profile-runtime"] = releaseActivationPrepared{value: value, platform: platform, runtime: actual, nativeInstalled: installed}
+		c.activation[activationKey(value)] = prepared
 	}
 	return values, nil
 }
 func (c *releaseOwnerComponents) ApplyActivation(ctx context.Context, target releaseowner.Target) error {
 	prepared, ok := c.activation[target.Owner+":"+target.Yard+":"+target.Class]
+	if ok && prepared.originalTarget != nil && target.AfterOwner == "" {
+		resolved, err := c.ResolveOwnerTarget(ctx, *prepared.originalTarget)
+		if err != nil || resolved != target {
+			return domain.ErrPlanStale
+		}
+	}
 	if !ok || (prepared.value != target && !c.rebindProfileCustody(prepared.value, target, "")) {
 		return domain.ErrPlanStale
 	}
@@ -821,7 +853,16 @@ func (c *releaseOwnerComponents) BindInstalledRuntimeRecipe(ctx context.Context,
 			Owner string `json:"owner"`
 		}
 		if json.Unmarshal(raw, &header) == nil && header.Owner == "owner-registration" {
-			return c.bindOwnerChildren(ctx, hash, raw)
+			if err := c.bindOwnerChildren(ctx, hash, raw); err != nil {
+				return err
+			}
+			c.ownerResults = nil
+			c.ownerResultReader = nil
+			c.ownerResultsRecipe = ""
+			c.afterOwnerOriginals = nil
+			c.afterOwnerViews = nil
+			c.afterOwnerCompletion = nil
+			return nil
 		}
 	}
 	matched := false
@@ -1017,6 +1058,55 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 		if err != nil {
 			return nil, err
 		}
+		if c.needsAfterOwner(testyardmigration.CurrentYard) {
+			before, err := testyardmigration.PrepareRouteConsumers(ctx, options)
+			if err != nil {
+				return nil, err
+			}
+			loaded, err := c.loadActivation(testyardmigration.CurrentYard)
+			if err != nil {
+				return nil, err
+			}
+			runtime, ok := c.platform(loaded, nil).(reconcileruntime.Runtime)
+			if !ok {
+				return nil, domain.ErrPlanStale
+			}
+			native, _ := c.cli.statusPorts()
+			reader, ok := native.(testyardmigration.RouteDevicePreparer)
+			if !ok {
+				return nil, domain.ErrPlanStale
+			}
+			routes, err := testyardmigration.PrepareOwnerRouteDevices(ctx, options, before, reader)
+			if err != nil {
+				return nil, err
+			}
+			p, err := runtime.PrepareAfterOwnerRoutes(ctx, routes, afterOwnerTemplate("routes", before))
+			if err != nil {
+				return nil, err
+			}
+			if err = p.ShareSources(c.retainPreparedSource); err != nil {
+				p.Close()
+				return nil, err
+			}
+			source := nativeValueDigest(struct{ Input, Scope, Component string }{c.activationSource(), before, p.RouteSourceBinding()})
+			desired := nativeValueDigest(struct{ Owner, State string }{owner, "verified"})
+			target := c.coreTarget(owner, "route-consumers", testyardmigration.CurrentYard, "deferred", state, "", source, desired, source)
+			target.Before = before
+			target.PreparedRecipe = p.Binding()
+			target.AfterOwner = "v1:routes:" + p.Binding()
+			target, err = c.bindGuestTarget(ctx, loaded, target)
+			if err != nil {
+				p.Close()
+				return nil, err
+			}
+			if c.installedRecipes == nil {
+				c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
+			}
+			c.installedRecipes[p.Binding()] = p
+			c.closers = append(c.closers, p)
+			c.activation[activationKey(target)] = releaseActivationPrepared{value: target, platform: runtime, route: port, before: before, nativeInstalled: p}
+			return []releaseowner.Target{target}, nil
+		}
 		before := ""
 		converged := state == string(testyardmigration.StateAbsent)
 		if state == string(testyardmigration.StateCurrent) {
@@ -1170,6 +1260,43 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 			powerYards = []domain.Context{loaded.Context}
 		}
 		platform := c.platform(loaded, powerYards)
+		if owner == "test-vm-broker" && c.needsAfterOwner(yard) {
+			runtime, ok := platform.(reconcileruntime.Runtime)
+			if !ok {
+				return nil, domain.ErrPlanStale
+			}
+			p, err := runtime.PrepareAfterOwnerBroker(ctx, afterOwnerTemplate("broker"))
+			if err != nil {
+				return nil, err
+			}
+			if err = p.ShareSources(c.retainPreparedSource); err != nil {
+				p.Close()
+				return nil, err
+			}
+			nativeSource, err := runtime.SelectedRuntimeInputs("core-guest-runtime")
+			if err != nil {
+				p.Close()
+				return nil, err
+			}
+			source := nativeValueDigest(struct{ Inputs, State, Stage, NativeSource string }{c.activationSource(), state, string(stage), nativeSource})
+			source = nativeValueDigest(struct{ Source, Recipe string }{source, p.BrokerSourceBinding()})
+			desired := nativeValueDigest(struct{ Owner, State, Target string }{owner, state, c.context.Target})
+			target := c.coreTarget(owner, "stage", yard, "deferred", state, string(stage), nativeValueDigest(struct{ State string }{"deferred"}), desired, source)
+			target.PreparedRecipe = p.Binding()
+			target.AfterOwner = "v1:broker:" + p.Binding()
+			target, err = c.bindGuestTarget(ctx, loaded, target)
+			if err != nil {
+				p.Close()
+				return nil, err
+			}
+			c.activation[activationKey(target)] = releaseActivationPrepared{value: target, platform: platform, stage: stage, nativeInstalled: p}
+			if c.installedRecipes == nil {
+				c.installedRecipes = map[string]*reconcileruntime.PreparedInstalledRuntime{}
+			}
+			c.installedRecipes[p.Binding()] = p
+			c.closers = append(c.closers, p)
+			return []releaseowner.Target{target}, nil
+		}
 		var hostPower *reconcileruntime.PreparedHostPower
 		var broker *reconcileruntime.PreparedTestVMBroker
 		var installed *reconcileruntime.PreparedInstalledRuntime
@@ -1349,9 +1476,27 @@ func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owne
 				prepared.value = value
 				c.activation[owner+":"+yard+":materialized-files"] = prepared
 			}
+			if c.needsAfterOwner(yard) && (assessment.State == "absent" || assessment.State == "stopped") {
+				prepared := c.activation[owner+":"+yard+":materialized-files"]
+				prepared, err = c.prepareAfterOwnerFiles(ctx, prepared)
+				if err != nil {
+					return nil, err
+				}
+				value = prepared.value
+				c.activation[activationKey(value)] = prepared
+			}
 			values = append(values, value)
 			platform := c.platform(loaded, nil)
 			runtime, ok := platform.(reconcileruntime.Runtime)
+			if ok && loaded.Integrations.AllowsCodingTools && c.needsAfterOwner(yard) && (assessment.State == "absent" || assessment.State == "stopped") {
+				prepared, prepareErr := c.prepareAfterOwnerIntegration(ctx, target, runtime, source)
+				if prepareErr != nil {
+					return nil, prepareErr
+				}
+				c.activation[activationKey(prepared.value)] = prepared
+				values = append(values, prepared.value)
+				continue
+			}
 			if !ok || !loaded.Integrations.AllowsCodingTools || (assessment.State != "drift" && assessment.State != "converged") {
 				continue
 			}
@@ -1544,7 +1689,19 @@ func nativeIngressStep(value releaseowner.IngressStep) releasetransition.V2Ingre
 	return releasetransition.V2IngressStep{Binding: *nativeIngressBinding(&value.Binding), Kind: releasetransition.V2IngressOperationKind(value.Kind), Expected: releasetransition.Fingerprint(value.Expected), Desired: releasetransition.Fingerprint(value.Desired), Static: releasetransition.Fingerprint(value.Static)}
 }
 func (c *releaseOwnerComponents) CaptureIngress(ctx context.Context, binding *releaseowner.IngressBinding) (releaseowner.IngressFacts, error) {
-	ingress, err := c.cli.releaseTransitionIngressFactory(c.request())(c.context.Releases)
+	return c.captureIngress(ctx, binding, false)
+}
+func (c *releaseOwnerComponents) CaptureRustIngress(ctx context.Context, binding *releaseowner.IngressBinding) (releaseowner.IngressFacts, error) {
+	return c.captureIngress(ctx, binding, true)
+}
+func (c *releaseOwnerComponents) captureIngress(ctx context.Context, binding *releaseowner.IngressBinding, rust bool) (releaseowner.IngressFacts, error) {
+	var ingress releasetransition.V2Ingress
+	var err error
+	if rust {
+		ingress, err = c.sourceOnlyIngress()
+	} else {
+		ingress, err = c.cli.releaseTransitionIngressFactory(c.request())(c.context.Releases)
+	}
 	if err != nil {
 		return releaseowner.IngressFacts{}, err
 	}
@@ -1553,6 +1710,7 @@ func (c *releaseOwnerComponents) CaptureIngress(ctx context.Context, binding *re
 		return releaseowner.IngressFacts{}, err
 	}
 	c.ingress = ingress
+	c.ingressRust = rust
 	c.prospective = facts.Prospective
 	if c.prospective != nil {
 		yards, err := c.prospective.ListYards()
@@ -1573,7 +1731,7 @@ func (c *releaseOwnerComponents) CaptureIngress(ctx context.Context, binding *re
 }
 func (c *releaseOwnerComponents) ObserveIngress(ctx context.Context, step releaseowner.IngressStep) (string, error) {
 	if c.ingress == nil {
-		if _, err := c.CaptureIngress(ctx, &step.Binding); err != nil {
+		if _, err := c.captureIngress(ctx, &step.Binding, c.ingressRust); err != nil {
 			return "", err
 		}
 	}
@@ -1582,7 +1740,7 @@ func (c *releaseOwnerComponents) ObserveIngress(ctx context.Context, step releas
 }
 func (c *releaseOwnerComponents) ApplyIngress(ctx context.Context, step releaseowner.IngressStep) error {
 	if c.ingress == nil {
-		if _, err := c.CaptureIngress(ctx, &step.Binding); err != nil {
+		if _, err := c.captureIngress(ctx, &step.Binding, c.ingressRust); err != nil {
 			return err
 		}
 	}
@@ -1590,7 +1748,7 @@ func (c *releaseOwnerComponents) ApplyIngress(ctx context.Context, step releaseo
 }
 func (c *releaseOwnerComponents) VerifyIngress(ctx context.Context, step releaseowner.IngressStep) error {
 	if c.ingress == nil {
-		if _, err := c.CaptureIngress(ctx, &step.Binding); err != nil {
+		if _, err := c.captureIngress(ctx, &step.Binding, c.ingressRust); err != nil {
 			return err
 		}
 	}

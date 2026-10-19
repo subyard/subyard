@@ -29,6 +29,215 @@ pub(crate) struct Command {
     pub(crate) kind: String,
     pub(crate) source: String,
 }
+// Resource causality from an original typed create. These facts do not prove
+// invocation quiescence and remain alongside the original top-level witnesses.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateIntent {
+    version: u8,
+    binding: native::Binding,
+    recipe: String,
+    source: String,
+    scope: String,
+    kind: String,
+    domain: String,
+    index: usize,
+    token: String,
+    request_digest: String,
+    server: String,
+    project: String,
+    resource: String,
+    pool: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    fingerprint: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateResult {
+    version: u8,
+    intent: CreateIntent,
+    #[serde(rename = "operationID")]
+    operation_id: String,
+    status: i64,
+    #[serde(rename = "instanceUUID")]
+    instance_uuid: String,
+    identity_digest: String,
+    etag_digest: String,
+}
+impl CreateIntent {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= 4096)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        require(
+            value.version == 1
+                && matches!(value.scope.as_str(), "current" | "legacy" | "recreate")
+                && matches!(
+                    (value.domain.as_str(), value.kind.as_str()),
+                    ("operation", "instance") | ("command", "project" | "srv-volume")
+                )
+                && (1..=256).contains(&value.index)
+                && value.token.len() == 32
+                && value
+                    .token
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && [
+                    &value.recipe,
+                    &value.source,
+                    &value.request_digest,
+                    &value.server,
+                ]
+                .into_iter()
+                .all(|v| record::fingerprint(v))
+                && [&value.project, &value.resource]
+                    .into_iter()
+                    .all(|v| v.len() <= 256 && record::safe_name(v))
+                && (value.kind != "project" || value.project == value.resource)
+                && (value.fingerprint.is_empty()
+                    || (value.kind == "instance" && record::fingerprint(&value.fingerprint)))
+                && if value.kind == "srv-volume" {
+                    value.pool.len() <= 256 && record::safe_name(&value.pool)
+                } else {
+                    value.pool.is_empty()
+                },
+        )?;
+        value.binding.validate()?;
+        Ok(value)
+    }
+}
+impl CreateResult {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= 4096)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        CreateIntent::checked(&codec::encode(&value.intent, true)?)?;
+        require(
+            value.version == 1
+                && value.status == 200
+                && record::fingerprint(&value.identity_digest)
+                && record::fingerprint(&value.etag_digest)
+                && if value.intent.domain == "operation" {
+                    create_id(&value.operation_id) && create_id(&value.instance_uuid)
+                } else {
+                    value.operation_id.is_empty() && value.instance_uuid.is_empty()
+                },
+        )?;
+        Ok(value)
+    }
+}
+fn create_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value != "."
+        && value != ".."
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+fn image_secret(kind: &str) -> bool {
+    matches!(
+        kind,
+        "owner-image-secret-current-primary"
+            | "owner-image-secret-current-fallback"
+            | "owner-image-secret-legacy-primary"
+            | "owner-image-secret-legacy-fallback"
+            | "owner-image-secret-recreate-primary"
+            | "owner-image-secret-recreate-fallback"
+    )
+}
+fn canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
+}
+pub(crate) fn operation_shape(value: &native::Operation, intent: bool) -> bool {
+    record::fingerprint(&value.server)
+        && record::safe_name(&value.project)
+        && record::safe_id(&value.kind)
+        && if image_secret(&value.kind) {
+            record::fingerprint(&value.resource)
+        } else {
+            record::safe_name(&value.resource)
+        }
+        && if intent {
+            value.id.is_empty()
+        } else if image_secret(&value.kind) {
+            canonical_uuid(&value.id)
+        } else if value.kind == "owner-create-instance" {
+            create_id(&value.id)
+        } else {
+            record::safe_id(&value.id)
+        }
+}
+pub(crate) fn operation_success(value: &native::Operation) -> bool {
+    value.status == 200 || (value.status == 401 && image_secret(&value.kind))
+}
+// Only these fixed indexed leaves are source evidence rather than compactable
+// operation triples/command pairs. The parser below validates their full names.
+pub(crate) fn create_fact(name: &str) -> bool {
+    name.ends_with("-create-intent.json") || name.ends_with("-create-result.json")
+}
+// A native owner's bound local compensation result. This is source-baseline
+// evidence only; it never replaces accepted/terminal/drain witnesses.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Restoration {
+    version: u8,
+    binding: native::Binding,
+    token: String,
+    recipe: String,
+    source: String,
+    member: RestoredMember,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoredMember {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    links: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanos: u32,
+    changed_seconds: i64,
+    changed_nanos: u32,
+    digest: String,
+}
+impl Restoration {
+    fn checked(raw: &[u8]) -> Result<Self> {
+        require(raw.len() <= 4096)?;
+        let value: Self = codec::decode_canonical(raw, true)?;
+        let member = &value.member;
+        require(
+            value.version == 1
+                && value.token.len() == 32
+                && value
+                    .token
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && record::fingerprint(&value.recipe)
+                && record::fingerprint(&value.source)
+                && record::fingerprint(&member.digest)
+                && member.links == 1
+                && member.size <= 32 << 20
+                && member.modified_nanos < 1_000_000_000
+                && member.changed_nanos < 1_000_000_000
+                && member.uid == rustix::process::getuid().as_raw()
+                && rustix::fs::FileType::from_raw_mode(member.mode)
+                    == rustix::fs::FileType::RegularFile
+                && matches!(member.mode & 0o777, 0o600 | 0o640 | 0o644),
+        )?;
+        value.binding.validate()?;
+        Ok(value)
+    }
+}
 #[derive(Clone, Copy)]
 pub(crate) enum CleanupRead<'a> {
     Inspection(&'a str),
@@ -65,6 +274,37 @@ impl Owner {
     }
 }
 impl store::Store {
+    pub(crate) fn validate_owner_producer(&self, binding: &native::Binding) -> Result<()> {
+        let root = self.root.as_ref().ok_or(Error::Protected)?;
+        let dir = store::directory(
+            root,
+            &[
+                "migrations".into(),
+                "native-custody".into(),
+                "v1".into(),
+                binding.transaction.clone(),
+            ],
+            false,
+        )?
+        .ok_or(Error::Unknown)?;
+        let prefix = format!("{:03}.", binding.ordinal);
+        let files = inventory::names(&dir, 8192)?
+            .into_iter()
+            .filter(|name| name.starts_with(&prefix) || name.starts_with(&format!(".{prefix}")))
+            .map(|name| {
+                let snapshot = store::read_at(&dir, &name, false)?;
+                Ok((name, snapshot.bytes().ok_or(Error::Unknown)?.to_vec()))
+            });
+        require(!validate_files(
+            &binding.transaction,
+            files,
+            None,
+            false,
+            None,
+            false,
+            None,
+        )?)
+    }
     pub(crate) fn validate_native_transaction(&self, transaction: &str) -> Result<()> {
         self.native_inventory_for(None, false, Some(transaction), None, true, true, None)
             .map(|_| ())
@@ -190,6 +430,12 @@ impl store::Store {
             let dir =
                 store::directory(&parent, std::slice::from_ref(&tx), false)?.ok_or(Error::Stale)?;
             let names = inventory::names(&dir, 8192 - count)?;
+            self.require_after_owner_resolutions(
+                &tx,
+                &names,
+                current.is_some_and(|j| j.transaction == tx && j.checkpoint == "complete"),
+            )?;
+            self.after_owner_references(&tx, &names)?;
             count = count.checked_add(names.len()).ok_or(Error::Bound)?;
             require(count <= 8192)?;
             let files = names.into_iter().map(|name| {
@@ -237,6 +483,10 @@ pub(crate) fn validate_files(
     let mut closure_bytes = BTreeMap::new();
     let mut recovery_bytes = BTreeMap::new();
     let mut top_bytes = BTreeMap::new();
+    let mut restorations = BTreeMap::new();
+    let mut create_intents = BTreeMap::new();
+    let mut create_results = BTreeMap::new();
+    let mut after_owner = BTreeMap::new();
     for file in files {
         let (name, raw) = file?;
         let raw = raw.as_slice();
@@ -261,6 +511,35 @@ pub(crate) fn validate_files(
         // retried only by the original exact publication; no admission hides them.
         if pending {
             return Err(Error::Unknown);
+        }
+        if create_fact(kind) {
+            let (domain, rest) = kind.split_once('-').ok_or(Error::Protected)?;
+            let (index, phase) = rest.split_once('-').ok_or(Error::Protected)?;
+            let index: usize = index.parse().map_err(|_| Error::Protected)?;
+            require(
+                matches!(domain, "operation" | "command")
+                    && (1..=256).contains(&index)
+                    && matches!(phase, "create-intent.json" | "create-result.json")
+                    && kind == format!("{domain}-{index:03}-{phase}"),
+            )?;
+            let key = (ordinal, domain.to_string(), index);
+            let value = if phase == "create-intent.json" {
+                let value = CreateIntent::checked(raw)?;
+                require(create_intents.insert(key, value.clone()).is_none())?;
+                value
+            } else {
+                let value = CreateResult::checked(raw)?;
+                let intent = value.intent.clone();
+                require(create_results.insert(key, value).is_none())?;
+                intent
+            };
+            require(
+                value.binding.transaction == tx
+                    && value.binding.ordinal == ordinal
+                    && value.domain == domain
+                    && value.index == index,
+            )?;
+            continue;
         }
         if let Some(command) = kind.strip_prefix("command-") {
             let (n, phase) = command.split_once('-').ok_or(Error::Protected)?;
@@ -291,19 +570,15 @@ pub(crate) fn validate_files(
             )?;
             let value: native::Operation = codec::decode_canonical(raw, true)?;
             require(
-                record::fingerprint(&value.server)
-                    && record::safe_name(&value.project)
-                    && record::safe_name(&value.resource)
-                    && record::safe_id(&value.kind)
+                operation_shape(&value, phase == "intent.json")
                     && if phase == "intent.json" {
                         value.id.is_empty() && value.status == 0
                     } else {
-                        record::safe_id(&value.id)
-                            && if phase == "accepted.json" {
-                                value.status == 0
-                            } else {
-                                matches!(value.status, 200 | 400 | 401)
-                            }
+                        if phase == "accepted.json" {
+                            value.status == 0
+                        } else {
+                            matches!(value.status, 200 | 400 | 401)
+                        }
                     },
             )?;
             require(
@@ -314,6 +589,16 @@ pub(crate) fn validate_files(
             continue;
         }
         match kind {
+            "after-owner.json" => {
+                let value = crate::after_owner::Resolution::checked(raw)?;
+                require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
+                require(after_owner.insert(ordinal, value).is_none())?;
+            }
+            "restoration.json" => {
+                let value = Restoration::checked(raw)?;
+                require(value.binding.transaction == tx && value.binding.ordinal == ordinal)?;
+                require(restorations.insert(ordinal, value).is_none())?;
+            }
             "reservation.json" => {
                 let reservation: crate::native_retention::Reservation =
                     codec::decode_canonical(raw, true)?;
@@ -373,6 +658,32 @@ pub(crate) fn validate_files(
         }
     }
     let mut closures = BTreeMap::new();
+    for (ordinal, value) in &after_owner {
+        let producer = intents.get(&value.producer.ordinal).ok_or(Error::Unknown)?;
+        let terminal = terminals
+            .get(&value.producer.ordinal)
+            .ok_or(Error::Unknown)?;
+        require(
+            producer.binding == value.producer
+                && producer.owner == "owner-registration"
+                && producer.resource == "test-yard"
+                && terminal.binding == value.producer
+                && terminal.state == "complete"
+                && top_bytes.get(&(value.producer.ordinal, "terminal"))
+                    == Some(&value.producer_terminal),
+        )?;
+        if let Some(intent) = intents.get(ordinal) {
+            require(
+                intent.binding == value.binding
+                    && intent.owner == value.owner
+                    && intent.resource == value.resource
+                    && intent.expected == value.expected
+                    && intent.desired == value.desired
+                    && intent.source == value.source
+                    && intent.recipe == value.request,
+            )?;
+        }
+    }
     for (ordinal, raw) in closure_bytes {
         let terminal = terminals.get(&ordinal).ok_or(Error::Unknown)?;
         let top = |kind| {
@@ -404,6 +715,104 @@ pub(crate) fn validate_files(
     }
     let mut fenced = std::collections::BTreeSet::new();
     let mut completed = BTreeMap::new();
+    for (ordinal, value) in &restorations {
+        let intent = intents.get(ordinal).ok_or(Error::Unknown)?;
+        let accepted = accepted.get(ordinal).ok_or(Error::Unknown)?;
+        require(
+            intent.owner == "owner-registration"
+                && intent.resource == "test-yard"
+                && value.binding == intent.binding
+                && value.recipe == intent.recipe
+                && accepted.binding == intent.binding
+                && accepted.owner == intent.owner
+                && accepted.resource == intent.resource
+                && accepted.state == "accepted",
+        )?;
+    }
+    for ((ordinal, domain, index), value) in &create_intents {
+        let intent = intents.get(ordinal).ok_or(Error::Unknown)?;
+        let accepted = accepted.get(ordinal).ok_or(Error::Unknown)?;
+        require(
+            intent.owner == "owner-registration"
+                && intent.resource == "test-yard"
+                && value.binding == intent.binding
+                && value.recipe == intent.recipe
+                && value.source == intent.source
+                && accepted.binding == intent.binding
+                && accepted.owner == intent.owner
+                && accepted.resource == intent.resource
+                && accepted.state == "accepted",
+        )?;
+        // Even a successful indexed operation or outer terminal cannot recover
+        // a missing original create response/result.
+        let result = create_results
+            .get(&(*ordinal, domain.clone(), *index))
+            .ok_or(Error::Unknown)?;
+        require(result.intent == *value)?;
+        let terminal = terminals.get(ordinal).ok_or(Error::Unknown)?;
+        if domain == "operation" {
+            let operation = terminal.operations.get(index - 1).ok_or(Error::Unknown)?;
+            require(
+                operation.kind == "owner-create-instance"
+                    && operation.server == value.server
+                    && operation.project == value.project
+                    && operation.resource == value.resource
+                    && operation.id == result.operation_id
+                    && operation.status == 200,
+            )?;
+        } else {
+            let command = closures
+                .get(ordinal)
+                .and_then(|c| c.commands.get(index - 1))
+                .or_else(|| commands.get(&(*ordinal, *index, "intent.json".into())))
+                .ok_or(Error::Unknown)?;
+            require(
+                command.kind
+                    == if value.kind == "project" {
+                        "incus-owner-create-project"
+                    } else {
+                        "incus-owner-create-volume"
+                    }
+                    && command.source == value.request_digest,
+            )?;
+        }
+    }
+    require(
+        create_results
+            .keys()
+            .all(|k| create_intents.contains_key(k)),
+    )?;
+    for (ordinal, terminal) in &terminals {
+        for (n, operation) in terminal.operations.iter().enumerate() {
+            if operation.kind == "owner-create-instance" {
+                create_intents
+                    .get(&(*ordinal, "operation".into(), n + 1))
+                    .ok_or(Error::Unknown)?;
+            }
+        }
+    }
+    for ((ordinal, index, _), command) in &commands {
+        if matches!(
+            command.kind.as_str(),
+            "incus-owner-create-project" | "incus-owner-create-volume"
+        ) {
+            create_intents
+                .get(&(*ordinal, "command".into(), *index))
+                .ok_or(Error::Unknown)?;
+        }
+    }
+    for (ordinal, closure) in &closures {
+        for (n, command) in closure.commands.iter().enumerate() {
+            if matches!(
+                command.kind.as_str(),
+                "incus-owner-create-project" | "incus-owner-create-volume"
+            ) {
+                create_intents
+                    .get(&(*ordinal, "command".into(), n + 1))
+                    .ok_or(Error::Unknown)?;
+            }
+        }
+    }
     let mut proofs = BTreeMap::new();
     // Recovery edges strictly increase ordinals: walk this finite DAG
     // without recursive parsing or a caller-supplied success flag.
@@ -438,6 +847,17 @@ pub(crate) fn validate_files(
         }
         proofs.insert(*ordinal, proof);
     }
+    for value in after_owner.values() {
+        let base = intents.get(&value.owner_ordinal).ok_or(Error::Unknown)?;
+        let mut binding = value.binding.clone();
+        binding.ordinal = value.owner_ordinal;
+        require(
+            base.binding == binding
+                && base.owner == "owner-registration"
+                && base.resource == "test-yard"
+                && completed.get(&value.owner_ordinal) == Some(&value.producer.ordinal),
+        )?;
+    }
     for (ordinal, intent) in &intents {
         crate::native_retention::Reservation::checked(
             reservations.get(ordinal).ok_or(Error::Unknown)?,
@@ -463,6 +883,9 @@ pub(crate) fn validate_files(
                     && accepted.state == "accepted",
             )?;
             require(!operations.keys().any(|(o, _, _)| o == ordinal))?;
+            // The activation-generation fence contract cannot close an owner
+            // create gap. Its causal result is not a resource-side fence.
+            require(!create_intents.keys().any(|(o, _, _)| o == ordinal))?;
             if let Some(j) = current.filter(|j| j.transaction == tx) {
                 require(
                     intent.binding.plan == j.authorization_plan
@@ -518,17 +941,13 @@ pub(crate) fn validate_files(
                 && accepted.state == "accepted",
         )?;
         if terminal.state == "complete" {
-            require(terminal.operations.iter().all(|o| o.status == 200))?;
+            require(terminal.operations.iter().all(operation_success))?;
         }
         let mut ids = std::collections::BTreeSet::new();
         require(
             terminal.operations.len() <= 256
                 && terminal.operations.iter().all(|o| {
-                    record::fingerprint(&o.server)
-                        && record::safe_name(&o.project)
-                        && record::safe_name(&o.resource)
-                        && record::safe_id(&o.id)
-                        && record::safe_id(&o.kind)
+                    operation_shape(o, false)
                         && matches!(o.status, 200 | 400 | 401)
                         && ids.insert(o.id.clone())
                 }),
@@ -659,6 +1078,575 @@ pub(crate) mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
     pub(crate) struct Fixture(pub(crate) PathBuf);
+    // Synthetic syntax/retention fixture; the actual producer corpus below is
+    // the separate cross-language evidence for a successful typed SDK create.
+    pub(crate) fn created_owner() -> (Fixture, store::Store, j::Record, native::Binding) {
+        let (f, s, j, b) = fixture();
+        let hash = "a".repeat(64);
+        write(
+            &f,
+            &b,
+            "001.intent.json",
+            &Intent {
+                version: 1,
+                binding: b.clone(),
+                owner: "owner-registration".into(),
+                resource: "test-yard".into(),
+                expected: hash.clone(),
+                desired: hash.clone(),
+                source: hash.clone(),
+                recipe: hash.clone(),
+            },
+        );
+        let mut accepted = terminal(&b, "accepted", vec![]);
+        accepted.owner = "owner-registration".into();
+        accepted.resource = "test-yard".into();
+        write(&f, &b, "001.accepted.json", &accepted);
+        let mut operations = vec![];
+        for (domain, index, scope, kind) in [
+            ("command", 1, "current", "project"),
+            ("command", 2, "legacy", "project"),
+            ("operation", 1, "current", "instance"),
+        ] {
+            let intent = CreateIntent {
+                version: 1,
+                binding: b.clone(),
+                recipe: hash.clone(),
+                source: hash.clone(),
+                scope: scope.into(),
+                kind: kind.into(),
+                domain: domain.into(),
+                index,
+                token: "a".repeat(32),
+                request_digest: "b".repeat(64),
+                server: "c".repeat(64),
+                project: "project".into(),
+                resource: if kind == "project" {
+                    "project"
+                } else {
+                    "instance"
+                }
+                .into(),
+                pool: String::new(),
+                fingerprint: String::new(),
+            };
+            write(
+                &f,
+                &b,
+                &format!("001.{domain}-{index:03}-create-intent.json"),
+                &intent,
+            );
+            let mut result = CreateResult {
+                version: 1,
+                intent: intent.clone(),
+                operation_id: String::new(),
+                status: 200,
+                instance_uuid: String::new(),
+                identity_digest: "d".repeat(64),
+                etag_digest: "e".repeat(64),
+            };
+            if domain == "command" {
+                let command = Command {
+                    kind: "incus-owner-create-project".into(),
+                    source: intent.request_digest,
+                };
+                for phase in ["intent", "terminal"] {
+                    write(
+                        &f,
+                        &b,
+                        &format!("001.command-{index:03}-{phase}.json"),
+                        &command,
+                    );
+                }
+            } else {
+                let mut operation = native::Operation {
+                    kind: "owner-create-instance".into(),
+                    server: intent.server,
+                    project: intent.project,
+                    resource: intent.resource,
+                    id: String::new(),
+                    status: 0,
+                };
+                write(&f, &b, "001.operation-001-intent.json", &operation);
+                operation.id = "operation-1".into();
+                write(&f, &b, "001.operation-001-accepted.json", &operation);
+                operation.status = 200;
+                write(&f, &b, "001.operation-001-terminal.json", &operation);
+                result.operation_id = operation.id.clone();
+                result.instance_uuid = "instance-uuid".into();
+                operations.push(operation);
+            }
+            write(
+                &f,
+                &b,
+                &format!("001.{domain}-{index:03}-create-result.json"),
+                &result,
+            );
+        }
+        let mut complete = accepted;
+        complete.state = "complete".into();
+        complete.operations = operations;
+        write(&f, &b, "001.terminal.json", &complete);
+        (f, s, j, b)
+    }
+    pub(crate) fn created_owner_with_fingerprint(
+    ) -> (Fixture, store::Store, j::Record, native::Binding) {
+        let (f, s, j, b) = created_owner();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let mut intent = CreateIntent::checked(
+            &fs::read(dir.join("001.operation-001-create-intent.json")).unwrap(),
+        )
+        .unwrap();
+        intent.fingerprint = "f".repeat(64);
+        write(&f, &b, "001.operation-001-create-intent.json", &intent);
+        let mut result = CreateResult::checked(
+            &fs::read(dir.join("001.operation-001-create-result.json")).unwrap(),
+        )
+        .unwrap();
+        result.intent = intent;
+        write(&f, &b, "001.operation-001-create-result.json", &result);
+        (f, s, j, b)
+    }
+    pub(crate) fn created_owner_with_image_token(
+    ) -> (Fixture, store::Store, j::Record, native::Binding) {
+        let (f, s, j, b) = created_owner_with_fingerprint();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        for phase in ["intent", "accepted", "terminal"] {
+            fs::rename(
+                dir.join(format!("001.operation-001-{phase}.json")),
+                dir.join(format!("001.operation-002-{phase}.json")),
+            )
+            .unwrap();
+        }
+        let mut intent = CreateIntent::checked(
+            &fs::read(dir.join("001.operation-001-create-intent.json")).unwrap(),
+        )
+        .unwrap();
+        let mut result = CreateResult::checked(
+            &fs::read(dir.join("001.operation-001-create-result.json")).unwrap(),
+        )
+        .unwrap();
+        intent.index = 2;
+        result.intent = intent.clone();
+        write(&f, &b, "001.operation-002-create-intent.json", &intent);
+        write(&f, &b, "001.operation-002-create-result.json", &result);
+        fs::remove_file(dir.join("001.operation-001-create-intent.json")).unwrap();
+        fs::remove_file(dir.join("001.operation-001-create-result.json")).unwrap();
+        let mut token = native::Operation {
+            kind: "owner-image-secret-current-primary".into(),
+            server: "c".repeat(64),
+            project: "project".into(),
+            resource: "f".repeat(64),
+            id: String::new(),
+            status: 0,
+        };
+        write(&f, &b, "001.operation-001-intent.json", &token);
+        token.id = "01234567-89ab-cdef-0123-456789abcdef".into();
+        write(&f, &b, "001.operation-001-accepted.json", &token);
+        token.status = 401;
+        write(&f, &b, "001.operation-001-terminal.json", &token);
+        let mut complete: native::Terminal =
+            codec::decode_canonical(&fs::read(dir.join("001.terminal.json")).unwrap(), true)
+                .unwrap();
+        complete.operations.insert(0, token);
+        write(&f, &b, "001.terminal.json", &complete);
+        (f, s, j, b)
+    }
+    #[test]
+    fn only_exact_image_secret_tokens_can_complete_with_cancelled_status() {
+        for kind in [
+            "owner-image-secret-current-primary",
+            "owner-image-secret-current-fallback",
+            "owner-image-secret-legacy-primary",
+            "owner-image-secret-legacy-fallback",
+            "owner-image-secret-recreate-primary",
+            "owner-image-secret-recreate-fallback",
+            "owner-image-secret-current-primary-extra",
+            "instance-state",
+        ] {
+            let (f, s, j, b) = created_owner_with_image_token();
+            let dir =
+                f.0.join("migrations/native-custody/v1")
+                    .join(&b.transaction);
+            let mut complete: native::Terminal =
+                codec::decode_canonical(&fs::read(dir.join("001.terminal.json")).unwrap(), true)
+                    .unwrap();
+            complete.operations[0].kind = kind.into();
+            write(&f, &b, "001.terminal.json", &complete);
+            for (phase, id, status) in [
+                ("intent", "", 0),
+                ("accepted", complete.operations[0].id.as_str(), 0),
+                ("terminal", complete.operations[0].id.as_str(), 401),
+            ] {
+                let mut token = complete.operations[0].clone();
+                token.id = id.into();
+                token.status = status;
+                write(&f, &b, &format!("001.operation-001-{phase}.json"), &token);
+            }
+            if !image_secret(kind) {
+                assert!(s.native_inventory(Some(&j), true).is_err());
+                assert!(s.lock().unwrap().close_native(&b).is_err());
+                continue;
+            }
+            assert!(s.native_inventory(Some(&j), true).is_ok());
+            let accepted_name = "001.operation-001-accepted.json";
+            let accepted = fs::read(dir.join(accepted_name)).unwrap();
+            let mut changed = complete.operations[0].clone();
+            changed.status = 0;
+            changed.id = "11234567-89ab-cdef-0123-456789abcdef".into();
+            write(&f, &b, accepted_name, &changed);
+            assert!(s.native_inventory(Some(&j), true).is_err());
+            fs::write(dir.join(accepted_name), accepted).unwrap();
+            let terminal_name = "001.operation-001-terminal.json";
+            let terminal = fs::read(dir.join(terminal_name)).unwrap();
+            fs::remove_file(dir.join(terminal_name)).unwrap();
+            assert_eq!(s.native_inventory(Some(&j), true), Err(Error::Unknown));
+            fs::write(dir.join(terminal_name), terminal).unwrap();
+            fs::set_permissions(dir.join(terminal_name), fs::Permissions::from_mode(0o600))
+                .unwrap();
+            complete.operations[0].status = 400;
+            write(&f, &b, terminal_name, &complete.operations[0]);
+            write(&f, &b, "001.terminal.json", &complete);
+            assert!(s.native_inventory(Some(&j), true).is_err());
+            complete.operations[0].status = 401;
+            write(&f, &b, terminal_name, &complete.operations[0]);
+            write(&f, &b, "001.terminal.json", &complete);
+            s.lock().unwrap().close_native(&b).unwrap();
+            assert!(s.native_inventory(Some(&j), true).is_ok());
+        }
+        let (f, s, j, b) = created_owner_with_image_token();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let mut complete: native::Terminal =
+            codec::decode_canonical(&fs::read(dir.join("001.terminal.json")).unwrap(), true)
+                .unwrap();
+        for (id, resource) in [
+            ("operation-1", "f".repeat(64)),
+            ("01234567-89AB-cdef-0123-456789abcdef", "f".repeat(64)),
+            (
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "not-a-fingerprint".into(),
+            ),
+        ] {
+            let mut changed = complete.operations[0].clone();
+            changed.id = id.into();
+            changed.resource = resource;
+            assert!(!operation_shape(&changed, false));
+        }
+        complete.operations[1].status = 401;
+        write(&f, &b, "001.terminal.json", &complete);
+        assert!(s.native_inventory(Some(&j), true).is_err());
+    }
+    #[test]
+    fn recreate_scope_is_closed_and_retains_original_causal_indices() {
+        let (f, s, j, b) = created_owner_with_fingerprint();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let intent_name = "001.operation-001-create-intent.json";
+        let result_name = "001.operation-001-create-result.json";
+        let mut intent = CreateIntent::checked(&fs::read(dir.join(intent_name)).unwrap()).unwrap();
+        let mut result = CreateResult::checked(&fs::read(dir.join(result_name)).unwrap()).unwrap();
+        intent.scope = "recreate".into();
+        result.intent = intent.clone();
+        write(&f, &b, intent_name, &intent);
+        write(&f, &b, result_name, &result);
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        s.lock().unwrap().close_native(&b).unwrap();
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        intent.scope = "future".into();
+        assert!(CreateIntent::checked(&codec::encode(&intent, true).unwrap()).is_err());
+        result.intent.index = 2;
+        write(&f, &b, result_name, &result);
+        assert!(s.native_inventory(Some(&j), true).is_err());
+    }
+    #[test]
+    fn optional_instance_fingerprint_preserves_v1_and_exact_causality() {
+        let (f, s, j, b) = created_owner();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let intent_name = "001.operation-001-create-intent.json";
+        let result_name = "001.operation-001-create-result.json";
+        let old = fs::read(dir.join(intent_name)).unwrap();
+        assert!(!old
+            .windows(b"fingerprint".len())
+            .any(|s| s == b"fingerprint"));
+        let mut intent = CreateIntent::checked(&old).unwrap();
+        assert!(intent.fingerprint.is_empty());
+        assert_eq!(codec::encode(&intent, true).unwrap(), old);
+        intent.fingerprint = "f".repeat(64);
+        let raw = codec::encode(&intent, true).unwrap();
+        let suffix = format!(",\"fingerprint\":\"{}\"}}\n", intent.fingerprint);
+        assert_eq!(raw, [&old[..old.len() - 2], suffix.as_bytes()].concat());
+        write(&f, &b, intent_name, &intent);
+        // A fingerprint added only to the intent cannot match the original result.
+        assert!(s.native_inventory(Some(&j), true).is_err());
+        let mut result = CreateResult::checked(&fs::read(dir.join(result_name)).unwrap()).unwrap();
+        result.intent = intent.clone();
+        write(&f, &b, result_name, &result);
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        for invalid in ["F".repeat(64), "f".repeat(63), "g".repeat(64)] {
+            intent.fingerprint = invalid;
+            assert!(CreateIntent::checked(&codec::encode(&intent, true).unwrap()).is_err());
+        }
+        let mut project = CreateIntent::checked(
+            &fs::read(dir.join("001.command-001-create-intent.json")).unwrap(),
+        )
+        .unwrap();
+        project.fingerprint = "f".repeat(64);
+        assert!(CreateIntent::checked(&codec::encode(&project, true).unwrap()).is_err());
+        for inserted in [
+            b",\"fingerprint\":\"\"".as_slice(),
+            b",\"fingerprint\":null",
+            b",\"unknown\":true",
+        ] {
+            let malformed = [&old[..old.len() - 2], inserted, b"}\n"].concat();
+            assert!(CreateIntent::checked(&malformed).is_err());
+        }
+        let expected = fs::read(dir.join(result_name)).unwrap();
+        s.lock().unwrap().close_native(&b).unwrap();
+        assert_eq!(fs::read(dir.join(result_name)).unwrap(), expected);
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        fs::remove_file(dir.join(result_name)).unwrap();
+        assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
+    }
+    #[test]
+    fn owner_create_causality_is_retained_and_never_substitutes_for_closure() {
+        let (f, s, j, b) = created_owner();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let result = dir.join("001.command-001-create-result.json");
+        let original = fs::read(&result).unwrap();
+        let top = dir.join("001.terminal.json");
+        let terminal_raw = fs::read(&top).unwrap();
+        fs::remove_file(&top).unwrap();
+        assert_eq!(s.native_inventory(Some(&j), true), Err(Error::Unknown));
+        fs::write(&top, &terminal_raw).unwrap();
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        fs::remove_file(&result).unwrap();
+        assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
+        fs::write(&result, &original).unwrap();
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
+        s.lock().unwrap().close_native(&b).unwrap();
+        assert!(!dir.join("001.command-001-intent.json").exists());
+        assert!(!dir.join("001.operation-001-accepted.json").exists());
+        assert!(dir.join("001.command-002-create-result.json").exists());
+        assert!(dir.join("001.operation-001-create-result.json").exists());
+        assert!(s.native_inventory(Some(&j), true).is_ok());
+        fs::remove_file(&result).unwrap();
+        assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
+        fs::write(&result, &original).unwrap();
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut changed: CreateResult = codec::decode_canonical(&original, true).unwrap();
+        changed.intent.source = "f".repeat(64);
+        write(&f, &b, "001.command-001-create-result.json", &changed);
+        assert!(s.native_inventory(Some(&j), true).is_err());
+        fs::write(&result, &original).unwrap();
+        fs::remove_file(dir.join("001.command-001-create-intent.json")).unwrap();
+        assert!(s.native_inventory(Some(&j), false).is_err());
+        fs::remove_file(&result).unwrap();
+        assert_eq!(s.native_inventory(Some(&j), false), Err(Error::Unknown));
+    }
+    #[test]
+    fn owner_create_refuses_noncanonical_unbound_or_mismatched_causal_facts() {
+        let (f, s, j, b) = created_owner();
+        let dir =
+            f.0.join("migrations/native-custody/v1")
+                .join(&b.transaction);
+        let name = "001.operation-001-create-result.json";
+        let raw = fs::read(dir.join(name)).unwrap();
+        for field in [
+            "recipe", "source", "token", "server", "project", "resource", "scope",
+        ] {
+            let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            v["intent"][field] = serde_json::Value::String("f".repeat(
+                if matches!(field, "recipe" | "source" | "server") {
+                    64
+                } else if field == "token" {
+                    32
+                } else {
+                    3
+                },
+            ));
+            let changed: CreateResult = serde_json::from_value(v).unwrap();
+            write(&f, &b, name, &changed);
+            assert!(s.native_inventory(Some(&j), true).is_err(), "{field}");
+        }
+        let mut v: CreateResult = codec::decode_canonical(&raw, true).unwrap();
+        v.operation_id = "different-operation".into();
+        write(&f, &b, name, &v);
+        assert!(s.native_inventory(Some(&j), true).is_err());
+        v.operation_id = "operation-1".into();
+        v.status = 400;
+        write(&f, &b, name, &v);
+        assert!(s.native_inventory(Some(&j), false).is_err());
+        for invalid in [
+            raw.iter()
+                .copied()
+                .chain(b" ".iter().copied())
+                .collect::<Vec<_>>(),
+            [b"{\"version\":1,".as_slice(), &raw[1..]].concat(),
+            [b"{\"unknown\":0,".as_slice(), &raw[1..]].concat(),
+        ] {
+            assert!(CreateResult::checked(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn actual_go_owner_create_facts_survive_rust_compaction() {
+        let Ok(path) = std::env::var("SUBYARD_RUST_OWNER_CREATE_CORPUS") else {
+            return;
+        };
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct File {
+            name: String,
+            raw: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Row {
+            name: String,
+            transaction: String,
+            files: Vec<File>,
+            accepted: bool,
+        }
+        use base64::Engine;
+        let rows: Vec<Row> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(!rows.is_empty());
+        let mut successes = 0;
+        for row in rows {
+            let files: Vec<_> = row
+                .files
+                .into_iter()
+                .map(|f| {
+                    (
+                        f.name,
+                        base64::engine::general_purpose::STANDARD
+                            .decode(f.raw)
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            let checked = validate_files(
+                &row.transaction,
+                files.iter().cloned().map(Ok),
+                None,
+                false,
+                None,
+                false,
+                None,
+            );
+            assert_eq!(checked.is_ok(), row.accepted, "{}: {checked:?}", row.name);
+            if !row.accepted {
+                continue;
+            }
+            successes += 1;
+            let (f, s, _, original) = fixture();
+            let native_root = f.0.join("migrations/native-custody/v1");
+            fs::remove_dir_all(native_root.join(original.transaction)).unwrap();
+            let directory = native_root.join(&row.transaction);
+            fs::create_dir(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut bindings = vec![];
+            for (name, raw) in &files {
+                // Admission above checked the complete finite name grammar.
+                fs::write(directory.join(name), raw).unwrap();
+                fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                if name
+                    .split_once('.')
+                    .is_some_and(|(_, suffix)| suffix == "intent.json")
+                {
+                    let intent: Intent = codec::decode_canonical(raw, true).unwrap();
+                    bindings.push(intent.binding);
+                }
+            }
+            assert!(files.iter().any(|(n, _)| create_fact(n)), "{}", row.name);
+            s.native_inventory(None, false).unwrap();
+            for binding in bindings {
+                s.lock().unwrap().close_native(&binding).unwrap();
+            }
+            s.native_inventory(None, false).unwrap();
+            for (name, raw) in &files {
+                if create_fact(name) {
+                    assert_eq!(fs::read(directory.join(name)).unwrap(), *raw);
+                }
+            }
+        }
+        assert!(successes > 0);
+    }
+    #[test]
+    fn restoration_is_bound_source_evidence_and_survives_native_compaction() {
+        let (f, store, journal, binding) = fixture();
+        let hash = "a".repeat(64);
+        let intent = Intent {
+            version: 1,
+            binding: binding.clone(),
+            owner: "owner-registration".into(),
+            resource: "test-yard".into(),
+            expected: hash.clone(),
+            desired: hash.clone(),
+            source: hash.clone(),
+            recipe: hash.clone(),
+        };
+        write(&f, &binding, "001.intent.json", &intent);
+        let mut accepted = terminal(&binding, "accepted", vec![]);
+        accepted.owner = intent.owner.clone();
+        accepted.resource = intent.resource.clone();
+        write(&f, &binding, "001.accepted.json", &accepted);
+        let mut fact = Restoration {
+            version: 1,
+            binding: binding.clone(),
+            token: "a".repeat(32),
+            recipe: hash.clone(),
+            source: hash.clone(),
+            member: RestoredMember {
+                device: 1,
+                inode: 2,
+                uid: rustix::process::getuid().as_raw(),
+                gid: 0,
+                mode: 0o100600,
+                links: 1,
+                size: 3,
+                modified_seconds: 1,
+                modified_nanos: 2,
+                changed_seconds: 3,
+                changed_nanos: 4,
+                digest: hash,
+            },
+        };
+        write(&f, &binding, "001.restoration.json", &fact);
+        assert_eq!(
+            store.native_inventory(Some(&journal), false),
+            Err(Error::Unknown)
+        );
+        let mut complete = accepted.clone();
+        complete.state = "complete".into();
+        write(&f, &binding, "001.terminal.json", &complete);
+        assert!(store.native_inventory(Some(&journal), false).is_ok());
+        store.lock().unwrap().close_native(&binding).unwrap();
+        assert!(f
+            .0
+            .join("migrations/native-custody/v1")
+            .join(&binding.transaction)
+            .join("001.restoration.json")
+            .exists());
+        assert!(store.native_inventory(Some(&journal), false).is_ok());
+        fact.recipe = "b".repeat(64);
+        write(&f, &binding, "001.restoration.json", &fact);
+        assert!(store.native_inventory(Some(&journal), false).is_err());
+        fact.recipe = intent.recipe;
+        fact.member.changed_nanos = 1_000_000_000;
+        write(&f, &binding, "001.restoration.json", &fact);
+        assert!(store.native_inventory(Some(&journal), false).is_err());
+    }
     #[test]
     fn local_owner_cleanup_pending_preserves_proofs_without_authorizing_other_failures() {
         let (f, store, mut journal, binding) = fixture();

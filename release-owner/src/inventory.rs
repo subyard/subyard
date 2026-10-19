@@ -98,17 +98,23 @@ impl Inventory {
     }
 }
 pub(crate) fn names(parent: &impl std::os::fd::AsFd, maximum: usize) -> Result<Vec<String>> {
+    byte_names(parent, maximum)?
+        .into_iter()
+        .map(|name| String::from_utf8(name).map_err(|_| Error::Protected))
+        .collect()
+}
+pub(crate) fn byte_names(parent: &impl std::os::fd::AsFd, maximum: usize) -> Result<Vec<Vec<u8>>> {
     let mut result = Vec::new();
     for entry in fs::Dir::read_from(parent).map_err(|_| Error::Io)? {
         let entry = entry.map_err(|_| Error::Io)?;
-        let name = entry.file_name().to_str().map_err(|_| Error::Protected)?;
-        if matches!(name, "." | "..") {
+        let name = entry.file_name().to_bytes();
+        if matches!(name, b"." | b"..") {
             continue;
         }
         if result.len() >= maximum {
             return Err(Error::Bound);
         }
-        result.push(name.into());
+        result.push(name.to_vec());
     }
     result.sort();
     Ok(result)

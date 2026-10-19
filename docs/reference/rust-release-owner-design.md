@@ -6,6 +6,11 @@ updated: 2026-10-18
 
 # Rust release-transition owner
 
+Status: experimental. Go remains the production default. Ordinary packages omit the
+Rust declaration and executable; use `dev/package-engine.sh --experimental-release-owner`
+for explicit owner experiments. Rust process and predecessor checks are opt-in targets.
+
+
 This ADR selects a complete Rust release-transition owner as the next architecture to evaluate.
 It specifies the ownership and protocol contracts for that evaluation. Production still uses the
 Go owner described in [Architecture](control-plane-architecture.md) and
@@ -203,6 +208,17 @@ unknown effects cannot be safely classified is ineligible until that recovery bo
 
 Yard RPC, the frozen release process protocol and the private owner/native protocol are
 separate boundaries. Frozen public codecs preserve their existing versions, fields and semantics.
+
+Read-only source admission uses a separate finite `_release-owner-source-v1` process. Its
+three initial descriptors are the exact sealed codec helper, original configuration root and
+original runtime root. It receives no grant, account barrier, update lease or native component
+pipeline. Original OS path bytes and returned original journal bytes use base64 carriers;
+the request is bounded at 64 KiB and the reply at 2 MiB so a valid 1 MiB journal still fits.
+Rust owns protected-history admission and the original binding. Go supplies authenticated
+artifact facts and decodes the returned frozen journal. An unfinished historical owner is
+probed only for its exact sealed capabilities; callers cannot supply capability JSON.
+Verified current tooling supplies the query program even when the installed data belongs to
+an authentic historical Go owner. This does not change transition-owner selection.
 Private typed DTOs reject unsupported roles, variants and versions before effects; their evolution
 does not silently extend a public recovery contract.
 

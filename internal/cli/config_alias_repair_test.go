@@ -38,7 +38,7 @@ func (reader *sourceRepairConsent) Read(target []byte) (int, error) {
 func TestQueuedSourceRepairCannotRecreateRetiredConfiguration(t *testing.T) {
 	_, home, configHome, environment := configCommandFixture(t)
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
-	root := filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	testkit.WriteFile(t, filepath.Join(configHome, "config.env"), []byte("AGENTS=claude\nCODING_TOOL_INTEGRATIONS=codex\n"), 0o600)
 	consent := &sourceRepairConsent{ready: make(chan struct{}), proceed: make(chan struct{})}
@@ -158,7 +158,7 @@ func aliasRepairRuntimeFixture(t *testing.T, root string) string {
 func TestConfigAliasRepairEarlyExplicitChoiceAndNoOp(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
-	root = filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+	root = sourceAdmissionToolingFixture(t, runtimeRoot)
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 	path := filepath.Join(configHome, "config.env")
 	before := "# preserved record\nAGENTS='claude'\nCODING_TOOL_INTEGRATIONS='codex'\nSSH_PORT='2398'\n"
@@ -250,7 +250,7 @@ func TestConfigValidateAliasConflictOffersExplicitRepairWithoutValues(t *testing
 func TestConfigAliasRepairRejectsForeignShippedOverride(t *testing.T) {
 	_, home, configHome, environment := configCommandFixture(t)
 	runtimeRoot := aliasRepairRuntimeFixture(t, home)
-	root := filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+	root := sourceAdmissionToolingFixture(t, runtimeRoot)
 	path := filepath.Join(configHome, "config.env")
 	before := []byte("AGENTS='claude'\nCODING_TOOL_INTEGRATIONS='codex'\n")
 	testkit.WriteFile(t, path, before, 0o600)
@@ -277,7 +277,7 @@ func TestConfigAliasRepairRejectsChangedInputsAfterConsent(t *testing.T) {
 		t.Run(drift, func(t *testing.T) {
 			_, home, configHome, environment := configCommandFixture(t)
 			runtimeRoot := aliasRepairRuntimeFixture(t, home)
-			root := filepath.Join(runtimeRoot, "releases", "1.2.3-owner")
+			root := sourceAdmissionToolingFixture(t, runtimeRoot)
 			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "SUBYARD_CONFIG_DIR="+filepath.Join(root, "config"))
 			path := filepath.Join(configHome, "config.env")
 			before := "AGENTS='claude'\nCODING_TOOL_INTEGRATIONS='codex'\n"

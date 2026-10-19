@@ -14,7 +14,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -155,10 +154,6 @@ func (cli *CLI) inspectConfigSourceAdmission(ctx context.Context, runtime *relea
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
 		return releaseruntime.SourceAdmission{}, errors.New("source repair requires verified installed release metadata")
-	}
-	legacy, err := migration.InspectMutationGate(ctx, options)
-	if err != nil || legacy != nil {
-		return releaseruntime.SourceAdmission{}, errors.New("finish the protected legacy migration with its original owner before source repair")
 	}
 	return runtime.InspectSourceAdmission(ctx, options.RuntimeRoot, options.ConfigHome)
 }

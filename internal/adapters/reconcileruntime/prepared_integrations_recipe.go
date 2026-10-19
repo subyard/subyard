@@ -453,12 +453,20 @@ func (runtime Runtime) restoreMaterializedIntegrations(ctx context.Context, p *P
 	if len(allowed) != len(p.files) {
 		return errors.New("unrecognized integration recipe leaf")
 	}
-	plan := d.Plan.restore()
+	plan, hooks, err := p.overlayAfterOwnerIntegrations(d)
+	if err != nil {
+		return err
+	}
+	runtime.HookPlan = hooks
 	prepared := &PreparedIntegrations{plan: plan, configs: p.configs, entries: entries, skipped: d.Skipped, runtime: d.Runtime, hooks: runtime.HookPlan}
-	if prepared.calculateBinding() != d.Binding {
+	expectedBinding := d.Binding
+	if p.afterOwnerIntegrations != nil {
+		expectedBinding = prepared.calculateBinding()
+	}
+	if prepared.calculateBinding() != expectedBinding {
 		return domain.ErrPlanStale
 	}
-	prepared.binding = d.Binding
+	prepared.binding = expectedBinding
 	p.integrations = prepared
 	if _, _, err := p.stageUsage(); err != nil {
 		return err

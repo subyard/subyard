@@ -46,10 +46,11 @@ type installedRecipe struct {
 	Profile    string                 `json:"profile,omitempty"`
 	Handler    string                 `json:"handler,omitempty"`
 	Native     []installedSourceGuard `json:"native,omitempty"`
+	AfterOwner []byte                 `json:"afterOwner,omitempty"`
 }
 
 func (p *PreparedInstalledRuntime) Recipe() []byte {
-	r := installedRecipe{Version: 1, Owner: p.owner, Source: p.source, Runtime: p.runtime, Resources: p.resources, Launcher: p.keyLauncher, HookBefore: p.hookBefore, Leaves: p.leaves, Profile: p.profile, Handler: p.handler, Native: p.native}
+	r := installedRecipe{Version: 1, Owner: p.owner, Source: p.source, Runtime: p.runtime, Resources: p.resources, Launcher: p.keyLauncher, HookBefore: p.hookBefore, Leaves: p.leaves, Profile: p.profile, Handler: p.handler, Native: p.native, AfterOwner: p.afterOwner}
 	paths := make([]string, 0, len(p.files))
 	for path := range p.files {
 		paths = append(paths, path)
@@ -118,6 +119,9 @@ func (runtime Runtime) BindInstalledRuntimeContext(ctx context.Context, raw []by
 	}
 	if !profileRuntimeDigest.MatchString(r.Source) || !profileRuntimeDigest.MatchString(r.Runtime) || !profileRuntimeDigest.MatchString(r.Resources) || (r.HookBefore != "" && !profileRuntimeDigest.MatchString(r.HookBefore)) || len(r.Launcher) > 4096 {
 		return nil, errors.New("installed recipe identity bound")
+	}
+	if len(r.AfterOwner) > 32<<20 || r.AfterOwner != nil && runtime.afterOwnerConfigs == nil && !runtime.afterOwnerConfigSource && runtime.afterOwnerBroker == nil && runtime.afterOwnerRoutes == nil && !runtime.afterOwnerIntegrationSource {
+		return nil, errors.New("conditional recipe header outside original bind")
 	}
 	if r.Owner == "materialized-files" || r.Owner == "materialized-integrations" {
 		return runtime.bindMaterializedRecipe(ctx, r, raw)
@@ -197,6 +201,12 @@ func (runtime Runtime) BindInstalledRuntimeContext(ctx context.Context, raw []by
 }
 
 func (runtime Runtime) validateInstalledRecipe(p *PreparedInstalledRuntime) error {
+	if p != nil && p.afterOwnerRuntime {
+		if p.closed.Load() {
+			return domain.ErrPlanStale
+		}
+		return runtime.validateInstalledRecipe(p.afterOwnerSourceCopy())
+	}
 	if p == nil || p.closed.Load() || p.runtime != runtime.configRuntimeBinding() || p.resources != runtime.installedResourceBinding() {
 		return domain.ErrPlanStale
 	}
@@ -245,6 +255,11 @@ type PreparedInstalledRuntime struct {
 	broker                                     *PreparedTestVMBroker
 	routes                                     *testyardmigration.PreparedRouteDevices
 	ownerInputs                                []ownerSourceInputBinding
+	afterOwnerConfigs                          *afterOwnerConfigPhysical
+	afterOwnerConfigSource                     bool
+	afterOwnerRuntime                          bool
+	afterOwnerIntegrations                     *afterOwnerIntegrationPhysical
+	afterOwner                                 []byte
 }
 
 func (p *PreparedInstalledRuntime) Binding() string {

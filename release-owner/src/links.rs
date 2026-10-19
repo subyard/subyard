@@ -17,6 +17,45 @@ pub struct RuntimeLinks {
     path: PathBuf,
 }
 impl RuntimeLinks {
+    pub(crate) fn pinned(path: &Path, root: OwnedFd) -> Result<Self> {
+        record::require(path.is_absolute() && path != Path::new("/"))?;
+        store::checked(&root, true, false, false)?;
+        let links = Self {
+            root,
+            path: path.to_owned(),
+        };
+        links.current_root()?;
+        Ok(links)
+    }
+    pub(crate) fn source_inputs(&self) -> Result<crate::assets::Inputs> {
+        self.current_root()?;
+        let mut values = std::collections::BTreeMap::new();
+        for name in ["", "releases", "current", "previous"] {
+            let stat = if name.is_empty() {
+                fs::fstat(&self.root)
+            } else {
+                fs::statat(&self.root, name, AtFlags::SYMLINK_NOFOLLOW)
+            };
+            let mut input = match stat {
+                Ok(s) => crate::assets::input(s),
+                Err(rustix::io::Errno::NOENT) if name == "previous" => {
+                    crate::assets::Input::default()
+                }
+                Err(_) => return Err(Error::Io),
+            };
+            if name.is_empty() || name == "releases" {
+                input.links = 0;
+            }
+            let path = if name.is_empty() {
+                self.path.clone()
+            } else {
+                self.path.join(name)
+            };
+            use std::os::unix::ffi::OsStrExt;
+            values.insert(path.as_os_str().as_bytes().to_vec(), input);
+        }
+        Ok(crate::assets::Inputs(values))
+    }
     pub fn open(path: &Path) -> Result<Self> {
         record::require(path.is_absolute() && path != Path::new("/"))?;
         let root = store::io(fs::open(

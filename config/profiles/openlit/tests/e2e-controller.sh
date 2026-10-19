@@ -43,4 +43,19 @@ for incompatible in '--kind container' '--kind vm' '--network-only' '--auth-only
   assert_controller_rejects 2 --slot 7 --migration "${incompatible_arguments[@]}"
 done
 assert_controller_failure --slot 7 --migration
+assert_controller_rejects 2 --slot 7 --native-loss invalid
+assert_controller_rejects 2 --slot 7 --native-loss group --kind vm
+assert_controller_rejects 2 --slot 7 --native-loss helper --auth-only
+assert_controller_rejects 2 --slot 7 --native-loss group --native-loss owner
+# Dispatch grammar uses a stub at the separately tested frozen-bundle boundary.
+mkdir -p "$tmp/tests/helpers"
+cat > "$tmp/tests/helpers/profile-native-loss.py" <<'PY'
+import os, pathlib, sys
+assert sys.argv[1:] == ['--preflight', '--bundle', '/frozen/bundle', '--bundle-sha256', 'a'*64]
+pathlib.Path(os.environ['PROFILE_CONTROLLER_LOG']).with_name('preflight-checked').touch()
+PY
+SUBYARD_E2E_CANDIDATE_BUNDLE=/frozen/bundle SUBYARD_E2E_CANDIDATE_SHA256="$(printf 'a%.0s' {1..64})" \
+  bash "$tmp/$controller" --slot 7 --native-loss group > "$tmp/loss-calls"
+[ -f "$tmp/preflight-checked" ]
+grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=180 4500 bash config/profiles/openlit/tests/e2e/owner.sh container  group' "$tmp/loss-calls"
 python3 -B "$ROOT/config/profiles/openlit/tests/migration-process-test.py"
