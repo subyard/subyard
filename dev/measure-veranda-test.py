@@ -25,6 +25,241 @@ wayland_spec.loader.exec_module(wayland_fixture)
 
 
 class WaylandProbeTest(unittest.TestCase):
+    def test_displayfd_waits_for_fragmented_newline_without_requiring_eof(self):
+        for fragments in ([b'123\n'], [b'123', b'\n'], [b'1', b'2', b'3', b'\n']):
+            with self.subTest(fragments=fragments):
+                read_fd, write_fd = os.pipe()
+                remaining = list(fragments)
+                os.write(write_fd, remaining.pop(0))
+                read = os.read
+                observed = []
+                def fragment(fd, size):
+                    data = read(fd, size)
+                    observed.append(data)
+                    if remaining:
+                        os.write(write_fd, remaining.pop(0))
+                    return data
+                try:
+                    with patch.object(probe.os, 'read', side_effect=fragment):
+                        self.assertEqual(probe.read_display_number(read_fd, probe.time.monotonic() + 1), '123')
+                    self.assertEqual(observed, fragments)
+                    # The writer is still open: newline, not EOF, authorizes return.
+                    os.fstat(write_fd)
+                finally:
+                    os.close(read_fd); os.close(write_fd)
+        for fragments, completed_at, accepted in (([b'123\n'], .9, True), ([b'123\n'], 1, False),
+                                                   ([b'123\n'], 1.1, False), ([b'123', b'\n'], 1.1, False)):
+            with self.subTest(fragments=fragments, completed_at=completed_at):
+                read_fd, write_fd = os.pipe()
+                remaining = list(fragments); os.write(write_fd, remaining.pop(0))
+                now = [0.0]; read = os.read
+                def observe(fd, size):
+                    data = read(fd, size)
+                    now[0] = completed_at if data.endswith(b'\n') else .25
+                    if remaining:
+                        os.write(write_fd, remaining.pop(0))
+                    return data
+                try:
+                    with patch.object(probe.time, 'monotonic', side_effect=lambda: now[0]), \
+                            patch.object(probe.os, 'read', side_effect=observe):
+                        if accepted:
+                            self.assertEqual(probe.read_display_number(read_fd, 1), '123')
+                        else:
+                            with self.assertRaises(TimeoutError):
+                                probe.read_display_number(read_fd, 1)
+                finally:
+                    os.close(read_fd); os.close(write_fd)
+
+    def test_displayfd_rejects_partial_eof_malformed_oversize_and_one_deadline(self):
+        for data in (b'', b'12', b'\n', b'1x\n', b'\xff\n', b'123456\n', b'1\nx', b'1\n2\n'):
+            with self.subTest(data=data):
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, data); os.close(write_fd)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        probe.read_display_number(read_fd, probe.time.monotonic() + 1)
+                finally:
+                    os.close(read_fd)
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b'1')
+        read = os.read
+        def fragment(fd, size):
+            data = read(fd, size)
+            os.write(write_fd, b'2')
+            return data
+        try:
+            with patch.object(probe.time, 'monotonic', side_effect=[0, .6, 1.1]), \
+                    patch.object(probe.os, 'read', side_effect=fragment) as reads:
+                with self.assertRaises(TimeoutError):
+                    probe.read_display_number(read_fd, 1)
+                self.assertEqual(reads.call_count, 2)  # Fragments do not reset the deadline.
+            with self.assertRaises(TimeoutError):
+                probe.read_display_number(read_fd, probe.time.monotonic())
+        finally:
+            os.close(read_fd); os.close(write_fd)
+
+    def test_native_regular_display_file_waits_for_newline_with_original_poll_bound(self):
+        source = (probe.ROOT / 'dev/e2e/veranda-native.sh').read_text()
+        loop = source.split('  xvfb_pid=$!\n', 1)[1].split('  python3 - "$FIXTURE" "$xvfb_pid"', 1)[0]
+        for initial, complete, expected, polls in ((b'17\n', False, 0, 0), (b'17', True, 0, 1), (b'17', False, 17, 100)):
+            with self.subTest(initial=initial, complete=complete), tempfile.TemporaryDirectory(prefix='veranda-display-', dir='/tmp') as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                display = root / 'display'; display.write_bytes(initial); display.chmod(0o600)
+                script = ('set -eu\nxvfb_pid=$$\npolls=0\n'
+                          'die(){ printf "%s\\n" "$polls"; exit 17; }\n'
+                          'sleep(){ polls=$((polls+1)); '
+                          + ('printf "\\n" >> "$FIXTURE/display"; ' if complete else '')
+                          + 'return 0; }\n' + loop + '\nprintf "%s\\n" "$polls"\n')
+                result = subprocess.run(['bash', '-c', script], env=dict(os.environ, FIXTURE=str(root)),
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(polls))
+                if result.returncode == 0:
+                    self.assertEqual(display.read_bytes(), b'17\n')
+
+    def test_current_gtk_requires_complete_healthy_default_body_not_navigation_or_error(self):
+        spec = importlib.util.spec_from_file_location('gtk_observer', Path(__file__).parent / 'e2e/veranda-package-ui.py')
+        gtk = importlib.util.module_from_spec(spec); spec.loader.exec_module(gtk)
+        atspi = SimpleNamespace(Role=SimpleNamespace(LABEL=29, PUSH_BUTTON=43, LIST_ITEM=32),
+                                StateType=SimpleNamespace(SHOWING='showing', SELECTED='selected', ENABLED='enabled', SENSITIVE='sensitive'))
+        def node(role, name, *states):
+            return SimpleNamespace(get_role=lambda: role, get_name=lambda: name,
+                                   get_state_set=lambda: SimpleNamespace(contains=lambda value: value in states))
+        rows = [node(32, 'Local owner / ' + name, 'showing', *(['selected'] if name == 'default' else []))
+                for name in ['default', *('fleet-' + str(index).zfill(2) for index in range(1, 20))]]
+        rows.append(node(32, 'Local owner', 'showing'))
+        heading = node(29, 'Local owner / default', 'showing')
+        connected = node(29, 'Connected', 'showing')
+        summary = node(29, 'Yard state: NOT_CREATED\n10 projects\nObserved: synthetic', 'showing')
+        refresh = node(43, 'Refresh', 'showing', 'sensitive')
+        valid = rows + [heading, connected, summary, refresh]
+        self.assertEqual(gtk.gtk_ready(valid, atspi, configured=True)['visible_yards'], 20)
+        for invalid in (rows + [connected, summary, refresh], valid[:-1], valid + [refresh],
+                        rows + [heading, connected, summary, node(43, 'Refresh', 'showing', 'enabled')],
+                        rows + [heading, node(29, 'invalid_response: unsupported', 'showing'), summary, refresh],
+                        rows + [heading, connected, node(29, summary.get_name()), refresh],
+                        rows[1:] + [heading, connected, summary, refresh],
+                        valid + [node(32, 'Local owner / fleet-01', 'showing', 'selected')]):
+            with self.subTest(nodes=len(invalid)):
+                self.assertIsNone(gtk.gtk_ready(invalid, atspi, configured=True))
+
+    def test_shared_gtk_observer_discards_incomplete_tree_and_rejects_ambiguous_foreign_or_bounds(self):
+        spec = importlib.util.spec_from_file_location('gtk_observer', Path(__file__).parent / 'e2e/veranda-package-ui.py')
+        gtk = importlib.util.module_from_spec(spec); spec.loader.exec_module(gtk)
+        spec = importlib.util.spec_from_file_location('gtk_driver', probe.ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        app = SimpleNamespace(get_process_id=lambda: 77, clear_cache=lambda: None,
+                              get_child_count=lambda: 0, get_state_set=lambda: SimpleNamespace(contains=lambda _: False))
+        # owned_tree retains nodes in a list, without requiring a hashable proxy.
+        def observer(frames):
+            value = gtk.GtkObserver.__new__(gtk.GtkObserver)
+            value.pid, value.driver, value.owned = 77, driver, lambda: None
+            value.diagnostics = {'incomplete_tree_retries': 0, 'observation_seconds': 0, 'observations': 0}
+            value.context = SimpleNamespace(pending=lambda: False)
+            def desktop(_):
+                frame = frames.pop(0) if len(frames) > 1 else frames[0]
+                return SimpleNamespace(clear_cache=lambda: None, get_child_count=lambda: len(frame),
+                                       get_child_at_index=lambda index: frame[index])
+            value.atspi = SimpleNamespace(get_desktop=desktop, StateType=SimpleNamespace(DEFUNCT='defunct'))
+            return value
+        value = observer([[None], [app]])
+        self.assertEqual(value.read(probe.time.monotonic() + 1), [app])
+        self.assertEqual(value.diagnostics['incomplete_tree_retries'], 1)
+        for frames, error in (([[app, app]], 'duplicate_owned'), ([[app] * 513], 'child_limit')):
+            with self.subTest(error=error), self.assertRaisesRegex(AssertionError, error):
+                observer(frames).read(probe.time.monotonic() + 1)
+        foreign = SimpleNamespace(get_process_id=lambda: 88)
+        app.get_child_count = lambda: 1
+        app.get_child_at_index = lambda _: foreign
+        with self.assertRaisesRegex(AssertionError, 'foreign_accessible_node'):
+            observer([[app]]).read(probe.time.monotonic() + 1)
+        with self.assertRaises(TimeoutError):
+            observer([[None]]).read(probe.time.monotonic() + .01)
+
+    def test_gtk_readiness_retries_getter_error_as_one_coherent_observation(self):
+        spec = importlib.util.spec_from_file_location('gtk_observer', Path(__file__).parent / 'e2e/veranda-package-ui.py')
+        gtk = importlib.util.module_from_spec(spec); spec.loader.exec_module(gtk)
+        spec = importlib.util.spec_from_file_location('gtk_driver', probe.ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        class ApiError(Exception): domain, code = 'atspi_error', 1
+        observer = gtk.GtkObserver.__new__(gtk.GtkObserver)
+        observer.driver, observer.api_error, observer.atspi = driver, ApiError, object()
+        observer.diagnostics = {}
+        reads = []
+        observer.read = lambda deadline: reads.append(True) or [object()]
+        with patch.object(gtk, 'gtk_ready', side_effect=[ApiError(), {'kind':'gtk-controllable-configured-overview'}]):
+            result = observer.ready(probe.time.monotonic()+1, configured=True)
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(observer.diagnostics['read_error_count'], 1)
+        self.assertEqual(result['kind'], 'gtk-controllable-configured-overview')
+        ApiError.code = 9
+        with patch.object(gtk, 'gtk_ready', side_effect=ApiError()), self.assertRaises(ApiError):
+            observer.ready(probe.time.monotonic()+1, configured=True)
+
+    def test_current_gtk_launch_uses_observer_without_legacy_stdout_marker(self):
+        binary = self.root / 'gtk-launch-fixture'
+        binary.write_text('#!/usr/bin/python3\nimport time\ntime.sleep(30)\n')
+        binary.chmod(0o700)
+        observed = []
+        class Observer:
+            diagnostics = {'observation_seconds': 0}
+            def __init__(self, pid, executable): observed.append((pid, executable))
+            def ready(self, deadline, configured):
+                self.configured = configured
+                return {'kind': 'gtk-controllable-configured-overview'}
+        module = SimpleNamespace(GtkObserver=Observer)
+        spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _: None))
+        with patch.object(probe.importlib.util, 'spec_from_file_location', return_value=spec), \
+                patch.object(probe.importlib.util, 'module_from_spec', return_value=module):
+            process, tree, ready = probe.launch(binary, {'PATH': '/usr/bin:/bin'}, 1,
+                                               gtk=True, expected_fleet=probe.FLEET_COUNTS)
+        try:
+            self.assertEqual(observed, [(process.pid, binary)])
+            self.assertEqual(tree.readiness_kind, 'gtk-controllable-configured-overview')
+            self.assertTrue(tree.gtk_observer.configured)
+            self.assertLess(ready, 1)
+        finally:
+            tree.stop(process)
+            process.stdout.close()
+
+    def test_gtk_renderer_metadata_uses_successful_surface_lines_and_retains_ambiguity(self):
+        failed = b"Failed to realize renderer 'GskVulkanRenderer' for surface 'GdkX11Toplevel'\n"
+        selected = b"Using renderer 'GskGLRenderer' for surface 'GdkX11Toplevel'\n"
+        self.assertIsNone(probe.gtk_renderer_metadata(failed)['main_surface'])
+        result = probe.gtk_renderer_metadata(failed + selected)
+        self.assertEqual(result['main_surface']['renderer_class'], 'GskGLRenderer')
+        self.assertEqual(result['status'], 'observed')
+        result = probe.gtk_renderer_metadata(selected + selected)
+        self.assertEqual(len(result['successful_surface_records']), 2)
+        self.assertIsNone(result['main_surface'])
+        self.assertEqual(result['status'], 'unknown')
+        self.assertTrue(probe.gtk_renderer_metadata(selected + b'x' * 65536)['truncated'])
+
+    def test_gtk_limits_distinguish_short_missing_over_limit_and_sampled_scope(self):
+        window = {'settle_seconds': 30, 'duration_seconds': 120, 'statistics_partial': False,
+                  'pss_missing_process_samples': 0, 'peak_rss_bytes': 100 * 1024**2, 'cpu_percent_one_core': .05,
+                  'resource_assessment': {'status': 'no_recorded_pressure'}}
+        result = {'startup': {'count': 30, 'p95_seconds': .9, 'peak_sampled_rss_bytes': 200 * 1024**2,
+                              'launches': [{'startup_metrics_partial': False}] * 30},
+                  'idle': window, 'window_states': {'visible': window, 'minimized': dict(window)}}
+        self.assertEqual(probe.assess_gtk_baseline(result)['status'], 'pass')
+        result['startup']['count'] = 1
+        result['startup']['launches'] = result['startup']['launches'][:1]
+        self.assertEqual(probe.assess_gtk_baseline(result)['status'], 'incomplete')
+        result['startup']['count'] = 30
+        result['startup']['launches'] *= 30
+        for value in (None, float('nan'), -1, 2.1):
+            result['startup']['p95_seconds'] = value
+            self.assertEqual(probe.assess_gtk_baseline(result)['status'], 'fail')
+        result['startup']['p95_seconds'] = 1.2
+        self.assertEqual(probe.assess_gtk_baseline(result)['limits']['startup_p95_seconds']['status'], 'within_limit')
+        window['statistics_partial'] = True
+        self.assertEqual(probe.assess_gtk_baseline(result)['status'], 'fail')
+        window['statistics_partial'] = False
+        window['peak_rss_bytes'] = None
+        self.assertEqual(probe.assess_gtk_baseline(result)['limits']['idle_rss_bytes']['status'], 'unknown')
+        self.assertEqual(probe.assess_gtk_baseline(result)['status'], 'fail')
+
     def test_resource_assessment_is_separate_and_fail_closed(self):
         base = {'schema_version': 1,
                 'guest_memory_bytes': {'status': 'ok', 'values': {'MemTotal': 4096, 'MemAvailable': 2048, 'SwapTotal': 8, 'SwapFree': 8}},

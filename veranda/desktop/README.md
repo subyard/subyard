@@ -133,6 +133,10 @@ window again after activation. It does not use
 accessibility actions or synthetic window-directed key events. Both X11 and Wayland support `--remote` and `--remote --ui`;
 text uses their native keyboard injection tools. Each result identifies its backend, screenshot, original
 GUI exit and observed process identities.
+Connect requires the actual owned panel title and unique focused editable destination
+before physical text and Return. Editor continuity compares the same visible typed
+editor's text, caret and selection while Refresh has focus, before any return-focus
+navigation: [GTK keyboard refocus can select all entry text](https://github.com/GNOME/gtk/blob/4.18.6/gtk/gtktext.c#L3229-L3249).
 
 Use the existing [candidate-bundle transport](../../docs/test-vms.md) to include
 prebuilt ELFs with the current public source. This example uses synthetic product
@@ -204,6 +208,11 @@ metadata, Unicode named-yard draft and draft restoration checks on the same
 remote candidate. These remain tests to run, not native proof from unit checks.
 The helper does not measure resource/latency budgets, create running
 yards or establish full UX/IME/platform/package behavior.
+Each input lifetime has a fixed functional workload watchdog: 90 seconds locally,
+360 seconds with `--remote`, and 600 seconds with `--remote --ui`. The expanded
+SSH/UI scenarios include many guarded observations and physical steps. These are
+test completion bounds, not product responsiveness limits; individual read, wait,
+key and natural-close deadlines remain separate and unchanged.
 The client does not retain each engine/SSH child's original wait status; observed
 identity death after app-directed shutdown must not be reported as a child exit0.
 
@@ -229,6 +238,87 @@ listener, pin and image cleanup follows product teardown; unrelated client
 settings and projects are preserved. Installed CLI help, actual import/export,
 TLS routing through the canonical project and native cleanup require a leased
 VM result; host-free artifact contracts do not establish those properties.
+
+## Linux GTK ordinary resource baseline
+
+The existing resource sampler has an explicit `--gtk` path for the current desktop.
+Its owning VM helper keeps the authentic same-candidate installed release preparation
+above, including installed-engine byte equality and migration readiness. Use a fresh
+8 GiB `android-test` VM for each backend, canonical product Incus Phase1 preparation,
+and a fresh unprivileged group session for the **whole helper**, as in the SHORT recipe.
+First run the one-launch prerequisite (explicit staged package and current engine):
+
+```sh
+python3 dev/e2e/veranda-wayland-resources.py /absolute/candidate.deb /absolute/yard --gtk --x11 --short
+```
+
+After its review, omit `--short` for 30 fresh app starts, then 30 seconds of settling
+and 120 seconds idle in each acknowledged visible/minimized state. For Wayland omit
+`--x11`; use another fresh VM, rather than inheriting the first platform teardown.
+The one-launch result is `incomplete` for resource acceptance, even when its native
+prerequisite succeeds. Over-limit complete measurements fail after retaining metrics.
+Targets and hard limits follow the [resource budgets](../../docs/reference/control-plane-architecture.md#veranda-resource-budgets).
+
+Current GTK readiness observes exact PID/UID/start/executable and a complete bounded
+owned AT-SPI tree: Connected, the actual default body heading and selected navigation
+row, 20 configured yard rows, the default 10-project Overview summary and enabled Refresh.
+Incomplete trees are discarded and retried under one startup deadline; foreign nodes,
+ambiguous apps and tree limits fail. A healthy configured owner cannot pass with an error
+screen. The 200 loaded projects are bound to real `owner.inventory` preflight and the
+existing typed client conversion; this does **not** claim 200 simultaneously rendered
+project widgets, or the ten project-name widgets hidden behind Projects. The physical
+SHORT owns that separate names/navigation check.
+
+Startup means the first controllable accessibility fleet boundary, **not paint**.
+Read-only AT-SPI/proc observation and command latency add measured startup overhead and
+sampling gaps; observer/compositor processes are outside app sums, while GUI work answering
+accessibility requests is included. RSS/PSS/CPU retain simultaneous GUI/local-Go/owned-SSH
+accounting; current mean CPU includes the final post-state-query sample before its matching
+elapsed endpoint, and sampled idle maxima include baseline/final endpoints. Historical
+receipts retain their original accounting. Peaks are sampled maxima, not continuous
+peak proof. Missing/partial metrics
+cannot PASS. The sampler closes its observed app tree through owned cleanup after each
+launch; natural close remains a separate SHORT assertion.
+
+The fixture uses a private bus and owned Xvfb/Openbox at 1920×1080, or labwc/Pixman at
+1920×1080@60 Hz, scale 1. X11 refresh rate is unmeasured. Resource children use the shipping GTK default/auto renderer with `GSK_RENDERER` unset,
+recorded separately from the known compositor renderer and runtime packages. [`GSK_DEBUG=renderer`](https://sources.debian.org/src/gtk4/4.18.6%2Bds-2/gsk/gskrenderer.c/)
+logs successful renderer/surface class pairs privately; per-launch
+metrics retain distinct successful surfaces and report unknown when main-surface evidence
+is missing/ambiguous/truncated. This instrumentation adds disclosed startup overhead and
+does not prove hardware acceleration. Functional SHORT's explicit
+Cairo selection remains separate. Window state is acknowledged
+through exact-PID Openbox EWMH or singleton labwc foreign-toplevel state, not inferred from
+sleep. No AT-SPI action/focus/text mutation is used. The historical explicit-binary
+marker/WebKit research path remains available without `--gtk`, labelled separately.
+Stress/event bursts, continuous refresh peaks, switch/snapshot/event-to-paint, recovery,
+inactive/occluded states and package lifecycle are separate unmet gates; this ordinary
+baseline does not promote them to PASS.
+
+## Local GTK IBus composition probe
+
+The SHORT's optional `--ime` mode is separate from `--remote --ui`: it runs two
+local GUI lifetimes against the same genuine owner, without repeating SSH flows.
+It adds `ibus`, `ibus-hangul`, `ibus-gtk4` and `fonts-noto-cjk` only in this mode.
+The fixture owns a foreground IBus daemon on a private address and bus, with
+private HOME/XDG and keyfile settings; it records installed package/input hashes,
+selects the `hangul` engine and verifies the two-set, initial-Latin, syllable-preedit
+settings by readback. `GTK_IM_MODULE=ibus` explicitly tests the GTK module, including
+on Wayland; it does not establish compositor-native input-method support.
+
+In the actual local owner's Yard name editor, physical Shift+Space, `r`, `k`,
+Shift+Space should compose ㄱ → 가 and commit U+AC00. No Hangul text injection,
+clipboard, accessibility action or owner operation supplies that syllable.
+Committed AT-SPI text must remain empty and the exact local-owner draft empty
+or absent during both preedit capture stages; after commit both must equal U+AC00. The GUI
+closes naturally and a second process must restore the same scoped draft/text.
+The fixture captures `ime-preedit-consonant.png`, `ime-preedit-syllable.png` and
+`ime-committed.png`; those are observations for separate native inspection.
+GTK 4.18.6 keeps [preedit and committed text separate](https://github.com/GNOME/gtk/blob/4.18.6/gtk/gtktext.c#L4192-L4227); the [Entry AT-SPI getter](https://github.com/GNOME/gtk/blob/4.18.6/gtk/a11y/gtkatspitext.c#L486-L509) reads committed text.
+Logical text/draft equality does not prove visible preedit, fonts or painted pixels.
+Existing lifecycle ownership, physical-input guards and 90-second local input
+budgets remain in force; actual package/schema/module and keyboard composition
+compatibility still require native validation.
 
 ## Linux GTK package preparation
 
@@ -287,3 +377,11 @@ baseline, newly added packages per phase and the phase's OS installed-size chang
 rollback may retain upgrade dependencies. Fixture-only tools are then installed for a
 second install/upgrade/rollback sequence that checks physical GTK launch/close. Its
 warm-cache apt logs are separate and cannot stand in for clean-machine download costs.
+
+For a separate fresh-VM Wayland package lifecycle, use the optional prefix
+`dev/e2e/veranda-package.sh --wayland <baseline.deb> <candidate.deb>`; omitting it
+retains X11. Both functional GTK paths force Cairo. The Wayland compositor is
+owned headless Labwc/Pixman with Xwayland disabled, initially empty before each
+launch; window attribution is subsequent singleton `org.subyard.Veranda` app-ID,
+not exact PID identity (the protocol has no PID query). These checks do not supply
+default-renderer/resource or connected-owner acceptance.

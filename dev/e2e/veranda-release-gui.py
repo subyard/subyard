@@ -1962,9 +1962,10 @@ def main():
                                    *(['-auth', str(authority)] if wayland else [])],
                                   env=base_env, pass_fds=(writefd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         children.append((server, measure.Tree(server.pid))); os.close(writefd)
-        with selectors.DefaultSelector() as selector:
-            selector.register(readfd, selectors.EVENT_READ); assert selector.select(3)
-        display = ':' + os.read(readfd, 32).decode().strip(); os.close(readfd)
+        try:
+            display = ':' + measure.read_display_number(readfd, time.monotonic() + 3)
+        finally:
+            os.close(readfd)
         if wayland:
             boundary('preparation.compositor')
             write(authority, xauthority_record(display, cookie))

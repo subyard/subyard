@@ -1140,12 +1140,13 @@ if [ "${SUBYARD_E2E_VERANDA_TERMINAL:-0}" = 1 ] || [ "${SUBYARD_E2E_VERANDA_EDIT
   install -m 0600 /dev/null "$FIXTURE/xvfb.log"
   setsid Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3> "$FIXTURE/display" > "$FIXTURE/xvfb.log" 2>&1 &
   xvfb_pid=$!
+  display_ready=0
   for _ in {1..100}; do
-    [ -s "$FIXTURE/display" ] && break
+    if IFS= read -r _display_number < "$FIXTURE/display"; then display_ready=1; break; fi
     kill -0 "$xvfb_pid" || die 'terminal Xvfb exited'
     sleep 0.05
   done
-  [ -s "$FIXTURE/display" ] || die 'terminal Xvfb readiness timeout'
+  [ "$display_ready" = 1 ] || die 'terminal Xvfb readiness timeout'
   python3 - "$FIXTURE" "$xvfb_pid" <<'PY'
 import json,os,pathlib,re,stat,sys
 root=pathlib.Path(sys.argv[1]); pid=int(sys.argv[2]); uid=os.geteuid()

@@ -54,6 +54,255 @@ class EvidenceChecks(unittest.TestCase):
             manifest = assets / 'prepared-assets.json'; manifest.write_text(json.dumps(data)); manifest.chmod(0o600)
             yield root, assets, engine, data
 
+    def test_destination_requires_actual_owned_panel_and_unique_focused_editable_text(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(PANEL=39, LABEL=29, TEXT=61, PUSH_BUTTON=43),
+            StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', EDITABLE='editable', DEFUNCT='defunct'))
+        def node(role, name, *states, parent=None, pid=77):
+            return SimpleNamespace(get_role=lambda: role, get_name=lambda: name, get_process_id=lambda: pid,
+                get_parent=lambda: parent, get_state_set=lambda: SimpleNamespace(contains=lambda value: value in states))
+        panel = node(39, '', 'showing'); other = node(39, '', 'showing')
+        button = node(43, 'Connect remote host', 'showing')
+        nav_label = node(29, 'Connect remote host', 'showing', parent=button)
+        title = node(29, 'Connect remote host', 'showing', parent=panel)
+        editor = node(61, 'Remote SSH destination', 'showing', 'focused', 'editable', parent=panel)
+        valid = [panel, button, nav_label, title, editor]
+        for allowed, items in ((True, valid), (False, [panel, button, nav_label, editor]),
+                (False, [panel, other, title, node(61, 'Remote SSH destination', 'showing', 'focused', 'editable', parent=other)]),
+                (False, [panel, title, node(29, 'Remote SSH destination', 'showing', 'focused', 'editable', parent=panel)]),
+                (False, [panel, title, node(61, 'Remote SSH destination', 'showing', 'focused', parent=panel)]),
+                (False, valid + [node(61, 'Remote SSH destination', 'showing', parent=panel)]),
+                (False, [panel, title, node(61, 'Remote SSH destination', 'showing', 'focused', 'editable', parent=panel, pid=88)])):
+            with self.subTest(allowed=allowed), patch.object(driver, 'x11_input') as physical:
+                if driver.remote_editor_ready(items, 77, atspi):
+                    physical(77, ['type', '--', '庭院 مرحبا α'])
+                self.assertEqual(physical.call_count, int(allowed))
+
+    def test_text_content_uses_explicit_interface_despite_accessible_method_collision(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        class Accessible:
+            contents = '庭院 مرحبا α'
+            def get_text(self):
+                raise AssertionError('Accessible accessor must never read content')
+        interface = Accessible()
+        with self.assertRaises(TypeError):
+            interface.get_text(0, -1)  # Exercise the real GI-shaped name collision.
+        calls = []
+        class TextAPI:
+            def get_character_count(value):
+                self.assertIs(value, interface)
+                return len(value.contents)
+            def get_text(value, start, end):
+                calls.append((value, start, end))
+                # GTK Editable clamps both offsets to Unicode character count.
+                length = len(value.contents)
+                return value.contents[max(0, min(start, length)):max(0, min(end, length))]
+        self.assertEqual(driver.interface_text(interface, TextAPI), '庭院 مرحبا α')
+        self.assertNotEqual(len(interface.contents), len(interface.contents.encode('utf-8')))
+        self.assertEqual(calls, [(interface, 0, len(interface.contents))])
+        with patch.object(TextAPI, 'get_text', return_value=interface.contents[:-1]):
+            self.assertIsNone(driver.interface_text(interface, TextAPI))
+        for count in (-1, 32769, True):
+            with self.subTest(count=count), patch.object(TextAPI, 'get_character_count', return_value=count), \
+                    patch.object(TextAPI, 'get_text') as content:
+                with self.assertRaisesRegex(AssertionError, 'accessible_text_limit_exceeded'):
+                    driver.interface_text(interface, TextAPI)
+                content.assert_not_called()
+
+    def test_unicode_delivery_and_scoped_persistence_share_one_deadline_and_private_scalars(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text())
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and any(isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)
+                              and item.value.value == 'host-unicode-editor-visible' for item in node.body))
+        start = next(index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
+                     and isinstance(node.value, ast.Constant) and node.value.value == 'host-unicode-editor-visible')
+        stop = next(index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant) and node.value.value == 'editor-refresh-baseline')
+        actual = compile(ast.Module(body=branch.body[start:stop], type_ignores=[]), 'actual-unicode-boundary', 'exec')
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29, PANEL=39, TEXT=61),
+            StateType=SimpleNamespace(SHOWING='showing', SELECTED='selected', FOCUSED='focused', EDITABLE='editable', DEFUNCT='defunct'))
+        class Node:
+            def __init__(self, role, name='', states=('showing',)):
+                self.role, self.name, self.states, self.pid = role, name, set(states), 7
+                self.parent, self.children, self.text = None, [], ''
+            def get_role(self): return self.role
+            def get_name(self): return self.name
+            def get_process_id(self): return self.pid
+            def get_parent(self): return self.parent
+            def get_child_count(self): return len(self.children)
+            def get_child_at_index(self, index): return self.children[index]
+            def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
+            def get_text_iface(self): return self
+        expected, wrong = '庭院 مرحبا α', 'PRIVATE_UNKNOWN_TEXT'
+        accepted, foreign, destination = 'PRIVATE_ACCEPTED_ID', 'PRIVATE_FOREIGN_ID', 'PRIVATE_HOST'
+        faults = ('exact', 'file-pending', 'wrong-text', 'incomplete-text', 'foreign-scope', 'duplicate-draft',
+                  'malformed-tree', 'unowned-editor', 'wrong-focus', 'wrong-role', 'ambiguous-editor', 'late-text-change')
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-unicode-', dir='/tmp') as temporary:
+                root = Path(temporary) / 'subyard/veranda'; root.mkdir(parents=True, mode=0o700)
+                def document(connection=accepted, copies=1):
+                    path = root / 'desktop.json'
+                    path.write_text(json.dumps({'drafts': [{'scope': {'connection': connection, 'yard': None},
+                        'field': 'create:name', 'value': expected}] * copies})); path.chmod(0o600)
+                if fault != 'file-pending':
+                    document(foreign if fault == 'foreign-scope' else accepted, 3 if fault == 'duplicate-draft' else 1)
+                nav = Node(31, 'Owner hosts and yards'); row = Node(32, states=('showing', 'selected'))
+                label = Node(29, destination); heading = Node(29, destination); panel = Node(39)
+                nav.children = [row]; row.parent = nav; row.children = [label]; label.parent = row; heading.parent = panel
+                editor = Node(61, 'Yard name', ('showing', 'focused', 'editable'))
+                editor.text = wrong if fault == 'wrong-text' else expected
+                items = [nav, row, label, heading, panel, editor]
+                if fault == 'malformed-tree': nav.children = []
+                if fault == 'unowned-editor': editor.pid = 8
+                if fault == 'wrong-focus': editor.states.remove('focused')
+                if fault == 'wrong-role': editor.role = 29
+                if fault == 'ambiguous-editor': items.append(Node(61, 'Yard name', ('showing', 'focused', 'editable')))
+                atspi.Text = SimpleNamespace(get_character_count=lambda value: len(value.text),
+                    get_text=lambda value, start, end: value.text[start:end - 1] if fault == 'incomplete-text' else value.text[start:end])
+                commands, deadlines, persisted, reads, clock_reads = [], [], [], [], []
+                clock, result = [100], {'original_exit_code': 1}
+                def monotonic(): clock_reads.append(True); return clock[0]
+                def keys(*arguments):
+                    self.assertEqual(arguments, ('-M', 'ctrl', '-k', 'a', '-m', 'ctrl', expected))
+                    commands.append(arguments)
+                def nodes(observe=None, site=None): return observe(items) if observe is not None else items
+                def draft(*arguments):
+                    persisted.append(True)
+                    if fault == 'file-pending' and len(persisted) == 2: document()
+                    value = driver.persisted_host_draft(*arguments)
+                    if value and fault == 'late-text-change': editor.text = wrong
+                    return value
+                def wait(predicate, seconds=20, deadline=None):
+                    end = clock[0] + seconds if deadline is None else deadline
+                    if deadline is not None: deadlines.append(deadline)
+                    while clock[0] < end:
+                        value = predicate()
+                        if value: return value
+                        clock[0] += 1
+                    raise TimeoutError(namespace['stage'])
+                namespace = dict(vars(driver), pid=7, destination=destination, unicode_draft=expected, Atspi=atspi,
+                    saved=json.dumps({'connections': [{'id': accepted}]}), result=result, nodes=nodes, wait=wait,
+                    keys=keys, names=lambda: {'Yard name'}, focus=lambda name: None,
+                    tab=lambda name, scope: self.assertEqual((name, scope), ('Yards', destination)),
+                    time=SimpleNamespace(monotonic=monotonic), persisted_host_draft=draft)
+                read_bytes = Path.read_bytes
+                def read(path): reads.append(path); return read_bytes(path)
+                failure = None
+                with patch.dict(os.environ, XDG_DATA_HOME=temporary), patch.object(Path, 'read_bytes', read):
+                    try: exec(actual, namespace)
+                    except (TimeoutError, AssertionError) as error: failure = error
+                self.assertEqual(len(commands), 1)  # No resend, including text/persistence timeouts.
+                self.assertEqual(clock_reads, [True])
+                self.assertTrue(deadlines and all(end == 120 for end in deadlines))
+                self.assertLessEqual(clock[0], 120)
+                self.assertEqual(result['original_exit_code'], 1)
+                if fault in ('exact', 'file-pending'):
+                    self.assertIsNone(failure); self.assertTrue(result['unicode_rtl_gtk_draft_saved'])
+                    self.assertEqual(deadlines, [120, 120])
+                    self.assertEqual(len(reads), 1)
+                else:
+                    self.assertIsNotNone(failure); self.assertNotIn('unicode_rtl_gtk_draft_saved', result)
+                    if fault in ('wrong-text', 'incomplete-text', 'foreign-scope', 'duplicate-draft'):
+                        self.assertIsInstance(failure, TimeoutError); self.assertEqual(clock[0], 120)
+                        self.assertEqual(namespace['stage'], 'host-unicode-committed-entry' if fault in ('wrong-text', 'incomplete-text') else 'host-unicode-persisted-draft')
+                    else: self.assertIsInstance(failure, AssertionError)
+                if fault in ('wrong-text', 'incomplete-text'):
+                    self.assertEqual(persisted, []); self.assertEqual(reads, [])
+                if fault == 'duplicate-draft':
+                    self.assertEqual(result['unicode_observation']['matching_draft_count'], 2)
+                if fault == 'late-text-change':
+                    self.assertEqual(str(failure), 'unicode_gtk_text_mismatch')  # Existing final assert still owns this boundary.
+                observation = result.get('unicode_observation', {})
+                self.assertTrue(all(value is None or type(value) in (bool, int) for value in observation.values()))
+                self.assertTrue(all(value is None or type(value) is bool or 0 <= value <= 32768 for value in observation.values()))
+                for private in (expected, wrong, accepted, foreign, destination, temporary):
+                    self.assertNotIn(private, json.dumps(result))
+
+    def test_editor_continuity_is_compared_with_refresh_focus_before_refocus(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43, TEXT=61, LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', EDITABLE='editable', DEFUNCT='defunct'))
+        def node(role, name, states):
+            return SimpleNamespace(get_role=lambda: role, get_name=lambda: name, get_process_id=lambda: 77,
+                get_state_set=lambda: SimpleNamespace(contains=lambda value: value in states))
+        refresh = node(43, 'Refresh', ('showing','focused'))
+        editor = node(61, 'Yard name', ('showing','editable'))
+        iface = SimpleNamespace(contents='庭院 مرحبا α', get_caret_offset=lambda: 4, selections=[(2,4)])
+        atspi.Text = SimpleNamespace(get_character_count=lambda interface: len(interface.contents),
+            get_text=lambda interface, start, end: interface.contents[max(0, min(start, len(interface.contents))):max(0, min(end, len(interface.contents)))],
+            get_n_selections=lambda interface: len(interface.selections),
+            get_selection=lambda interface, index: SimpleNamespace(start_offset=interface.selections[index][0], end_offset=interface.selections[index][1]))
+        editor.get_text_iface = lambda: iface
+        self.assertEqual(driver.selection_baseline(iface,atspi.Text,len(iface.contents)),(4,[(2,4)]))
+        for caret, selections in ((4,[]),(4,[(4,4)]),(-1,[(2,4)]),(11,[(2,4)]),
+                                  (True,[(2,4)]),(3,[(2,4)])):
+            iface.selections = selections
+            with self.subTest(caret=caret,selections=selections), \
+                    patch.object(iface,'get_caret_offset',return_value=caret), \
+                    self.assertRaisesRegex(AssertionError,'refresh_reset_selection'):
+                driver.selection_baseline(iface,atspi.Text,len(iface.contents))
+        iface.selections = [(2,4)]
+        self.assertTrue(driver.editor_continuity([refresh,editor],77,atspi,editor,'庭院 مرحبا α',4,[(2,4)]))
+        with self.assertRaisesRegex(AssertionError,'refresh_reset_caret'):
+            driver.editor_continuity([refresh,editor],77,atspi,editor,'庭院 مرحبا α',3,[(2,4)])
+        for selections in ([], [(3,4)], [(-1,4)], [(2,11)], [(2,4),(5,6)]):
+            iface.selections = selections
+            if not selections:self.assertEqual(driver.selection_ranges(iface,atspi.Text,len(iface.contents)),[])
+            with self.subTest(selections=selections), self.assertRaisesRegex(AssertionError,'refresh_reset_selection'):
+                driver.editor_continuity([refresh,editor],77,atspi,editor,'庭院 مرحبا α',4,[(2,4)])
+        iface.selections = [(2,4)]
+        for items in ([node(43,'Copy shell command',('showing','focused')),editor],
+                      [refresh,node(29,'Yard name',('showing','editable'))], [refresh,editor,editor]):
+            with self.subTest(items=items), self.assertRaisesRegex(AssertionError,'focus_target_unavailable'):
+                driver.editor_continuity(items,77,atspi,editor,'庭院 مرحبا α',4,[(2,4)])
+
+    def test_retained_overview_text_observes_update_without_hidden_name_or_partial_timestamp(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        stamp = '2026-10-19T16:00:00.123456789Z'
+        atspi = SimpleNamespace(Role=SimpleNamespace(LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing', DEFUNCT='defunct'))
+        def node(pid=77, role=29, states=('showing',), contents='Owner: synthetic\nObserved: '+stamp):
+            value = SimpleNamespace(pid=pid, role=role, states=set(states), contents=contents, hidden=False)
+            value.get_process_id=lambda:value.pid; value.get_role=lambda:value.role
+            value.get_state_set=lambda:SimpleNamespace(contains=lambda state:state in value.states)
+            value.get_name=lambda:'' if value.hidden else value.contents
+            value.get_text_iface=lambda:value
+            return value
+        detail=node()
+        atspi.Text=SimpleNamespace(get_character_count=lambda interface:len(interface.contents),
+            get_text=lambda interface,start,end:interface.contents[start:end])
+        with patch.object(driver,'navigation_context',return_value={'scope':'owner','heading':True}):
+            self.assertIs(driver.overview_observed_label([detail],77,'owner',atspi),detail)
+            for items in ([],[node(pid=88)],[node(states=('showing','defunct'))],[node(contents='No observation')],
+                          [detail,node()],[node(role=61)]):
+                with self.subTest(items=items):self.assertIsNone(driver.overview_observed_label(items,77,'owner',atspi))
+        with patch.object(driver,'navigation_context',return_value={'scope':'other','heading':True}), \
+                self.assertRaisesRegex(AssertionError,'local_scope_changed'):
+            driver.overview_observed_label([detail],77,'owner',atspi)
+        detail.hidden=True;detail.states.clear()
+        with patch.object(detail,'get_name',side_effect=AssertionError('hidden Name must not be read')), \
+                patch.object(driver,'process_identity') as unused, patch('builtins.print') as output:
+            checks=[];owned=lambda:checks.append(True)
+            self.assertEqual(driver.retained_observed(detail,77,atspi,owned),stamp)
+            detail.contents='Owner: synthetic\nObserved: 2026-10-19T16:00:01Z'
+            self.assertEqual(driver.retained_observed(detail,77,atspi,owned),'2026-10-19T16:00:01Z')
+            with patch.object(atspi.Text,'get_text',return_value=detail.contents[:-1]):
+                self.assertIsNone(driver.retained_observed(detail,77,atspi,owned))
+            detail.contents='Owner: synthetic\nObserved: 2026-10-19T16:00:'
+            self.assertIsNone(driver.retained_observed(detail,77,atspi,owned))
+            self.assertEqual(len(checks),4);output.assert_not_called();unused.assert_not_called()
+        for invalid in (node(pid=88),node(role=61),node(states=('defunct',))):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(AssertionError,'focus_target_unavailable'):
+                driver.retained_observed(invalid,77,atspi,lambda:None)
+        with self.assertRaisesRegex(AssertionError,'GUI identity changed'):
+            driver.retained_observed(detail,77,atspi,lambda:(_ for _ in ()).throw(AssertionError('GUI identity changed')))
+
     def test_prepared_assets_reject_missing_symlink_digest_engine_and_version(self):
         for fault in ('valid', 'missing', 'symlink', 'digest', 'engine', 'version', 'mode', 'extra'):
             with self.subTest(fault=fault), self.prepared_assets_fixture() as (root, assets, engine, data):
@@ -327,6 +576,39 @@ class EvidenceChecks(unittest.TestCase):
             with self.subTest(fault=fault), self.assertRaises(AssertionError):
                 driver.navigate_owner(lambda: dict(state), send, 'Remote owner')
             self.assertEqual(commands, ['Home'])
+        for fault in ('terminal-suffix-growth', 'nonterminal-suffix-growth', 'prefix-name', 'prefix-owner',
+                      'target-owner', 'duplicate-target', 'changed-target', 'lost-focus', 'unexpected-focus'):
+            owners = [True, False, True, False]
+            state = {'order': order, 'owners': owners, 'focused': 3}
+            commands, trace = [], []
+            def send(key):
+                commands.append(key)
+                state['focused'] = 0 if key == 'Home' else state['focused'] + 1
+                if fault == 'nonterminal-suffix-growth' and key == 'Home':
+                    state['order'] = order + ['Remote owner / fleet-01']
+                    state['owners'] = owners + [False]
+                elif state['focused'] == 2:
+                    if fault == 'terminal-suffix-growth':
+                        state['order'] = order + ['Remote owner / fleet-01']
+                        state['owners'] = owners + [False]
+                    elif fault == 'prefix-name': state['order'] = [order[0], 'Changed prefix', *order[2:]]
+                    elif fault == 'prefix-owner': state['owners'] = [False, *owners[1:]]
+                    elif fault == 'target-owner': state['owners'] = [*owners[:2], False, owners[3]]
+                    elif fault == 'duplicate-target':
+                        state['order'] = order + ['Remote owner']; state['owners'] = owners + [True]
+                    elif fault == 'changed-target': state['order'] = [*order[:2], 'Changed owner', order[3]]
+                    elif fault == 'lost-focus':
+                        state.update(focused=None, selected=2, heading=True)
+                    elif fault == 'unexpected-focus': state['focused'] = 1
+            with self.subTest(fault=fault):
+                if fault == 'terminal-suffix-growth':
+                    driver.navigate_owner(lambda: dict(state), send, 'Remote owner', trace)
+                else:
+                    with self.assertRaisesRegex(AssertionError, 'focus_target_unavailable'):
+                        driver.navigate_owner(lambda: dict(state), send, 'Remote owner', trace)
+                self.assertEqual(commands, ['Home'] if fault == 'nonterminal-suffix-growth' else ['Home', 'Down', 'Down'])
+                self.assertEqual(len(trace), len(commands) + 1)  # Retain the rejected normal snapshot, without another read.
+                self.assertNotIn('physical_key', trace[-1])
 
     def test_named_control_exits_navigation_without_changing_selected_yard(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
@@ -384,9 +666,9 @@ class EvidenceChecks(unittest.TestCase):
             StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct'))
         activate = next(node for node in ast.walk(ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text()))
                         if isinstance(node, ast.FunctionDef) and node.name == 'activate')
-        def button(name, pid=7, role=43, showing=True):
+        def button(name, pid=7, role=43, showing=True, focused=True):
             return SimpleNamespace(get_process_id=lambda: pid, get_role=lambda: role, get_name=lambda: name,
-                get_state_set=lambda: SimpleNamespace(contains=lambda state: state=='focused' or (state=='showing' and showing)))
+                get_state_set=lambda: SimpleNamespace(contains=lambda state: (state=='focused' and focused) or (state=='showing' and showing)))
         for name in ('Connect remote host', 'Connect', 'Cancel', 'Accept and connect'):
             commands=[];workspace_reads=[];node=button(name)
             def hidden_workspace():
@@ -397,13 +679,18 @@ class EvidenceChecks(unittest.TestCase):
                 hidden_workspace,commands.append,name)
             self.assertEqual(commands, [])  # No F6, no workspace heading requirement.
             self.assertEqual(workspace_reads, [])
-            for nodes in ([button(name,pid=8)], [button(name,role=29)], [button(name,showing=False)], [node,button(name)]):
+            for nodes in ([button(name,pid=8)], [button(name,role=29)], [button(name,showing=False)],
+                          [button(name,focused=False)], [node,button(name)]):
                 namespace={'focus':lambda *args,**kwargs:None, 'nodes':lambda observe,site:observe(nodes),
                            'pid':7, 'Atspi':atspi, 'focused_button':driver.focused_button,
                            'keys':lambda *args:commands.append(args)}
                 exec(compile(ast.Module(body=[activate],type_ignores=[]),'actual-activate','exec'),namespace)
                 with self.assertRaises(AssertionError): namespace['activate'](name)
                 self.assertEqual(commands, [])
+            namespace['nodes']=lambda observe,site:observe([node])
+            namespace['activate'](name)
+            self.assertEqual(commands,[('-k','space')])
+            commands.clear()
             with self.assertRaises(AssertionError):
                 driver.focus_target(lambda:True,hidden_workspace,commands.append,name,workspace=True)
 
@@ -432,17 +719,20 @@ class EvidenceChecks(unittest.TestCase):
     def test_selected_scope_requires_navigation_selection_and_workspace_heading(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
-        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29),
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29, PAGE_TAB=37),
             StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct', SELECTED='selected'))
         class Node:
             def __init__(self, role, name='', states=('showing',)):
                 self.role,self.name,self.states,self.children,self.parent=role,name,set(states),[],None
+                self.child_reads=0
             def get_role(self): return self.role
             def get_name(self): return self.name
             def get_process_id(self): return 7
             def get_parent(self): return self.parent
             def get_child_count(self): return len(self.children)
-            def get_child_at_index(self,index): return self.children[index]
+            def get_child_at_index(self,index):
+                self.child_reads+=1
+                return self.children[index]
             def get_state_set(self): return SimpleNamespace(contains=lambda state:state in self.states)
         nav=Node(31,'Owner hosts and yards');workspace=Node(39)
         rows=[Node(32,'owner / default'),Node(32,'owner / fleet-19')]
@@ -454,18 +744,141 @@ class EvidenceChecks(unittest.TestCase):
         items=[nav,workspace,heading,button,*rows,*labels]
         self.assertIn('owner / default', {node.get_name() for node in items})
         self.assertFalse(driver.selected_scope(driver.navigation_context(items,7,atspi),'owner / default'))
+        self.assertEqual(nav.child_reads,2)  # Selection reuses the validated rows, not a second fetch.
+        rows[1].states.remove('selected')
+        with self.assertRaises(AssertionError):driver.navigation_context(items,7,atspi)
+        rows[1].states.add('selected')
         rows[1].states.remove('selected');rows[0].states.add('selected');heading.name='owner / default'
         self.assertTrue(driver.selected_scope(driver.navigation_context(items,7,atspi),'owner / default'))
+        button.states.remove('focused')  # Cancel can hide the previously focused panel.
+        snapshot=driver.navigation_context(items,7,atspi)
+        self.assertIsNone(snapshot['focused'])
+        self.assertTrue(driver.selected_scope(snapshot,'owner / default'))
+        button.states.add('focused')
+        projects = next(node for node in ast.walk(ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text()))
+                        if isinstance(node, ast.FunctionDef) and node.name == 'projects')
+        harness=ast.parse("def harness():\n stage=''\n return projects\n")
+        harness.body[0].body.insert(1,projects)
+        baseline=driver.navigation_context(items,7,atspi)
+        for fault in ('valid','lost-focus','multiple-focus','foreign','hidden','wrong-role','stale-scope'):
+            tab=Node(37,'Projects',('showing','focused'));tab.parent=workspace
+            actual=[node for node in items if node is not button]+[tab]
+            if fault=='lost-focus':tab.states.remove('focused')
+            elif fault=='multiple-focus':actual.append(Node(37,'Projects',('showing','focused')))
+            elif fault=='foreign':tab.get_process_id=lambda:8
+            elif fault=='hidden':tab.states.remove('showing')
+            elif fault=='wrong-role':tab.role=29
+            elif fault=='stale-scope':actual.remove(heading)
+            actual.extend(Node(29,f'project-00-{index:02}') for index in range(10))
+            commands=[]
+            namespace={'scope_snapshot':lambda site:dict(baseline),'selected_scope':driver.selected_scope,
+                       'navigation_context':driver.navigation_context,'focus_matches':driver.focus_matches,
+                       'workspace_tab_ready':driver.workspace_tab_ready,
+                       'focus':lambda *args,**kwargs:None,'nodes':lambda observe,site:observe(actual),
+                       'pid':7,'Atspi':atspi,'keys':lambda *args:commands.append(args),
+                       'wait':lambda predicate:self.assertTrue(predicate())}
+            exec(compile(harness,'actual-projects','exec'),namespace)
+            with self.subTest(project_activation=fault):
+                if fault=='valid':namespace['harness']()('owner / default','test')
+                else:
+                    with self.assertRaises(AssertionError):namespace['harness']()('owner / default','test')
+                self.assertEqual(commands,[('-k','space')] if fault=='valid' else [])
         heading.name='wrong context'
         self.assertFalse(driver.selected_scope(driver.navigation_context(items,7,atspi),'owner / default'))
         rows[1].states.add('selected')
         with self.assertRaises(AssertionError):driver.navigation_context(items,7,atspi)
 
+        ui_tab=next(node for node in ast.walk(ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text()))
+                    if isinstance(node,ast.FunctionDef) and node.name=='tab')
+        owner=Node(32,states=('showing','selected','focused'));owner_label=Node(29,'owner')
+        owner.parent=nav;owner.children=[owner_label];owner_label.parent=owner
+        nav.children=[owner,*rows]
+        for fault in ('valid','lost-focus','multiple-focus','foreign','hidden','wrong-role','stale-scope'):
+            for row in rows:row.states={'showing'}
+            owner.states={'showing','selected','focused'};heading.name='owner'
+            tab=Node(37,'Yards');tab.parent=workspace
+            refresh=Node(43,'Refresh');refresh.parent=workspace
+            actual=[nav,workspace,heading,owner,owner_label,*rows,*labels,tab,refresh];commands=[]
+            def focus(name,workspace=False,expected_scope=None):
+                self.assertTrue(workspace);self.assertEqual(expected_scope,'owner')
+                def read():
+                    context=driver.navigation_context(actual,7,atspi)
+                    self.assertTrue(driver.selected_scope(context,expected_scope))
+                    return dict(context,matched=driver.focus_matches(actual,7,name,atspi))
+                def send(key):
+                    commands.append(key)
+                    if key=='F6':owner.states.remove('focused');refresh.states.add('focused')
+                    else:refresh.states.remove('focused');tab.states.add('focused')
+                driver.focus_control(read,send,name)
+                if fault=='lost-focus':tab.states.remove('focused')
+                elif fault=='multiple-focus':refresh.states.add('focused')
+                elif fault=='foreign':tab.get_process_id=lambda:8
+                elif fault=='hidden':tab.states.remove('showing')
+                elif fault=='wrong-role':tab.role=29
+                elif fault=='stale-scope':owner.states.remove('selected');rows[0].states.add('selected');heading.name='owner / default'
+            namespace={'focus':focus,'nodes':lambda observe,site:observe(actual),'pid':7,'Atspi':atspi,
+                       'workspace_tab_ready':driver.workspace_tab_ready,'keys':lambda *args:commands.append(args)}
+            exec(compile(ast.Module(body=[ui_tab],type_ignores=[]),'actual-ui-tab','exec'),namespace)
+            with self.subTest(ui_tab=fault):
+                if fault=='valid':namespace['tab']('Yards','owner')
+                else:
+                    with self.assertRaises(AssertionError):namespace['tab']('Yards','owner')
+                self.assertEqual(commands,['F6','Tab',('-k','space')] if fault=='valid' else ['F6','Tab'])
+
+        for fault in ('valid','changed-selection','f6-stays','post-f6-reentry'):
+            for row in rows:row.states={'showing'}
+            owner.states={'showing','selected'};heading.name='owner'
+            tab=Node(37,'Sync');tab.parent=workspace
+            overview=Node(37,'Overview');overview.parent=workspace
+            refresh=Node(43,'Refresh',('showing','focused'));refresh.parent=workspace
+            actual=[nav,workspace,heading,owner,owner_label,*rows,*labels,tab,overview,refresh];commands=[]
+            def focus(name,workspace=False,expected_scope=None):
+                self.assertTrue(workspace);self.assertEqual(expected_scope,'owner')
+                def read():
+                    context=driver.navigation_context(actual,7,atspi)
+                    self.assertTrue(driver.selected_scope(context,expected_scope))
+                    return dict(context,matched=driver.focus_matches(actual,7,name,atspi))
+                def send(key):
+                    commands.append(key)
+                    if key=='F6':
+                        if fault!='f6-stays':owner.states.remove('focused');overview.states.add('focused')
+                    elif 'focused' in refresh.states:
+                        refresh.states.remove('focused');owner.states.add('focused')
+                        if fault=='changed-selection':
+                            owner.states.remove('selected');rows[0].states.add('selected');heading.name='owner / default'
+                    else:
+                        overview.states.remove('focused')
+                        (owner if fault=='post-f6-reentry' else tab).states.add('focused')
+                driver.focus_control(read,send,name)
+            namespace={'focus':focus,'nodes':lambda observe,site:observe(actual),'pid':7,'Atspi':atspi,
+                       'workspace_tab_ready':driver.workspace_tab_ready,'keys':lambda *args:commands.append(args)}
+            exec(compile(ast.Module(body=[ui_tab],type_ignores=[]),'actual-header-to-ui-tab','exec'),namespace)
+            with self.subTest(header_ui_tab=fault):
+                if fault=='valid':namespace['tab']('Sync','owner')
+                else:
+                    with self.assertRaises(AssertionError):namespace['tab']('Sync','owner')
+                self.assertEqual(commands,['Tab','F6','Tab',('-k','space')] if fault=='valid'
+                                 else ['Tab'] if fault=='changed-selection' else ['Tab','F6']
+                                 if fault=='f6-stays' else ['Tab','F6','Tab'])
+
+        host=next(node for node in ast.walk(ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text()))
+                  if isinstance(node,ast.FunctionDef) and node.name=='host')
+        for selected_host in (False,True):
+            owner.states={'showing'};rows[0].states={'showing'};rows[1].states={'showing'}
+            (owner if selected_host else rows[0]).states.add('selected')
+            heading.name='owner' if selected_host else 'owner / default'
+            actual=[nav,workspace,heading,owner,owner_label,*rows,*labels,Node(29,'Connected'),Node(29,'20 yards')]
+            observed=[];namespace={'focus':lambda *args,**kwargs:None,'destination':'owner','pid':7,'Atspi':atspi,
+                'navigation_context':driver.navigation_context,'selected_scope':driver.selected_scope,
+                'nodes':lambda observe,site:observe(actual),'wait':lambda predicate:observed.append(predicate())}
+            exec(compile(ast.Module(body=[host],type_ignores=[]),'actual-ui-host','exec'),namespace)
+            namespace['host']();self.assertEqual(observed,[selected_host])
+
     def test_navigation_snapshot_rejects_unowned_or_ambiguous_lists_before_input(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
         atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29),
-                                StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct'))
+                                StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct', SELECTED='selected'))
         class Node:
             def __init__(self, role, name='', states=('showing',)):
                 self.role, self.name, self.states, self.pid = role, name, set(states), 7
@@ -478,7 +891,8 @@ class EvidenceChecks(unittest.TestCase):
             def get_child_at_index(self, index): return self.children[index]
             def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
         for fault in ('valid', 'list-role', 'list-name', 'list-pid', 'row-pid', 'row-parent',
-                      'label-parent', 'hidden', 'defunct', 'duplicate-list', 'duplicate-row', 'multiple-focus'):
+                      'label-parent', 'hidden', 'defunct', 'duplicate-list', 'duplicate-row', 'multiple-focus',
+                      'foreign-focus', 'hidden-focus', 'defunct-focus'):
             nav = Node(31, 'Owner hosts and yards'); row = Node(32, states=('showing', 'focused'))
             label = Node(29, 'Local owner'); nav.children = [row]; row.parent = nav
             row.children = [label]; label.parent = row; items = [nav, row, label]
@@ -493,6 +907,13 @@ class EvidenceChecks(unittest.TestCase):
             elif fault == 'duplicate-list': items.append(Node(31, nav.name))
             elif fault == 'duplicate-row': nav.children.append(row)
             elif fault == 'multiple-focus': label.states.add('focused')
+            elif fault.endswith('-focus'):
+                row.states.remove('focused')
+                focus=Node(43,'Refresh',states=('showing','focused'))
+                if fault=='foreign-focus':focus.pid=8
+                elif fault=='hidden-focus':focus.states.remove('showing')
+                else:focus.states.add('defunct')
+                items.append(focus)
             commands = []
             with self.subTest(fault=fault):
                 if fault == 'valid':
@@ -829,6 +1250,539 @@ class EvidenceChecks(unittest.TestCase):
                     key(77, 'space')
                 retry.assert_not_called()
                 key.assert_not_called()
+
+    def test_connected_owner_requires_all_labels_in_one_observation(self):
+        ready=next(node for node in ast.walk(ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text()))
+                   if isinstance(node,ast.FunctionDef) and node.name=='connected_owner')
+        with patch('builtins.print'):
+            observations=iter([{'remote'}, {'Connected','20 yards'}, {'remote','Connected','20 yards'}])
+            reads=[]
+            def names():
+                reads.append(True)
+                return next(observations)
+            namespace={'names':names,'destination':'remote'}
+            exec(compile(ast.Module(body=[ready],type_ignores=[]),'actual-connected-owner','exec'),namespace)
+            self.assertFalse(namespace['connected_owner']())
+            self.assertEqual(len(reads),1)
+            self.assertFalse(namespace['connected_owner']())
+            self.assertEqual(len(reads),2)
+            self.assertTrue(namespace['connected_owner']())
+            self.assertEqual(len(reads),3)
+
+    def test_input_progress_is_bounded_deduplicated_cached_and_excludes_text(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        result={'physical_key_commands':0,'selection_trace':[{'selected':1,'focused':None,'heading':True,'scope':'private text'}]}
+        snapshot={'truncated':False};cached=[{'role':37,'name':'private text','states':['FOCUSED']}];state={}
+        with patch('builtins.print') as output, patch.object(driver,'owned_tree') as ui_read, \
+             patch.object(driver.time,'monotonic') as clock:
+            clock.return_value=10
+            for _ in range(3):driver.input_progress(result,'first-key-decline','read-start','named-focus:private text','none',snapshot,cached,state)
+            self.assertEqual(output.call_count,1)
+            self.assertEqual(json.loads(output.call_args.args[0].split(' ',1)[1])['cached_focused_roles'],[37])
+            clock.return_value=12.5
+            driver.input_progress(result,'first-key-decline','read-start','named-focus:private text','none',snapshot,cached,state)
+            self.assertEqual(output.call_count,1)  # Time alone cannot defeat deduplication.
+            for index in range(600):
+                result['physical_key_commands']=index
+                driver.input_progress(result,'first-key-decline','key-start','navigation','Tab',snapshot,cached,state)
+            self.assertEqual(output.call_count,512)
+            frames=[call.args[0] for call in output.call_args_list]
+            self.assertTrue(all(len(frame.encode())<=1050 and 'private text' not in frame for frame in frames))
+            self.assertTrue(json.loads(frames[-1].split(' ',1)[1])['truncated'])
+            self.assertEqual(json.loads(frames[-1].split(' ',1)[1])['elapsed_seconds'],2.5)
+            self.assertTrue(all(call.kwargs=={'flush':True} for call in output.call_args_list))
+            ui_read.assert_not_called()
+        # Execute the actual coherent nodes path: progress cannot add a read.
+        nodes=next(node for node in ast.walk(ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text()))
+                   if isinstance(node,ast.FunctionDef) and node.name=='nodes')
+        reads=[];namespace={'progress':lambda *args:None,'coherent_observation':driver.coherent_observation,
+            'read_tree':lambda end:reads.append(end) or [],'read_deadline':None,'time':driver.time,
+            'result':{},'GLib':SimpleNamespace(Error=RuntimeError)}
+        exec(compile(ast.Module(body=[nodes],type_ignores=[]),'actual-nodes','exec'),namespace)
+        self.assertEqual(namespace['nodes'](len,'navigation'),0)
+        self.assertEqual(len(reads),1)
+
+    def test_ime_is_two_local_lifetimes_and_conflicting_flags_fail_before_native_work(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        self.assertEqual(short.short_scenarios(False, False, True), ['ime', 'ime-restore'])
+        self.assertEqual(short.keyboard_lifetime_ms(['ime', 'ime-restore'], short.workload_budget(False, False)), 240000)
+        for flag in ('--remote', '--ui', '--owner-focus'):
+            with self.subTest(flag=flag), patch.object(sys, 'argv', ['short', '/unused/gui', '/unused/engine', '--ime', flag]), \
+                 patch.object(short.subprocess, 'run') as native, patch.object(short.subprocess, 'check_output') as query, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error: short.main()
+                self.assertEqual(error.exception.code, 2)
+                native.assert_not_called(); query.assert_not_called()
+
+    def test_delayed_ime_setup_does_not_consume_window_manager_startup_budget(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-short.py').read_text())
+        # Run the actual orchestration from IME setup through WM readiness.
+        setup = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                     and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                             and call.func.id == 'prepare_ime' for call in ast.walk(node)))
+        body = next(node.body for node in ast.walk(tree) if isinstance(node, ast.With) and setup in node.body)
+        start = body.index(setup)
+        stop = next(index for index in range(start, len(body))
+                    if isinstance(body[index], ast.Assign)
+                    and any(isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+                            and target.slice.value == 'lifetimes' for target in body[index].targets))
+        now = [0.0]; live = SimpleNamespace(poll=lambda: None); setup_calls = []
+        def delayed_setup(*args): setup_calls.append(True); now[0] += 15
+        namespace = dict(vars(short), args=SimpleNamespace(ime=True, x11=True, remote=False, owner_focus=False, ui=False),
+            state=Path('/unused'), env={}, result={}, display=live, x11_deadline=10,
+            service=lambda *args: (live, None), prepare_ime=delayed_setup)
+        with patch.object(short.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(short.fixture, 'private_log', side_effect=lambda path: contextlib.nullcontext(io.StringIO())), \
+             patch.object(short.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='4\n', stderr='')) as query:
+            exec(compile(ast.Module(body=body[start:stop], type_ignores=[]), 'actual-ime-wm-startup', 'exec'), namespace)
+        self.assertEqual(setup_calls, [True])
+        self.assertEqual(namespace['x11_deadline'] - now[0], 10)
+        self.assertEqual(query.call_args.args[0], ['xdotool', 'get_num_desktops'])
+        self.assertEqual(query.call_args.kwargs['timeout'], 1)
+
+    def test_owner_startup_waits_for_connected_before_strict_scope_and_projects(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text())
+        scope_wait = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'wait_scope')
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29, PANEL=39),
+                                StateType=SimpleNamespace(SHOWING='showing', SELECTED='selected', FOCUSED='focused', DEFUNCT='defunct'))
+        class Node:
+            def __init__(self, role, name='', states=('showing',)):
+                self.role, self.name, self.states, self.pid = role, name, set(states), 7
+                self.parent, self.children = None, []
+            def get_role(self): return self.role
+            def get_name(self): return self.name
+            def get_process_id(self): return self.pid
+            def get_parent(self): return self.parent
+            def get_child_count(self): return len(self.children)
+            def get_child_at_index(self, index): return self.children[index]
+            def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
+        for scenario in ('connect', 'owner-focus', 'remote-restore', 'local-restore'):
+            branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == 'scenario == ' + repr(scenario))
+            restoring = scenario in ('remote-restore', 'local-restore')
+            stop = (next(index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+                                 and target.slice.value in ('remote_owner_yard_tab_restored', 'local_owner_yard_tab_restored')
+                                 for target in node.targets)) + 1) if restoring else 3
+            for fault in ('valid', 'wrong-scope', 'malformed', 'unowned'):
+                with self.subTest(scenario=scenario, fault=fault):
+                    expected_scope = ('remote' if scenario == 'remote-restore' else 'Local owner') + ' / default'
+                    nav = Node(31, 'Owner hosts and yards')
+                    row = Node(32, expected_scope if fault != 'wrong-scope' else 'Other owner / default', ('showing', 'selected'))
+                    label = Node(29, 'default'); heading = Node(29, row.name); panel = Node(39)
+                    nav.children = [row]; row.parent = nav; row.children = [label]; label.parent = row; heading.parent = panel
+                    items = [nav, row, label, heading, panel]
+                    if fault == 'malformed': nav.children = []
+                    if fault == 'unowned': row.pid = 8
+                    calls, commands, result = [], [], {}
+                    ready = [False]
+                    projects = {f'project-00-{index:02}' for index in range(10)}
+                    def names():
+                        calls.append('names'); ready[0] = calls.count('names') >= 3
+                        return ({'Connected', *projects} if ready[0] else
+                                {'Connecting…' if calls.count('names') == 1 else 'Inventory changed; refreshing…'})
+                    def snapshot(site):
+                        calls.append('scope')
+                        return driver.navigation_context(items if ready[0] else [], 7, atspi)
+                    def wait(predicate):
+                        for attempt in range(5):
+                            value = predicate()
+                            if value: return value
+                        raise TimeoutError('startup')
+                    namespace = dict(vars(driver), scenario=scenario, destination='remote', names=names,
+                                     scope_snapshot=snapshot, wait=wait, result=result, keys=commands.append)
+                    actual = compile(ast.Module(body=[scope_wait, *branch.body[:stop]], type_ignores=[]), 'actual-restore-startup', 'exec')
+                    if fault == 'valid':
+                        exec(actual, namespace)
+                        self.assertEqual(calls[:4], ['names', 'names', 'names', 'scope'])
+                        if restoring:
+                            self.assertTrue(result['remote_owner_yard_tab_restored' if scenario == 'remote-restore' else 'local_owner_yard_tab_restored'])
+                            self.assertGreater(calls.count('names'), 3)  # Actual project-name predicate ran.
+                        else:
+                            self.assertEqual(calls, ['names', 'names', 'names', 'scope'])
+                    else:
+                        with self.assertRaises(TimeoutError if fault == 'wrong-scope' else AssertionError):
+                            exec(actual, namespace)
+                        self.assertFalse(result)
+                    self.assertEqual(commands, [])
+
+    def test_ime_startup_waits_through_empty_tree_before_strict_scope_in_both_lifetimes(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text())
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and isinstance(node.test, ast.Compare) and isinstance(node.test.comparators[0], ast.Tuple)
+                      and ast.literal_eval(node.test.comparators[0]) == ('ime', 'ime-restore'))
+        stop = next(index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant) and node.value.value == 'ime-yard-name-editor')
+        scope_wait = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'wait_scope')
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31))
+        for scenario in ('ime', 'ime-restore'):
+            with self.subTest(scenario=scenario):
+                startup_reads = []; scopes = []; ready = [False]
+                scope = ['Local owner / default' if scenario == 'ime' else 'Local owner']
+                def names():
+                    startup_reads.append(True)
+                    ready[0] = len(startup_reads) >= 3
+                    return {'Connected'} if ready[0] else set()
+                def snapshot(site):
+                    if not ready[0]:
+                        return driver.navigation_context([], 7, atspi)
+                    scopes.append(scope[0])
+                    return {'scope': scope[0], 'heading': True}
+                def wait(predicate):
+                    for attempt in range(5):
+                        value = predicate()
+                        if value: return value
+                    raise TimeoutError('startup')
+                def focus(name, owner_row=False):
+                    self.assertEqual((name, owner_row), ('Local owner', True))
+                    scope[0] = name
+                namespace = dict(vars(driver), scenario=scenario, names=names, scope_snapshot=snapshot,
+                                 wait=wait, focus=focus)
+                exec(compile(ast.Module(body=[scope_wait, *branch.body[:stop]], type_ignores=[]),
+                             'actual-ime-startup', 'exec'), namespace)
+                self.assertGreaterEqual(len(startup_reads), 3)
+                self.assertEqual(scopes, ['Local owner / default', 'Local owner'] if scenario == 'ime' else ['Local owner'])
+
+    def test_ime_uses_physical_two_set_keys_and_rejects_early_or_wrong_commits(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        toggle = ('-M', 'shift', '-k', 'space', '-m', 'shift')
+        for readings, accepted in ((['', '', '', '\uac00'], True), (['', 'r'], False), (['', '', '', 'rk'], False)):
+            with self.subTest(accepted=accepted):
+                values = iter(readings); keys = []; captures = []; persisted = []
+                def wait(predicate): self.assertTrue(predicate())
+                def execute():
+                    driver.compose_ime(lambda *args: keys.append(args), lambda: next(values), wait,
+                        lambda *args: captures.append(args), lambda: persisted.append(True) or True)
+                if accepted: execute()
+                else:
+                    with self.assertRaises(AssertionError): execute()
+                self.assertEqual(keys[:2], [toggle, ('-k', 'r')])
+                if accepted:
+                    self.assertEqual(keys, [toggle, ('-k', 'r'), ('-k', 'k'), toggle])
+                    self.assertEqual(captures, [('consonant', ''), ('syllable', ''), ('committed', '\uac00')])
+                    self.assertEqual(persisted, [True])
+                else:
+                    self.assertNotIn(('committed', '\uac00'), captures)
+                    self.assertEqual(persisted, [])
+
+    def test_ime_draft_equality_requires_exact_local_owner_scope_and_field(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        with tempfile.TemporaryDirectory(prefix='veranda-ime-draft-', dir='/tmp') as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            self.assertTrue(driver.local_ime_draft(root, ''))
+            self.assertFalse(driver.local_ime_draft(root))
+            for scope, field, value, expected in (({'connection': None, 'yard': None}, 'create:name', '\uac00', True),
+                    ({'connection': 'remote', 'yard': None}, 'create:name', '\uac00', False),
+                    ({'connection': None, 'yard': 'default'}, 'create:name', '\uac00', False),
+                    ({'connection': None, 'yard': None}, 'setting:LABEL', '\uac00', False),
+                    ({'connection': None, 'yard': None}, 'create:name', 'rk', False)):
+                (root / 'desktop.json').write_text(json.dumps({'drafts': [{'scope': scope, 'field': field, 'value': value}]}))
+                (root / 'desktop.json').chmod(0o600)
+                self.assertEqual(driver.local_ime_draft(root), expected)
+            (root / 'desktop.json').write_text(json.dumps({'drafts': []}))
+            self.assertTrue(driver.local_ime_draft(root, ''))
+            (root / 'desktop.json').chmod(0o644)
+            with self.assertRaisesRegex(AssertionError, 'ime_draft_unavailable'):
+                driver.local_ime_draft(root, '')
+
+    def test_ime_setup_checks_real_script_readback_and_owns_a_foreground_private_daemon(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none', 'settings', 'engine'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-ime-setup-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); settings = {}; services = []; env = {}; evidence = {}
+                names = ('libim-ibus.so', 'ibus-engine-hangul', 'org.freedesktop.ibus.engine.hangul.gschema.xml')
+                for name in names: (state / name).write_bytes(b'host-free metadata fixture')
+                def run(command, **kwargs):
+                    if command[0] == 'gsettings': settings[tuple(command[2:4])] = command[4]
+                    else: self.assertEqual(command, ['ibus', 'engine', 'hangul'])
+                    return SimpleNamespace(returncode=0)
+                def query(command, **kwargs):
+                    if command[:2] == ['gsettings', 'get']:
+                        return "'wrong'" if fault == 'settings' else settings[tuple(command[2:4])]
+                    if command[:2] == ['ibus', 'engine']: return 'wrong' if fault == 'engine' else 'hangul'
+                    if command[:2] == ['dpkg-query', '-W']: return 'ibus fixture-version'
+                    self.assertEqual(command[:2], ['dpkg-query', '-L'])
+                    return '\n'.join(str(state / name) for name in names)
+                def service(name, command):
+                    services.append((name, command))
+                    return SimpleNamespace(poll=lambda: None), None
+                with patch.object(short.subprocess, 'run', side_effect=run), \
+                     patch.object(short.subprocess, 'check_output', side_effect=query), patch.object(Path, 'is_socket', return_value=True):
+                    if fault == 'none': short.prepare_ime(state, env, service, evidence)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'ime_.*readback_mismatch'):
+                            short.prepare_ime(state, env, service, evidence)
+                if fault == 'settings': self.assertEqual(services, [])
+                else:
+                    self.assertEqual(len(services), 1)
+                    name, command = services[0]
+                    self.assertEqual(name, 'ibus'); self.assertIn('--single', command)
+                    self.assertNotIn('--daemonize', command); self.assertNotIn('--replace', command)
+                    self.assertIn('--address=unix:path=' + str(state / 'ibus-bus'), command)
+                if fault == 'none':
+                    self.assertEqual(evidence['stage'], 'ready')
+                    self.assertEqual(env['GTK_IM_MODULE'], 'ibus')
+                    self.assertEqual(env['GSETTINGS_BACKEND'], 'keyfile')
+                    self.assertEqual(evidence['settings']['use-system-keyboard-layout'], 'true')
+
+    def test_functional_workload_budgets_distinguish_expanded_remote_ui(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        self.assertEqual([short.workload_budget(remote, ui) for remote, ui in
+            ((False, False), (False, True), (True, False), (True, True))], [90, 90, 360, 600])
+        lifetimes = []
+        for remote, ui, owner_focus in ((False, False, False), (False, True, False),
+                (False, False, True), (True, False, False), (True, True, False)):
+            scenarios = short.short_scenarios(remote, owner_focus)
+            workload = short.workload_budget(remote, ui)
+            lifetime = short.keyboard_lifetime_ms(scenarios, workload)
+            self.assertGreaterEqual(lifetime, len(scenarios) * (workload + 15) * 1000)
+            self.assertLessEqual(lifetime * 1000, 2**31 - 1)  # wtype converts milliseconds to microseconds.
+            lifetimes.append(lifetime)
+        self.assertEqual(lifetimes, [120000, 120000, 120000, 1170000, 1890000])
+
+    def test_package_wayland_close_rejects_foreign_ambiguous_inactive_or_changed_owner(self):
+        spec = importlib.util.spec_from_file_location('gtk_package', ROOT / 'dev/e2e/veranda-package-ui.py')
+        package = importlib.util.module_from_spec(spec); spec.loader.exec_module(package)
+        for fault in ('foreign-process', 'foreign-window', 'ambiguous', 'inactive', 'changed-owner', 'none'):
+            with self.subTest(fault=fault):
+                window = fixture.probe.WlrToplevel('/synthetic/wayland', 'org.subyard.Veranda')
+                guards = []
+                def owned():
+                    guards.append(True)
+                    if fault == 'foreign-process' or fault == 'changed-owner' and len(guards) > 1:
+                        raise AssertionError('owned_gui_identity_changed')
+                def command(action, *matches):
+                    if action == 'list':
+                        return {'foreign-window': 'foreign: title\n',
+                                'ambiguous': 'org.subyard.Veranda: one\norg.subyard.Veranda: two\n'}.get(fault, 'org.subyard.Veranda: title\n')
+                    if action == 'find':
+                        self.assertEqual(matches, ('app_id:org.subyard.Veranda', 'state:unminimized', 'state:active'))
+                        if fault == 'inactive': raise RuntimeError('no active window acknowledgement')
+                    return ''
+                with patch.object(window, 'command', side_effect=command), \
+                     patch.object(fixture.probe.time, 'monotonic', side_effect=[0, 6] if fault == 'inactive' else None), \
+                     patch.object(package.subprocess, 'run') as physical:
+                    if fault == 'none':
+                        receipt = package.wayland_close(SimpleNamespace(owned=owned), window)
+                        self.assertTrue(receipt['activated_acknowledged'])
+                        self.assertIn('protocol has no PID', receipt['binding'])
+                        physical.assert_called_once_with(['wtype', '-s', '100', '-M', 'alt', '-k', 'F4', '-m', 'alt', '-s', '100'], check=True, timeout=3)
+                        self.assertEqual(len(guards), 3)
+                    else:
+                        with self.assertRaises((RuntimeError, AssertionError)):
+                            package.wayland_close(SimpleNamespace(owned=owned), window)
+                        physical.assert_not_called()
+
+    def test_package_wayland_nonempty_compositor_prevents_actual_app_launch(self):
+        code = (ROOT / 'dev/e2e/veranda-package.sh').read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        boundary = next(node for node in ast.walk(ast.parse(code)) if isinstance(node, ast.If)
+            and any(isinstance(item, ast.Expr) and isinstance(item.value, ast.Call)
+                    and isinstance(item.value.func, ast.Attribute) and item.value.func.attr == 'require_empty' for item in node.body))
+        launch = next(node for node in ast.walk(ast.parse(code)) if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == 'launch_logged' and isinstance(node.targets[0], ast.Tuple)
+            and node.targets[0].elts[0].id == 'app')
+        actual = compile(ast.Module(body=[boundary, launch], type_ignores=[]), 'actual-package-prelaunch', 'exec')
+        for initial in ('foreign: existing\n', 'org.subyard.Veranda: existing\n', ''):
+            with self.subTest(initial=bool(initial)), patch.object(fixture.probe.WlrToplevel, 'command', return_value=initial), \
+                 patch.object(subprocess, 'run') as physical:
+                launches = []
+                namespace = {'backend': 'wayland', 'probe': fixture.probe,
+                    'environment': {'WAYLAND_DISPLAY': '/synthetic/wayland'}, 'subprocess': subprocess,
+                    'launch_logged': lambda *args, **kwargs: launches.append(args) or (None, None)}
+                if initial:
+                    with self.assertRaisesRegex(RuntimeError, 'initially empty'):
+                        exec(actual, namespace)
+                    self.assertEqual(launches, [])
+                else:
+                    exec(actual, namespace)
+                    self.assertEqual(len(launches), 1)
+                physical.assert_not_called()
+
+    def test_package_cleanup_attempts_every_owned_tree_and_preserves_original_failure(self):
+        code = (ROOT / 'dev/e2e/veranda-package.sh').read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        parsed = ast.parse(code)
+        stop = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == 'stop_owned')
+        final = next(node.finalbody for node in ast.walk(parsed) if isinstance(node, ast.Try)
+                     and node.finalbody and isinstance(node.finalbody[0], ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'original_failure' for target in node.finalbody[0].targets))
+        for original in (False, True):
+            with self.subTest(original=original), tempfile.TemporaryDirectory(prefix='veranda-package-cleanup-', dir='/tmp') as temporary:
+                events = []
+                def owned(name, fail=False):
+                    def stop(process):
+                        events.append((name, process))
+                        if fail: raise RuntimeError('private cleanup detail')
+                    return SimpleNamespace(stop=stop)
+                namespace = {'cleanup_errors': [], 'sys': sys, 'contextlib': contextlib, 'display_state': Path(temporary),
+                    'tree': owned('app', True), 'app': 1, 'services': [(2, owned('bus')), (3, owned('compositor'))],
+                    'stderr_workers': [], '__import__': __import__}
+                exec(compile(ast.Module(body=[stop], type_ignores=[]), 'actual-stop-owned', 'exec'), namespace)
+                final_code = compile(ast.Module(body=final, type_ignores=[]), 'actual-package-cleanup', 'exec')
+                with contextlib.redirect_stderr(io.StringIO()) as diagnostic:
+                    if original:
+                        with self.assertRaisesRegex(ValueError, 'original failure'):
+                            try: raise ValueError('original failure')
+                            finally: exec(final_code, namespace)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'fixture cleanup failed'):
+                            exec(final_code, namespace)
+                self.assertEqual(events, [('app', 1), ('compositor', 3), ('bus', 2)])
+                self.assertNotIn('private', diagnostic.getvalue())
+
+    def test_package_stderr_is_private_bounded_and_drained_during_wait(self):
+        code=(ROOT/'dev/e2e/veranda-package.sh').read_text().split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
+        launch=next(node for node in ast.parse(code).body if isinstance(node,ast.FunctionDef) and node.name=='launch_logged')
+        with tempfile.TemporaryDirectory(prefix='veranda-package-stderr-',dir='/tmp') as temporary:
+            state=Path(temporary);state.chmod(0o700)
+            namespace={'os':os,'state':state,'phase':'install','threading':__import__('threading'),'subprocess':subprocess}
+            exec(compile(ast.Module(body=[launch],type_ignores=[]),'actual-package-log','exec'),namespace)
+            process,worker=namespace['launch_logged']([sys.executable,'-c',
+                "import sys;sys.stderr.buffer.write(b'x'*(2*1024*1024+65536));sys.stderr.flush();print('done')"],
+                'app',stdout=subprocess.PIPE)
+            self.assertIsNone(process.stderr)  # communicate cannot race the private drain.
+            self.assertEqual(process.communicate(timeout=5)[0],b'done\n')
+            self.assertEqual(process.returncode,0)
+            worker.join(timeout=2);self.assertFalse(worker.is_alive())
+            path=state/'gtk-install-app-stderr.log'
+            self.assertEqual(path.stat().st_size,2*1024*1024)
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            self.assertEqual(path.stat().st_nlink,1)
+            fdopen=os.fdopen
+            class FailedLog:
+                def __init__(self,file):self.file=file
+                def __enter__(self):return self
+                def __exit__(self,*args):self.file.close()
+                def write(self,data):raise OSError('diagnostic write failed')
+            def failing_log(fd,mode,*args,**kwargs):
+                file=fdopen(fd,mode,*args,**kwargs)
+                return FailedLog(file) if mode=='wb' else file
+            with patch.object(os,'fdopen',side_effect=failing_log):
+                process,worker=namespace['launch_logged']([sys.executable,'-c',
+                    "import sys;sys.stderr.buffer.write(b'x'*131072);sys.exit(17)"],
+                    'driver',stdout=subprocess.PIPE)
+                process.communicate(timeout=5);worker.join(timeout=2)
+            self.assertEqual(process.returncode,17)  # Diagnostic I/O preserves the child's original failure.
+            self.assertFalse(worker.is_alive())
+
+    def test_package_diagnostic_uses_cached_readiness_without_extra_getters_or_text(self):
+        spec=importlib.util.spec_from_file_location('gtk_package',ROOT/'dev/e2e/veranda-package-ui.py')
+        package=importlib.util.module_from_spec(spec);spec.loader.exec_module(package)
+        atspi=SimpleNamespace(Role=SimpleNamespace(LABEL=29,PUSH_BUTTON=43),
+            StateType=SimpleNamespace(SHOWING='showing',ENABLED='enabled',SENSITIVE='sensitive',SELECTED='selected'))
+        calls=[]
+        def node(role,name):
+            return SimpleNamespace(get_state_set=lambda:SimpleNamespace(contains=lambda state:state in ('showing','sensitive')),
+                get_role=lambda:role,get_name=lambda:calls.append(True) or name)
+        diagnostics={}
+        self.assertEqual(package.gtk_ready([node(43,'Refresh'),node(43,'Connect remote host'),
+            node(29,'private_error: private detail')],atspi,diagnostics=diagnostics)['kind'],
+            'gtk-controllable-actionable-owner-error')
+        diagnostics['last_readiness']['private_text']='private detail'
+        before=len(calls);observer=SimpleNamespace(diagnostics=diagnostics)
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            package.package_diagnostic('readiness',observer,RuntimeError('private detail'))
+        self.assertEqual(len(calls),before)
+        frame=json.loads(output.getvalue().split(' ',1)[1])
+        self.assertEqual(frame['failure_type'],'RuntimeError')
+        self.assertEqual(frame['last_complete_readiness']['enabled_refresh'],0)
+        self.assertEqual(frame['last_complete_readiness']['sensitive_refresh'],1)
+        self.assertNotIn('private',output.getvalue())
+        with patch('builtins.print',side_effect=OSError('private')):
+            package.package_diagnostic('readiness',observer,RuntimeError('original'))
+
+    def test_actual_input_watchdog_captures_before_cleanup_without_masking_timeout(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        loop=next(node for node in ast.walk(ast.parse((ROOT/'veranda/desktop/wayland-short.py').read_text()))
+                  if isinstance(node,ast.While) and ast.unparse(node.test)=='action.poll() is None')
+        for fault in ('none','capture','process','window','window-before'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-watchdog-',dir='/tmp') as temporary:
+                state=Path(temporary);events=[];lifetime={};identity=(os.getuid(),123,4,5)
+                window=SimpleNamespace(window='12',singleton=lambda:'13' if fault=='window' else '12')
+                def window_probe(*args):
+                    if fault=='window-before':raise RuntimeError('private diagnostic detail')
+                    return window
+                def capture(argv,**options):
+                    events.append('capture')
+                    self.assertEqual(options['env']['DISPLAY'],':99')
+                    if fault=='capture':raise subprocess.TimeoutExpired(['capture'],5)
+                    Path(argv[-1]).write_bytes(b'owned screenshot')
+                namespace={'action':SimpleNamespace(poll=lambda:None),'tree':SimpleNamespace(sample=lambda:events.append('sample')),
+                    'time':short.time,'deadline':0,'capture_input_watchdog':short.capture_input_watchdog,
+                    'lifetime':lifetime,'app':SimpleNamespace(pid=77,poll=lambda:None),'gui_identity':identity,
+                    'result':{'backend':'x11'},'env':{'DISPLAY':':99'},'state':state,'args':SimpleNamespace(remote=True),
+                    'workload_seconds':600}
+                with patch.object(short.time,'monotonic',return_value=1), \
+                     patch.object(short.input_driver,'process_identity',return_value=(999,123,4,5) if fault=='process' else identity), \
+                     patch.object(short.probe,'X11Toplevel',side_effect=window_probe), \
+                     patch.object(short.input_driver.subprocess,'run',side_effect=capture):
+                    with self.assertRaisesRegex(AssertionError,'physical_input_watchdog'):
+                        with fixture.cleanup_on_exit(lambda:events.append('cleanup'),'test'):
+                            exec(compile(ast.Module(body=[loop],type_ignores=[]),'actual-watchdog','exec'),namespace)
+                self.assertEqual(events,['sample','cleanup'] if fault in ('process','window-before') else ['sample','capture','cleanup'])
+                self.assertIn('watchdog_capture_seconds',lifetime)
+                if fault=='none':
+                    self.assertEqual(lifetime['watchdog_capture']['workload_deadline_seconds'],600)
+                    self.assertEqual((state/'failure.png').stat().st_mode & 0o777,0o600)
+                else:
+                    self.assertIn('watchdog_capture_failure_type',lifetime)
+                    self.assertEqual(lifetime['watchdog_capture_failure_stage'],
+                        {'capture':'screenshot','process':'process-before','window':'window-after','window-before':'window-before'}[fault])
+                    self.assertNotIn('private diagnostic detail',json.dumps(lifetime))
+                    self.assertFalse((state/'failure.png').exists())
+
+    def test_failure_handler_retains_only_last_owned_source_frame_and_original_classification(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text())
+        handler = next(node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
+                       and node.name == 'error' and node.body
+                       and ast.unparse(node.body[0]).startswith('result.update(failure_stage=stage'))
+        actual = ast.fix_missing_locations(ast.Module(body=[ast.Try(
+            body=[ast.Expr(value=ast.Call(func=ast.Name(id='own_outer', ctx=ast.Load()), args=[], keywords=[]))],
+            handlers=[handler], orelse=[], finalbody=[])], type_ignores=[]))
+        for deeper_foreign in (False, True):
+            with self.subTest(deeper_foreign=deeper_foreign):
+                result = {'original_exit_code': 1}; collectors = []
+                namespace = dict(vars(driver), result=result, stage='synthetic-stage', deeper_foreign=deeper_foreign,
+                                 retain_failure_diagnostics=lambda value, collect: collectors.append(collect))
+                private = 'PRIVATE_TRACE_MARKER'
+                exec(compile("def foreign_private_frame():\n    raise RuntimeError('" + private + "')\n",
+                             '/private/' + private, 'exec'), namespace)
+                source = ("def own_outer():\n    own_inner()\n"
+                          "def own_inner():\n    if deeper_foreign:\n        foreign_private_frame()\n"
+                          "    else:\n        raise AssertionError('focus_target_unavailable')\n")
+                exec(compile(source, driver.__file__, 'exec'), namespace)
+                with patch.object(driver.subprocess, 'run') as rpc, \
+                        patch.object(driver.subprocess, 'check_output') as read, \
+                        patch.object(driver, 'capture_view') as capture:
+                    exec(compile(actual, 'actual-exception-handler', 'exec'), namespace)
+                    rpc.assert_not_called(); read.assert_not_called(); capture.assert_not_called()
+                self.assertEqual(result['original_exit_code'], 1)
+                self.assertEqual(result['failure_stage'], 'synthetic-stage')
+                self.assertEqual(result['failure_type'], 'RuntimeError' if deeper_foreign else 'AssertionError')
+                if deeper_foreign:
+                    self.assertNotIn('failure_reason', result)
+                else:
+                    self.assertEqual(result['failure_reason'], 'focus_target_unavailable')
+                self.assertEqual(result['failure_source_frame'], {'function': 'own_inner', 'line': 5 if deeper_foreign else 7})
+                self.assertEqual(len(collectors), 1)  # Existing diagnostic callback remains deferred.
+                self.assertNotIn(private, json.dumps(result))
+                self.assertNotIn(driver.__file__, json.dumps(result))
+                self.assertNotIn('foreign_private_frame', json.dumps(result))
 
     def test_failed_diagnostics_preserve_original_failure_and_remove_partial_image(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')

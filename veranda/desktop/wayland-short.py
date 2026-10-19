@@ -27,6 +27,9 @@ spec = importlib.util.spec_from_file_location("gtk_short_fixture", ROOT / "dev/e
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 probe = fixture.probe
+spec = importlib.util.spec_from_file_location("gtk_short_input", ROOT / "veranda/desktop/wayland-input.py")
+input_driver = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(input_driver)
 
 
 def run(command, env, log, timeout=30):
@@ -79,10 +82,61 @@ def retain_lifetime_snapshot(lifetime, tree, app):
         lifetime['process_snapshot_failure_type'] = type(error).__name__
 
 
-def short_scenarios(remote, owner_focus):
+def capture_input_watchdog(lifetime, app, identity, backend, env, capture, workload_seconds):
+    started = time.monotonic()
+    created = None
+    stage = 'process-before'
+    try:
+        def owned():
+            assert app.poll() is None and input_driver.process_identity(app.pid) == identity
+            assert identity[0] == os.getuid()
+        owned()
+        stage = 'window-before'
+        if backend == 'x11':
+            window = probe.X11Toplevel(app.pid, env, owned)
+            binding = {'window': window.window, 'pid': app.pid}
+        else:
+            window = probe.WlrToplevel(env['WAYLAND_DISPLAY'], 'org.subyard.Veranda')
+            window.singleton()
+            binding = {'app_id': 'org.subyard.Veranda', 'singleton': True, 'protocol_has_pid': False}
+        stage = 'screenshot'
+        input_driver.capture_view(backend, capture, env)
+        created = capture.lstat()
+        stage = 'process-after'
+        owned()
+        stage = 'window-after'
+        if backend == 'x11':
+            assert window.singleton() == window.window
+        else:
+            window.singleton()
+        lifetime['watchdog_capture'] = {'sha256': hashlib.sha256(capture.read_bytes()).hexdigest(),
+                                        'window': binding, 'workload_deadline_seconds': workload_seconds}
+    except BaseException as error:
+        lifetime['watchdog_capture_failure_type'] = type(error).__name__
+        lifetime['watchdog_capture_failure_stage'] = stage
+        if created is not None:
+            with contextlib.suppress(OSError):
+                if os.path.samestat(created, capture.lstat()):
+                    capture.unlink()
+    finally:
+        lifetime['watchdog_capture_seconds'] = time.monotonic() - started
+
+
+def short_scenarios(remote, owner_focus, ime=False):
+    if ime:
+        if remote or owner_focus: raise ValueError("IME probe is local only")
+        return ['ime', 'ime-restore']
     if remote and owner_focus:
         raise ValueError('owner focus diagnostic is local only')
     return ['owner-focus'] if owner_focus else ['connect', 'remote-restore', 'local-restore'] if remote else ['local']
+
+
+def workload_budget(remote, ui):
+    return 600 if remote and ui else 360 if remote else 90
+
+
+def keyboard_lifetime_ms(scenarios, workload_seconds):
+    return max(120000, len(scenarios) * (workload_seconds + 30) * 1000)
 
 
 def verify_persisted_selection(selected, connection_id, scenario):
@@ -92,6 +146,52 @@ def verify_persisted_selection(selected, connection_id, scenario):
     assert selected['yardName'] == (None if scenario == 'local-restore' else 'default')
 
 
+
+def prepare_ime(state, env, service, evidence):
+    """One private IBus GTK-module fixture; no compositor input-method claim."""
+    schema = 'org.freedesktop.ibus.engine.hangul'
+    env.update(GTK_IM_MODULE='ibus', GSETTINGS_BACKEND='keyfile',
+               IBUS_ADDRESS='unix:path=' + str(state / 'ibus-bus'))
+    settings = {'hangul-keyboard': "'2'", 'initial-input-mode': "'latin'",
+                'switch-keys': "'Shift+space'", 'preedit-mode': "'syllable'", 'word-commit': 'false', 'disable-latin-mode': 'false'}
+    evidence.update(engine='hangul', schema=schema, settings={}, gtk_im_module='ibus',
+                    settings_backend='private keyfile', visual_observation='pending native screenshot inspection',
+                    wayland_scope='GTK IBus module; not compositor-native input-method protocol')
+    with fixture.private_log(state / 'ime-setup.log') as log:
+        def query(command):
+            value = subprocess.check_output(command, env=env, stderr=log, text=True, timeout=5)
+            assert len(value.encode()) <= 65536, 'ime_prerequisite_output_limit'
+            return value.strip()
+        # ibus engine otherwise may run setxkbmap, including on a Wayland display.
+        for owner, key, value in [('org.freedesktop.ibus.general', 'use-system-keyboard-layout', 'true'),
+                                  *[(schema, key, value) for key, value in settings.items()]]:
+            evidence['stage'] = 'setting:' + key
+            subprocess.run(['gsettings', 'set', owner, key, value], env=env, stdout=log, stderr=log, check=True, timeout=5)
+            assert query(['gsettings', 'get', owner, key]) == value, 'ime_settings_readback_mismatch'
+            evidence['settings'][key] = value
+        evidence['stage'] = 'installed-inputs'
+        evidence['packages'] = query(['dpkg-query', '-W', '-f=${binary:Package} ${Version}\n',
+                                      'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk']).splitlines()
+        evidence['installed_files'] = []
+        for package, basename in [('ibus-gtk4', 'libim-ibus.so'), ('ibus-hangul', 'ibus-engine-hangul'),
+                                  ('ibus-hangul', schema + '.gschema.xml')]:
+            paths = [Path(name) for name in query(['dpkg-query', '-L', package]).splitlines() if Path(name).name == basename]
+            assert len(paths) == 1 and paths[0].is_file(), 'ime_installed_input_missing'
+            evidence['installed_files'].append({'package': package, 'basename': basename,
+                'sha256': hashlib.sha256(paths[0].read_bytes()).hexdigest()})
+        evidence['stage'] = 'private-daemon'
+        daemon, _ = service('ibus', ['ibus-daemon', '--single', '--emoji-extension=disable', '--cache=none',
+                                    '--timeout=5000', '--address=' + env['IBUS_ADDRESS']])
+        deadline = time.monotonic() + 10
+        while not (state / 'ibus-bus').is_socket():
+            assert daemon.poll() is None and time.monotonic() < deadline, 'ime_daemon_unavailable'
+            time.sleep(.05)
+        evidence['stage'] = 'engine-selection'
+        subprocess.run(['ibus', 'engine', 'hangul'], env=env, stdout=log, stderr=log, check=True, timeout=5)
+        assert query(['ibus', 'engine']) == 'hangul', 'ime_engine_readback_mismatch'
+        evidence['stage'] = 'ready'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gui", type=Path)
@@ -99,9 +199,12 @@ def main():
     parser.add_argument("--x11", action="store_true", help="run the SHORT on a private Xvfb display instead of Wayland")
     parser.add_argument("--remote", action="store_true", help="include real loopback SSH onboarding, cancellation and saved selection lifetimes")
     parser.add_argument("--ui", action="store_true", help="include focused typed GTK pages, plan/discard and Unicode draft restoration")
+    parser.add_argument("--ime", action="store_true", help="two local lifetimes: physical IBus Hangul composition and committed draft restart")
     parser.add_argument("--owner-focus", action="store_true", help="diagnose one local owner-row physical focus lifetime")
     parser.add_argument("--prepared-assets", type=Path, help="validated staged runtime and exact Debian container image assets")
     args = parser.parse_args()
+    if args.ime and (args.remote or args.ui or args.owner_focus):
+        parser.error("--ime requires standalone local lifetimes without --remote, --ui or --owner-focus")
     if args.owner_focus and (args.remote or args.ui):
         parser.error("--owner-focus requires a local lifetime without --remote or --ui")
     if args.ui and not args.remote:
@@ -116,7 +219,7 @@ def main():
     result = {"schema_version": 1, "original_exit_code": 1, "stage": "packages",
               "run": os.environ.get("SUBYARD_E2E_RUN_ID"), "slot": os.environ.get("SUBYARD_E2E_SLOT"),
               "backend": "x11" if args.x11 else "wayland",
-              "scope": "GTK Linux local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
+              "scope": "GTK IBus Hangul local app-draft composition/restart; no resource or visual acceptance" if args.ime else "GTK Linux local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
               "gui_sha256": hashlib.sha256(args.gui.read_bytes()).hexdigest(),
               "engine_sha256": hashlib.sha256(args.engine.read_bytes()).hexdigest()}
     try:
@@ -126,13 +229,13 @@ def main():
                                                 'inode': state_info.st_ino}
             def retain_evidence():
                 result['private_logs'] = {}
-                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'sshd.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log'):
+                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'sshd.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log', 'ibus.log', 'ime-setup.log', 'app-ime-restore.log', 'input-ime-restore.log'):
                     path = state / name
                     if path.exists():
                         assert path.stat().st_nlink == 1 and path.stat().st_size <= 2 * 1024 * 1024
                         result['private_logs'][name] = base64.b64encode(path.read_bytes()).decode('ascii')
                 result['screenshots'] = {}
-                for name in ('useful.png', 'failure.png', 'trust.png', 'remote-restore.png', 'local-restore.png'):
+                for name in ('useful.png', 'failure.png', 'trust.png', 'remote-restore.png', 'local-restore.png', 'ime-preedit-consonant.png', 'ime-preedit-syllable.png', 'ime-committed.png', 'ime-restore.png'):
                     capture = state / name
                     if capture.exists():
                         assert capture.stat().st_size <= 2 * 1024 * 1024
@@ -142,6 +245,7 @@ def main():
             run(["sudo", "-n", "apt-get", "update", "-qq"], env, state / "apt-update.log", 180)
             display_packages = ["xvfb", "openbox", "xdotool", "libx11-6"] if args.x11 else ["labwc", "wlrctl", "wlr-randr", "wayland-utils", "wtype", "grim"]
             run(["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", *display_packages,
+                 *(["ibus", "ibus-hangul", "ibus-gtk4", "fonts-noto-cjk"] if args.ime else []),
                  "libgtk-4-1",
                  "dbus", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0", "openssh-server"], env, state / "apt-install.log", 300)
             result["stage"] = "platform"
@@ -263,11 +367,8 @@ def main():
                         display, _ = service("xvfb", ["Xvfb", "-noreset", "-displayfd", str(write_fd), "-screen", "0", "1280x800x24", "-nolisten", "tcp"], pass_fds=(write_fd,))
                     finally:
                         os.close(write_fd)
-                    with selectors.DefaultSelector() as selector:
-                        selector.register(read_fd, selectors.EVENT_READ)
-                        assert selector.select(min(5, max(0, x11_deadline - time.monotonic()))), 'x11_display_readiness_timeout'
-                    number = os.read(read_fd, 32).decode().strip()
-                    assert re.fullmatch(r'[0-9]{1,5}', number) and display.poll() is None
+                    number = probe.read_display_number(read_fd, min(x11_deadline, time.monotonic() + 5))
+                    assert display.poll() is None
                     env['DISPLAY'] = ':' + number
                 finally:
                     os.close(read_fd)
@@ -294,24 +395,35 @@ def main():
             launchers = [Path(path) for path in subprocess.check_output(["dpkg-query", "-L", "at-spi2-core"], text=True).splitlines() if path.endswith("/at-spi-bus-launcher")]
             assert len(launchers) == 1
             service("accessibility", [str(launchers[0]), "--launch-immediately"])
+            if args.ime:
+                result['stage'] = 'ime-prerequisites'
+                result['ime'] = {}
+                prepare_ime(state, env, service, result['ime'])
+            scenarios = short_scenarios(args.remote, args.owner_focus, args.ime)
+            workload_seconds = workload_budget(args.remote, args.ui)
+            keeper_ms = keyboard_lifetime_ms(scenarios, workload_seconds)
             if args.x11:
+                x11_deadline = time.monotonic() + 10
                 manager, _ = service("window-manager", ["openbox"])
                 result['stage'] = 'x11-window-manager'
                 wait_x11_ready(display, manager, env, x11_deadline, state / 'x11-wm-ready.log')
             else:
-                service("keyboard", ["wtype", "-s", "120000"])
+                service("keyboard", ["wtype", "-s", str(keeper_ms)])
             result['lifetimes'] = []
-            scenarios = short_scenarios(args.remote, args.owner_focus)
+            result['input_workload_budget_seconds'] = workload_seconds
             for scenario in scenarios:
                 result["stage"] = "launch-" + scenario
-                suffix = '' if scenario in ('local', 'connect', 'owner-focus') else '-' + scenario
+                suffix = '' if scenario in ('local', 'connect', 'owner-focus', 'ime') else '-' + scenario
+                if args.ime:
+                    assert subprocess.check_output(['ibus', 'engine'], env=env, stderr=subprocess.DEVNULL, text=True, timeout=5).strip() == 'hangul', 'ime_engine_readback_mismatch'
                 app_log = stack.enter_context(fixture.private_log(state / ('app' + suffix + '.log')))
                 app = subprocess.Popen([str(args.gui.resolve())], env=env, stdout=app_log, stderr=subprocess.STDOUT, start_new_session=True)
                 tree = probe.Tree(app.pid, engine=args.engine.resolve())
                 stack.enter_context(fixture.cleanup_on_exit(lambda app=app, tree=tree: tree.stop(app), "app-" + scenario))
-                lifetime = {'scenario': scenario}
+                lifetime = {'scenario': scenario, 'input_workload_budget_seconds': workload_seconds}
                 result['lifetimes'].append(lifetime)
                 try:
+                    gui_identity = input_driver.process_identity(app.pid)
                     driver = ROOT / "veranda/desktop/wayland-input.py"
                     capture = state / ('useful.png' if not suffix else scenario + '.png')
                     driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0", VERANDA_GTK_BACKEND=result['backend'])
@@ -323,10 +435,12 @@ def main():
                         action = subprocess.Popen([sys.executable, str(driver)], env=driver_env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                         action_tree = probe.Tree(action.pid)
                         stack.enter_context(fixture.cleanup_on_exit(lambda action=action, tree=action_tree: tree.stop(action), "input-" + scenario))
-                        deadline = time.monotonic() + (180 if args.remote else 90)
+                        deadline = time.monotonic() + workload_seconds
                         while action.poll() is None:
                             tree.sample()
-                            assert time.monotonic() < deadline
+                            if time.monotonic() >= deadline:
+                                capture_input_watchdog(lifetime, app, gui_identity, result['backend'], env, state / 'failure.png', workload_seconds)
+                                raise AssertionError('physical_input_watchdog')
                             time.sleep(.05)
                     lifetime['input_exit_code'] = action.returncode
                     frames = [line[len("VERANDA_GTK_INPUT "):] for line in (state / ('input' + suffix + '.log')).read_text().splitlines() if line.startswith("VERANDA_GTK_INPUT ")]

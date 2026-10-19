@@ -184,6 +184,35 @@ class MemoryProbeTest(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, 'no ack'):
             control.check('minimized')
 
+    def test_x11_state_requires_exact_owned_window_and_actual_visible_or_minimized_ack(self):
+        owned = SimpleNamespace(calls=0)
+        def guard(): owned.calls += 1
+        env = {'DISPLAY': ':owned'}
+        windows = SimpleNamespace(returncode=0, stdout='321\n')
+        with patch.object(probe.subprocess, 'run', return_value=windows), \
+                patch.object(probe.subprocess, 'check_output', return_value='77\n'):
+            control = probe.X11Toplevel(77, env, guard)
+        for state, properties, expected in (('visible', '_NET_WM_STATE(ATOM) = \n', True),
+                                            ('minimized', '_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n', True),
+                                            ('minimized', '_NET_WM_STATE(ATOM) = \n', False)):
+            replies = ['77\n', properties] + (['Map State: IsViewable\n', '321\n'] if state == 'visible' else [])
+            with self.subTest(state=state, properties=properties), \
+                    patch.object(probe.subprocess, 'run', return_value=windows), \
+                    patch.object(probe.subprocess, 'check_output', side_effect=replies):
+                if expected:
+                    self.assertEqual(control.check(state)['state'], state)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'not acknowledged'): control.check(state)
+        for query, pid in ((SimpleNamespace(returncode=0, stdout='321\n322\n'), '77\n'),
+                           (windows, '88\n'), (SimpleNamespace(returncode=0, stdout='322\n'), '77\n')):
+            with patch.object(probe.subprocess, 'run', return_value=query) as run, \
+                    patch.object(probe.subprocess, 'check_output', return_value=pid), \
+                    self.assertRaises(RuntimeError):
+                control.set('minimized')
+            self.assertTrue(all(call.args[0][1] == 'search' for call in run.call_args_list),
+                            'changed/foreign window received a physical state command')
+        self.assertGreater(owned.calls, 0)
+
     def test_idle_statistics_use_simultaneous_sums_and_one_cpu(self):
         clock = [0.0]
         class SampleTree:
@@ -196,14 +225,18 @@ class MemoryProbeTest(unittest.TestCase):
                         'pss_missing_processes': 0}
         def sleep(seconds):
             clock[0] += seconds
+        control = SimpleNamespace(set=lambda state: {'state': state}, check=lambda state: sleep(.5))
         with patch.object(probe.time, 'monotonic', side_effect=lambda: clock[0]), \
                 patch.object(probe.time, 'sleep', side_effect=sleep):
-            result = probe.measure_idle(SimpleNamespace(poll=lambda: None), SampleTree(), 2, 0)
+            result = probe.measure_idle(SimpleNamespace(poll=lambda: None), SampleTree(), 2, 0, control=control)
         self.assertEqual([sample['elapsed_seconds'] for sample in result['samples']], [1, 2])
         self.assertEqual(result['statistics']['rss_bytes'], {'median': 250, 'p95': 300,
                                                             'observed_max': 300, 'sample_count': 2})
+        self.assertEqual(result['peak_rss_bytes'], 400, 'final observed endpoint cannot be excluded from sampled peak')
         expected_cpu = 100 * (probe.TICKS // 10) / probe.TICKS
-        self.assertAlmostEqual(result['cpu_percent_one_core'], expected_cpu)
+        # The nonzero final state query adds .5 s; its CPU must reach the endpoint.
+        self.assertEqual(result['duration_seconds'], 2.5)
+        self.assertAlmostEqual(result['cpu_percent_one_core'], expected_cpu * 3 / 2.5)
         self.assertAlmostEqual(result['samples'][0]['cpu_percent_one_core'], expected_cpu)
 
 

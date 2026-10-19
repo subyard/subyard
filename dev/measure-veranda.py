@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded Linux resource probe using isolated Xvfb or explicit Wayland; no fleet mutations."""
 import argparse
+import contextlib
 import ctypes
 import ctypes.util
 import hashlib
@@ -25,6 +26,27 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGE = os.sysconf('SC_PAGE_SIZE')
 TICKS = os.sysconf('SC_CLK_TCK')
 FLEET_COUNTS = {'owners': 1, 'yards': 20, 'projects': 200}
+
+
+def read_display_number(fd, deadline):
+    """Read Xserver's bounded displayfd record without accepting a partial line."""
+    record = b''
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError('x11_display_readiness_timeout')
+            fragment = os.read(fd, 7 - len(record))
+            if not fragment:
+                raise RuntimeError('incomplete_x11_display_record')
+            record += fragment
+            if not re.fullmatch(rb'[0-9]{1,5}\n?', record):
+                raise RuntimeError('invalid_x11_display_record')
+            if record.endswith(b'\n'):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('x11_display_readiness_timeout')
+                return record[:-1].decode('ascii')
 
 
 def resource_witness(*, proc=Path('/proc'), cgroup_root=Path('/sys/fs/cgroup'),
@@ -436,7 +458,7 @@ def wayland_display(env=None):
     return str(endpoint)
 
 
-def environment(directory, display, engine, *, wayland=False):
+def environment(directory, display, engine, *, wayland=False, gtk=False):
     paths = {name: directory / name for name in ('home', 'data', 'cache', 'config', 'runtime', 'operator', 'owner-config', 'owner-data')}
     for path in paths.values():
         path.mkdir(mode=0o700)
@@ -457,6 +479,14 @@ def environment(directory, display, engine, *, wayland=False):
         'VERANDA_RESOURCE_PROBE': '1',
     }
     env.update({'GDK_BACKEND': 'wayland', 'WAYLAND_DISPLAY': display} if wayland else {'DISPLAY': display})
+    if gtk:
+        env.update(GTK_A11Y='atspi', DBUS_SESSION_BUS_ADDRESS=os.environ['DBUS_SESSION_BUS_ADDRESS'],
+                   GDK_BACKEND='wayland' if wayland else 'x11',
+                   XDG_SESSION_TYPE='wayland' if wayland else 'x11',
+                   SUBYARD_NO_AUDIT='1', SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE='1', MIN_DISK_GIB='1')
+        env.pop('VERANDA_RESOURCE_PROBE', None)
+        env['GSK_DEBUG'] = 'renderer'
+        env['STORAGE_PATH'] = os.environ['STORAGE_PATH']
     return env
 
 
@@ -613,7 +643,7 @@ def readiness_kind(buffer):
     return 'native-workload-complete; no frontend frame'
 
 
-def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNULL, cgroup=None):
+def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNULL, cgroup=None, gtk=False):
     started = time.monotonic()
     gate_read = gate_write = None
     command = [str(binary)]
@@ -650,14 +680,30 @@ def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNU
             os.write(gate_write, b'1')
             os.close(gate_write)
             gate_write = None
+        observer = None
+        if gtk:
+            spec = importlib.util.spec_from_file_location('veranda_gtk_observer', ROOT / 'dev/e2e/veranda-package-ui.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            observer = module.GtkObserver(process.pid, executable=binary)
         while time.monotonic() - started < timeout:
-            tree.sample(pss=True)
+            startup_sample = tree.sample(pss=True)
+            if observer is not None:
+                tree.gtk_startup_partial = getattr(tree, 'gtk_startup_partial', False) or any(startup_sample.get(key, 0) for key in ('pss_missing_processes', 'fd_missing_processes', 'identity_changed_processes'))
+                proof = observer.ready(started + timeout, configured=expected_fleet is not None)
+                sampled = tree.sample(pss=True)
+                tree.gtk_startup_partial = tree.gtk_startup_partial or any(sampled.get(key, 0) for key in ('pss_missing_processes', 'fd_missing_processes', 'identity_changed_processes'))
+                if proof:
+                    tree.readiness_kind = proof['kind']
+                    tree.gtk_observation = {**proof, **observer.diagnostics}
+                    tree.gtk_observer = observer
+                    return process, tree, time.monotonic() - started
             for key, _ in selector.select(0.05):
                 block = os.read(key.fd, 4096)
                 if not block:
                     raise RuntimeError(f'app exited before ready (status {process.poll()})')
                 buffered += block
-                if b'VERANDA_READY\n' in buffered:
+                if not gtk and b'VERANDA_READY\n' in buffered:
                     if expected_fleet is not None:
                         ready_fleet(buffered, expected_fleet)
                     tree.readiness_kind = readiness_kind(buffered)
@@ -732,6 +778,56 @@ class WlrToplevel:
                 time.sleep(0.05)
 
 
+class X11Toplevel:
+    """Exact-PID window state on the caller-owned Xvfb/Openbox display."""
+    def __init__(self, pid, env, owned):
+        self.pid, self.env, self.owned = pid, env, owned
+        self.window = self.singleton()
+
+    def windows(self):
+        result = subprocess.run(['xdotool', 'search', '--pid', str(self.pid)], env=self.env,
+                                text=True, capture_output=True, timeout=3)
+        if result.returncode not in (0, 1): raise RuntimeError('X11 window query failed')
+        windows = result.stdout.splitlines()
+        if any(not value.isdecimal() for value in windows): raise RuntimeError('invalid X11 window identity')
+        return windows
+
+    def singleton(self):
+        self.owned()
+        windows = self.windows()
+        if len(windows) != 1: raise RuntimeError('owned X11 window is ambiguous or absent')
+        pid = subprocess.check_output(['xdotool', 'getwindowpid', windows[0]], env=self.env, text=True, timeout=3).strip()
+        if pid != str(self.pid): raise RuntimeError('owned X11 window PID changed')
+        return windows[0]
+
+    def require_empty(self):
+        if self.windows(): raise RuntimeError('owned X11 window survived app cleanup')
+
+    def check(self, state):
+        if self.singleton() != self.window: raise RuntimeError('owned X11 window changed')
+        properties = subprocess.check_output(['xprop', '-id', self.window, '_NET_WM_STATE'], env=self.env, text=True, timeout=3)
+        minimized = '_NET_WM_STATE_HIDDEN' in properties
+        if minimized != (state == 'minimized'): raise RuntimeError('X11 window state not acknowledged')
+        if state == 'visible':
+            view = subprocess.check_output(['xwininfo', '-id', self.window], env=self.env, text=True, timeout=3)
+            if 'Map State: IsViewable' not in view: raise RuntimeError('owned X11 window is not viewable')
+            active = subprocess.check_output(['xdotool', 'getactivewindow'], env=self.env, text=True, timeout=3).strip()
+            if active != self.window: raise RuntimeError('owned X11 window is not active')
+        return {'state': state, 'window_pid': self.pid, 'minimized_acknowledged': minimized,
+                'activated_acknowledged': not minimized, 'proof': 'exact PID/start/exe plus Openbox EWMH state; not painted pixels'}
+
+    def set(self, state):
+        if self.singleton() != self.window: raise RuntimeError('owned X11 window changed')
+        subprocess.run(['xdotool', 'windowminimize' if state == 'minimized' else 'windowactivate', self.window],
+                       env=self.env, check=True, timeout=3)
+        deadline = time.monotonic() + 5
+        while True:
+            try: return self.check(state)
+            except RuntimeError:
+                if time.monotonic() >= deadline: raise RuntimeError('X11 window state acknowledgement timed out') from None
+                time.sleep(.05)
+
+
 def measure_idle(process, tree, seconds, settle_seconds, *, control=None, state='visible'):
     proof = control.set(state) if control is not None else {'state': 'unverified-visible', 'proof': 'no compositor state query'}
     settle_until = time.monotonic() + settle_seconds
@@ -760,6 +856,8 @@ def measure_idle(process, tree, seconds, settle_seconds, *, control=None, state=
         if control is not None:
             control.check(state)
         samples.append(sample)
+    # Include the final state-query/collection interval in both CPU endpoints.
+    last = tree.sample(pss=True, attribution=True, resources=True)
     elapsed = time.monotonic() - idle_started
     stats = {}
     for metric in ('rss_bytes', 'pss_bytes', 'private_bytes', 'swap_bytes', 'fds', 'threads', 'process_count',
@@ -770,12 +868,13 @@ def measure_idle(process, tree, seconds, settle_seconds, *, control=None, state=
     result = {'duration_seconds': elapsed, 'settle_seconds': settle_seconds, 'window_state': proof,
             'cpu_seconds': (tree.cpu_ticks - initial_cpu) / TICKS,
             'cpu_percent_one_core': 100 * (tree.cpu_ticks - initial_cpu) / TICKS / elapsed,
-            'baseline': baseline, 'last': tree.sample(pss=True, attribution=True, resources=True),
-            'peak_rss_bytes': stats['rss_bytes']['observed_max'], 'peak_pss_bytes': stats['pss_bytes']['observed_max'],
-            'pss_missing_process_samples': sum(sample['pss_missing_processes'] for sample in samples),
+            'baseline': baseline, 'last': last,
+            'peak_rss_bytes': max(baseline['rss_bytes'], last['rss_bytes'], stats['rss_bytes']['observed_max']),
+            'peak_pss_bytes': max(baseline['pss_bytes'], last['pss_bytes'], stats['pss_bytes']['observed_max']),
+            'pss_missing_process_samples': sum(sample['pss_missing_processes'] for sample in (baseline, *samples, last)),
             'statistics_partial': any(sample['pss_missing_processes'] or sample.get('fd_missing_processes', 0)
                                       or sample.get('identity_changed_processes', 0)
-                                      for sample in samples),
+                                      for sample in (baseline, *samples, last)),
             'statistics': stats, 'samples': samples}
     result['resource_assessment'] = assess_resource_witnesses(
         [item.get('resource_witness') for item in (baseline, *samples, result['last'])],
@@ -847,6 +946,49 @@ def screenshot(display, output):
         x11.XCloseDisplay(connection)
 
 
+def gtk_renderer_metadata(data):
+    """Only successful GTK realization lines; class names do not prove GPU use."""
+    records = [{'renderer_class': renderer.decode('ascii'), 'surface_class': surface.decode('ascii')}
+               for renderer, surface in re.findall(rb"Using renderer '(Gsk[A-Za-z0-9_]{1,80})' for surface '(Gdk[A-Za-z0-9_]{1,80})'", data[:65536])]
+    toplevels = [record for record in records if record['surface_class'] in ('GdkX11Toplevel', 'GdkWaylandToplevel')]
+    return {'selection': 'GTK default/auto; GSK_RENDERER unset', 'logging': 'GSK_DEBUG=renderer; instrumentation overhead included',
+            'successful_surface_records': records, 'main_surface': toplevels[0] if len(toplevels) == 1 and len(data) <= 65536 else None,
+            'status': 'observed' if len(toplevels) == 1 and len(data) <= 65536 else 'unknown',
+            'hardware_acceleration': 'unmeasured', 'truncated': len(data) > 65536}
+
+
+def assess_gtk_baseline(result):
+    """Ordinary sampled limits only; SHORT and missing metrics never PASS."""
+    startup = result['startup']
+    states = result['window_states']
+    complete = (startup['count'] == 30 and set(states) == {'visible', 'minimized'} and all(window['settle_seconds'] >= 30 and window['duration_seconds'] >= 120
+                                             for window in states.values()))
+    invalid = (not states or any(window['statistics_partial'] or window['pss_missing_process_samples']
+                               or window.get('resource_assessment', {}).get('status') not in ('no_recorded_pressure', 'pressure_observed')
+                               for window in states.values())
+               or len(startup.get('launches', [])) != startup['count']
+               or any(launch.get('startup_metrics_partial', True) for launch in startup.get('launches', [])))
+    def measured_max(values):
+        if not values or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in values):
+            return None
+        return max(values)
+    limits = {
+        'startup_p95_seconds': {'value': startup['p95_seconds'], 'target': 1, 'limit': 2},
+        'idle_rss_bytes': {'value': measured_max([window.get('peak_rss_bytes') for window in states.values()]), 'target': 128 * 1024**2, 'limit': 256 * 1024**2},
+        'idle_cpu_percent_one_core': {'value': measured_max([window.get('cpu_percent_one_core') for window in states.values()]), 'target': .1, 'limit': .5},
+        'startup_sampled_rss_bytes': {'value': startup['peak_sampled_rss_bytes'], 'target': 256 * 1024**2, 'limit': 384 * 1024**2},
+    }
+    for item in limits.values():
+        value = item['value']
+        item['status'] = ('unknown' if type(value) not in (int, float) or not math.isfinite(value) or value < 0 else
+                          'over_limit' if value > item['limit'] else 'target' if value <= item['target'] else 'within_limit')
+    failed = invalid or any(item['status'] == 'unknown' for item in limits.values()) or (complete and any(item['status'] == 'over_limit' for item in limits.values()))
+    return {'status': 'fail' if failed else 'pass' if complete else 'incomplete', 'limits': limits,
+            'scope': 'ordinary startup/idle sampled measurements only; sampled startup RSS is not refresh/switch/event-burst peak acceptance',
+            'required_window_states': 'visible and minimized required for this baseline; inactive/occluded remain separate gates',
+            'complete_baseline_window': complete, 'missing_or_partial_metrics': invalid}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True,
@@ -854,6 +996,9 @@ def main():
     parser.add_argument('--engine', type=Path, default=ROOT / '.build/veranda-probe-engine')
     parser.add_argument('--output', type=Path, default=ROOT / '.build/veranda-resources.json')
     parser.add_argument('--screenshot', type=Path, default=ROOT / '.build/veranda-resources.png')
+    parser.add_argument('--gtk', action='store_true', help='current GTK read-only accessibility readiness; no stdout marker/WebKit dependency')
+    parser.add_argument('--gtk-stderr-log', type=Path, help='private GTK renderer log retained outside per-launch state')
+    parser.add_argument('--x11-display', help='GTK only: caller-owned isolated X11 display with ready window manager')
     parser.add_argument('--wayland', action='store_true',
                         help='use the current owned Wayland compositor; keep app data isolated and omit screenshots')
     parser.add_argument('--configured-fleet', action='store_true',
@@ -885,6 +1030,14 @@ def main():
                         help='settle the final launch before the idle measurement (default: 30)')
     parser.add_argument('--timeout', type=float, default=30)
     args = parser.parse_args()
+    if args.gtk and (not args.configured_fleet or (not args.wayland and not args.x11_display)):
+        parser.error('--gtk requires --configured-fleet and --wayland or --x11-display')
+    if args.gtk_stderr_log and not args.gtk:
+        parser.error('--gtk-stderr-log requires --gtk')
+    if args.x11_display and (not args.gtk or args.wayland):
+        parser.error('--x11-display requires --gtk without --wayland')
+    if args.gtk and any((args.disable_compositing, args.disable_dmabuf, args.disable_gdk_gl, args.gdk_debug_nogl, args.gdk_rendering_image)):
+        parser.error('legacy graphics diagnostics are separate from the GTK baseline')
     if args.privileged_cgroup_attach and args.app_cgroup is None:
         parser.error('--privileged-cgroup-attach requires --app-cgroup')
     if (args.gdk_debug_nogl or args.gdk_rendering_image) and (args.disable_gdk_gl or args.disable_dmabuf or args.disable_compositing):
@@ -892,7 +1045,7 @@ def main():
     if ((args.toplevel_control_wlrctl and not args.wayland)
             or ((args.window_state or args.wlrctl_app_id) and not args.toplevel_control_wlrctl)):
         parser.error('window-state/app-ID selection requires --wayland and --toplevel-control-wlrctl')
-    states = args.window_state or ['visible']
+    states = args.window_state or (['visible', 'minimized'] if args.gtk and args.x11_display else ['visible'])
     if len(states) != len(set(states)):
         parser.error('each window-state can be measured only once per launch')
     if (args.starts < 1 or args.idle_seconds <= 0 or args.idle_settle_seconds < 0 or args.timeout <= 0
@@ -917,24 +1070,32 @@ def main():
             parser.error('wlrctl app-ID must be a nonempty bounded identifier without whitespace')
         control = WlrToplevel(display, app_id)
         control.require_empty()
-    webkit, webkit_source = webkit_version()
+    webkit, webkit_source = (None, 'not applicable: GTK4') if args.gtk else webkit_version()
     inputs = {'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               'engine_sha256': hashlib.sha256(args.engine.read_bytes()).hexdigest()}
     xvfb = None
-    if not args.wayland:
-        read_fd, write_fd = os.pipe()
-        xvfb = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
-                                pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.close(write_fd)
-        display = ':' + os.read(read_fd, 32).decode().strip()
-        os.close(read_fd)
+    gtk_log = args.gtk_stderr_log or args.output.with_suffix('.gtk-stderr.log')
+    if args.gtk: write_metrics(gtk_log, '')
     launches = []
     try:
+        if args.x11_display:
+            display = args.x11_display
+        if not args.wayland and not args.x11_display:
+            read_fd, write_fd = os.pipe()
+            try:
+                try:
+                    xvfb = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
+                                            pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                finally:
+                    os.close(write_fd)
+                display = ':' + read_display_number(read_fd, time.monotonic() + args.timeout)
+            finally:
+                os.close(read_fd)
         with tempfile.TemporaryDirectory(prefix='veranda-probe-', dir='/var/tmp') as temporary:
             for index in range(args.starts):
                 directory = Path(temporary) / str(index)
                 directory.mkdir(mode=0o700)
-                env = environment(directory, display, args.engine.resolve(), wayland=args.wayland)
+                env = environment(directory, display, args.engine.resolve(), wayland=args.wayland, **({'gtk': True} if args.gtk else {}))
                 fleet = configured_fleet(directory, env) if args.configured_fleet else None
                 if args.disable_compositing:
                     env['WEBKIT_DISABLE_COMPOSITING_MODE'] = '1'
@@ -949,9 +1110,15 @@ def main():
                 if control is not None:
                     control.require_empty()
                 launch_options = {'cgroup': cgroup} if cgroup is not None else {}
-                process, tree, ready = launch(args.binary.resolve(), env, args.timeout,
-                                             expected_fleet=FLEET_COUNTS if args.configured_fleet else None, **launch_options)
+                if args.gtk: launch_options['gtk'] = True
+                log_offset = gtk_log.stat().st_size if args.gtk else 0
+                with (gtk_log.open('ab') if args.gtk else contextlib.nullcontext()) as gtk_stderr:
+                    if args.gtk: launch_options['stderr'] = gtk_stderr
+                    process, tree, ready = launch(args.binary.resolve(), env, args.timeout,
+                                                 expected_fleet=FLEET_COUNTS if args.configured_fleet else None, **launch_options)
                 try:
+                    if args.gtk and args.x11_display:
+                        control = X11Toplevel(process.pid, env, tree.gtk_observer.owned)
                     # Continue sampling through async details/renderer initialization;
                     # readiness timing remains the first usable fleet/error marker.
                     settle_until = time.monotonic() + 2
@@ -959,16 +1126,26 @@ def main():
                         time.sleep(0.05)
                         if process.poll() is not None:
                             raise RuntimeError('app exited during startup sampling')
-                        tree.sample(pss=True)
+                        sampled = tree.sample(pss=True)
+                        if args.gtk:
+                            tree.gtk_startup_partial = getattr(tree, 'gtk_startup_partial', False) or any(sampled.get(key, 0) for key in ('pss_missing_processes', 'fd_missing_processes', 'identity_changed_processes'))
+                    renderer = None
+                    if args.gtk:
+                        with gtk_log.open('rb') as source:
+                            source.seek(log_offset)
+                            renderer = gtk_renderer_metadata(source.read(65537))
                     launches.append({'ready_seconds': ready,
+                                     'gtk_renderer': renderer,
                                      'readiness_kind': getattr(tree, 'readiness_kind', 'frontend-two-frame-marker'),
+                                     'gtk_observation': getattr(tree, 'gtk_observation', None),
+                                     'startup_metrics_partial': getattr(tree, 'gtk_startup_partial', False),
                                      'peak_sampled_rss_bytes': tree.peak_rss,
                                      'peak_sampled_pss_bytes': tree.peak_pss, 'max_process_count': tree.max_count,
                                      'peak_processes': tree.peak_processes,
                                      'process_names': sorted(tree.names)})
                     print(f'Launch {index + 1}/{args.starts}: {ready:.3f}s', flush=True)
                     if index == args.starts - 1:
-                        screenshot_captured = False if args.wayland else screenshot(display, args.screenshot)
+                        screenshot_captured = False if args.wayland or args.gtk else screenshot(display, args.screenshot)
                         window_states = {state: measure_idle(process, tree, args.idle_seconds, args.idle_settle_seconds,
                                                              control=control, state=state) for state in states}
                         idle = window_states[states[0]]
@@ -995,12 +1172,13 @@ def main():
             cpu = next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), 'not measured')
             result = {
                 'scope': ('Linux Wayland isolated local owner; screen, GPU, compositor and workload pinning remain caller gates; no prepared physical fleet or mutations'
-                          if args.wayland else 'Linux Xvfb isolated local owner; screenshot defines rendered state; no prepared physical fleet or mutations'),
+                          if args.wayland else 'Linux Xvfb isolated local owner; no prepared physical fleet or mutations'),
+                'readiness_mode': 'GTK read-only accessibility' if args.gtk else 'historical stdout marker/WebKit research',
                 'inputs': inputs,
                 'configured_fleet': fleet,
                 'display': ({'server': 'Wayland', 'screen': 'not measured', 'gpu': 'not measured', 'compositor': 'not measured',
                              'rendering': 'hardware acceleration unverified', 'screenshot_limitation': 'omitted to avoid capturing unrelated desktop content'}
-                            if args.wayland else {'server': 'Xvfb', 'screen': '1280x800x24', 'rendering': 'hardware acceleration unverified'}),
+                            if args.wayland else {'server': 'Xvfb', 'screen': '1920x1080x24' if args.gtk else '1280x800x24', 'rendering': 'hardware acceleration unverified'}),
                 'diagnostic_disable_compositing': args.disable_compositing,
                 'diagnostic_disable_dmabuf': args.disable_dmabuf,
                 'diagnostic_disable_gdk_gl': args.disable_gdk_gl,
@@ -1009,13 +1187,16 @@ def main():
                 'screenshot_captured': screenshot_captured,
                 'system': {'os': os_release.get('PRETTY_NAME', '').strip('"'), 'kernel': os.uname().release,
                            'arch': os.uname().machine, 'cpu': cpu, 'logical_cpus': os.cpu_count(),
+                           'gtk4': command_output(['dpkg-query', '-W', '-f=${Version}', 'libgtk-4-1']) if args.gtk else None,
                            'webkit2gtk': webkit, 'webkit2gtk_version_source': webkit_source,
                            'desktop_packages': desktop_packages()},
                 'method': {'startup': ('cold processes and fresh isolated app data; warm OS/library cache; '
                                        + ('native workload complete; no frontend frame'
                                           if launches[-1]['readiness_kind'].startswith('native-workload')
+                                          else 'first controllable complete owned GTK configured Overview; not paint' if args.gtk
                                           else 'first-screen marker after initial fleet/error and two animation frames')),
                            'startup_sampling_seconds': 0.05, 'idle_sampling_seconds': 1,
+                           'sampling_intervals': 'requested minima; actual observer/proc/command latency adds gaps, sampled peaks only',
                            'idle_settle_seconds': args.idle_settle_seconds,
                            'launch_peak_window': 'process start through two seconds after initial readiness, including asynchronous details',
                            'memory': 'simultaneous sum of per-process smaps_rollup RSS (shared pages double counted), PSS, private clean+dirty+hugetlb and swap; missing rollups use stat RSS and flag incomplete sums',
@@ -1025,7 +1206,9 @@ def main():
                            'cgroup_memory': 'memory.current includes charged memory beyond process RSS/PSS; unavailable controllers yield null',
                            'resource_witness': 'numeric guest pressure/disk witnesses at idle endpoints and 1 Hz samples; overhead included in collection_seconds; unknown counters remain null; no pressure acceptance claim',
                            'cpu': 'sum sampled /proc CPU deltas; one core normalized; short-lived children between samples may be missed',
-                           'mutations_measured': False, 'xvfb_included': False},
+                           'mutations_measured': False, 'xvfb_included': False,
+                           'gtk_renderer': 'shipping GTK default/auto; GSK_RENDERER unset; GSK_DEBUG=renderer class evidence per launch; hardware acceleration unmeasured' if args.gtk else None,
+                           'observer': 'read-only AT-SPI overhead included in startup elapsed/app response work; observer process outside app sums; per-launch wall latency recorded' if args.gtk else None},
                 'startup': {'count': len(launches), 'median_seconds': (timings[(len(timings)-1)//2] + timings[len(timings)//2]) / 2,
                             'p95_seconds': timings[math.ceil(0.95 * len(timings))-1],
                             'peak_sampled_rss_bytes': max(item['peak_sampled_rss_bytes'] for item in launches),
@@ -1038,8 +1221,14 @@ def main():
                               + ([] if control is not None and 'minimized' in states else ['minimized']),
                 'process_history': history,
             }
+            if args.gtk:
+                result['assessment'] = assess_gtk_baseline(result)
+                result['unmeasured'] += ['paint', 'loaded-switch-to-paint', 'snapshot-to-paint', 'event-to-paint',
+                                        'stress', 'reconnect-cycles', 'network-recovery', 'suspend-recovery']
             write_metrics(args.output, json.dumps(result, indent=2) + '\n')
             print(f'Metrics: {args.output}', flush=True)
+            if args.gtk and result['assessment']['status'] == 'fail':
+                raise RuntimeError('GTK ordinary baseline exceeded a hard limit or has incomplete metrics')
     finally:
         if xvfb is not None:
             xvfb.terminate()

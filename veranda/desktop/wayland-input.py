@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -18,6 +19,48 @@ spec.loader.exec_module(ssh_fixture)
 
 class IncompleteTree(Exception):
     pass
+
+
+def process_identity(pid):
+    process = Path('/proc') / str(pid)
+    fields = (process / 'stat').read_text().rsplit(')', 1)[1].split()
+    assert fields[0] not in ('Z', 'X'), 'owned_process_terminated'
+    exe = (process / 'exe').stat()
+    return process.stat().st_uid, int(fields[19]), exe.st_dev, exe.st_ino
+
+
+def input_progress(result, stage, phase, site, key, snapshot, tree, state):
+    """Bounded cached diagnostics only; never read accessibility or typed text."""
+    if state.get('count', 0) >= 512:
+        return
+    label = lambda value, size: value if isinstance(value, str) and re.fullmatch(r'[a-z0-9:-]{1,' + str(size) + '}', value) else 'other'
+    number = lambda value: value if type(value) is int and 0 <= value <= 1_000_000_000 else None
+    navigation = result.get('selection_trace', [{}])[-1] if result.get('selection_trace') else {}
+    focus = result.get('scope_focus_trace', [{}])[-1] if result.get('scope_focus_trace') else {}
+    reads = result.get('navigation_read', {})
+    data = {'stage': label(stage, 80), 'phase': phase if phase in ('read-start', 'read-end', 'key-start', 'key-end') else 'other',
+            'site': label(site.split(':', 1)[0], 40), 'key': key if key in ('Tab', 'F6', 'other', 'none') else 'other',
+            'key_commands': number(result.get('physical_key_commands')), 'cached_selected': number(navigation.get('selected')),
+            'cached_navigation_focus': number(navigation.get('focused')), 'cached_control_focus': number(focus.get('focused')),
+            'cached_heading': navigation.get('heading') is True, 'cached_control_matched': focus.get('matched') is True,
+            'cached_tree_nodes': min(len(tree), 2048), 'cached_focused_roles': [number(node.get('role')) for node in tree
+                if 'FOCUSED' in node.get('states', ())][:4], 'snapshot_truncated': snapshot.get('truncated') is True,
+            'incomplete_reads': number(reads.get('incomplete_tree_retries', 0)), 'read_errors': number(reads.get('read_error_count', 0))}
+    signature = json.dumps(data, sort_keys=True)
+    previous = state.setdefault('last', {})
+    if previous.get(data['phase']) == signature:
+        return
+    previous[data['phase']] = signature
+    state['count'] = state.get('count', 0) + 1
+    now = time.monotonic()
+    data.update(sequence=state['count'], truncated=state['count'] == 512,
+                elapsed_seconds=round(max(0, now - state.setdefault('started', now)), 3))
+    encoded = json.dumps(data, sort_keys=True)
+    assert len(encoded.encode()) <= 1024
+    try:
+        print('VERANDA_GTK_PROGRESS ' + encoded, flush=True)
+    except BaseException as error:
+        result['progress_failure_type'] = type(error).__name__
 
 
 def owned_tree(app, pid, defunct, deadline):
@@ -173,7 +216,8 @@ def retain_failure_diagnostics(result, collect):
         result['diagnostic_failure_type'] = type(error).__name__
 
 
-def capture_view(backend, capture):
+def capture_view(backend, capture, env=None):
+    env = os.environ if env is None else env
     assert capture.parent.resolve() == capture.parent and not capture.exists()
     fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)
@@ -181,7 +225,7 @@ def capture_view(backend, capture):
     try:
         with os.fdopen(fd, 'wb') as output:
             if backend == 'wayland':
-                subprocess.run(['grim', '-'], check=True, env=os.environ,
+                subprocess.run(['grim', '-'], check=True, env=env,
                                stdout=output, stderr=subprocess.DEVNULL, timeout=5)
         if backend == 'x11':
             code = ('import importlib.util,pathlib,sys\n'
@@ -190,9 +234,11 @@ def capture_view(backend, capture):
                     'assert probe.screenshot(sys.argv[2],pathlib.Path(sys.argv[3]))\n')
             subprocess.run([sys.executable, '-c', code,
                 str(Path(__file__).resolve().parents[2] / 'dev/measure-veranda.py'),
-                os.environ['DISPLAY'], str(capture)], check=True, timeout=5,
+                env['DISPLAY'], str(capture)], env=env, check=True, timeout=5,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        assert capture.stat().st_nlink == 1 and capture.stat().st_size <= 2 * 1024 * 1024
+        info = capture.lstat()
+        assert (os.path.samestat(original, info) and stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and info.st_size <= 2 * 1024 * 1024)
     except BaseException:
         # A partial diagnostic image must not break the parent's evidence retention.
         if capture.exists() and os.path.samestat(original, capture.lstat()):
@@ -232,16 +278,19 @@ def navigation_snapshot(items, pid, atspi):
         assert (node.get_process_id() == pid and node.get_role() == role
                 and states.contains(atspi.StateType.SHOWING)
                 and not states.contains(atspi.StateType.DEFUNCT)), 'focus_target_unavailable'
+        return states
     lists = [node for node in items if node.get_role() == atspi.Role.LIST
              and node.get_name() == 'Owner hosts and yards']
     assert len(lists) == 1, 'focus_target_unavailable'
     navigation = lists[0]
     valid(navigation, atspi.Role.LIST)
     assert 0 < navigation.get_child_count() <= 64, 'focus_target_unavailable'
-    rows, order, owners = [], [], []
+    rows, order, owners, selected = [], [], [], []
     for index in range(navigation.get_child_count()):
         row = navigation.get_child_at_index(index)
-        valid(row, atspi.Role.LIST_ITEM)
+        states = valid(row, atspi.Role.LIST_ITEM)
+        if states.contains(atspi.StateType.SELECTED):
+            selected.append(index)
         assert row.get_parent() == navigation and row.get_child_count() == 1, 'focus_target_unavailable'
         child = row.get_child_at_index(0)
         valid(child, atspi.Role.LABEL)
@@ -251,16 +300,132 @@ def navigation_snapshot(items, pid, atspi):
         order.append(row.get_name() or child.get_name())
     assert all(order) and len(set(order)) == len(order), 'focus_target_unavailable'
     focused = [node for node in items if node.get_state_set().contains(atspi.StateType.FOCUSED)]
-    assert len(focused) == 1, 'focus_target_unavailable'
-    valid(focused[0], focused[0].get_role())
+    # Closing the focused SSH panel can leave scope visible without a focus target.
+    assert len(focused) <= 1, 'focus_target_unavailable'
+    if focused:
+        valid(focused[0], focused[0].get_role())
     return {'order': order, 'owners': owners,
-            'focused': rows.index(focused[0]) if focused[0] in rows else None}
+            'selected_indices': selected,
+            'focused': rows.index(focused[0]) if focused and focused[0] in rows else None}
 
 
 def focused_button(items, pid, name, atspi):
     focused = [node for node in items if node.get_state_set().contains(atspi.StateType.FOCUSED)]
     return (focus_matches(items, pid, name, atspi) and len(focused) == 1
             and focused[0].get_role() == atspi.Role.PUSH_BUTTON)
+
+
+def focused_editable(items, pid, name, atspi):
+    matches = [node for node in items if node.get_process_id() == pid
+               and node.get_role() == atspi.Role.TEXT and node.get_name() == name
+               and node.get_state_set().contains(atspi.StateType.SHOWING)
+               and not node.get_state_set().contains(atspi.StateType.DEFUNCT)]
+    return (matches[0] if len(matches) == 1 and focus_matches(items, pid, name, atspi)
+            and matches[0].get_state_set().contains(atspi.StateType.FOCUSED)
+            and matches[0].get_state_set().contains(atspi.StateType.EDITABLE) else None)
+
+
+def remote_editor_ready(items, pid, atspi):
+    editor = focused_editable(items, pid, 'Remote SSH destination', atspi)
+    if editor is None: return False
+    parent = editor.get_parent()
+    if (parent not in items or parent.get_process_id() != pid or parent.get_role() != atspi.Role.PANEL
+            or not parent.get_state_set().contains(atspi.StateType.SHOWING)
+            or parent.get_state_set().contains(atspi.StateType.DEFUNCT)):
+        return False
+    titles = [node for node in items if node.get_process_id() == pid and node.get_role() == atspi.Role.LABEL
+              and node.get_name() == 'Connect remote host' and node.get_parent() == parent
+              and node.get_state_set().contains(atspi.StateType.SHOWING)
+              and not node.get_state_set().contains(atspi.StateType.DEFUNCT)]
+    return len(titles) == 1
+
+
+def interface_text(interface, text_api):
+    # Accessible.get_text() shadows the Text interface's content method in GI.
+    count = text_api.get_character_count(interface)
+    assert type(count) is int and 0 <= count <= 32768, 'accessible_text_limit_exceeded'
+    text = text_api.get_text(interface, 0, count)
+    return text if isinstance(text, str) and len(text) == count else None
+
+
+def committed_host_editor(items, pid, scope, expected, atspi, observation):
+    assert selected_scope(navigation_context(items, pid, atspi), scope), 'local_scope_changed'
+    node = focused_editable(items, pid, 'Yard name', atspi)
+    assert node is not None, 'focus_target_unavailable'
+    value = interface_text(node.get_text_iface(), atspi.Text)
+    observation.update(committed_complete=value is not None,
+                       committed_length=len(value) if value is not None else None,
+                       committed_equal=value == expected)
+    return value == expected
+
+
+def persisted_host_draft(root, connection_id, expected, observation):
+    path = root / 'desktop.json'
+    present = path.exists()
+    observation.update(file_present=present, draft_read_complete=False, matching_scope=False,
+                       matching_draft_count=0, draft_value_equal=False)
+    if not present: return False
+    drafts = json.loads(path.read_bytes())['drafts']
+    scoped = [draft for draft in drafts if draft['scope'] == {'connection': connection_id, 'yard': None}]
+    matches = [draft for draft in scoped if draft['field'] == 'create:name']
+    equal = len(matches) == 1 and matches[0]['value'] == expected
+    observation.update(draft_read_complete=True, matching_scope=bool(scoped),
+                       matching_draft_count=min(len(matches), 2), draft_value_equal=equal)
+    return equal
+
+
+def overview_observed_label(items, pid, expected_scope, atspi):
+    assert selected_scope(navigation_context(items, pid, atspi), expected_scope), 'local_scope_changed'
+    matches = [node for node in items if node.get_process_id() == pid and node.get_role() == atspi.Role.LABEL
+               and node.get_state_set().contains(atspi.StateType.SHOWING)
+               and not node.get_state_set().contains(atspi.StateType.DEFUNCT)
+               and re.search(r'(?:^|\n)Observed: [^\n]+\Z', node.get_name())]
+    return matches[0] if len(matches) == 1 else None
+
+
+def retained_observed(node, pid, atspi, owned):
+    owned()
+    assert (node.get_process_id() == pid and node.get_role() == atspi.Role.LABEL
+            and not node.get_state_set().contains(atspi.StateType.DEFUNCT)), 'focus_target_unavailable'
+    # GTK hides a non-current page's Name; the retained selectable Label's Text stays current.
+    text = interface_text(node.get_text_iface(), atspi.Text)
+    match = re.search(r'(?:^|\n)Observed: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)\Z', text) if text is not None else None
+    return match[1] if match else None
+
+
+def selection_ranges(interface, text_api, length):
+    count = text_api.get_n_selections(interface)
+    assert type(count) is int and 0 <= count <= 1, 'refresh_reset_selection'
+    ranges = []
+    for index in range(count):
+        selected = text_api.get_selection(interface, index)
+        start, end = selected.start_offset, selected.end_offset
+        assert type(start) is int and type(end) is int and 0 <= start <= end <= length, 'refresh_reset_selection'
+        ranges.append((start, end))
+    return ranges
+
+
+def selection_baseline(interface, text_api, length):
+    caret = interface.get_caret_offset()
+    ranges = selection_ranges(interface, text_api, length)
+    assert (type(caret) is int and 0 <= caret <= length and len(ranges) == 1
+            and ranges[0][0] < ranges[0][1] and caret in ranges[0]), 'refresh_reset_selection'
+    return caret, ranges
+
+
+def editor_continuity(items, pid, atspi, original, text, caret, selections):
+    assert focused_button(items, pid, 'Refresh', atspi), 'focus_target_unavailable'
+    editors = [node for node in items if node.get_process_id() == pid and node.get_role() == atspi.Role.TEXT
+               and node.get_name() == 'Yard name' and node.get_state_set().contains(atspi.StateType.SHOWING)
+               and node.get_state_set().contains(atspi.StateType.EDITABLE)
+               and not node.get_state_set().contains(atspi.StateType.DEFUNCT)]
+    assert len(editors) == 1, 'focus_target_unavailable'
+    node = editors[0]
+    assert node == original, 'refresh_replaced_editor'
+    assert interface_text(node.get_text_iface(), atspi.Text) == text, 'unicode_gtk_text_mismatch'
+    assert node.get_text_iface().get_caret_offset() == caret, 'refresh_reset_caret'
+    assert selection_ranges(node.get_text_iface(), atspi.Text, len(text)) == selections, 'refresh_reset_selection'
+    return True
 
 
 def focus_control(read, send, name, trace=None):
@@ -280,7 +445,7 @@ def focus_control(read, send, name, trace=None):
         if snapshot['matched']: return
         assert count < 64, 'focus_target_unavailable'
         key = 'F6' if snapshot['focused'] is not None else 'Tab'
-        left_navigation = True
+        left_navigation |= key == 'F6'
         if trace is not None: trace[-1]['physical_key'] = key
         send(key)
 
@@ -298,10 +463,7 @@ def focus_target(read_named, read_workspace, send, name, workspace=False, trace=
 
 def navigation_context(items, pid, atspi):
     snapshot = navigation_snapshot(items, pid, atspi)
-    navigation = next(node for node in items if node.get_role() == atspi.Role.LIST
-                      and node.get_name() == 'Owner hosts and yards')
-    selected = [index for index in range(navigation.get_child_count())
-                if navigation.get_child_at_index(index).get_state_set().contains(atspi.StateType.SELECTED)]
+    selected = snapshot['selected_indices']
     assert len(selected) == 1, 'local_scope_changed'
     scope = snapshot['order'][selected[0]]
     headings = [node for node in items if node.get_process_id() == pid
@@ -315,6 +477,14 @@ def navigation_context(items, pid, atspi):
 
 def selected_scope(snapshot, expected):
     return snapshot['scope'] == expected and snapshot['heading']
+
+
+def workspace_tab_ready(items, pid, name, expected_scope, atspi):
+    assert selected_scope(navigation_context(items, pid, atspi), expected_scope), 'local_scope_changed'
+    focused = [node for node in items if node.get_state_set().contains(atspi.StateType.FOCUSED)]
+    assert (focus_matches(items, pid, name, atspi) and len(focused) == 1
+            and focused[0].get_role() == atspi.Role.PAGE_TAB), 'focus_target_unavailable'
+    return True
 
 
 def open_review(acquire, read_entry, send):
@@ -333,16 +503,20 @@ def navigate_owner(read, send, target, trace=None):
     order, owners, expected = None, None, None
     for count in range(65):
         snapshot = read()
+        if trace is not None:
+            trace.append(dict(snapshot, target=target, expected=expected, step=count))
         if order is None:
             order, owners = snapshot['order'], snapshot['owners']
             assert order.count(target) == 1 and owners[order.index(target)], 'focus_target_unavailable'
-        assert snapshot['order'] == order and snapshot['owners'] == owners, 'focus_target_unavailable'
         current = snapshot['focused']
         assert expected is None or current == expected, 'focus_target_unavailable'
-        if trace is not None:
-            trace.append(dict(snapshot, target=target, expected=expected, step=count))
-        if current == order.index(target):
+        target_index = order.index(target)
+        if current == target_index:
+            assert (snapshot['order'].count(target) == 1
+                    and snapshot['order'][:target_index + 1] == order[:target_index + 1]
+                    and snapshot['owners'][:target_index + 1] == owners[:target_index + 1]), 'focus_target_unavailable'
             return
+        assert snapshot['order'] == order and snapshot['owners'] == owners, 'focus_target_unavailable'
         assert count < 64, 'focus_target_unavailable'
         if current is None:
             key = 'Tab'
@@ -435,6 +609,35 @@ def cancellation_flow_closed(items, atspi):
                    and node.get_state_set().contains(atspi.StateType.SHOWING) for node in items)
 
 
+
+def local_ime_draft(root, committed='\uac00'):
+    path = root / 'desktop.json'
+    if not path.exists(): return committed == ''
+    info = path.lstat()
+    assert (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+            and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 128 * 1024), 'ime_draft_unavailable'
+    drafts = [draft for draft in json.loads(path.read_bytes())['drafts']
+              if draft['scope'] == {'connection': None, 'yard': None} and draft['field'] == 'create:name']
+    return (not drafts and committed == '') or len(drafts) == 1 and drafts[0]['value'] == committed
+
+
+def compose_ime(keys, read, wait, capture, persisted):
+    """Only physical ASCII keys enter GTK; preedit pixels need separate inspection."""
+    # GTK4.18.6 GtkEntry's AT-SPI GetText reads committed EntryBuffer, not preedit layout.
+    assert read() == '', 'ime_initial_editor_not_empty'
+    keys('-M', 'shift', '-k', 'space', '-m', 'shift')
+    keys('-k', 'r')
+    assert read() == '', 'ime_preedit_committed_early'
+    capture('consonant', '')
+    keys('-k', 'k')
+    assert read() == '', 'ime_preedit_committed_early'
+    capture('syllable', '')
+    keys('-M', 'shift', '-k', 'space', '-m', 'shift')
+    wait(lambda: read() == '\uac00')
+    wait(persisted)
+    capture('committed', '\uac00')
+
+
 def main():
     import gi
     gi.require_version("Atspi", "2.0")
@@ -447,15 +650,14 @@ def main():
     result = {"original_exit_code": 1, "physical_key_commands": 0, 'physical_keys': [],
               "accessibility_actions_used": False, "backend": backend}
     def identity():
-        process = Path('/proc') / str(pid)
-        fields = (process / 'stat').read_text().rsplit(')', 1)[1].split()
-        assert fields[0] not in ('Z', 'X'), 'owned_process_terminated'
-        exe = (process / 'exe').stat()
-        return process.stat().st_uid, int(fields[19]), exe.st_dev, exe.st_ino
+        return process_identity(pid)
     original_identity = identity()
     assert original_identity[0] == os.getuid()
     last_tree, last_accessibility = [], {}
     snapshot_state = {'next': 0, 'truncated': False}
+    progress_state = {'started': started}
+    def progress(phase, site='navigation', key='none'):
+        input_progress(result, stage, phase, site, key, snapshot_state, last_tree, progress_state)
     try:
         connection = Gio.DBusConnection.new_for_address_sync(os.environ["DBUS_SESSION_BUS_ADDRESS"],
             Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
@@ -498,9 +700,12 @@ def main():
             return owned_tree(app, pid, Atspi.StateType.DEFUNCT, deadline)
 
         def nodes(observe=None, site='navigation'):
+            progress('read-start', site)
             if observe is not None:
-                return coherent_observation(read_tree, observe, read_deadline or time.monotonic() + 20,
+                value = coherent_observation(read_tree, observe, read_deadline or time.monotonic() + 20,
                     result.setdefault('navigation_read', {}), GLib.Error, site)
+                progress('read-end', site)
+                return value
             items = complete_tree(read_tree, read_deadline or time.monotonic() + 20, snapshot_state)
             if time.monotonic() >= snapshot_state['next']:
                 # Cache diagnostics during normal reads, at most once per second.
@@ -523,6 +728,7 @@ def main():
                 snapshot_state['truncated'] = len(snapshot) != len(items)
                 if not snapshot_state['truncated']:
                     last_tree[:] = snapshot
+            progress('read-end', site)
             return items
 
         def wait(predicate, seconds=20, deadline=None):
@@ -540,6 +746,8 @@ def main():
                 read_deadline = previous
 
         def keys(*arguments):
+            key = arguments[1] if len(arguments) == 2 and arguments[0] == '-k' and arguments[1] in ('Tab', 'F6') else 'other'
+            progress('key-start', key=key)
             owned()
             if backend == 'x11':
                 x11_keys(pid, arguments, owned)
@@ -547,6 +755,7 @@ def main():
                 subprocess.run(["wtype", "-s", "100", *arguments, "-s", "100"], check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             result["physical_key_commands"] += 1
+            progress('key-end', key=key)
 
         def local_key(key):
             if backend == 'x11':
@@ -580,7 +789,10 @@ def main():
         destination = os.environ.get('VERANDA_GTK_DESTINATION', '')
         def names():
             return {node.get_name() for node in nodes() if node.get_state_set().contains(Atspi.StateType.SHOWING)}
-        def focus(name, owner_row=False, workspace=False):
+        def connected_owner():
+            visible = names()
+            return destination in visible and 'Connected' in visible and any('20 yards' in name for name in visible)
+        def focus(name, owner_row=False, workspace=False, expected_scope=None):
             if owner_row:
                 def read_navigation():
                     def observe(items):
@@ -598,6 +810,8 @@ def main():
             def read_control():
                 def observe(items):
                     snapshot = navigation_context(items, pid, Atspi)
+                    if expected_scope is not None:
+                        assert selected_scope(snapshot, expected_scope), 'local_scope_changed'
                     snapshot['matched'] = focus_matches(items, pid, name, Atspi)
                     return snapshot
                 return nodes(observe, 'named-focus:' + name)
@@ -617,9 +831,12 @@ def main():
                 return nodes(observe, 'review-entry-before-space')
             entry = open_review(lambda: focus('Connect remote host'), read_entry, lambda: keys('-k', 'space'))
             result.setdefault('review_entry_scopes', []).append({key: entry[key] for key in ('scope', 'selected', 'heading', 'button_focused')})
-            wait(lambda: 'Connect remote host' in names())
-            keys(destination, '-k', 'Return')
-            wait(lambda: review_ready(names(), destination, os.environ['VERANDA_GTK_FINGERPRINT'], known_key))
+            deadline = time.monotonic() + 20
+            wait(lambda: nodes(lambda items: remote_editor_ready(items, pid, Atspi), 'remote-editor-before-text'), deadline=deadline)
+            keys(destination)
+            wait(lambda: nodes(lambda items: remote_editor_ready(items, pid, Atspi), 'remote-editor-before-return'), deadline=deadline)
+            keys('-k', 'Return')
+            wait(lambda: review_ready(names(), destination, os.environ['VERANDA_GTK_FINGERPRINT'], known_key), deadline=deadline)
             return entry
         def scope_snapshot(site):
             snapshot = nodes(lambda items: navigation_context(items, pid, Atspi), site)
@@ -646,9 +863,9 @@ def main():
             stage = prefix + ':projects-before-focus'
             assert selected_scope(scope_snapshot(stage), expected_scope), 'local_scope_changed'
             stage = prefix + ':projects-focus'
-            focus('Projects', workspace=True)
+            focus('Projects', workspace=True, expected_scope=expected_scope)
             stage = prefix + ':projects-activate'
-            assert selected_scope(scope_snapshot(stage), expected_scope), 'local_scope_changed'
+            assert nodes(lambda items: workspace_tab_ready(items, pid, 'Projects', expected_scope, Atspi), stage)
             keys('-k', 'space')
             stage = prefix + ':projects-visible'
             expected = {f"project-00-{index:02}" for index in range(10)}
@@ -661,8 +878,8 @@ def main():
             wait(visible)
         if scenario == 'connect':
             stage = 'initial-local-fleet'
-            wait_scope('Local owner / default', stage)
             wait(lambda: 'Connected' in names())
+            wait_scope('Local owner / default', stage)
             stage = 'first-key-decline'
             decline_entry = review()
             # Screenshot records the actual native public-fingerprint review.
@@ -676,7 +893,7 @@ def main():
             stage = 'first-key-accept'
             review()
             activate('Accept and connect')
-            wait(lambda: destination in names() and 'Connected' in names() and any('20 yards' in name for name in names()))
+            wait(connected_owner)
             result['authenticated_owner_discovered_and_saved'] = True
             saved = (root / 'connections.json').read_bytes()
             result['saved_store_sha256'] = hashlib.sha256(saved).hexdigest()
@@ -728,8 +945,8 @@ def main():
             result['visible_remote_project_names'] = 10
         elif scenario == 'remote-restore':
             stage = 'restore-remote-selection'
-            wait_scope(destination + ' / default', stage)
             wait(lambda: 'Connected' in names())
+            wait_scope(destination + ' / default', stage)
             expected = {f"project-00-{index:02}" for index in range(10)}
             wait(lambda: expected <= names())
             result['remote_owner_yard_tab_restored'] = True
@@ -739,15 +956,15 @@ def main():
             result['local_owner_selected_and_saved'] = True
         elif scenario == 'local-restore':
             stage = 'restore-local-selection'
-            wait_scope('Local owner / default', stage)
             wait(lambda: 'Connected' in names())
+            wait_scope('Local owner / default', stage)
             expected = {f"project-00-{index:02}" for index in range(10)}
             wait(lambda: expected <= names())
             result['local_owner_yard_tab_restored'] = True
             stage = 'select-saved-remote-owner'
             focus(destination, owner_row=True)
             wait_scope(destination, stage)
-            wait(lambda: destination in names() and 'Connected' in names() and any('20 yards' in name for name in names()))
+            wait(connected_owner)
             result['saved_remote_selected_with_fresh_inventory'] = True
             stage = 'repair-host-key'
             block = Path(os.environ['VERANDA_GTK_BLOCK'])
@@ -762,15 +979,81 @@ def main():
             root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
             previous = json.loads((root / 'connections.json').read_bytes())['connections'][0]
             activate('Accept and connect')
-            wait(lambda: destination in names() and 'Connected' in names() and any('20 yards' in name for name in names()))
+            wait(connected_owner)
             current = json.loads((root / 'connections.json').read_bytes())['connections'][0]
             assert current['id'] == previous['id'] and current['hostId'] == previous['hostId'], 'repair_changed_owner'
             assert current['fingerprint'] == os.environ['VERANDA_GTK_REPLACEMENT'], 'repair_missing_replacement'
             result['separate_replacement_repair_preserved_owner'] = True
+        elif scenario in ('ime', 'ime-restore'):
+            stage = 'ime-local-owner'
+            if scenario == 'ime':
+                wait(lambda: 'Connected' in names())
+                wait_scope('Local owner / default', stage)
+                focus('Local owner', owner_row=True)
+            wait(lambda: 'Connected' in names())
+            wait_scope('Local owner', stage)
+            stage = 'ime-yard-name-editor'
+            if scenario == 'ime':
+                focus('Yards', workspace=True, expected_scope='Local owner')
+                assert nodes(lambda items: workspace_tab_ready(items, pid, 'Yards', 'Local owner', Atspi), stage)
+                keys('-k', 'space')
+            wait(lambda: 'Yard name' in names())
+            focus('Yard name', workspace=True, expected_scope='Local owner')
+            original_editor = None
+            def read_ime_editor():
+                def observe(items):
+                    assert selected_scope(navigation_context(items, pid, Atspi), 'Local owner'), 'local_scope_changed'
+                    focused = [node for node in items if node.get_state_set().contains(Atspi.StateType.FOCUSED)]
+                    editors = [node for node in items if node.get_process_id() == pid and node.get_role() == Atspi.Role.TEXT
+                        and node.get_name() == 'Yard name' and node.get_state_set().contains(Atspi.StateType.SHOWING)
+                        and node.get_state_set().contains(Atspi.StateType.EDITABLE)
+                        and not node.get_state_set().contains(Atspi.StateType.DEFUNCT)]
+                    assert len(editors) == 1 and focused == editors, 'focus_target_unavailable'
+                    assert original_editor is None or editors[0] == original_editor, 'ime_editor_replaced'
+                    return editors[0], interface_text(editors[0].get_text_iface(), Atspi.Text)
+                return nodes(observe, stage)
+            original_editor, initial = read_ime_editor()
+            store = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
+            persisted = lambda: local_ime_draft(store)
+            if scenario == 'ime':
+                stage = 'ime-two-set-composition'
+                assert local_ime_draft(store, ''), 'ime_preedit_committed_early'
+                result['ime_captures'] = {}
+                def capture_ime(name, committed):
+                    # Settling delay is not a preedit/paint measurement or assertion.
+                    time.sleep(.25)
+                    assert read_ime_editor()[1] == committed, 'ime_committed_text_mismatch'
+                    assert local_ime_draft(store, committed), 'ime_preedit_committed_early'
+                    capture = Path(os.environ['VERANDA_GTK_CAPTURE']).with_name('ime-' + ('preedit-' if name != 'committed' else '') + name + '.png')
+                    capture_view(backend, capture)
+                    assert read_ime_editor()[1] == committed, 'ime_committed_text_mismatch'
+                    assert local_ime_draft(store, committed), 'ime_preedit_committed_early'
+                    result['ime_captures'][name] = {'sha256': hashlib.sha256(capture.read_bytes()).hexdigest(),
+                        'expected_preedit': {'consonant': '\u3131', 'syllable': '\uac00', 'committed': ''}[name],
+                        'observed_committed_text': committed, 'scoped_draft_matches_committed_baseline': True, 'visual_observation': 'pending native screenshot inspection'}
+                def ime_keys(*arguments):
+                    read_ime_editor()  # Re-prove owned exact editor focus/scope before every physical command.
+                    keys(*arguments)
+                compose_ime(ime_keys, lambda: read_ime_editor()[1], wait, capture_ime, persisted)
+                result['ime_physical_sequence'] = ['Shift+space', 'r', 'k', 'Shift+space']
+                result['ime_committed_codepoint'] = 'U+AC00'
+                result['ime_scoped_draft_saved'] = True
+            else:
+                stage = 'ime-restarted-committed-draft'
+                assert initial == '\uac00' and persisted(), 'ime_draft_restart_missing'
+                result['ime_committed_draft_restart_equal'] = True
+            def saved_ime_context():
+                path = store / 'navigation.json'
+                if not path.exists(): return False
+                selected = json.loads(path.read_bytes())
+                return selected['connectionId'] is None and selected['yardName'] is None and selected['tab'] == 'Yards'
+            wait(saved_ime_context)
+            result['ime_scope'] = {'connection': None, 'yard': None, 'tab': 'Yards'}
+            result['ime_visual_observation'] = 'pending native screenshot inspection'
         elif scenario == 'owner-focus':
             stage = 'diagnostic-local-default'
-            wait_scope('Local owner / default', stage)
             wait(lambda: 'Connected' in names())
+            wait_scope('Local owner / default', stage)
             select_default('Local owner', 'diagnostic-local-default')
             result['named_default_yard_focused'] = True
             stage = 'diagnostic-local-refresh'
@@ -824,46 +1107,67 @@ def main():
             unicode_draft = '庭院 مرحبا α'
             def host():
                 focus(destination, owner_row=True)
-                wait(lambda: destination in names() and any('20 yards' in name for name in names()))
-            def tab(name):
-                focus(name); keys('-k', 'space')
+                def ready(items):
+                    if not selected_scope(navigation_context(items, pid, Atspi), destination): return False
+                    visible = {node.get_name() for node in items if node.get_state_set().contains(Atspi.StateType.SHOWING)}
+                    return destination in visible and 'Connected' in visible and any('20 yards' in name for name in visible)
+                wait(lambda: nodes(ready, 'ui-host-selected'))
+            def tab(name, expected_scope):
+                focus(name, workspace=True, expected_scope=expected_scope)
+                assert nodes(lambda items: workspace_tab_ready(items, pid, name, expected_scope, Atspi), 'ui-tab-activate')
+                keys('-k', 'space')
             if scenario == 'connect':
                 stage = 'yard-profiles-exact-plan-discard'
-                tab('Profiles')
+                tab('Profiles', destination + ' / default')
                 wait(lambda: any('Effective profile selection:' in name for name in names()))
                 focus('Review profile selection'); keys('-k', 'space')
                 wait(lambda: any('Confirmation:' in name and 'Expires:' in name for name in names()))
                 activate('Discard plan')
                 wait(lambda: any('Plan discarded.' in name for name in names()))
                 result['typed_profile_exact_plan_discard'] = True
-                stage = 'host-unicode-draft'
-                host(); tab('Yards')
+                stage = 'host-refresh-overview-observation'
+                host(); tab('Overview', destination)
+                overview_detail = wait(lambda: nodes(lambda items: overview_observed_label(items, pid, destination, Atspi), stage))
+                stage = 'host-unicode-editor-visible'
+                tab('Yards', destination)
                 wait(lambda: 'Yard name' in names())
-                focus('Yard name'); keys('-M', 'ctrl', '-k', 'a', '-m', 'ctrl', unicode_draft)
+                focus('Yard name')
+                accepted_connections = json.loads(saved)['connections']
+                assert len(accepted_connections) == 1
+                accepted_connection_id = accepted_connections[0]['id']
+                assert isinstance(accepted_connection_id, str) and accepted_connection_id
+                stage = 'host-unicode-physical-typing'
+                keys('-M', 'ctrl', '-k', 'a', '-m', 'ctrl', unicode_draft)
+                deadline = time.monotonic() + 20
                 root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
-                wait(lambda: (root / 'desktop.json').exists() and any(draft['field'] == 'create:name' and draft['value'] == unicode_draft for draft in json.loads((root / 'desktop.json').read_bytes())['drafts']))
+                observation = result.setdefault('unicode_observation', {})
+                stage = 'host-unicode-committed-entry'
+                wait(lambda: nodes(lambda items: committed_host_editor(items, pid, destination,
+                    unicode_draft, Atspi, observation), stage), deadline=deadline)
+                stage = 'host-unicode-persisted-draft'
+                wait(lambda: persisted_host_draft(root, accepted_connection_id, unicode_draft, observation), deadline=deadline)
                 node = next(node for node in nodes() if node.get_name() == 'Yard name' and node.get_state_set().contains(Atspi.StateType.FOCUSED))
-                assert node.get_text_iface().get_text(0, -1) == unicode_draft, 'unicode_gtk_text_mismatch'
+                assert interface_text(node.get_text_iface(), Atspi.Text) == unicode_draft, 'unicode_gtk_text_mismatch'
                 result['unicode_rtl_gtk_draft_saved'] = True
-                stage = 'same-scope-editor-refresh-continuity'
+                stage = 'editor-refresh-baseline'
                 original_editor = node
                 keys('-k', 'Left', '-M', 'shift', '-k', 'Left', '-k', 'Left', '-m', 'shift')
-                original_caret = node.get_text_iface().get_caret_offset()
-                original_selections = node.get_text_iface().get_n_selections()
-                before_refresh = wait(observed)
+                original_caret, original_selections = selection_baseline(node.get_text_iface(), Atspi.Text, len(unicode_draft))
+                before_refresh = wait(lambda: retained_observed(overview_detail, pid, Atspi, owned))
                 time.sleep(1.1)
+                stage = 'editor-refresh-action'
                 activate('Refresh', workspace=True)
-                wait(lambda: (value := observed()) and value != before_refresh)
-                focus('Yard name')
-                node = next(node for node in nodes() if node.get_name() == 'Yard name' and node.get_state_set().contains(Atspi.StateType.FOCUSED))
-                assert node == original_editor, 'refresh_replaced_editor'
-                assert node.get_text_iface().get_text(0, -1) == unicode_draft, 'unicode_gtk_text_mismatch'
-                assert node.get_text_iface().get_caret_offset() == original_caret, 'refresh_reset_caret'
-                assert node.get_text_iface().get_n_selections() == original_selections, 'refresh_reset_selection'
+                stage = 'editor-refresh-completion'
+                wait(lambda: (value := retained_observed(overview_detail, pid, Atspi, owned)) and value != before_refresh)
+                # Compare before keyboard refocus, which may select all entry text.
+                stage = 'editor-refresh-continuity'
+                assert nodes(lambda items: editor_continuity(items, pid, Atspi, original_editor,
+                    unicode_draft, original_caret, original_selections), 'editor-refresh-continuity')
+                result['editor_continuity_focus'] = 'Refresh'
                 result['same_scope_refresh_retained_editor_caret_selection'] = True
                 stage = 'host-sync-separated-metadata'
-                tab('Sync')
-                wait(lambda: any('Configuration Git' in name for name in names()) and any('Credentials · REDACTED' in name for name in names()))
+                tab('Sync', destination)
+                wait(lambda: (visible := names()) and any('Configuration Git' in name for name in visible) and any('Credentials · REDACTED' in name for name in visible))
                 result['typed_git_credentials_sections_visible'] = True
                 select_default(destination, 'ui-remote-yard')
                 projects(destination + ' / default', 'ui-remote-yard')
@@ -876,9 +1180,9 @@ def main():
                 result['draft_restart_preserved'] = True
             elif scenario == 'local-restore':
                 stage = 'host-draft-rendered-after-owner-reselection'
-                tab('Yards'); wait(lambda: 'Yard name' in names()); focus('Yard name')
+                tab('Yards', destination); wait(lambda: 'Yard name' in names()); focus('Yard name')
                 node = next(node for node in nodes() if node.get_name() == 'Yard name' and node.get_state_set().contains(Atspi.StateType.FOCUSED))
-                assert node.get_text_iface().get_text(0, -1) == unicode_draft, 'draft_restart_missing'
+                assert interface_text(node.get_text_iface(), Atspi.Text) == unicode_draft, 'draft_restart_missing'
                 result['draft_restart_rendered'] = True
         if scenario in ('connect', 'remote-restore', 'local-restore'):
             stage = 'saved-navigation-context'
@@ -902,16 +1206,22 @@ def main():
         else:
             local_key('alt+F4')
         result["original_exit_code"] = 0
-        result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1"
+        result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1" and scenario not in ('ime', 'ime-restore')
         result["owner_mutation_executed"] = False
     except BaseException as error:
         result.update(failure_stage=stage, failure_type=type(error).__name__)
         reasons = {'owned_process_terminated', 'owned_process_identity_changed',
                    'duplicate_owned_accessible_application', 'accessible_depth_exceeded',
                    'accessible_node_limit_exceeded', 'accessible_children_unavailable', 'foreign_accessible_node', 'local_scope_changed',
-                   'accessible_child_limit_exceeded', 'focus_target_unavailable', 'decline_registered_host', 'cancel_changed_store', 'repair_changed_owner', 'repair_missing_replacement', 'unicode_gtk_text_mismatch', 'draft_restart_missing', 'refresh_replaced_editor', 'refresh_reset_caret', 'refresh_reset_selection', 'owned_x11_window_unavailable', 'owned_x11_window_changed', 'x11_capture_failed'}
+                   'accessible_child_limit_exceeded', 'accessible_text_limit_exceeded', 'focus_target_unavailable', 'decline_registered_host', 'cancel_changed_store', 'repair_changed_owner', 'repair_missing_replacement', 'unicode_gtk_text_mismatch', 'draft_restart_missing', 'refresh_replaced_editor', 'refresh_reset_caret', 'refresh_reset_selection', 'owned_x11_window_unavailable', 'owned_x11_window_changed', 'x11_capture_failed', 'ime_initial_editor_not_empty', 'ime_preedit_committed_early', 'ime_editor_replaced', 'ime_committed_text_mismatch', 'ime_draft_restart_missing', 'ime_draft_unavailable'}
         if isinstance(error, AssertionError) and str(error) in reasons:
             result['failure_reason'] = str(error)
+        traceback = error.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename == __file__:
+                result['failure_source_frame'] = {'function': traceback.tb_frame.f_code.co_name,
+                                                  'line': traceback.tb_lineno}
+            traceback = traceback.tb_next
         def collect():
             diagnostic = {'atspi': dict(last_accessibility), 'tree': list(last_tree),
                           'snapshot': dict(snapshot_state)}
