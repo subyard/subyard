@@ -140,7 +140,14 @@ func (reconciler Reconciler) Apply(ctx context.Context, approved ReconcilePlan) 
 		if err := reconciler.Runner.ApplyStage(ctx, stage.ID); err != nil {
 			return fmt.Errorf("apply init stage %q: %w", stage.ID, err)
 		}
-		verified, err := reconciler.Runner.VerifyStage(ctx, stage.ID)
+		var verified bool
+		if verifier, ok := reconciler.Runner.(interface {
+			VerifyStageWithDiagnostic(context.Context, ports.ReconcileStageID) (bool, error)
+		}); ok {
+			verified, err = verifier.VerifyStageWithDiagnostic(ctx, stage.ID)
+		} else {
+			verified, err = reconciler.Runner.VerifyStage(ctx, stage.ID)
+		}
 		if err != nil {
 			return fmt.Errorf("verify init stage %q: %w", stage.ID, err)
 		}

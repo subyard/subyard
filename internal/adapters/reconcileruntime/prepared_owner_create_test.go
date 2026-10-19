@@ -324,7 +324,8 @@ func TestOwnerInstanceRuntimeConsumesOriginalResultBeforeFixedCommand(t *testing
 			}
 			defer unlock()
 			marker := filepath.Join(root, "dispatched")
-			runtime.Environment = append(runtime.Environment, "SUBYARD_HOME="+root, "MARKER="+marker, "TRACE="+trace, "MODE="+mode)
+			runtime.Environment = append(runtime.Environment, "SUBYARD_HOME="+root, "MARKER="+marker, "TRACE="+trace, "MODE="+mode,
+				"SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=forged-environment-value")
 			if err := os.Mkdir(filepath.Join(root, "scripts"), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -332,9 +333,17 @@ func TestOwnerInstanceRuntimeConsumesOriginalResultBeforeFixedCommand(t *testing
 set -eu
 [ -f /proc/self/fd/3 ]
 case "$1" in
- --owner-before-instance) printf 'before-instance\n' >>"$TRACE"; [ "$MODE" != pre-command-failure ] ;;
- --owner-before-srv) [ "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" = original-created-uuid ]; printf 'before-srv\n' >>"$TRACE"; [ "$MODE" != before-srv-failure ] ;;
- --owner-after-srv) [ "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" = original-created-uuid ]; [ "$SUBYARD_PREPARED_OWNER_VOLUME_TOKEN" = original-volume-token ]; printf 'after-srv\n' >>"$TRACE"; printf original >"$MARKER" ;;
+ --owner-before-instance) [ -z "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" ]; printf 'before-instance\n' >>"$TRACE"; [ "$MODE" != pre-command-failure ] ;;
+ --owner-before-srv|--owner-after-srv)
+   [ "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" = original-created-uuid ]
+   if [ "$MODE" = retained-results ]; then
+     [ -z "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" ]
+   else [ "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" = original-created-uuid ]; fi
+   if [ "$1" = --owner-before-srv ]; then
+     printf 'before-srv\n' >>"$TRACE"; [ "$MODE" != before-srv-failure ]
+   else
+     [ "$SUBYARD_PREPARED_OWNER_VOLUME_TOKEN" = original-volume-token ]; printf 'after-srv\n' >>"$TRACE"; printf original >"$MARKER"
+   fi ;;
  *) exit 91 ;;
 esac
 `

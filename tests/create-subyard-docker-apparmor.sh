@@ -37,6 +37,9 @@ export MOCK_CATALOG_MODE=success MOCK_INIT_EXIT=0
 export MOCK_INIT_CREATED_ON_FAILURE=0
 export MOCK_INIT_SIGNAL=0
 export MOCK_CATALOG_REMOTE=images:
+export MOCK_TMP_CHECK_FILE="$TMP/tmp-checks" MOCK_REBOOT=0
+export MOCK_BOOT_AFTER_RESTART=0
+export MOCK_BOOT_WAIT_EXIT=0 MOCK_CHANGED_UUID=0
 for file in "$MOCK_INSTANCE_FILE" "$MOCK_CATALOG_FILE" "$MOCK_CATALOG_ATTEMPTS" "$MOCK_CAPTURE_FILE"; do
   install -m 0600 /dev/null "$file"
 done
@@ -111,15 +114,43 @@ case "${1:-} ${2:-} ${3:-}" in
   'config device add' | 'config device remove') ;;
   'config get yard')
     [ "${4:-}" != security.nesting ] || printf 'true\n'
+    if [ "${4:-}" = volatile.uuid ]; then
+      if [ "$MOCK_CHANGED_UUID" = 1 ] && [ -e "$MOCK_TMP_CHECK_FILE" ]; then
+        printf 'replacement-yard-uuid\n'
+      else printf 'fixture-new-yard-uuid\n'; fi
+    fi
+    [ "${4:-}" != limits.cpu ] || printf '%s\n' "${LIMITS_CPU:-}"
+    [ "${4:-}" != limits.memory ] || printf '%s\n' "${LIMITS_MEMORY:-}"
+    [ "${4:-}" != user.subyard.owner_create ] || printf 'fixture-owner-token\n'
     ;;
   'config set yard' | 'config unset yard') ;;
   'storage volume show') ;;
-  'list yard --project') printf '%s\n' "$MOCK_POWER_STATE" ;;
-  'start yard --project') ;;
+  'list yard --project')
+    if [ "$MOCK_REBOOT" = 1 ] && [ -f "$MOCK_TMP_CHECK_FILE.power" ]; then
+      cat "$MOCK_TMP_CHECK_FILE.power"
+    else printf '%s\n' "$MOCK_POWER_STATE"; fi ;;
+  'start yard --project') [ "$MOCK_REBOOT" != 1 ] || printf 'RUNNING\n' > "$MOCK_TMP_CHECK_FILE.power" ;;
+  'stop yard --project')
+    printf 'STOPPED\n' > "$MOCK_TMP_CHECK_FILE.power"
+    [ "$MOCK_BOOT_AFTER_RESTART" != 1 ] || printf 'initializing\n' > "$MOCK_TMP_CHECK_FILE.boot" ;;
   'exec yard --project')
     case "$*" in
       'exec yard --project subyard -- true') ;;
+      'exec yard --project subyard -T -- sh -s -- apply') cat >/dev/null ;;
+      'exec yard --project subyard -T -- sh -s -- wait-boot')
+        cat >/dev/null
+        [ "$MOCK_BOOT_WAIT_EXIT" = 0 ] || exit "$MOCK_BOOT_WAIT_EXIT"
+        printf 'running\n' > "$MOCK_TMP_CHECK_FILE.boot" ;;
+      'exec yard --project subyard -T -- sh -s -- check')
+        cat >/dev/null
+        if [ "$MOCK_REBOOT" = 1 ] && [ ! -e "$MOCK_TMP_CHECK_FILE" ]; then
+          : > "$MOCK_TMP_CHECK_FILE"
+          exit 10
+        fi ;;
       *'ip -4 -o address show dev'*)
+        if [ "$MOCK_BOOT_AFTER_RESTART" = 1 ]; then
+          [ "$(cat "$MOCK_TMP_CHECK_FILE.boot" 2>/dev/null)" = running ] || exit 1
+        fi
         printf '2: eth0    inet 10.80.0.10/24 brd 10.80.0.255 scope global eth0\n' ;;
       *) printf 'unexpected incus call: %s\n' "$*" >&2; exit 90 ;;
     esac
@@ -136,7 +167,7 @@ run_create() {
   local rc=0
   : > "$MOCK_INCUS_LOG"
   : > "$MOCK_CAPTURE_FILE"
-  bash "$ROOT/scripts/03-create-subyard.sh" --yes >"$TMP/output" 2>&1 || rc=$?
+  bash "$ROOT/scripts/03-create-subyard.sh" "$@" --yes >"$TMP/output" 2>&1 || rc=$?
   if [ -s "$MOCK_CAPTURE_FILE" ]; then
     [ ! -e "$(cat "$MOCK_CAPTURE_FILE")" ] || fail 'private image metadata capture survived the operation'
   fi
@@ -369,3 +400,171 @@ MOCK_CATALOG_MODE=terminal
 run_create
 ! grep -Eq '^(image list |init )' "$MOCK_INCUS_LOG" || fail 'existing instance consulted image metadata'
 printf 'ok: image metadata retries preserve preferred image and fallback requires proven absence\n'
+
+# First-boot temporary storage convergence is part of ordinary creation for both
+# kinds, even with no optional profiles. Existing instances never cross this stop.
+for kind in container vm; do
+  reset_creation
+  MOCK_INCUS_DEVICES=''
+  MOCK_REBOOT=1 MOCK_POWER_STATE=RUNNING
+  rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+  YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 ENVIRONMENT_PROFILES='' run_create
+  [ "$(grep -c '^stop yard --project subyard$' "$MOCK_INCUS_LOG")" = 1 ] \
+    || fail "new $kind did not finish the first tmpfs boot"
+  [ "$(grep -c '^exec yard --project subyard -T -- sh -s -- check$' "$MOCK_INCUS_LOG")" = 2 ] \
+    || fail "new $kind did not verify actual storage after boot"
+  run_create
+  ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail "existing $kind was stopped for temporary storage"
+done
+printf 'ok: new container and VM disk /tmp converge before handoff; existing yards remain running\n'
+
+# An agent and masked disk /tmp can be visible before the restarted VM has a
+# default route. Normal creation must wait for boot before its native IPv4 probe.
+reset_creation
+MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=STOPPED MOCK_BOOT_AFTER_RESTART=1
+rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power" "$MOCK_TMP_CHECK_FILE.boot"
+YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 VM_PIN_IPV4=0 run_create
+grep -Fxq 'exec yard --project subyard -T -- sh -s -- wait-boot' "$MOCK_INCUS_LOG" \
+  || fail 'new VM storage restart did not wait for native boot completion'
+MOCK_BOOT_AFTER_RESTART=0
+printf 'ok: first VM storage restart waits past exec readiness before native IPv4 inspection\n'
+
+for kind in container vm; do
+  reset_creation
+  MOCK_REBOOT=1 MOCK_POWER_STATE=RUNNING MOCK_BOOT_WAIT_EXIT=23
+  rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+  if YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create; then
+    fail "$kind storage restart accepted failed boot readiness"
+  fi
+  grep -Fq 'new yard boot did not complete after temporary storage restart' "$TMP/output" \
+    || fail "$kind storage restart lost its boot failure diagnostic"
+  [ "$(grep -c '^exec yard --project subyard -T -- sh -s -- check$' "$MOCK_INCUS_LOG")" = 1 ] \
+    || fail "$kind checked storage after failed boot readiness"
+done
+MOCK_BOOT_WAIT_EXIT=0
+reset_creation
+MOCK_REBOOT=1 MOCK_CHANGED_UUID=1
+rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+if YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 run_create; then
+  fail 'storage restart accepted a replacement instance identity'
+fi
+grep -Fq 'new yard identity changed before temporary storage boot' "$TMP/output" \
+  || fail 'storage restart lost its identity refusal'
+! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail 'storage restart stopped a replacement instance'
+MOCK_CHANGED_UUID=0
+printf 'ok: new-yard storage restart refuses failed boot readiness and replaced instance identity\n'
+
+# Native creation precedes the split shell portions. Only a fresh POST result
+# may authorize their initial storage restart; retained identity alone may not.
+(
+  export SUBYARD_PREPARED_OWNER_PHASE=1
+  export SUBYARD_PREPARED_OWNER_INSTANCE_UUID=fixture-new-yard-uuid
+  export SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN=fixture-owner-token
+  export SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=fixture-new-yard-uuid
+  for kind in container vm; do
+    reset_creation
+    printf '1\n' > "$MOCK_INSTANCE_FILE"
+    MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=RUNNING
+    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-before-srv
+    ! grep -Eq '^(init |image |stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
+      || fail "native $kind before-srv crossed the storage boot boundary"
+    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-after-srv
+    [ "$(grep -c '^stop yard --project subyard$' "$MOCK_INCUS_LOG")" = 1 ] \
+      || fail "fresh native $kind did not complete the initial storage restart"
+    [ "$(grep -c '^exec yard --project subyard -T -- sh -s -- check$' "$MOCK_INCUS_LOG")" = 2 ] \
+      || fail "fresh native $kind did not verify actual storage after restart"
+    ! grep -Eq '^(init |image )' "$MOCK_INCUS_LOG" || fail "native $kind repeated SDK creation"
+
+    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
+    SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID='' YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
+      run_create --owner-after-srv
+    ! grep -Eq '^(stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
+      || fail "retained native $kind identity authorized a storage restart"
+    if SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=replacement-uuid YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
+        run_create --owner-after-srv; then
+      fail "native $kind accepted a different fresh-instance UUID"
+    fi
+    ! grep -Eq '^(start |stop |config (set|device (add|remove)))' "$MOCK_INCUS_LOG" \
+      || fail "native $kind mutated a different fresh-instance identity"
+  done
+)
+printf 'ok: prepared split creation converges fresh disk /tmp and never restarts retained instance results\n'
+
+# Consume the physical fixture's actual generated inputs through normal creation.
+# The selected project has its own local catalog: a bare default-project cache
+# alias must not replace the explicitly remote source for either guest kind.
+(
+  eval "$(sed -n '/^write_yard_config() {/,/^}/p' "$ROOT/dev/e2e/disk-tmp-acceptance.sh")"
+  export STATE="$TMP/image-selection" name=fixture-input port=34567
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
+  identity_bin="$TMP/identity-bin"
+  install -d -m 0700 "$identity_bin"
+  export MOCK_ACCOUNT_FILE="$TMP/fixture-account" MOCK_ACCOUNT_CALLS="$TMP/fixture-account-calls"
+  install -m 0600 /dev/null "$MOCK_ACCOUNT_FILE"
+  install -m 0600 /dev/null "$MOCK_ACCOUNT_CALLS"
+  # Execute the real account boundary with generated settings. UID 1000 is
+  # reserved, matching the cloud-image failure; no host account commands run.
+  sed -n '/^# Groups + unprivileged/,/^# dev sudo/{ /^# dev sudo/!p; }' \
+    "$ROOT/scripts/04-provision-subyard.sh" > "$TMP/provision-user.sh"
+  cat > "$identity_bin/id" <<'MOCK'
+#!/bin/sh
+test "$*" = '-u dev' || exit 90
+test -s "$MOCK_ACCOUNT_FILE" || exit 1
+cat "$MOCK_ACCOUNT_FILE"
+MOCK
+  cat > "$identity_bin/useradd" <<'MOCK'
+#!/bin/sh
+test "$*" = '-u 1001 -m -s /bin/bash dev' || exit 1
+echo "useradd $*" >> "$MOCK_ACCOUNT_CALLS"
+echo 1001 > "$MOCK_ACCOUNT_FILE"
+MOCK
+  cat > "$identity_bin/groupadd" <<'MOCK'
+#!/bin/sh
+case "$*" in '-f yard'|'-f kvm') ;; *) exit 90 ;; esac
+MOCK
+  cat > "$identity_bin/usermod" <<'MOCK'
+#!/bin/sh
+test "$*" = '-aG yard,kvm,docker dev'
+MOCK
+  chmod 0700 "$identity_bin/"*
+  for kind in container vm; do
+    reset_creation
+    MOCK_INCUS_DEVICES='' MOCK_REBOOT=0 MOCK_POWER_STATE=RUNNING
+    write_yard_config
+    set -a
+    # shellcheck source=/dev/null
+    . "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
+    set +a
+    image_type=container
+    [ "$kind" != vm ] || image_type=virtual-machine
+    printf '[{"fingerprint":"%064d","type":"%s","aliases":[{"name":"debian/13/cloud"}]}]\n' \
+      1 "$image_type" > "$MOCK_CATALOG_FILE"
+    run_create
+    grep -Fxq 'image list images: --project subyard --format=json' "$MOCK_INCUS_LOG" \
+      || fail "$kind fixture did not query its explicit remote source"
+    grep -Fq 'init images:debian/13/cloud yard --project subyard ' "$MOCK_INCUS_LOG" \
+      || fail "$kind fixture image did not reach its selected isolated project"
+    ! grep -Fq 'preferred image is absent' "$TMP/output" \
+      || fail "$kind fixture relied on a default-project image alias"
+    [ "$DEV_USER:$DEV_UID" = dev:1001 ] || fail "$kind fixture identity was not explicit"
+    : > "$MOCK_ACCOUNT_FILE"
+    : > "$MOCK_ACCOUNT_CALLS"
+    for _ in 1 2; do
+      PATH="$identity_bin:/usr/bin:/bin" bash -euo pipefail "$TMP/provision-user.sh" \
+        > "$TMP/identity-output" 2>&1 || { cat "$TMP/identity-output" >&2; fail "$kind configured user did not provision"; }
+      [ ! -s "$TMP/identity-output" ] || fail "$kind configured user drifted on repeat"
+    done
+    [ "$(cat "$MOCK_ACCOUNT_CALLS")" = 'useradd -u 1001 -m -s /bin/bash dev' ] \
+      || fail "$kind generated identity did not reach native useradd exactly once"
+    : > "$MOCK_ACCOUNT_FILE"
+    if DEV_UID=1000 PATH="$identity_bin:/usr/bin:/bin" bash -euo pipefail "$TMP/provision-user.sh" \
+        > "$TMP/identity-output" 2>&1; then
+      fail "$kind native account fixture accepted the reserved image UID"
+    fi
+    grep -Fq 'uid 1000 is taken in the yard' "$TMP/identity-output" \
+      || fail "$kind native account fixture lost the occupied-UID refusal"
+  done
+)
+printf 'ok: physical fixture image inputs resolve remotely in the selected isolated project for both kinds\n'
+printf 'ok: generated cloud fixture identity provisions and repeats through the native account boundary\n'

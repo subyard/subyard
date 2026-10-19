@@ -33,6 +33,46 @@ When a selected check needs real GNU/Linux hosts, use an allocated `test-vms` sl
 The operator owns outer-yard start, stop and teardown; the
 root broker owns inner slot create, start and stop; agents acquire leases only.
 
+The focused temporary-storage fixture uses one standard disposable VM and creates
+its container and 1 GiB nested VM sequentially. It needs nested KVM, passwordless
+root helpers in that allocation, and at least 10 GiB free on `/var/tmp`. Run its
+owning local checks from the coverage table before acquiring a slot:
+
+```sh
+python3 dev/release-acceptance.py prepare --version 1.0.0-disk-tmp.e2e --output .build/disk-tmp-candidate
+export SUBYARD_E2E_CANDIDATE_BUNDLE="$PWD/.build/disk-tmp-candidate/candidate-bundle.tar.gz"
+export SUBYARD_E2E_CANDIDATE_SHA256
+SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | awk '{print $1}')"
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose disk-tmp -- \
+  timeout --signal=TERM --kill-after=60 2700 bash dev/e2e/disk-tmp-acceptance.sh
+```
+
+It reuses the platform/image preflight and packaged-candidate installer, then
+checks native materialized-config inspection and installs in the same fresh
+`incus-admin` group context after platform preparation. Normal creation resolves
+the supported remote image in each isolated yard project for both guest kinds;
+it does not rely on a cache alias in the platform's default project.
+It exercises ordinary minimal-yard initialization for both kinds. The fixture
+explicitly configures `dev` with UID 1001, following the Debian-cloud
+P0 convention, and verifies that identity before ordinary-user writes.
+Rollback requires an actual root-owned native `tmp.mount` unit and preserves pre-existing boot links;
+any exact link added to seed the tmpfs boot is removed without stopping the mount.
+Native mask rollback
+and restart establish an active tmpfs baseline; repeat initialization must preserve
+a file, an unlinked open file and a Unix socket until the explicitly requested guest
+restart. The fixture verifies a changed native container init PID or VM guest boot
+ID and waits for the guest system manager to finish booting before inspecting the
+mount. Failed cases retain bounded boot/mount properties and cleanup-step exits.
+It checks actual disk backing, mode
+1777, ordinary-user writes, repeat initialization and native teardown. The controller
+retains responsibility for lease release; no outer-yard restart is involved.
+
+To undo the policy on a yard, first verify that `/etc/systemd/system/tmp.mount` is
+the `/dev/null` mask, then remove that mask with `systemctl unmask tmp.mount` inside
+the selected guest. Its next normal stop/start restores the image's original mount
+policy. Do not stop the live mount during rollback. Repeating `yard init` restores
+the Subyard policy.
+
 ## Operator setup
 
 Register a yard with the profile:

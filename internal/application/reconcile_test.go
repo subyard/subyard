@@ -26,6 +26,34 @@ type observedReconcileFixture struct {
 	observation ports.ReconcileStageObservation
 }
 
+type diagnosticReconcileFixture struct {
+	*reconcileFixture
+	failure error
+	calls   int
+}
+
+func (fixture *diagnosticReconcileFixture) VerifyStageWithDiagnostic(context.Context, ports.ReconcileStageID) (bool, error) {
+	fixture.calls++
+	return false, fixture.failure
+}
+
+func TestReconcilerUsesDiagnosticOnlyAfterApply(t *testing.T) {
+	stage := ReconcileStage{ID: ports.ReconcileStageProvision, Label: "Provision"}
+	failure := errors.New("component requires a native reboot")
+	fixture := &diagnosticReconcileFixture{reconcileFixture: &reconcileFixture{
+		converged: map[ports.ReconcileStageID]bool{},
+	}, failure: failure}
+	reconciler := Reconciler{Stages: []ReconcileStage{stage}, Runner: fixture}
+	plan, err := reconciler.Plan(context.Background())
+	if err != nil || plan.Pending() != 1 || fixture.calls != 0 {
+		t.Fatalf("expected drift was not a plain observation: plan=%#v calls=%d err=%v", plan, fixture.calls, err)
+	}
+	err = reconciler.Apply(context.Background(), plan)
+	if !errors.Is(err, failure) || fixture.calls != 1 || len(fixture.applied) != 1 {
+		t.Fatalf("post-apply diagnostic was lost: calls=%d applied=%v err=%v", fixture.calls, fixture.applied, err)
+	}
+}
+
 func (fixture observedReconcileFixture) ObserveStage(context.Context, ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {
 	return fixture.observation, nil
 }

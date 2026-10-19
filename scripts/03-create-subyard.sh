@@ -104,6 +104,7 @@ reconcile_e2e_route_mount() {
 # Only the native owner bridge uses these fixed portions. Ordinary calls run
 # the complete original body in its existing order.
 owner_phase=whole
+created=0 created_uuid=''
 case "${1:-}" in
   --owner-before-instance) owner_phase=before-instance ;;
   --owner-before-srv) owner_phase=before-srv ;;
@@ -121,6 +122,13 @@ if [ "$owner_phase" != whole ]; then
         || die 'original owner instance token differs'
     fi
   fi
+fi
+if [ "$owner_phase" = after-srv ] && [ -n "${SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID:-}" ]; then
+  [ "$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID" = "$SUBYARD_PREPARED_OWNER_INSTANCE_UUID" ] \
+    && [ -n "${SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN:-}" ] \
+    || die 'fresh owner instance identity differs'
+  created=1
+  created_uuid="$SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"
 fi
 docker_apparmor_required=0
 if [ "$owner_phase" = whole ] || [ "$owner_phase" = before-instance ]; then
@@ -216,7 +224,9 @@ else
     || die "original owner-created instance is missing"
   subyard_instance_identity_flags
   if yard_instance_create; then
-    :
+    created=1
+    created_uuid=$(incus config get "$YARD_INSTANCE_NAME" volatile.uuid "${PROJ[@]}")
+    [ -n "$created_uuid" ] || die 'new yard identity is unavailable'
   else
     rc=$?
     printf 'image lookup or instance creation failed (exit %s)\n' "$rc" >&2
@@ -471,6 +481,33 @@ if [ "$YARD_KIND" = vm ]; then
       'VM agent did not become ready for boot verification' || die "$POWER_ERROR"
   }
 fi
+# Only a guest created by this invocation has no admitted user workload. Apply
+# the base policy and finish its first boot before provisioning can publish READY.
+# An existing guest is never restarted to change its temporary storage.
+if [ "$created" = 1 ]; then
+  incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+    || die 'new yard agent did not become ready for temporary storage setup'
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- apply \
+    < "$SCRIPT_DIR/guest-disk-tmp.sh"
+  tmp_state=0
+  incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- check \
+    < "$SCRIPT_DIR/guest-disk-tmp.sh" || tmp_state=$?
+  if [ "$tmp_state" = 10 ]; then
+    [ "$(incus config get "$YARD_INSTANCE_NAME" volatile.uuid "${PROJ[@]}")" = "$created_uuid" ] \
+      || die 'new yard identity changed before temporary storage boot'
+    "$SCRIPT_DIR/lifecycle-guard.sh" stop --reconcile \
+      || die 'could not safely finish new yard temporary storage setup'
+    power_start_guarded "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "$BRIDGE" || die "$POWER_ERROR"
+    incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
+      || die 'new yard agent did not become ready after temporary storage boot'
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- wait-boot \
+      < "$SCRIPT_DIR/guest-disk-tmp.sh" || die 'new yard boot did not complete after temporary storage restart'
+    incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- check \
+      < "$SCRIPT_DIR/guest-disk-tmp.sh" || die 'new yard temporary storage is not disk-backed'
+  elif [ "$tmp_state" != 0 ]; then
+    die 'new yard temporary storage could not be verified'
+  fi
+fi
 # Cloud-image seeding can replace QEMU during the agent wait.
 # Scope its replacement before guest preparation can fail.
 if [ -n "${VM_CPU_WEIGHT:-}" ]; then
@@ -480,7 +517,8 @@ if [ "${SRV_VOLUME_TYPE:-filesystem}" = block ]; then
   vm_storage_mount
 fi
 if [ "$YARD_KIND" = vm ] && [ "${VM_PIN_IPV4:-0}" != 1 ]; then
-  vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")"
+  vm_ipv4="$(incus_instance_primary_ipv4 "$INCUS_PROJECT" "$YARD_INSTANCE_NAME")" \
+    || die 'could not inspect VM primary IPv4 address after guest boot'
   [ -n "$vm_ipv4" ] || die 'VM has no primary IPv4 address'
   pinned_ipv4="$(incus query "/1.0/instances/$YARD_INSTANCE_NAME?project=$INCUS_PROJECT" |
     jq -r '(.expanded_devices // .devices).eth0["ipv4.address"] // ""')"

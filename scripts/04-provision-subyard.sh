@@ -49,6 +49,12 @@ info "waiting for $YARD_INSTANCE_NAME agent"
 incus_wait_instance_agent "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" \
   || die "instance '$YARD_INSTANCE_NAME' agent did not become ready"
 
+# Common base policy, independent of optional profiles. Never unmount or stop a
+# running /tmp; readiness reports when the installed policy still needs reboot.
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -T -- sh -s -- apply \
+  < "$SCRIPT_DIR/guest-disk-tmp.sh"
+incus config set "$YARD_INSTANCE_NAME" user.subyard.disk_tmp v1 "${PROJ[@]}"
+
 PREVIEW_SOURCE="$SCRIPT_DIR/../config/preview/subyard-preview"
 [ -f "$PREVIEW_SOURCE" ] && [ ! -L "$PREVIEW_SOURCE" ] && [ -r "$PREVIEW_SOURCE" ] \
   || die "static preview helper source is unavailable"

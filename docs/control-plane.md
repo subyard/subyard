@@ -547,6 +547,21 @@ Stage adapters may implement `VerifyStageWithDiagnostic` for post-apply validati
 Ordinary observations continue to return expected drift as a state; post-apply failures
 return the observed component reason through `ActivationDiagnostic`. The test VM broker
 uses bounded, source-owned readiness reasons for its host sink, backend and guest checks.
+Base guest provisioning masks `tmp.mount` for every container and VM, independently
+of optional profiles. Policy application waits at most two minutes for the guest's
+native system manager to finish booting (running or degraded), since exec readiness
+can precede the system bus and boot mounts. A newly created instance completes a
+guarded first-boot restart when necessary and waits for completed guest boot again
+before filesystem and network inspection. Repeat provisioning only installs the
+next-boot policy: it never stops a live `/tmp`, removes its files or closes sockets.
+Prepared native creation carries that restart authority only from the current
+successful instance POST through its fixed shell portions, bound to the returned
+UUID and owner token. A retained create result establishes identity, without
+granting permission to restart a guest that may already contain active work.
+Provision readiness checks the actual backing filesystem, root ownership and mode
+1777 as well as the mask. An active tmpfs remains unconverged; post-apply diagnostics
+ask the owner to close sessions and stop/start that yard. Intentionally stopped yards
+retain their deferred policy marker and verify the actual filesystem when running.
 Initial observation failures also retain these reasons; repairable drift stays a state.
 Route-consumer ownership conflicts identify the affected yard, validated native instance
 and route device, with a read-only Incus inspection command. Configuration inspection

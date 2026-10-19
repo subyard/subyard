@@ -393,6 +393,9 @@ func (runtime Runtime) checkOwnerVolumeInstance(ctx context.Context, p ports.Pre
 }
 
 func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environment map[string]string) error {
+	// A retained create result proves identity, not that a guest is still unused.
+	// Only this call's successful POST may authorize the initial storage restart.
+	environment["SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"] = ""
 	if runtime.ownerVolume == nil {
 		return domain.ErrPlanStale
 	}
@@ -434,6 +437,7 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 	}
 	var original *ports.PreparedOwnerInstance
 	var created *ports.NativeOwnerCreated
+	freshInstance := false
 	if runtime.ownerInstance != nil {
 		original = &runtime.ownerInstance.original
 		var value *ports.NativeOwnerCreated
@@ -472,6 +476,7 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 			var resolved ports.PreparedOwnerInstance
 			value, resolved, err = policyCreator.ApplyPreparedOwnerPolicyInstance(ctx, request, env, home)
 			if err == nil {
+				freshInstance = true
 				runtime.ownerInstance.resolved = &resolved
 				original = &resolved
 			}
@@ -491,6 +496,9 @@ func (runtime Runtime) applyOwnerInstancePortions(ctx context.Context, environme
 		}
 		environment["SUBYARD_PREPARED_OWNER_INSTANCE_UUID"] = created.InstanceUUID
 		environment["SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN"] = created.Intent.Token
+		if freshInstance {
+			environment["SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID"] = created.InstanceUUID
+		}
 	} else {
 		environment["SUBYARD_PREPARED_OWNER_INSTANCE_UUID"] = volume.InstanceUUID
 	}

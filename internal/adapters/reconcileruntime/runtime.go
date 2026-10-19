@@ -333,6 +333,11 @@ func (runtime Runtime) VerifyStageWithDiagnostic(ctx context.Context, stage port
 	if stage == ports.ReconcileStageTestVMs {
 		return runtime.testVMsReadiness(ctx, true)
 	}
+	if stage == ports.ReconcileStageProvision {
+		if ready, err := runtime.diskTmpReadiness(ctx, true); err != nil || !ready {
+			return false, err
+		}
+	}
 	return runtime.VerifyStage(ctx, stage)
 }
 
@@ -1787,6 +1792,9 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if strings.EqualFold(instance.Status, "stopped") {
+		if policy, _ := instance.EffectiveConfig("user.subyard.disk_tmp"); policy != "v1" {
+			return false, nil
+		}
 		previewHash, err := runtime.previewSourceHash()
 		if err != nil {
 			return false, err
@@ -1932,16 +1940,25 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	}
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 		plan, err := runtime.IntegrationPlan(ctx)
-		return !plan.Changed, err
+		if err != nil || plan.Changed {
+			return false, err
+		}
+		return runtime.diskTmpReadiness(ctx, false)
 	}
 	// Resolved contexts opt into the shared integration ownership contract.
 	for _, entry := range runtime.Environment {
 		if strings.HasPrefix(entry, "INTEGRATION_HOST_LINKS=") {
 			plan, err := runtime.IntegrationPlan(ctx)
-			return marker == version && !plan.Changed, err
+			if err != nil || marker != version || plan.Changed {
+				return false, err
+			}
+			return runtime.diskTmpReadiness(ctx, false)
 		}
 	}
-	return marker == version, nil
+	if marker != version {
+		return false, nil
+	}
+	return runtime.diskTmpReadiness(ctx, false)
 }
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {

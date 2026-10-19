@@ -1037,7 +1037,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			{Result: ports.InstanceExecResult{Stdout: []byte(" 7f 45 4c 46\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
-			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {},
+			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {},
 		}
 	}
 	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
@@ -1120,6 +1120,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	incus.Reconcile.Instance = ports.InstanceInfo{Status: "Stopped", Config: map[string]string{
 		"user.subyard.managed": "true", "user.subyard.initialized": "true",
 		"user.subyard.desired_power": "stopped", "user.subyard.ccusage_version": "1.2.3",
+		"user.subyard.disk_tmp": "v1",
 	}}
 	previewHash, err := runtime.previewSourceHash()
 	if err != nil {
