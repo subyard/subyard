@@ -22,8 +22,7 @@ finish() {
   fi
   # Preserve the test result while using the runner's normal cleanup/release trap.
   set +e
-  (exit "$rc")
-  cleanup_on_exit
+  cleanup_on_exit '' "$rc"
 }
 trap finish EXIT
 trap 'exit 130' INT

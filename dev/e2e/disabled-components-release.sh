@@ -40,9 +40,8 @@ controller_cleanup() {
     run_guest 1 "$bundle" "$bundle_hash" timeout --signal=TERM --kill-after=30 180 \
       bash "$payload" clean "$token" || failed=1
   fi
-  [ "$failed" = 0 ] || rc=3
-  (exit "$rc")
-  cleanup_on_exit
+  [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
+  cleanup_on_exit '' "$rc"
 }
 trap controller_cleanup EXIT
 trap 'exit 130' INT

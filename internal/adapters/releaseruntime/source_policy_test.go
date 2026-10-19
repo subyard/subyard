@@ -115,7 +115,7 @@ func TestHistoricalUninstallSourceIgnoresMigrationReadiness(t *testing.T) {
 			write(filepath.Join(candidate, "scripts", "02-create-project.sh"), creator, 0o600)
 			manifest := fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(engine))
 			for _, name := range []string{"subyard-power-reconcile.service.in", "subyard-keys-sync.service.in", "subyard-keys-sync.timer.in"} {
-				templatePath := filepath.Join("..", "..", "..", "config", "systemd", name)
+				templatePath := filepath.Join("..", "..", "..", "tests", "fixtures", "systemd", strings.TrimSuffix(name, ".in")+"-v0.19.0.in")
 				if name == "subyard-keys-sync.service.in" {
 					// Historical producers retain the public recipe, independently of current unit policy.
 					templatePath = filepath.Join("..", "..", "..", "tests", "fixtures", "systemd", "subyard-keys-sync-v0.21.2.service.in")

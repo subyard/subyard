@@ -516,15 +516,18 @@ resolve_vm_count() {
 }
 
 facade_request() {
-  local command="$1" bootstrap
+  local command="$1" bootstrap rc=0
   ensure_identity
   resolve_bastion_route
   bootstrap="$(mktemp "$STATE_ROOT/.facade-config.XXXXXX")"
   VM_IP=(); VM_HOST_KEY=()
   render_client_config > "$bootstrap"
   chmod 0600 "$bootstrap"
-  ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" </dev/null
-  local rc=$?
+  if [ -n "${2:-}" ]; then
+    timeout --signal=TERM --kill-after=5 "$2" ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" </dev/null || rc=$?
+  else
+    ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" </dev/null || rc=$?
+  fi
   rm -f "$bootstrap"
   return "$rc"
 }
@@ -919,20 +922,25 @@ lease_command() {
 }
 
 release_lease() {
-  local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN" response code
+  local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN" response code started=$SECONDS rc=0
   [ -n "$LEASE_ID" ] || return 0
-  if ! response="$(facade_request "$(lease_command release)")"; then
+  printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
+  if response="$(facade_request "$(lease_command release)" 180)"; then :; else
+    rc=$?
+    printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' "$((SECONDS - started))" "$rc" >&2 || true
     printf 'agent-e2e: release failed for slot=%s run=%s\n' \
       "$released_slot" "$released_run" >&2
     return 1
   fi
   if [ "$(jq -r '.status // empty' <<<"$response")" != ok ]; then
+    printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=1\n' "$((SECONDS - started))" >&2 || true
     code="$(jq -r '.code // "invalid_response"' <<<"$response")"
     printf 'agent-e2e: release rejected for slot=%s run=%s (%s)\n' \
       "$released_slot" "$released_run" "$code" >&2
     return 1
   fi
   LEASE_ID=""
+  printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=0\n' "$((SECONDS - started))" >&2 || true
   printf 'E2E lease released: slot=%s run=%s\n' "$released_slot" "$released_run" >&2
 }
 
@@ -1139,7 +1147,11 @@ verify_boundary() {
 guest() {
   local vm="$1" command; shift
   command="$(quote_ssh_command "$@")"
-  ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command"
+  if [ -n "${E2E_GUEST_TIMEOUT:-}" ]; then
+    timeout --signal=TERM --kill-after=5 "$E2E_GUEST_TIMEOUT" ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command"
+  else
+    ssh -F "$CLIENT_CONFIG" -T "e2e-vm-$vm" -- "$command"
+  fi
 }
 
 quote_ssh_command() {
@@ -1156,11 +1168,12 @@ cleanup_guest() {
   local vm="$1" directory="${GUEST_DIRS[$1]:-}" rc=0
   [ -n "$directory" ] || return 0
   phase_start guest-cleanup "$vm"
+  printf 'E2E_BUDGET phase=guest-cleanup budget_seconds=120 grace_seconds=5 vm=%s\n' "$vm" >&2 || true
   case "$directory" in /var/tmp/subyard-worktree.*) ;; *) phase_end 1; return 1 ;; esac
   if [ "${2:-}" = quiet ]; then
-    guest "$vm" sudo -n find "$directory" -depth -delete </dev/null >/dev/null 2>&1 || rc=$?
+    E2E_GUEST_TIMEOUT=120 guest "$vm" sudo -n find "$directory" -depth -delete </dev/null >/dev/null 2>&1 || rc=$?
   else
-    guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || rc=$?
+    E2E_GUEST_TIMEOUT=120 guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || rc=$?
   fi
   phase_end "$rc"
   [ "$rc" = 0 ] || return "$rc"
@@ -1168,7 +1181,7 @@ cleanup_guest() {
 }
 
 cleanup_on_exit() {
-  local rc=$? vm cleanup_failed=0 started=$SECONDS
+  local rc=${2:-$?} vm cleanup_failed=0 started=$SECONDS
   trap - EXIT INT TERM
   set +e
   # Interrupted work stays incomplete; EXIT closes terminal failures only.
@@ -1189,7 +1202,8 @@ cleanup_on_exit() {
     esac
   fi
   release_lease || cleanup_failed=1
-  [ "$cleanup_failed" = 0 ] || rc=3
+  # Keep the workload/signal outcome; cleanup has its own terminal phase.
+  [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
   phase_marker cleanup/release end "$((SECONDS - started))" "$((cleanup_failed * 3))"
   if [ "$rc" != 0 ] && [ -n "$LEASE_REQUESTED_SLOT" ]; then
     printf 'agent-e2e: inspect own broker diagnostics: dev/agent-e2e.sh --yard %s --logs --slot %s -n 50\n' \
@@ -1352,7 +1366,7 @@ set_requested_slot() {
 }
 
 main() {
-  local selector=all root bundle bundle_hash vm run_failed=0 cleanup_failed=0
+  local selector=all root bundle bundle_hash vm guest_rc run_failed=0 cleanup_failed=0
   local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0 slot_value=''
   local log_count=50 log_count_set=0 incident_id='' diagnostic_mode=''
   local status_response
@@ -1481,7 +1495,8 @@ main() {
     verify)
       [ "${#command[@]}" -eq 0 ] || die "--verify-boundary takes no command"
       trap cleanup_on_exit EXIT
-      trap 'cleanup_on_exit interrupted' INT TERM
+      trap 'cleanup_on_exit interrupted 130' INT
+      trap 'cleanup_on_exit interrupted 143' TERM
       LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
       phase_start allocation
       acquire_lease
@@ -1493,7 +1508,8 @@ main() {
     ssh)
       case "$ssh_vm" in 1 | 2) ;; *) die "--ssh needs VM selector 1 or 2" ;; esac
       trap cleanup_on_exit EXIT
-      trap 'cleanup_on_exit interrupted' INT TERM
+      trap 'cleanup_on_exit interrupted 130' INT
+      trap 'cleanup_on_exit interrupted 143' TERM
       LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
       phase_start allocation
       acquire_lease
@@ -1512,7 +1528,8 @@ main() {
   command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
   trap cleanup_on_exit EXIT
-  trap 'cleanup_on_exit interrupted' INT TERM
+  trap 'cleanup_on_exit interrupted 130' INT
+  trap 'cleanup_on_exit interrupted 143' TERM
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
   phase_start allocation
   acquire_lease
@@ -1527,14 +1544,17 @@ main() {
   ok "worktree bundle ready (sha256=$bundle_hash)"
 
   for vm in "${selected[@]}"; do
-    if ! run_guest "$vm" "$bundle" "$bundle_hash" "${command[@]}"; then run_failed=1; fi
+    if run_guest "$vm" "$bundle" "$bundle_hash" "${command[@]}"; then :; else
+      guest_rc=$?
+      [ "$run_failed" != 0 ] || run_failed="$guest_rc"
+    fi
     if ! cleanup_guest "$vm"; then
       printf 'agent-e2e: VM%s run directory cleanup failed\n' "$vm" >&2
       cleanup_failed=1
     fi
   done
+  [ "$run_failed" = 0 ] || return "$run_failed"
   [ "$cleanup_failed" = 0 ] || return 3
-  [ "$run_failed" = 0 ] || return 1
   ok "selected VM checks passed; run-specific worktrees removed"
 }
 

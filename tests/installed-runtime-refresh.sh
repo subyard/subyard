@@ -110,7 +110,7 @@ if SUBYARD_KEYS_SYSTEMD_DIR="$foreign" bash "$ROOT/scripts/install-keys-auto-syn
 [ "$(stat -c '%i:%s:%Y:%Z' "$foreign/subyard-keys-sync.service")" = "$foreign_before" ]
 [ "$(cat "$foreign/subyard-keys-sync.service")" = 'foreign user unit' ]
 [ ! -e "$foreign/subyard-keys-sync.timer" ] && [ ! -e "$foreign/.subyard-keys-sync.json" ]
-for unsafe in changed mode symlink; do
+for unsafe in changed mode symlink receipt-mode receipt-symlink directory-symlink; do
   units="$TMP/unsafe-$unsafe"
   mkdir -m 0700 "$units"
   sed "s|@YARD_BIN@|$YARD_RUNTIME_ROOT/current/bin/yard|g" \
@@ -120,9 +120,18 @@ for unsafe in changed mode symlink; do
     changed) printf '# foreign modification\n' >> "$units/subyard-keys-sync.service" ;;
     mode) chmod 0664 "$units/subyard-keys-sync.service" ;;
     symlink) mv "$units/subyard-keys-sync.service" "$units/target"; ln -s target "$units/subyard-keys-sync.service" ;;
+    receipt-mode) printf '{}\n' > "$units/.subyard-keys-sync.json"; chmod 0644 "$units/.subyard-keys-sync.json" ;;
+    receipt-symlink) printf '{}\n' > "$units/target"; ln -s target "$units/.subyard-keys-sync.json" ;;
+    directory-symlink) mv "$units" "$units-target"; ln -s "$units-target" "$units" ;;
   esac
+  # Capture metadata and content before the production refusal, including symlink targets.
+  before="$(find -H "$units" -printf '%P:%y:%m:%i:%s:%T@:%C@\n' | sort)"
+  content_before="$(find -H "$units" -type f -exec sha256sum {} + | sort)"
+  : > "$SYSTEMCTL_LOG"
   if SUBYARD_KEYS_SYSTEMD_DIR="$units" bash "$ROOT/scripts/install-keys-auto-sync.sh" --refresh --yes > "$TMP/unsafe.log" 2>&1; then exit 1; fi
-  [ ! -e "$units/.subyard-keys-sync.json" ] && [ ! -e "$units/subyard-keys-sync.timer" ]
+  [ "$(find -H "$units" -printf '%P:%y:%m:%i:%s:%T@:%C@\n' | sort)" = "$before" ]
+  [ "$(find -H "$units" -type f -exec sha256sum {} + | sort)" = "$content_before" ]
+  [ ! -s "$SYSTEMCTL_LOG" ] && [ ! -e "$units/subyard-keys-sync.timer" ]
 done
 # Removing both files retires timer intent, even when its prior receipt remains.
 rm -- "$SUBYARD_KEYS_SYSTEMD_DIR/subyard-keys-sync.service" "$SUBYARD_KEYS_SYSTEMD_DIR/subyard-keys-sync.timer"

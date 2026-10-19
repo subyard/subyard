@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically synchronize Subyard encrypted credential ledgers
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5h30min
+RandomizedDelaySec=30min
+Persistent=true
+Unit=subyard-keys-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -36,7 +36,7 @@ fixture() {
     bash "${GUEST_DIRS[$vm]}/src/dev/e2e/config-sync-two-host.sh" "$@" </dev/null
 }
 cleanup_acceptance() {
-  local rc=$? vm cleanup_failed=0
+  local rc=${1:-$?} vm cleanup_failed=0
   trap - EXIT INT TERM
   set +e
   for vm in 1 2; do
@@ -44,12 +44,13 @@ cleanup_acceptance() {
       fixture "$vm" acceptance-cleanup >/dev/null 2>&1 || cleanup_failed=1
     fi
   done
-  [ "$cleanup_failed" = 0 ] || rc=3
+  [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
   # The shared wrapper owns heartbeat, guest-worktree deletion and lease release.
-  (exit "$rc")
-  cleanup_on_exit
+  cleanup_on_exit '' "$rc"
 }
-trap cleanup_acceptance EXIT INT TERM
+trap cleanup_acceptance EXIT
+trap 'cleanup_acceptance 130' INT
+trap 'cleanup_acceptance 143' TERM
 
 acquire_lease
 start_lease_keeper

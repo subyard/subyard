@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Bind the activation fixture to current frozen metadata and authentic predecessors."""
 import ast
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 
@@ -37,9 +41,162 @@ class ActivationIdentityTest(unittest.TestCase):
 
     def test_mismatched_archive_checksum_or_predecessor_is_refused(self):
         for changes in ({'runtime_file': 'subyard-0.19.1-activation-e2e-linux-amd64.tar.gz'},
+                {'runtime_file': 'subyard-0.21.0-linux-riscv64.tar.gz'},
                 {'runtime_sha256': 'invalid'}, {'baseline': '0.21.0'}, {'version': '0.20.0'}):
             with self.subTest(changes=changes):
                 self.assertNotEqual(self.identity(**changes).returncode, 0)
+
+
+class CandidateArchiveTest(unittest.TestCase):
+    def test_actual_archive_verification_repeat_refusal_and_partial_retry(self):
+        helper = GUEST.parents[5]/'tests/helpers/release-candidate.sh'
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            root = Path(temporary)
+            release = root/'.subyard-acceptance/release'
+            release.mkdir(parents=True)
+            archive = release/'subyard-0.21.0-linux-amd64.tar.gz'
+            metadata = release.parent/'candidate.json'
+            payload = b'#!/bin/sh\nprintf "yard-engine 0.21.0\\n"\n'
+            def package(bad_manifest=False):
+                files = {'bin/yard':payload, 'bin/yard-engine':payload}
+                files['runtime-files.sha256'] = ''.join(
+                    f'{"0"*64 if bad_manifest else hashlib.sha256(body).hexdigest()}  {name}\n'
+                    for name,body in files.items()).encode()
+                with tarfile.open(archive,'w:gz') as bundle:
+                    for name,body in files.items():
+                        entry = tarfile.TarInfo(name)
+                        entry.size = len(body)
+                        entry.mode = 0o755 if name.startswith('bin/') else 0o644
+                        bundle.addfile(entry,io.BytesIO(body))
+                metadata.write_text(json.dumps(dict(version='0.21.0',runtime_file=archive.name,
+                    runtime_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())))
+            def prepare():
+                return subprocess.run(['bash','-c','. "$1"; release_candidate_prepare "$2"',
+                    'fixture',str(helper),str(root)],capture_output=True,text=True,timeout=5)
+            package()
+            for _ in range(2):
+                result = prepare()
+                self.assertEqual(result.returncode,0,result.stderr)
+                engine = Path(result.stdout.strip())
+                self.assertEqual(subprocess.check_output([str(engine)],text=True),'yard-engine 0.21.0\n')
+                self.assertFalse((release.parent/'runtime.next').exists())
+            before = engine.read_bytes()
+            archive.write_bytes(archive.read_bytes()+b'tampered')
+            self.assertNotEqual(prepare().returncode,0)
+            self.assertEqual(engine.read_bytes(),before)
+            package(bad_manifest=True)
+            self.assertNotEqual(prepare().returncode,0)
+            package()
+            self.assertEqual(prepare().returncode,0)
+            self.assertFalse((release.parent/'runtime.next').exists())
+
+
+class ControllerPrerequisiteTest(unittest.TestCase):
+    def test_guest_cleanup_reports_failure_independently_of_native_exit_three(self):
+        source = GUEST.with_name('acceptance.sh').read_text()
+        start = source.index('\ncleanup() {')+1
+        cleanup = source[start:source.index('\n}\n',start)+3]
+        script = cleanup + r'''
+set -euo pipefail
+MODE=--cleanup UNIT_FILE='' HERMES_PROJECT=owned PROJECT='' STATE='' CHECKPOINT=/missing
+failure=$2
+cleanup_hermes() { [ "$failure" != hermes ]; }
+cleanup_unit() { [ "$failure" != unit ]; }
+cleanup "$1"
+'''
+        for native in (0,3,23):
+            for failure in ('none','hermes','unit'):
+                with self.subTest(native=native,failure=failure):
+                    result = subprocess.run(['bash','-c',script,'fixture',str(native),failure],
+                                            capture_output=True,text=True,timeout=5)
+                    cleanup_rc = 0 if failure == 'none' else 3
+                    expected = native or cleanup_rc
+                    self.assertEqual(result.returncode,expected,result.stderr)
+                    self.assertIn(f'original_exit_code={native} cleanup_exit_code={cleanup_rc} final_exit_code={expected}',result.stderr)
+
+    def test_empty_python_selection_is_not_green(self):
+        result = subprocess.run(['python3','-B',__file__,'-k','__absent_required_case__'],
+                                capture_output=True,text=True,timeout=5)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('empty or skipped required fixture selection',result.stderr)
+
+    def test_broker_controller_cleanup_preserves_original_and_reports_release_failure(self):
+        source = GUEST.with_name('acceptance.sh').read_text()
+        start = source.index('  controller_cleanup() {')
+        cleanup = source[start:source.index('\n  }\n',start)+5]
+        script = cleanup + r'''
+set -euo pipefail
+prepared=0 cleanup_failed=0 LEASE_KEEPER_PID='' LOCAL_TEMP=''
+declare -A GUEST_DIRS=()
+phase_end() { :; }
+phase_marker() { :; }
+release_lease() { return 7; }
+controller_cleanup "$1"
+'''
+        for native in (0,23,124,130,143):
+            with self.subTest(native=native):
+                result = subprocess.run(['bash','-c',script,'fixture',str(native)],
+                                        capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,native or 3,result.stderr)
+                self.assertIn('cleanup_exit_code=3',result.stderr)
+
+    def test_actual_controller_cleanup_preserves_failure_timeout_and_signal(self):
+        source = GUEST.with_name('connection-sync.sh').read_text()
+        start = source.index('cleanup_acceptance() {')
+        cleanup = source[start:source.index('\n}\n', start)+3]
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            script = cleanup + r'''
+set -euo pipefail
+ROOT=$1 LEASE_RUN=fixture
+declare -A GUEST_DIRS=([1]=owned)
+fixture() { return 7; }
+cleanup_on_exit() { exit "$2"; }
+cleanup_acceptance "$2"
+'''
+            for native in (0, 23, 124, 130, 143):
+                with self.subTest(native=native):
+                    result = subprocess.run(['bash', '-c', script, 'fixture', temporary, str(native)],
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, native or 3, result.stderr)
+
+    def test_required_failure_missing_empty_or_skipped_case_stops_allocation(self):
+        root = GUEST.parents[5]
+        required = ('TestConnectionFixtureIssuerLocal',
+                    'TestClientHandlerAndFakeGitHubContractOverUnixSocket',
+                    'TestRuntimeStatusReportsLoadedExecutableWithoutCredentials',
+                    'TestClientRuntimeStatusRejectsPredecessorAndIncompatibleIdentity')
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            go = directory/'go'
+            go.write_text('#!/usr/bin/env python3\nimport os\nprint(os.environ["GO_EVENTS"])\nraise SystemExit(int(os.environ["GO_EXIT"]))\n')
+            go.chmod(0o700)
+            ssh = directory/'ssh'
+            ssh.write_text('#!/bin/sh\ntouch "$ALLOCATION_ATTEMPT"\nexit 99\n')
+            ssh.chmod(0o700)
+            attempted = directory/'allocation'
+            for case in ('failure', 'empty', 'missing', 'skip'):
+                events = [] if case == 'empty' else [dict(Test=name,
+                    Action='skip' if case == 'skip' and name == required[0] else 'pass')
+                    for name in required if case != 'missing' or name != required[0]]
+                with self.subTest(case=case):
+                    result = subprocess.run(['bash', str(root/'config/profiles/github/tests/e2e/connection-sync.sh'),
+                        '--slot', '1'], env=dict(os.environ, PATH=str(directory)+':'+os.environ['PATH'],
+                            GO_EVENTS='\n'.join(map(json.dumps, events)),
+                            GO_EXIT='23' if case == 'failure' else '0', ALLOCATION_ATTEMPT=str(attempted)),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+                    self.assertFalse(attempted.exists(), 'local failure reached the broker')
+
+    def test_installed_worker_mode_dispatches_to_owning_pair_and_preserves_exit(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)/'config/profiles/github/tests/e2e'
+            directory.mkdir(parents=True)
+            shutil.copyfile(GUEST.with_name('acceptance.sh'), directory/'acceptance.sh')
+            (directory/'connection-sync.sh').write_text('#!/bin/sh\n[ "$*" = "--slot 7" ] || exit 99\nexit 17\n')
+            result = subprocess.run(['bash', str(directory/'acceptance.sh'), '--installed-worker', '--slot', '7'],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 17, result.stderr)
+            self.assertIn('installed worker admission and real SSH/SOPS peer', result.stdout)
 
 
 class ActivationTimingTest(unittest.TestCase):
@@ -370,4 +527,7 @@ else
 
 
 if __name__ == '__main__':
-    unittest.main()
+    program = unittest.main(exit=False)
+    if not program.result.testsRun or program.result.skipped:
+        raise SystemExit('empty or skipped required fixture selection')
+    raise SystemExit(0 if program.result.wasSuccessful() else 1)

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -74,6 +75,34 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_owning_preflight_reuses_only_validated_local_receipt(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            for name in ('dev/release-acceptance.py', 'config/profiles/github/tests/run.sh'):
+                target = checkout/name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root/name, target)
+            output = directory/'accepted'
+            source, receipt = prepare_fixture(checkout, output)
+            receipt['checks']['verify'] = m.execute('verify', ['make','verify'], source, output, m.clean_environment())
+            receipt['checks']['verify']['execution_environment'] = receipt['environment']
+            m.save(output, receipt)
+            tools = directory/'tools'
+            tools.mkdir()
+            go = tools/'go'
+            go.write_text('#!/bin/sh\n[ "$*" = version ] || exit 99\nprintf "go version fixture\\n"\n')
+            go.chmod(0o700)
+            env = dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], SUBYARD_E2E_LOCAL_EVIDENCE=str(output))
+            runner = source/'config/profiles/github/tests/run.sh'
+            result = subprocess.run(['bash',str(runner),'--preflight'], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('reuse validated make verify PASS', result.stdout)
+            receipt['checks']['verify']['command'] = ['true']
+            m.save(output, receipt)
+            result = subprocess.run(['bash',str(runner),'--preflight'], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_optional_process_coverage_preserves_frozen_required_evidence(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -971,6 +1000,48 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(m.run_checks(output, [1], ["profile:sample"], False), 0)
                 self.assertEqual(started, [("profile:sample/three", 1)])
 
+    def test_native_failure_signal_timeout_and_cleanup_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            script = output / "outcome.sh"
+            for suffix, expected, termination, category in (
+                ('exit 23', 23, 'exit', 'product'),
+                ('exit 124', 124, 'timeout', 'timeout'),
+                ('kill -TERM $$', -15, 'signal', 'product')):
+                with self.subTest(suffix=suffix):
+                    script.write_text("#!/bin/bash\n"
+                        "printf 'E2E_PHASE phase=packing state=end duration_seconds=2 exit_code=0\\n'\n"
+                        "printf 'E2E_BUDGET phase=guest-cleanup budget_seconds=120 grace_seconds=5 vm=1\\n'\n"
+                        "printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\\n'\n"
+                        "printf 'E2E_RELEASE state=end duration_seconds=4 budget_seconds=180 grace_seconds=5 exit_code=7\\n'\n"
+                        "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=3\\n'\n"
+                        "printf 'E2E_FAILURE class=product\\n'\n" + suffix + "\n")
+                    result = m.execute("native", ["bash", str(script)], output, output, m.clean_environment())
+                    self.assertEqual(result['exit_code'], expected)
+                    self.assertEqual(result['termination'], termination)
+                    self.assertEqual(result['failure_class'], category)
+                    self.assertEqual(result['last_completed_phase'], 'packing')
+                    self.assertEqual(result['cleanup']['cleanup/release']['exit_code'], 3)
+                    self.assertEqual(result['cleanup']['lease-release'], {'exit_code':7, 'duration_seconds':4})
+                    self.assertEqual(result['phase_budgets']['guest-cleanup/vm1'], {'budget_seconds':120, 'grace_seconds':5})
+                    self.assertEqual(result['phase_budgets']['lease-release'], {'budget_seconds':180, 'grace_seconds':5})
+
+    def test_required_local_failure_blocks_every_live_allocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            checks = {name: ['true'] for name in ('verify', 'compatibility', 'p0-release-smoke', 'profile:sample')}
+            receipt = {'version':'test', 'profiles':{}, 'checks':{name:{'status':'pending'} for name in checks}}
+            executed = []
+            def execute(name, command, root, output, env, slot=None):
+                self.assertIsNone(slot, 'local failure reached VM allocation')
+                executed.append(name)
+                return {'status':'failed', 'exit_code':23}
+            with patch.object(m, 'load_bound', return_value=(output, receipt)), \
+                 patch.object(m, 'commands', return_value=checks), patch.object(m, 'save'), \
+                 patch.object(m, 'execute', side_effect=execute):
+                self.assertEqual(m.run_checks(output, [1, 2], [], False), 1)
+            self.assertEqual(executed, ['verify'])
+
     def test_capacity_phase_heartbeat_and_interruption_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -1020,6 +1091,21 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertTrue(target["checks"][name]["inherited"])
             self.assertEqual(target["checks"][name]["from_receipt_sha256"], m.digest(first / "receipt.json"))
             self.assertEqual(target["checks"]["profile:sample/two"]["status"], "pending")
+            direct_name = "profile:sample/two"
+            target["checks"][direct_name] = m.execute(direct_name,
+                m.commands(target_root, "test", target["profiles"])[direct_name],
+                target_root, second, m.clean_environment(), 1)
+            m.save(second, target)
+            chained = checkout / ".build/chained"
+            prepare_fixture(checkout, chained)
+            before = {path: path.read_bytes() for output in (first, second, chained)
+                      for path in output.iterdir() if path.is_file()}
+            with self.assertRaisesRegex(ValueError, "cannot chain inherited evidence"):
+                # Validate the whole batch before copying even the direct result.
+                m.import_evidence(chained, second, [direct_name, name])
+            after = {path: path.read_bytes() for output in (first, second, chained)
+                     for path in output.iterdir() if path.is_file()}
+            self.assertEqual(after, before)
             with redirect_stdout(io.StringIO()):
                 frozen_report = m.preflight(second)
             self.assertEqual(frozen_report["candidate"], "frozen")

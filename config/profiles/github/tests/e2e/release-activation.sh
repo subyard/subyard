@@ -23,10 +23,10 @@ for command in go jq python3 shellcheck tar timeout sha256sum; do
 done
 bash -n "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh"
 shellcheck -S warning "$ROOT/config/profiles/github/tests/e2e/release-activation.sh" "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh"
+bash "$ROOT/config/profiles/github/tests/run.sh" --preflight
+python3 -B "$ROOT/config/profiles/github/tests/release-observation-test.py"
+bash "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh" --local-probe
 if [ "$preflight" = 1 ]; then
-  python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"
-  python3 -B "$ROOT/config/profiles/github/tests/release-observation-test.py"
-  bash "$ROOT/config/profiles/github/tests/e2e/release-activation-guest.sh" --local-probe
   printf 'ok: release activation local fixture prerequisites; no lease acquired\n'
   exit 0
 fi
@@ -41,8 +41,8 @@ cleanup() {
   local original=$?
   trap - EXIT INT TERM
   [ -f "$WORK/.marker" ] && [ "$(cat "$WORK/.marker")" = subyard-activation-controller-v1 ] \
-    && [[ "$WORK" = /tmp/subyard-activation-controller.* ]] || exit 3
-  find "$WORK" -depth -delete || exit 3
+    && [[ "$WORK" = /tmp/subyard-activation-controller.* ]] || { [ "$original" != 0 ] && exit "$original"; exit 3; }
+  find "$WORK" -depth -delete || { [ "$original" != 0 ] && exit "$original"; exit 3; }
   exit "$original"
 }
 trap cleanup EXIT

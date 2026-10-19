@@ -19,6 +19,25 @@ grep -Fq 'target=/var/lib/subyard/e2e-routes' "$ROOT/scripts/03-create-subyard.s
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 
+# Workload, signal and timeout outcomes survive an independently failing cleanup.
+for original in 0 23 124 130 143; do
+  for cleanup_rc in 0 7; do
+    expected="$original"
+    [ "$original:$cleanup_rc" != 0:7 ] || expected=3
+    if (
+      trap - EXIT INT TERM
+      release_lease() { return "$cleanup_rc"; }
+      E2E_ACTIVE_PHASE=guest E2E_PHASE_VM=1
+      LEASE_KEEPER_PID='' LOCAL_TEMP='' LEASE_REQUESTED_SLOT=''
+      GUEST_DIRS=()
+      cleanup_on_exit interrupted "$original"
+    ) >"$TMP/cleanup-outcome.log" 2>&1; then actual=0; else actual=$?; fi
+    [ "$actual" = "$expected" ] || fail "cleanup replaced native exit $original with $actual"
+    grep -Fq "phase=cleanup/release state=end" "$TMP/cleanup-outcome.log" \
+      || fail 'cleanup terminal phase missing'
+  done
+done
+
 # Diagnostic reads use the existing controller capability and never allocate.
 (
   STATE_ROOT="$TMP/log-client"
@@ -3212,13 +3231,13 @@ for phase_scenario in success guest-failure transfer-failure direct-failure rele
   case "$phase_scenario" in
     success|guest-failure)
       guest_rc=0; expected_rc=0
-      if [ "$phase_scenario" = guest-failure ]; then guest_rc=23; expected_rc=1; fi
+      if [ "$phase_scenario" = guest-failure ]; then guest_rc=23; expected_rc=23; fi
       phase_expected+=$'\npacking:start:0:-\npacking:end:0:-\ntransport:start:0:1\ntransport:end:0:1\nguest:start:0:1'
       phase_expected+=$'\n'"guest:end:$guest_rc:1"
       phase_expected+=$'\nguest-cleanup:start:0:1\nguest-cleanup:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
       ;;
     transfer-failure)
-      expected_rc=1
+      expected_rc=2
       phase_expected+=$'\npacking:start:0:-\npacking:end:0:-\ntransport:start:0:1\ntransport:end:2:1\nguest-cleanup:start:0:1\nguest-cleanup:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
       ;;
     direct-failure)
@@ -3230,7 +3249,7 @@ for phase_scenario in success guest-failure transfer-failure direct-failure rele
       phase_expected+=$'\nguest:start:0:1\nguest:end:0:1\ncleanup/release:start:0:-\ncleanup/release:end:3:-'
       ;;
     interrupt)
-      expected_rc=0 # Preserve the runner's existing signal-trap exit status.
+      expected_rc=143
       phase_expected+=$'\nguest:start:0:1\ncleanup/release:start:0:-\ncleanup/release:end:0:-'
       ;;
   esac

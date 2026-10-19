@@ -148,6 +148,7 @@ def source_fingerprint(root):
 def clean_environment():
     env = os.environ.copy()
     for key in ("SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256",
+                "SUBYARD_E2E_LOCAL_EVIDENCE",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE",
                 "SUBYARD_REPOSITORY_ROOT", "YARD_ENGINE_PATH"):
         env.pop(key, None)
@@ -325,6 +326,7 @@ def execute(name, command, root, output, env, slot=None):
     interrupted = False
     cleanup_status = None
     markers = set()
+    phases = {}
     offset = 0
     next_heartbeat = start + HEARTBEAT_SECONDS
     with private_file(log, "wb") as stream:
@@ -340,18 +342,30 @@ def execute(name, command, root, output, env, slot=None):
                 event(output, "heartbeat", check=name, slot=slot,
                       duration_seconds=round(time.monotonic() - start, 2))
                 next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
-            offset = phase_events(output, name, log, offset, markers)
+            offset = phase_events(output, name, log, offset, markers, phases=phases)
         if STOP.is_set() and not interrupted:
             interrupted = True
             cleanup_status = interrupt_group(process)
         code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
         stream.flush()
         os.fsync(stream.fileno())
-    phase_events(output, name, log, offset, markers, final=True)
+    phase_events(output, name, log, offset, markers, final=True, phases=phases)
     blocked = capacity_reason(log) if code == 4 and not interrupted else None
     result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 else "failed", "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
               "log_sha256": digest(log), "command": command_identity(command, root)}
+    result["termination"] = ("signal" if code is not None and (code < 0 or code in (130, 137, 143))
+                             else "timeout" if code == 124 else "exit" if code is not None else "unknown")
+    if result["termination"] == "signal":
+        result["signal"] = -code if code < 0 else code - 128
+    result["last_completed_phase"] = phases.get("last_completed_phase", "unknown")
+    if phases.get("cleanup"):
+        result["cleanup"] = phases["cleanup"]
+    if phases.get("budgets"):
+        result["phase_budgets"] = phases["budgets"]
+    if code != 0:
+        result["failure_class"] = ("environment" if blocked else "timeout" if code == 124
+                                   else phases.get("failure_class", "unknown"))
     environments = sorted(marker[1:] for marker in markers if marker[0] == "environment")
     if slot:
         result["environments"] = [{"type": kind, "vm_count": count, "base_fingerprint": fingerprint}
@@ -368,7 +382,7 @@ def execute(name, command, root, output, env, slot=None):
     return result
 
 
-def phase_events(output, name, log, offset, seen, final=False):
+def phase_events(output, name, log, offset, seen, final=False, phases=None):
     offset, discard = offset if isinstance(offset, tuple) else (offset, False)
     with log.open("rb") as stream:
         stream.seek(offset)
@@ -399,6 +413,28 @@ def phase_events(output, name, log, offset, seen, final=False):
                 event(output, "controller-phase", check=name, phase=stage[1].decode(),
                       state=stage[2].decode(), duration_seconds=int(stage[3]),
                       exit_code=int(stage[4]), **({"vm": int(stage[5])} if stage[5] else {}))
+                if phases is not None and stage[2] == b"end":
+                    phase = stage[1].decode()
+                    if phase == "cleanup/release" or "cleanup" in phase:
+                        key = phase + ("/vm" + stage[5].decode() if stage[5] else "")
+                        phases.setdefault("cleanup", {})[key] = {"exit_code": int(stage[4]), "duration_seconds": int(stage[3])}
+                    elif stage[4] == b"0":
+                        phases["last_completed_phase"] = phase
+            failure = re.fullmatch(rb"E2E_FAILURE class=(product|fixture|environment|timeout|unknown)\n", line)
+            if failure and phases is not None:
+                phases["failure_class"] = failure[1].decode()
+            budget = re.fullmatch(rb"E2E_BUDGET phase=(guest-cleanup|fixture/[a-z0-9-]{1,60}) budget_seconds=([0-9]{1,5}) grace_seconds=([0-9]{1,4})(?: vm=([12]))?\n", line)
+            if budget and phases is not None and bool(budget[4]) == (budget[1] == b"guest-cleanup"):
+                key = budget[1].decode() + ("/vm" + budget[4].decode() if budget[4] else "")
+                phases.setdefault("budgets", {})[key] = {"budget_seconds": int(budget[2]), "grace_seconds": int(budget[3])}
+            release = re.fullmatch(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
+            if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
+                event(output, "lease-release", check=name, state=release[1].decode(), duration_seconds=int(release[2]),
+                      budget_seconds=180, grace_seconds=5, exit_code=int(release[3]))
+                if phases is not None:
+                    phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
+                    if release[1] == b"end":
+                        phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
             if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
@@ -783,6 +819,12 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
+    for name in sorted(selected - set(pending)):
+        result = receipt["checks"][name]
+        if result["status"] == "passed":
+            origin = "inherited" if result.get("inherited") else "direct"
+            print(f"REUSE {name} {origin}: validated command, inputs, environment and complete PASS", flush=True)
+            event(output, "check-reuse", check=name, origin=origin, reason="validated-applicable-pass")
     live = [name for name in pending if is_live(name)]
     if live and not slots:
         raise ValueError("live checks require --slots N [N ...]")
@@ -808,6 +850,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     # synthetic worktrees and must retain the normal bundler contract.
     env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
+               SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
                SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
     # One controller per approved slot, taking the next independent check when free.
     lock = threading.Lock()
@@ -943,6 +986,8 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
         result = source["checks"][name]
         if "evidence_transfer" in result:
             raise ValueError("ordinary import cannot chain reviewed evidence transfers")
+        if result.get("inherited"):
+            raise ValueError("ordinary import cannot chain inherited evidence")
         expected_command = command_identity(check_commands[name], root)
         if result["status"] != "passed" or result.get("command") != expected_command:
             raise ValueError("evidence import requires passing command-bound evidence")

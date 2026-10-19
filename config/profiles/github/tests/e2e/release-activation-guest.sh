@@ -224,10 +224,10 @@ PY
   done
   if [ "$failed" = 0 ]; then
     [[ "$STATE" = /tmp/subyard-release-activation.* ]] && [ ! -L "$STATE" ] \
-      && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || exit 3
-    find "$STATE" -depth -delete || exit 3
+      && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || { [ "$original" != 0 ] && exit "$original"; exit 3; }
+    find "$STATE" -depth -delete || { [ "$original" != 0 ] && exit "$original"; exit 3; }
   fi
-  [ "$failed" = 0 ] || exit 3
+  [ "$failed" = 0 ] || [ "$original" != 0 ] || exit 3
   exit "$original"
 }
 trap cleanup EXIT

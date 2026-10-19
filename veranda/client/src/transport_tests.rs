@@ -353,6 +353,66 @@ fn shared_golden_frames_decode_and_reencode_with_the_production_codec() {
     }
 }
 
+// One native process contract joins the implementations. The Python synthetic
+// owner above retains the fault matrix; it is not the compatibility oracle.
+#[cfg(target_os = "linux")]
+#[test]
+fn current_go_engine_negotiates_with_native_rust_client_and_refuses_version_skew() {
+    let fixture = OwnerFixture::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = fixture.root.join("yard-engine");
+    let started = Instant::now();
+    let built = Command::new("go")
+        .current_dir(&root)
+        .env("TMPDIR", "/tmp")
+        .args(["build", "-o"])
+        .arg(&engine)
+        .arg("./cmd/yard")
+        .output()
+        .expect("Go toolchain required for the native owner process contract");
+    assert!(
+        built.status.success(),
+        "Go prerequisite build failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    eprintln!(
+        "native Go prerequisite build_seconds={:.2}",
+        started.elapsed().as_secs_f64()
+    );
+    fs::create_dir(fixture.root.join("home")).unwrap();
+    let command = || {
+        let mut command = Command::new(&engine);
+        command
+            .args(["rpc", "--stdio"])
+            .env("HOME", fixture.root.join("home"))
+            .env("SUBYARD_OPERATOR_HOME", fixture.root.join("home"))
+            .env("SUBYARD_CONFIG_HOME", fixture.root.join("config"))
+            .env("SUBYARD_HOME", fixture.root.join("data"))
+            .env("SUBYARD_REPOSITORY_ROOT", &root)
+            .env("SUBYARD_NO_AUDIT", "1")
+            .env_remove("YARD_ENGINE_PATH");
+        command
+    };
+    let client = RpcClient::open(command(), PRODUCT_VERSION, Arc::new(|_| {})).unwrap();
+    assert_eq!(client.engine_version, PRODUCT_VERSION);
+    assert!(client
+        .capabilities
+        .iter()
+        .any(|capability| capability == "operation-exact-plan-v1"));
+    let context = client
+        .call("context.get", "", json!({}), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(context["yardName"], "default");
+    assert_eq!(context["accessKind"], "local");
+    assert_eq!(
+        context["paths"]["configHome"],
+        fixture.root.join("config").to_str().unwrap()
+    );
+    client.close();
+    assert!(client.child.lock().unwrap().is_none());
+    assert!(RpcClient::open(command(), "9.9.9", Arc::new(|_| {})).is_err());
+}
+
 #[test]
 fn subprocess_negotiation_and_queries_use_shared_golden_results_and_operation_binding() {
     let fixture = OwnerFixture::new();

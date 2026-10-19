@@ -724,6 +724,26 @@ gated lanes. A generic dependency-free resource pass does not report those handl
 
 ### Fixture preflight
 
+For the installed credential worker and its SSH/SOPS connection contract, use the existing owning
+profile runner mode:
+
+```sh
+bash config/profiles/github/tests/run.sh --preflight
+bash config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot "$slot"
+```
+
+The physical controller itself enforces the local preflight before allocation; a separate manual
+preflight is useful while repairing but is not an additional acceptance gate. It checks required
+Go cases actually passed, executable Python fixture regressions and production filesystem ownership.
+It also exercises the base image's actual Incus `--upgrade-only` installer boundary without an
+installation identity; package-only upgrade does not publish yard ownership. Normal initialization
+continues to require its prepared identity before side effects.
+When launched by the release collector after `make verify`, it reuses that existing receipt only
+after the collector's normal command/input/environment validation, and prints the reason.
+Standalone runs execute fresh prerequisites. A failed or unknown binding refuses reuse.
+The pair checks actual installed runtime admission, the real user manager and an observable due-peer
+result; local passes do not establish those facts. Other units retain their own physical lanes.
+
 For GitHub/native-helper release activation, the owning singleton controller requires the same
 frozen public bundle used by supported candidate transport. Include its normal
 `.subyard-acceptance` metadata/assets; the lane derives the candidate version from that
@@ -741,6 +761,9 @@ The controller packages its explicitly synthetic compatible successor (the next 
 with an `activation-fixture` suffix) before lease acquisition; the original candidate's verified
 assets remain intact. The guest uses the actual checksum-pinned 0.20.0 installer/updater, verified
 against immutable published release metadata, two container yards and a config-only absent yard.
+Normal invocation runs the same cheap local checks as `--preflight` before packaging/allocation;
+`--preflight` exits before allocation. A valid local shape alone does not authenticate an archive:
+normal execution still checks its actual bytes, architecture, engine version and pinned installer.
 The default `--baseline 0.19.0` preserves the original 0.19.1 activation fixture path. A first transition may
 download unchanged native tool pins once to establish trustworthy activation receipts. The lane
 has a 60-minute work budget and bounded marker-owned cleanup; its terminal output retains native

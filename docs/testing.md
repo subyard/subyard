@@ -54,6 +54,13 @@ than repeating their logical matrices in P0.
 | Owner inventory read freshness | `go:ownerinventory`: `TestSnapshotFresh` uses fixed time for default/custom TTL boundaries and clock skew | `go:ownerinventory`: service cache/fetch contracts; `go:cli`: trusted owner rename and stale inventory checks | `dev/e2e/entity-naming-lifecycle.sh`: real SSH rename, key rotation, offline refresh and removal; fixture timestamps expire caches without wall-clock sleeps | Owner inventory cache or refresh changes |
 | Host registration consent and trust | `go:cli`: `TestSSHTrustUsesTypedConsentAndDoesNotConsumeCommandPayload` covers interactive and automated consent | `go:cli`: `TestHostAddPinsFingerprintAndRegistersInitialSnapshotTogether` checks one confirmation and atomic trust/inventory registration | `dev/e2e/entity-naming-lifecycle.sh`: direct, alias and proxy SSH registration uses explicit `--yes` | Host registration or SSH trust changes |
 | Crypto and SSH adapter compatibility | Owning crypto, trust and transport packages | `e2e:adapter-contracts`, `e2e:credential-tools`, `e2e:ssh-credential-peer`: pinned real tools and loopback SSH | `e2e:ssh-unknown-host`, `p0:peer`: separate host identities, routing and failure/reconnect | Adapter/tool/trust changes |
+| GitHub broker status, loaded identity and issuer | Owning `config/profiles/github/broker` tests; required `TestConnectionFixtureIssuerLocal` and runtime skew/refusal cases | `TestClientHandlerAndFakeGitHubContractOverUnixSocket`: production handler/client plus synthetic upstream; `config/profiles/github/tests/run.sh --preflight` runs required cases once and checks JSON pass/skip counts | Owning GitHub acceptance: installed broker and client identities | Broker protocol/consumer changes; local Go/Python prerequisites, T0/T1 |
+| Shared RPC implementations | Go shared frame contracts and Rust golden/fault tests | Linux Veranda native Rust client builds the current Go engine, negotiates and queries it, then refuses version skew; existing Python subprocess owner retains the fault matrix | Existing Veranda owner/SSH lanes | RPC schema/client/server changes; stable Rust, Python and Go, T1; cold build separate |
+| Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
+| Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Existing source-upgrade/full-uninstall lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
+| Fixture preparation and retry | GitHub `release-activation-test.py`: metadata/version/architecture/checksum shape, actual archive/refusal/retry, synthetic successor, marker/init retry and partial cleanup behavior | Existing `--preflight` includes the production Incus installer's package-only base-image call without installation identity; normal install still refuses missing/empty identity before writes. Release activation also executes its local probe and verifies frozen bundle checksum, engine identity and successor before allocation | Existing owning activation lane | Fixture/helper/artifact changes; Go/Python/jq/ShellCheck and exact artifact inputs, T0/T1 before T3 |
+| Controller outcome and allocation ordering | `tests/agent-e2e.sh`, `tests/release-acceptance.sh` | Actual controller failure injection: missing/skipped/empty required cases stop before broker; native failure/signal/timeout and cleanup remain separate | Affected existing controller lane, preserving lease ownership and cleanup | Controller, phase, transport or cleanup changes; T1 before T3 |
+| Evidence reuse and gate completeness | `tests/release-acceptance.sh`: command/source/assets/helper/environment binding, tamper, incomplete and inherited-chain refusal | Existing `import`/`transfer`, validated by `load_bound`; execution prints direct/inherited reuse reason | Required fresh/continuous/full gates remain separate | Evidence/runner/dependency changes; T1; an equal executable alone is insufficient |
 
 Go packages can contain both unit and local integration checks; the fixture boundary
 determines their evidence, rather than the test language or package name.
@@ -65,6 +72,24 @@ Frozen release smoke and peer fixtures already reuse collector candidate assets 
 source A/B, tagged owner histories and pinned predecessors retain distinct artifact identities.
 Full/release-smoke, reboot observations, nested teardown and all shipped-profile acceptance
 requirements remain as documented; local passes do not replace them.
+
+T0 is the smallest named regression (aim for 60 seconds); T1 is the affected owning local
+set (aim for about three minutes). T2 is the complete host-free suite, T3 the affected physical
+lane, and T4 full P0. These are selection levels, not a sequence required for every edit.
+Measure only necessary checks; report cold toolchain/download/build prerequisites separately.
+Use existing Go `-run`, Cargo test filters, Python owning tests and profile `--preflight` modes.
+Check the native summary has a nonzero case count and the intended case actually passed.
+Unexpected required skips, missing cases and empty selections are incomplete, even with exit zero.
+
+Changes to `config/systemd/subyard-keys-sync.*`, `scripts/install-keys-auto-sync.sh`, their
+installer/refresh callers, `_keys-auto-sync`, credential consumer admission, or the shared
+`internal/cli` and `internal/adapters/releaseruntime` admission validators **require** the owning
+installed-worker mode above. Include transitive validator changes when selecting it. That mode
+prints its reason and runs local prerequisites before allocating its disposable pair. It observes
+the real worker's SSH/SOPS result. For a different unit, select its existing owning systemd lane
+(for example `power-systemd`); the GitHub worker does not establish every core unit contract.
+Selection is explicit by changed contract; automatic changed-file inference is not supported.
+The ordinary profile/release inventory and mandatory smoke/full gates retain their existing meaning.
 
 ## Execution and reporting principles
 
@@ -405,6 +430,19 @@ with a lowercase name of up to 60 letters, digits or hyphens. Start markers use 
 exit code; end markers retain the measured duration and original exit code (0–255). The collector
 projects only this bounded grammar into phase events, without copying fixture output. A successful
 cleanup phase does not change a preceding failure into a pass.
+Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
+`unknown`), last successful operation phase and separate cleanup phase exits/durations.
+Exit 124 is a timeout; known signal exits retain the signal number. Typed capacity refusal is
+environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+`E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
+cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
+budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub
+connection fixture limits ordinary phases to 1800 seconds and each cleanup to 180 seconds,
+with 60 seconds for guest termination. Its fixture cleanup, guest cleanup and lease release are
+separate evidence. A cleanup error changes a successful invocation to failure but preserves an
+already nonzero workload/signal/timeout exit. Capture failure and original work remain distinct.
+Bounded `E2E_BUDGET` records populate `phase_budgets`; `E2E_RELEASE` start/end records preserve
+the lease release budget, elapsed time and native status separately from aggregate cleanup.
 Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
 Only one mutating collector may use an output directory at a time.
 
@@ -412,6 +450,9 @@ Explicit `import --output NEW --from OLD --check CHECK` copies passing command-b
 between bound candidates with matching source and release assets, retaining inherited provenance.
 Only provenance generation timestamps may differ; artifact identities and original metadata hashes remain bound.
 Local evidence also requires its recorded execution environment to match.
+The current run prints `REUSE` with direct/inherited origin and its validation reason for applicable
+PASS results. A new or changed input requires the affected fresh check; failure/incomplete results
+remain recorded and cannot be promoted by a passing subset or an equal executable.
 `--allow-other-profile-tests` permits a profile check to survive changes confined to other shipped
 profiles' test directories. Its runtime, assets, inventory, own profile and shared inputs must
 remain identical. This exception never applies to local gates or continuous release smoke.
@@ -498,7 +539,8 @@ against the shipped rules for that evidence; real client approve/deny needs sepa
 ## Run Veranda host-free checks
 
 Install Python 3 and the current stable Rust toolchain selected by
-[`rust-toolchain.toml`](../rust-toolchain.toml), then run from the repository root:
+[`rust-toolchain.toml`](../rust-toolchain.toml), plus the module-selected Go toolchain on Linux
+for the native owner process contract, then run from the repository root:
 
 ```sh
 make verify-veranda

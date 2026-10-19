@@ -17,16 +17,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$LEASE_REQUESTED_SLOT" ] || die '--slot N is required'
+# These process/fixture and production filesystem checks never acquire a lease.
+bash "$ROOT/config/profiles/github/tests/run.sh" --preflight
 LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
 fixture_path=config/profiles/github/tests/e2e/connection-sync-guest.sh
 fixture() {
-  local vm="$1"; shift
+  local vm="$1" started=$SECONDS rc=0 mode="$2" budget=1800; shift
+  [ "$mode" != cleanup ] || budget=180
+  printf 'E2E_BUDGET phase=fixture/connection-%s budget_seconds=%s grace_seconds=60\n' "$mode" "$budget" >&2
+  printf 'E2E_PHASE phase=fixture/connection-%s state=start duration_seconds=0 exit_code=0\n' "$mode" >&2
   guest "$vm" /usr/sbin/runuser -u dev -- env HOME=/home/dev USER=dev LOGNAME=dev \
     SUBYARD_E2E_VM="$vm" SUBYARD_E2E_RUN_ID="$LEASE_RUN" \
-    timeout --foreground 1800 bash "${GUEST_DIRS[$vm]}/src/$fixture_path" "$@" </dev/null
+    timeout --foreground --signal=TERM --kill-after=60 "$budget" bash "${GUEST_DIRS[$vm]}/src/$fixture_path" "$@" </dev/null || rc=$?
+  printf 'E2E_PHASE phase=fixture/connection-%s state=end duration_seconds=%s exit_code=%s\n' "$mode" "$((SECONDS - started))" "$rc" >&2
+  return "$rc"
 }
 cleanup_acceptance() {
-  local rc=$? vm failed=0 cleanup_rc cleanup_log
+  local rc=${1:-$?} vm failed=0 cleanup_rc cleanup_log
   trap - EXIT INT TERM
   set +e
   for vm in 1 2; do
@@ -41,12 +48,15 @@ cleanup_acceptance() {
     fi
   done
   [ "$failed" = 0 ] || printf 'github-connection-e2e: fixture phase exit=%s; cleanup also failed (exit=3)\n' "$rc" >&2
-  [ "$failed" = 0 ] || rc=3
-  (exit "$rc")
-  cleanup_on_exit
+  [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
+  cleanup_on_exit '' "$rc"
 }
-trap cleanup_acceptance EXIT INT TERM
+trap cleanup_acceptance EXIT
+trap 'cleanup_acceptance 130' INT
+trap 'cleanup_acceptance 143' TERM
+phase_start allocation
 acquire_lease
+phase_end 0
 start_lease_keeper
 bundle="$LOCAL_TEMP/worktree.tar.gz"
 build_bundle "$ROOT" "$bundle"

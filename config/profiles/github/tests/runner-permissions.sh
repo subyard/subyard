@@ -32,7 +32,14 @@ set -eu
 case " $* " in
   *' test -list '*)
     printf '%s\n' TestLoadConfigAndKeyRejectUnsafeFiles TestProtectedFilesRejectSymlinksAndOversize ;;
-  *' test -race '*) printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG" ;;
+  *' test -race '*|*' test -json -race '*)
+    printf '%s %s\n' "$(umask)" "$*" >> "$RUNNER_GO_LOG"
+    if [[ " $* " = *' -json '* ]]; then
+      for name in TestConnectionFixtureIssuerLocal TestClientHandlerAndFakeGitHubContractOverUnixSocket \
+        TestRuntimeStatusReportsLoadedExecutableWithoutCredentials TestClientRuntimeStatusRejectsPredecessorAndIncompatibleIdentity; do
+        printf '{"Action":"pass","Test":"%s"}\n' "$name"
+      done
+    fi ;;
 esac
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/gofmt"

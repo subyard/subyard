@@ -31,9 +31,8 @@ controller_main() {
         bash dev/e2e/proxy-address-boot.sh clean "$PROXY_CONTROLLER_TOKEN" \
         || failed=1
     fi
-    [ "$failed" = 0 ] || rc=3
-    (exit "$rc")
-    cleanup_on_exit
+    [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
+    cleanup_on_exit '' "$rc"
   }
   trap controller_cleanup EXIT
   # Signal this process group to interrupt an active foreground SSH transport.

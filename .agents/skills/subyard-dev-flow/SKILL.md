@@ -81,6 +81,13 @@ coordinator, and do not create or close shared task files or start another full 
   only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted
   lanes cannot adequately cover. Explain that reason before the expensive run; availability of
   VMs alone does not justify using them.
+- Keys sync unit/sandbox, installer/refresh and shared runtime/credential admission changes require
+  `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`, including changes
+  to called validators. This existing owning mode checks a real user manager and installed worker
+  with its SSH/SOPS peer; a host-free systemctl stub cannot close that contract. Select other units'
+  existing owning systemd lanes separately. Follow the explicit dependency map in
+  [coverage ownership](../../../docs/testing.md#coverage-ownership); there is no automatic
+  changed-file selector. Run the mode's local prerequisites before its allocation.
 - Before publishing a runtime release, run fresh release smoke
   (`dev/e2e/p0-acceptance.sh --slot N`), the full release compatibility check in
   [Development](../../../docs/development.md), and all shipped-profile acceptance on the same candidate.

@@ -36,14 +36,15 @@ cleanup_guest() {
   [ "$FIXTURE_SCENARIO" != cleanup-failure ]
 }
 cleanup_on_exit() {
-  local rc=$?
+  local rc=${2:-$?}
   printf 'release:%s\n' "$rc" >> "$FIXTURE_LOG"
   find "$LOCAL_TEMP" -depth -delete
   exit "$rc"
 }
 CLIENT
 for scenario in failure cleanup-failure; do
-  case "$scenario" in failure) expected=23 ;; cleanup-failure) expected=3 ;; esac
+  # Cleanup failure cannot replace the native preparation failure.
+  expected=23
   rc=0
   FIXTURE_LOG="$TMP/$scenario.log" FIXTURE_SCENARIO="$scenario" SUBYARD_E2E_VM='' \
     bash "$TMP/dev/e2e/proxy-address-boot.sh" --slot 2 \

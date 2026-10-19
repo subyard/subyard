@@ -148,6 +148,8 @@ run_installer() (
   export SUBYARD_INSTALLATION_CONTEXT
   if [ "${TEST_WITHOUT_INSTALLATION_CONTEXT:-0}" = 1 ]; then
     unset SUBYARD_INSTALLATION_CONTEXT
+  elif [ "${TEST_WITHOUT_INSTALLATION_CONTEXT:-0}" = 2 ]; then
+    export SUBYARD_INSTALLATION_CONTEXT=''
   fi
   "$installer_path" --yes "$@"
 )
@@ -275,13 +277,16 @@ else
 fi
 [ ! -e "$contextless_home" ] || fail 'contextless sudo upgrade touched the data home'
 
-if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT=1 \
-  run_installer "$contextless_home" >"$contextless_output" 2>&1; then
-  fail 'normal installation accepted missing installation authority'
-fi
-grep -Fq 'SUBYARD_INSTALLATION_CONTEXT' "$contextless_output" \
-  || fail 'normal installation did not reject missing installation authority'
-[ ! -e "$contextless_home" ] || fail 'rejected contextless installation touched the data home'
+# Normal installation requires nonempty authority before any host writes.
+for absent_context in 1 2; do
+  if TEST_UID=0 TEST_WITHOUT_INSTALLATION_CONTEXT="$absent_context" \
+    run_installer "$contextless_home" >"$contextless_output" 2>&1; then
+    fail 'normal installation accepted missing or empty installation authority'
+  fi
+  grep -Fq 'SUBYARD_INSTALLATION_CONTEXT' "$contextless_output" \
+    || fail 'normal installation did not reject missing or empty installation authority'
+  [ ! -e "$contextless_home" ] || fail 'rejected contextless installation touched the data home'
+done
 
 # A successful package command must not let an Incus version below the required floor continue.
 cp -R "$ROOT/scripts" "$TMP/version-scripts"

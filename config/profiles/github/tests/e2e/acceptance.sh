@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+if [ "${1:-}" = --installed-worker ]; then
+  shift
+  printf 'GitHub physical selection: installed worker admission and real SSH/SOPS peer; required for keys unit, installer/refresh or shared admission changes\n'
+  exec bash "$ROOT/config/profiles/github/tests/e2e/connection-sync.sh" "$@"
+fi
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
 if YARD_BIN="$(release_candidate_prepare "$ROOT")"; then
@@ -81,7 +86,7 @@ controller_main() {
   fi
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-github-e2e.XXXXXX")"
   controller_cleanup() {
-    rc=$?
+    rc=${1:-$?}
     local original_rc="$rc" existing_directory cleanup_started=$SECONDS fixture_rc release_rc=0
     trap - EXIT INT TERM
     set +e
@@ -119,13 +124,15 @@ controller_main() {
       /tmp/subyard-github-e2e.*|"${TMPDIR:-/tmp}"/subyard-github-e2e.*)
         find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1 ;;
     esac
-    [ "$cleanup_failed" = 0 ] || rc=3
+    [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
     phase_marker cleanup/release end "$((SECONDS - cleanup_started))" "$((cleanup_failed * 3))"
     printf 'github_e2e_controller_result original_exit_code=%s cleanup_exit_code=%s final_exit_code=%s\n' \
       "$original_rc" "$((cleanup_failed * 3))" "$rc" >&2
     exit "$rc"
   }
-  trap controller_cleanup EXIT INT TERM
+  trap controller_cleanup EXIT
+  trap 'controller_cleanup 130' INT
+  trap 'controller_cleanup 143' TERM
   acquire_lease
   start_lease_keeper
   bundle="$LOCAL_TEMP/worktree.tar.gz"
@@ -438,7 +445,7 @@ cleanup_hermes() {
   cleanup_unit_file "$HERMES_UNIT" "$HERMES_UNIT_FILE"
 }
 cleanup() {
-  local rc=$? state_cleaned=0
+  local rc=${1:-$?} state_cleaned=0 cleanup_rc=0
   local original_rc="$rc"
   trap - EXIT INT TERM
   set +e
@@ -447,43 +454,46 @@ cleanup() {
     systemctl_user show "$UNIT" -p ActiveState -p Result -p ExecMainStatus >&2
     journalctl --user -u "$UNIT" --no-pager -n 8 >&2
   fi
-  [ -z "$HERMES_PROJECT" ] || cleanup_hermes || rc=3
+  [ -z "$HERMES_PROJECT" ] || cleanup_hermes || cleanup_rc=3
   if [ -n "$PROJECT" ] && incus project show "$PROJECT" >/dev/null 2>&1; then
     project_marker="$(incus project get "$PROJECT" user.subyard.e2e 2>/dev/null || true)"
     instance_marker="$(incus config get "$INSTANCE" user.subyard.e2e --project "$PROJECT" 2>/dev/null || true)"
     if [ "$project_marker" = "$MARKER" ] && [ "$instance_marker" = "$MARKER" ] \
       || { [ "$PROJECT_CLAIMED" = 1 ] && [ -z "$project_marker" ] && [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ]; }; then
-      yard teardown --yes >/dev/null 2>&1 || rc=3
+      yard teardown --yes >/dev/null 2>&1 || cleanup_rc=3
     else
       printf 'github-broker-e2e: refusing to remove unmarked project %s\n' "$PROJECT" >&2
-      rc=3
+      cleanup_rc=3
     fi
   fi
-  cleanup_unit || rc=3
-  if [ "$rc" != 3 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-github-broker.* ]] \
+  cleanup_unit || cleanup_rc=3
+  if [ "$cleanup_rc" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-github-broker.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ]; then
     if [ "$(incus storage get default source 2>/dev/null || true)" = "$STATE/storage" ]; then
       # A retained Incus pool from an older fixture must outlive its test state.
       for child in "$STATE"/*; do
         [ "$child" != "$STATE/storage" ] || continue
         [ -e "$child" ] || [ -L "$child" ] || continue
-        sudo -n find "$child" -depth -delete || rc=3
+        sudo -n find "$child" -depth -delete || cleanup_rc=3
       done
     else
-      sudo -n find "$STATE" -depth -delete || rc=3
+      sudo -n find "$STATE" -depth -delete || cleanup_rc=3
     fi
-    [ "$rc" = 3 ] || state_cleaned=1
+    [ "$cleanup_rc" != 0 ] || state_cleaned=1
   fi
-  if { [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; } && [ "$rc" != 3 ] \
+  if { [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; } && [ "$cleanup_rc" = 0 ] \
     && { [ "$state_cleaned" = 1 ] || { [ "$MODE" = --cleanup ] && [ "$rc" = 0 ]; }; } \
     && [ -f "$CHECKPOINT" ] && [ "$(stat -c '%a' "$CHECKPOINT")" = 600 ] \
     && [ "$(jq -r '.STATE' "$CHECKPOINT" 2>/dev/null || true)" = "$STATE" ]; then
-    rm -f -- "$CHECKPOINT"
+    rm -f -- "$CHECKPOINT" || cleanup_rc=3
   fi
-  printf 'github_e2e_guest_result mode=%s original_exit_code=%s final_exit_code=%s\n' "$MODE" "$original_rc" "$rc" >&2
+  [ "$original_rc" != 0 ] || rc="$cleanup_rc"
+  printf 'github_e2e_guest_result mode=%s original_exit_code=%s cleanup_exit_code=%s final_exit_code=%s\n' "$MODE" "$original_rc" "$cleanup_rc" "$rc" >&2
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 if [ "$MODE" = --prepare-reboot ] \
   && { [ -e "$CHECKPOINT" ] || [ -L "$CHECKPOINT" ]; }; then
