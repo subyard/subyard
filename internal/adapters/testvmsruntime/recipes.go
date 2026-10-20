@@ -25,7 +25,8 @@ var recipeFiles = []string{
 	"scripts/lib-power.sh",
 }
 
-func recipeBundle(root string) ([]byte, []byte, error) {
+// RecipeBundle produces the exact trusted archive installed for base builders.
+func RecipeBundle(root string) ([]byte, []byte, error) {
 	var archive, manifest bytes.Buffer
 	compressed := gzip.NewWriter(&archive)
 	writer := tar.NewWriter(compressed)
@@ -68,7 +69,7 @@ func recipeBundle(root string) ([]byte, []byte, error) {
 }
 
 func recipeBundleDigest(root string) (string, error) {
-	_, manifest, err := recipeBundle(root)
+	_, manifest, err := RecipeBundle(root)
 	if err != nil {
 		return "", err
 	}
@@ -77,7 +78,7 @@ func recipeBundleDigest(root string) (string, error) {
 }
 
 func (backend *Backend) installRecipes(ctx context.Context) error {
-	archive, manifest, err := recipeBundle(backend.RepositoryRoot)
+	archive, manifest, err := RecipeBundle(backend.RepositoryRoot)
 	if err != nil {
 		return err
 	}

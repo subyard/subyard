@@ -24,11 +24,11 @@ func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "operator-private.env"), []byte("must never enter image"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	first, manifest, err := recipeBundle(root)
+	first, manifest, err := RecipeBundle(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := recipeBundle(root)
+	second, _, err := RecipeBundle(root)
 	if err != nil || !bytes.Equal(first, second) {
 		t.Fatalf("nondeterministic archive: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "operator-private.env"), path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := recipeBundle(root); err == nil {
+	if _, _, err := RecipeBundle(root); err == nil {
 		t.Fatal("accepted symlink into local data")
 	}
 }

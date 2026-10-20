@@ -803,6 +803,28 @@ Standalone runs execute fresh prerequisites. A failed or unknown binding refuses
 The pair checks actual installed runtime admission, the real user manager and an observable due-peer
 result; local passes do not establish those facts. Other units retain their own physical lanes.
 
+For the broker recipe and supported-upgrade boundary, use the test-vms owning controller:
+
+```sh
+bash config/profiles/test-vms/tests/e2e/acceptance.sh --slot "$slot" --lane broker-cold-upgrade --preflight
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  bash config/profiles/test-vms/tests/e2e/acceptance.sh --slot "$slot" --lane broker-cold-upgrade
+```
+
+The controller runs the installer regression before the archived recipe contract and refuses
+missing, skipped or failed required cases before allocation. A validated collector `make verify`
+PASS is reusable under the existing binding rules. It selects one Android disposable stage for
+the owner, cold builder and singleton, with native memory and backing-storage preflight before
+acquire. Its authentic checksum-pinned 0.19.0 owner upgrades through its supported updater to the
+frozen candidate and retains broker state. No refresh warms the candidate base: the first acquire
+runs the real recipe, validates a new base, boots a singleton, checks SSH and a second boot, then
+releases and proves available without pending work. Candidate engine/recipe, base fingerprint and
+native terminal/cleanup evidence are printed by the shared staging fixture. This changes only the
+leased stage; the operator-owned allocation broker stays independent. Default profile acceptance
+runs this lane and full-uninstall; release collection requires both, alongside existing synthetic
+migration/rollback gates.
+
 For GitHub/native-helper release activation, the owning singleton controller requires the same
 frozen public bundle used by supported candidate transport. Include its normal
 `.subyard-acceptance` metadata/assets; the lane derives the candidate version from that

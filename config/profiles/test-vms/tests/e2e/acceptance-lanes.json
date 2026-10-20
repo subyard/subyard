@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "lanes": [
+    {"id": "broker-cold-upgrade", "arguments": ["--lane", "broker-cold-upgrade"]},
+    {"id": "full-uninstall", "arguments": ["--lane", "full-uninstall"]}
+  ]
+}

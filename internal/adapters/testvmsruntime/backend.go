@@ -167,7 +167,7 @@ func (backend *Backend) prepareApply(ctx context.Context, physical bool) (*Prepa
 	if p.download, err = os.ReadFile(state.downloadHelper); err != nil {
 		return nil, err
 	}
-	if p.recipes, p.manifest, err = recipeBundle(backend.RepositoryRoot); err != nil {
+	if p.recipes, p.manifest, err = RecipeBundle(backend.RepositoryRoot); err != nil {
 		return nil, err
 	}
 	if err := p.checkEngine(); err != nil {

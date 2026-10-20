@@ -2,6 +2,7 @@
 """Host-free checks for the real-boot observer's projection and cleanup."""
 import json
 import hashlib
+import copy
 import pathlib
 import re
 import shlex
@@ -593,7 +594,7 @@ assert exported.returncode == 0, exported
 actor_context = exported.stdout.splitlines(); assert len(actor_context) == 4
 with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid')]:
+    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid','supported-purpose','foreign-matching-purpose')]:
         case = root/(scope+'-'+(failed or 'success')); lists = case/'var/lib/apt/lists'; lists.mkdir(parents=True)
         locks = [case/name for name in ['var/lib/dpkg/lock-frontend','var/lib/dpkg/lock','var/lib/apt/lists/lock']]
         for lock in locks: lock.parent.mkdir(parents=True, exist_ok=True); lock.touch()
@@ -607,8 +608,11 @@ with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as dir
         if failed == 'special': os.mkfifo(lists/'late-fifo')
         state=case/'state';state.mkdir(mode=0o711);state.chmod(0o711)
         marker=state/'.subyard-p0-marker';marker.write_text(('foreign' if failed=='marker' else 'fixture')+'\n');marker.chmod(0o600)
+        current_context=list(actor_context)
+        if failed=='supported-purpose': current_context[-1]='broker-cold-upgrade'
+        if failed=='foreign-matching-purpose': current_context[-1]='foreign-purpose'
         lease=case/'lease';lease.write_text(json.dumps({'schema_version':1 if failed=='lease' else 2,'yard':'workspace-attribution',
-            **dict(zip(('project','run','slot','purpose'),actor_context))}));lease.chmod(0o444)
+            **dict(zip(('project','run','slot','purpose'),current_context))}));lease.chmod(0o444)
         if failed=='marker-mode':marker.chmod(0o644)
         if failed=='lease-link':os.link(lease,case/'lease-copy')
         if failed=='lease-symlink':lease.rename(case/'lease-original');lease.symlink_to(case/'lease-original')
@@ -635,23 +639,23 @@ subprocess.check_output=command
             import fcntl
             held = locks[0].open('r+'); fcntl.lockf(held, fcntl.LOCK_EX|fcntl.LOCK_NB)
         context = ['foreign-'+key if failed == key else value
-            for key,value in zip(('project','run','slot','purpose'),actor_context)]
+            for key,value in zip(('project','run','slot','purpose'),current_context)]
         result = subprocess.run(['python3', '-c', setup+payload,scope,str(state),'fixture',str(os.getuid()),
             *context], capture_output=True, text=True, timeout=5)
         if held: held.close()
-        refused=bool(failed) and not failed.startswith('du-')
+        refused=bool(failed) and not failed.startswith('du-') and failed!='supported-purpose'
         assert (result.returncode != 0) == refused, (scope,failed,result)
         assert index.exists() == refused and (partial/'index').exists() == refused and foreign.read_text() == 'foreign bytes', result
         rows=[json.loads(line.split('=',1)[1]) for line in result.stdout.splitlines()]
         assert len(rows)==(0 if refused else 2) and 'private APT index bytes' not in result.stdout+result.stderr,result
         if rows:
             assert [row['phase'] for row in rows]==['before_reclaim','after_reclaim'] and all(row['scope']==scope and set(row)=={'phase','scope','apt_lists_bytes'} for row in rows),rows
-            assert all(row['apt_lists_bytes'] is None for row in rows) if failed else rows[0]['apt_lists_bytes']>rows[1]['apt_lists_bytes']>=0,rows
+            assert all(row['apt_lists_bytes'] is None for row in rows) if failed.startswith('du-') else rows[0]['apt_lists_bytes']>rows[1]['apt_lists_bytes']>=0,rows
         assert [lock.stat().st_ino for lock in locks] == inodes, 'APT lock inode changed'
     reclaim_apt = re.search(r'^reclaim_owner_apt_indexes\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
     for owned, installed in [(0,1),(1,0)]:
         script = f'''set -euo pipefail
-MINIMAL_OWNER={owned}
+MINIMAL_OWNER={owned}; SUPPORTED_UPGRADE=0
 verify_broker_installation() {{ return {0 if installed else 1}; }}
 p0_capacity_assert_root_marker() {{ :; }}
 outer_exec() {{ echo unsafe_deletion; }}
@@ -661,7 +665,7 @@ outer_exec() {{ echo unsafe_deletion; }}
     context_start=fixture.index('readonly -a OUTER_E2E_CONTEXT=')
     outer_context=fixture[context_start:fixture.index('\nTOKEN=',context_start)]
     script='set -euo pipefail\n'+guest_exports+'\n'+outer_context+"""
-SUBYARD_E2E_YARD=nested-yard; MINIMAL_OWNER=1; P0_CAPACITY_STATE_ROOT=/tmp/fixture; MARKER=fixture
+SUBYARD_E2E_YARD=nested-yard; MINIMAL_OWNER=1; SUPPORTED_UPGRADE=0; P0_CAPACITY_STATE_ROOT=/tmp/fixture; MARKER=fixture
 p0_capacity_assert_root_marker() { :; }
 verify_broker_installation() { :; }
 outer_exec() { printf 'owner:%s\\n' "$*"; cat >/dev/null; }
@@ -671,6 +675,27 @@ sudo() { printf 'l1:%s\\n' "$*"; cat >/dev/null; }
     assert result.returncode==0 and len(result.stdout.splitlines())==2,result
     assert all(' '.join(actor_context) in line and 'broker-selector' not in line and 'nested-yard' not in line
         for line in result.stdout.splitlines()),result
+    # The supported owner is created by the published runtime's normal init,
+    # rather than the minimal diagnostic driver. Both keep identical proof gates.
+    supported_script=script.replace('MINIMAL_OWNER=1; SUPPORTED_UPGRADE=0', 'MINIMAL_OWNER=0; SUPPORTED_UPGRADE=1')
+    result=subprocess.run(['bash','-c',supported_script],capture_output=True,text=True,timeout=5)
+    assert result.returncode==0 and len(result.stdout.splitlines())==2,result
+    for guard in ['p0_capacity_assert_root_marker', 'verify_broker_installation']:
+        refused=supported_script.replace(guard+'() { :; }',guard+'() { return 1; }')
+        result=subprocess.run(['bash','-c',refused],capture_output=True,text=True,timeout=5)
+        assert result.returncode==1 and not result.stdout,result
+    release_gate=fixture.split('if [ "$RELEASE_STAGED" = 1 ]; then\n  reclaim_release_staging',1)[1].split('\nfi',1)[0]
+    release_gate='if [ "$RELEASE_STAGED" = 1 ]; then\n  reclaim_release_staging'+release_gate+'\nfi'
+    for staged in [0,1]:
+        for native in [0,23]:
+            script=f"""set -euo pipefail
+RELEASE_STAGED={staged}
+reclaim_release_staging() {{ echo staged; return {native}; }}
+die() {{ exit 2; }}
+"""+release_gate
+            result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+            assert result.stdout==('staged\n' if staged else ''),result
+            assert result.returncode==(2 if staged and native else 0),result
 print('APT indexes require native locks, canonical ownership and complete preflight; lock inodes survive')
 
 fault_payload = fixture.split("<<'PYINVENTORYFAULT'\n", 1)[1].split('\nPYINVENTORYFAULT', 1)[0]
@@ -842,3 +867,203 @@ runtime_yard() {{ printf '%s\n' {shlex.quote(event_body)}; }}
             if failed in ['pause','setup','release','consumed','quarantine','fence','incident','host','replay','restore']:
                 assert 'systemctl' not in calls, (failed,calls)
 print('actual singleton recovery phase requires original failure, capture, immutable replay, restoration, fencing and native availability proofs')
+
+# Execute the shared pre-acquire boundary: supported history must build only via
+# acquire, while the established reliability diagnostic retains explicit refresh.
+cold = fixture.split('if [ "$SUPPORTED_UPGRADE" = 0 ]; then\n  printf \'  [ .. ] cold post-upgrade base validation', 1)[1]
+cold = 'if [ "$SUPPORTED_UPGRADE" = 0 ]; then\n  printf \'  [ .. ] cold post-upgrade base validation' + cold.split('\nstart_holder_child hold_lease holder', 1)[0]
+resource_observer = re.search(r'^observe_cold_resources\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
+native_idle = {'status':'ok','pool':{'slots':[{'slot_id':'slot-001','state':'available'}]},
+               'resources':{'bases':[],'memory_admission':{'physical_available_known':True,
+                 'pending_builder_bytes':0,'pending_vm_bytes':0},'reserved_vm_memory_bytes':0}}
+for supported, cached, success in [(1, False, True), (1, True, False), (0, False, True)]:
+    with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+        marker = pathlib.Path(directory) / 'refresh'
+        sample=copy.deepcopy(native_idle)
+        sample['resources']['bases']=[{'type':'subyard-pair','fingerprint':'a'*64,'current':True}] if cached or not supported else []
+        body=json.dumps(sample)
+        script = f"""set -euo pipefail
+SUPPORTED_UPGRADE={supported}
+SUBYARD_HOME=/unused
+status() {{ printf '%s' '{body}'; }}
+timeout() {{ : > '{marker}'; }}
+outer_exec() {{ printf '%s' '{{"properties":{{"user.subyard.base_validation":"cidata-seed-clean-v2"}},"type":"virtual-machine"}}'; }}
+die() {{ exit 2; }}
+""" + resource_observer + '\n' + cold
+        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
+        assert (result.returncode == 0) == success, result
+        assert marker.exists() == (not supported), result
+print('supported upgrade cold boundary refuses cached bases and never refreshes before acquire')
+
+# Run the same production observer and terminal boundary against native-shaped
+# snapshots. Absent idle builder/errors are normal; unknown evidence never is.
+terminal = fixture.rsplit('if [ "$SUPPORTED_UPGRADE" = 1 ]; then\n  observe_cold_resources released',1)[1]
+terminal = 'if [ "$SUPPORTED_UPGRADE" = 1 ]; then\n  observe_cold_resources released' + terminal.split('\nverify_singleton_recovery',1)[0]
+for phase in ['before_acquire','released']:
+    valid=copy.deepcopy(native_idle)
+    if phase=='released': valid['resources']['bases']=[{'type':'subyard-pair','fingerprint':'a'*64,'current':True}]
+    samples=[('omitted-idle-builder-and-diagnostics',valid,True)]
+    explicit=copy.deepcopy(valid); explicit['resources']['errors']=[]
+    samples.append(('empty-diagnostics',explicit,True))
+    for path,values in [
+        (['resources'],[None,[], 'unknown']),
+        (['resources','bases'],[None,{},'unknown',[None],[{'type':'subyard-pair','fingerprint':'invalid','current':True}]]),
+        (['resources','memory_admission'],[None,{},'unknown']),
+        (['resources','memory_admission','physical_available_known'],[None,False,'true']),
+        (['resources','memory_admission','pending_builder_bytes'],[None,'0',False,-1,0.5,1]),
+        (['resources','memory_admission','pending_vm_bytes'],[None,'0',False,-1,0.5,1]),
+        (['resources','reserved_vm_memory_bytes'],[None,'0',False,-1,0.5,1]),
+        (['resources','builder'],[None,{}, {'type':'subyard-pair','reserved_memory_bytes':2684354560}]),
+        (['resources','errors'],[None,{},'unknown',['image_registry_unavailable'],['memory_telemetry_unavailable'],['future_unknown_error']]),
+        (['pool','slots'],[None,[],[{'slot_id':'slot-002','state':'available'}],[{'slot_id':'slot-001','state':'provisioning'}]])]:
+        for value in values:
+            sample=copy.deepcopy(valid); target=sample
+            for key in path[:-1]: target=target[key]
+            target[path[-1]]=value
+            samples.append(('.'.join(path)+'='+repr(value),sample,False))
+        sample=copy.deepcopy(valid); target=sample
+        for key in path[:-1]: target=target[key]
+        target.pop(path[-1],None)
+        # Builder and empty diagnostics are legitimate omitted native fields.
+        samples.append(('missing '+'.'.join(path),sample,path[-1] in ['builder','errors']))
+    if phase=='before_acquire':
+        sample=copy.deepcopy(valid); sample['resources']['bases']=[{'type':'subyard-pair','fingerprint':'a'*64,'current':True}]
+        samples.append(('cached-base',sample,False))
+    else:
+        for bases in [[],[{'type':'subyard-pair','fingerprint':'b'*64,'current':True}],
+                      [{'type':'subyard-pair','fingerprint':'a'*64,'current':False}]]:
+            sample=copy.deepcopy(valid); sample['resources']['bases']=bases
+            samples.append(('missing-bound-current-base',sample,False))
+    for label,sample,success in samples:
+        script='set -euo pipefail\nSUPPORTED_UPGRADE=1; base='+('a'*64)+'\n'
+        script+='status() { printf %s '+shlex.quote(json.dumps(sample))+'; }\n'
+        script+='outer_exec() { :; }\ndie() { exit 2; }\n'+resource_observer+'\n'
+        script+=('observe_cold_resources before_acquire\n' if phase=='before_acquire' else terminal)
+        result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+        assert (result.returncode==0)==success,(phase,label,result)
+        assert ('STAGING_SUPPORTED_COLD_TERMINAL=' in result.stdout)==(phase=='released' and success),(phase,label,result)
+        if success:
+            observed=json.loads(result.stdout.split('STAGING_RESOURCE_OBSERVATION=',1)[1].splitlines()[0])
+            assert observed['phase']==phase and observed['diagnostics_complete'] is True and observed['builder_present'] is False,observed
+            assert all(type(observed[key]) is int and observed[key]==0 for key in ['pending_builder_bytes','pending_vm_bytes','reserved_vm_memory_bytes']),observed
+            assert set(observed)=={'phase','slot_state','bases','builder_present','pending_builder_bytes','pending_vm_bytes','reserved_vm_memory_bytes','diagnostics_complete'},observed
+            if phase=='released': assert observed['bases']==valid['resources']['bases'],observed
+print('native cold/final resource observations require typed complete evidence; unknown registry/memory/counts refuse and omitted idle builder passes')
+
+# Execute the predecessor's preparation boundary with physical peers replaced.
+# The real preparation function remains shared; it runs while 0.19 is installed,
+# and the native predecessor must publish an available broker before the update.
+predecessor = fixture.split('  baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"\n', 1)[1].split('  # Stage only verified frozen assets', 1)[0]
+predecessor = 'baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"\n' + predecessor
+with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp') as directory:
+    root = pathlib.Path(directory)
+    launcher = root / 'runtime/current/bin/yard'
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text('#!/bin/bash\nprintf "yard 0.19.0\\n"\n')
+    launcher.chmod(0o700)
+    leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
+    leaf.parent.mkdir(parents=True)
+    leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
+    for failure in ['', 'version', 'worker', 'native-state', 'git-operation']:
+        log = root / ('calls-' + (failure or 'success'))
+        script = f"""set -euo pipefail
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner
+prepare_minimal_owner() {{ printf 'minimal\n' >> '{log}'; }}
+runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else "0.19.0"}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
+verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
+outer_exec() {{
+  case "$*" in
+    'python3 - /home/dev off check') printf 'git-operation\n' >> '{log}'; cat >/dev/null; return {1 if failure == 'git-operation' else 0} ;;
+    *'_test-vms-worker status') printf 'native-state\n' >> '{log}'; printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}}}}' ;;
+    *sha256sum*) printf '%s  leases.json\n' '{"a"*64}' ;;
+    *) return 99 ;;
+  esac
+}}
+incus() {{ printf '%s\n' '01234567-89ab-cdef-0123-456789abcdef'; }}
+die() {{ exit 2; }}
+""" + predecessor
+        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
+        assert (result.returncode == 0) == (not failure), result
+        calls = log.read_text().splitlines()
+        assert calls == {'version':['minimal'], 'worker':['minimal','verified'],
+                          'native-state':['minimal','verified','native-state'],
+                          'git-operation':['minimal','verified','native-state','git-operation'],
+                          '':['minimal','verified','native-state','git-operation']}[failure], calls
+        assert ('STAGING_BASELINE_BROKER=' in result.stdout) == (failure in ['', 'git-operation']), result
+print('shared minimal preparation retains authentic predecessor and requires native broker ownership before upgrade')
+
+# Execute the candidate's real Git configuration function as the process user.
+# Physical preflight uses the same leaf's CLI, which drops to native guest dev.
+with tempfile.TemporaryDirectory(prefix='subyard-updater-git-', dir='/tmp') as directory:
+    root = pathlib.Path(directory)
+    home = root / 'home'; home.mkdir(mode=0o700)
+    config = home / '.config/git/config'; config.parent.mkdir(parents=True)
+    config.write_text('[user]\n\tname = Fixture\n'); config.chmod(0o600)
+    original = config.read_bytes()
+    import shutil
+    native_git = shutil.which('git'); assert native_git
+    for installed in [False, True]:
+        tools = root / ('installed' if installed else 'missing'); tools.mkdir(mode=0o700)
+        if installed: (tools / 'git').symlink_to(native_git)
+        operation = "import pathlib,runpy,sys; leaf=runpy.run_path(sys.argv[1]); assert leaf['reconcile'](pathlib.Path(sys.argv[2]),'off','check')"
+        result = subprocess.run([sys.executable, '-c', operation,
+                                 str(pathlib.Path('config/profiles/github/git_wiring.py').resolve()), str(home)],
+                                env={'PATH':str(tools),'HOME':str(home),'LC_ALL':'C'},
+                                capture_output=True,text=True,timeout=5)
+        assert (result.returncode==0)==installed, result
+        if not installed: assert 'FileNotFoundError' in result.stderr and "'git'" in result.stderr,result
+        assert config.read_bytes()==original and not (home/'.config/subyard/github-git.conf').exists()
+print('actual updater Git configuration operation rejects missing Git and preserves native user config')
+
+# Exercise consumed-input cleanup on real private files, including all-or-nothing
+# refusal before deletion. Installed history and controller/source bytes survive.
+consumed = fixture.split("<<'PYCONSUMED'",1)[1].split('\n',1)[1].split('\nPYCONSUMED',1)[0]
+for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-digest', 'baseline-digest']:
+    with tempfile.TemporaryDirectory(prefix='subyard-worktree.',dir='/tmp') as directory:
+        parent=pathlib.Path(directory); root=parent/'src'; owner=parent/'owner'
+        runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/'baseline-0.19.0'
+        for target in [runtime,release,baseline,root/'dev',owner/'installed/current',owner/'installed/previous']:
+            target.mkdir(parents=True,exist_ok=True)
+        for target in [runtime/'engine',release/'runtime.tar.gz',baseline/'archive',owner/'installed/current/engine',owner/'installed/previous/engine',parent/'worktree.tar.gz']:
+            target.write_bytes(b'verified fixture bytes')
+        digest=hashlib.sha256(b'verified fixture bytes').hexdigest()
+        (root/'.subyard-acceptance/candidate.json').write_text(json.dumps({'runtime_file':'runtime.tar.gz','runtime_sha256':digest}))
+        (root/'dev/verify-release-upgrades.py').write_text("import hashlib\nDIRECT_BASELINE='0.19.0'\nDIRECT_BASELINE_SHA256={'amd64':"+repr(digest)+"}\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
+        if fault=='symlink': (runtime/'foreign').symlink_to(owner/'installed/current')
+        if fault=='hardlink': os.link(owner/'installed/current/engine',runtime/'foreign')
+        if fault=='candidate-digest': (release/'runtime.tar.gz').write_bytes(b'changed')
+        if fault=='baseline-digest': (baseline/'archive').write_bytes(b'changed')
+        prefix=''
+        if fault=='mount':
+            prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(runtime))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
+        if fault=='foreign-owner': prefix='from unittest import mock\nmock.patch.object(os,\'geteuid\',return_value=os.geteuid()+1).start()\n'
+        program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:])')
+        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner)],capture_output=True,text=True,timeout=5)
+        assert (result.returncode==0)==(fault==''),(fault,result)
+        for target in [runtime,release,baseline,parent/'worktree.tar.gz']:
+            assert target.exists()==bool(fault),(fault,target,result)
+        assert (root/'dev/verify-release-upgrades.py').exists()
+        assert all((owner/f'installed/{history}/engine').read_bytes()==b'verified fixture bytes' for history in ['current','previous'])
+        if not fault:
+            receipt=json.loads(result.stdout.split('STAGING_CONSUMED_INPUTS=',1)[1])
+            assert receipt['total_allocated_bytes']==sum(receipt['allocated_bytes'].values())>0,receipt
+
+reclaim = re.search(r'^reclaim_supported_upgrade_inputs\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
+fingerprint='a'*64
+for fault in ['', 'unbound','marker','identity','alias','baseline-image']:
+    script=f"""set -euo pipefail
+ROOT=/tmp/subyard-worktree.fixture/src; OWNER_ROOT=/tmp/owner
+SUPPORTED_UPGRADE=1; SUPPORTED_UPGRADE_BOUND={0 if fault=='unbound' else 1}
+OWNER_BASE_IMAGE_CREATED=1; OWNER_BASE_IMAGE_FINGERPRINT={fingerprint}
+OWNER_BASELINE_IMAGES={'a'*64 if fault=='baseline-image' else ''}
+p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
+verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
+incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}
+python3() {{ cat >/dev/null; echo consumed; }}
+reclaim_broker_recovery_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; echo image; OWNER_BASE_IMAGE_CREATED=0; }}
+"""+reclaim+'\nreclaim_supported_upgrade_inputs\n'
+    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+    assert (result.returncode==0)==(fault==''),(fault,result)
+    assert ('consumed' in result.stdout)==(fault==''),(fault,result)
+    assert ('STAGING_CONSUMED_OWNER_IMAGE=' in result.stdout)==(fault==''),(fault,result)
+print('verified consumed upgrade inputs reclaim allocated bytes; foreign/link/mount/digest/identity/image drift refuses before deletion')

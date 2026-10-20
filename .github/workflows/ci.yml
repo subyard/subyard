@@ -61,6 +61,8 @@ jobs:
           shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
       - name: Complete shipped profile acceptance inventory
         run: bash dev/test-profiles.sh --e2e --list
+      - name: Broker installer and bundled recipe prerequisites
+        run: bash config/profiles/test-vms/tests/run.sh --preflight
       - name: Yard-safe verification gate
         run: |
           set -o pipefail
