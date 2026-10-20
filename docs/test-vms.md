@@ -681,6 +681,20 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
+For P0 host-sink isolation and cleanup, the existing cleanup fixture has a focused physical mode:
+
+```sh
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose p0-sink-lifecycle -- \
+  bash tests/real-host/p0-cleanup-recovery.sh sink-lifecycle 123
+```
+
+It uses a real Incus producer and explicit systemd oneshots to verify fixture collection,
+removal, and preservation of the common sink's disabled intent, events and incidents. It never
+waits for a periodic sink tick. Host-free interruption and fresh-process cleanup checks remain
+in `tests/p0-capacity.sh`; this focused mode does not replace a required full P0 run. Marker-owned tree deletion retries
+automatically. Unsafe sink artifacts or custody metadata, and metadata-only or missing-service
+inventories, return nonzero and retain the marked fixture root for inspection.
+
 The integration selection fixtures use only marker-owned yards on allocated VM1. They exercise
 fresh/default selection, legacy selection adoption with established inventory, evidence-backed
 retirement, desired-retained failure and retry, and stopped-yard rejection without model API calls:

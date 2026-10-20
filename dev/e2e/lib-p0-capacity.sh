@@ -29,14 +29,15 @@ p0_capacity_init() {
 p0_capacity_assert_root_marker() {
   [ -d "$P0_CAPACITY_STATE_ROOT" ] && [ ! -L "$P0_CAPACITY_STATE_ROOT" ] \
     || p0_capacity_die "state root is unavailable: $P0_CAPACITY_STATE_ROOT" || return
-  [ "$(cat "$P0_CAPACITY_STATE_ROOT/.subyard-p0-marker" 2>/dev/null)" = \
-      "$P0_CAPACITY_MARKER" ] \
-    || p0_capacity_die "refusing unmarked state root $P0_CAPACITY_STATE_ROOT"
+  p0_capacity_assert_tree_marker "$P0_CAPACITY_STATE_ROOT" "$P0_CAPACITY_MARKER"
 }
 
 p0_capacity_prepare_root() {
   local marker="$P0_CAPACITY_STATE_ROOT/.subyard-p0-marker"
   install -d -m 0711 "$HOME/.cache"
+  if [ -e "$P0_CAPACITY_STATE_ROOT.subyard-p0-cleanup" ] || [ -L "$P0_CAPACITY_STATE_ROOT.subyard-p0-cleanup" ]; then
+    p0_capacity_delete_tree "$P0_CAPACITY_STATE_ROOT" || return
+  fi
   if [ -e "$P0_CAPACITY_STATE_ROOT" ]; then
     [ -d "$P0_CAPACITY_STATE_ROOT" ] && [ ! -L "$P0_CAPACITY_STATE_ROOT" ] \
       || p0_capacity_die "state root is not a plain directory: $P0_CAPACITY_STATE_ROOT" || return
@@ -83,6 +84,9 @@ p0_capacity_prepare_subtree() {
     "$P0_CAPACITY_STATE_ROOT"/*) ;;
     *) p0_capacity_die "unsafe P0 subtree $path"; return ;;
   esac
+  if [ -e "$path.subyard-p0-cleanup" ] || [ -L "$path.subyard-p0-cleanup" ]; then
+    p0_capacity_delete_tree "$path" || return
+  fi
   if [ -e "$path" ]; then
     [ -d "$path" ] && [ ! -L "$path" ] \
       || p0_capacity_die "P0 subtree is not a plain directory: $path" || return
@@ -100,6 +104,13 @@ p0_capacity_prepare_subtree() {
 p0_capacity_retire_fixture_sink() {
   local data_home="${1:?fixture data home is required}" state environment execution property value
   local service=subyard-test-vms-host-sink.service timer=subyard-test-vms-host-sink.timer
+  local sink=/usr/local/libexec/subyard/test-vms-host-sink
+  if [ -n "${2:-}" ]; then
+    [[ "$2" =~ ^[0-9]+$ ]] || p0_capacity_die "invalid fixture sink token" || return
+    service="subyard-p0-$2-test-vms-host-sink.service"
+    timer="subyard-p0-$2-test-vms-host-sink.timer"
+    sink="/usr/local/libexec/subyard/subyard-p0-$2-test-vms-host-sink"
+  fi
   local environment_pattern='^SUBYARD_HOME=(/[A-Za-z0-9_./-]+) SUBYARD_OPERATOR_GID=[0-9]+$'
   local command_pattern='^\{ path=/usr/local/libexec/subyard/test-vms-host-sink ; argv\[\]=/usr/local/libexec/subyard/test-vms-host-sink _test-vms-host-sink sync ; ignore_errors=no ; [^{}]* \}$'
   command -v systemctl >/dev/null 2>&1 || return 0
@@ -115,6 +126,7 @@ p0_capacity_retire_fixture_sink() {
     || { p0_capacity_die 'matching fixture host sink is not loaded safely'; return; }
   execution="$(systemctl show "$service" -p ExecStart --value)" \
     || { p0_capacity_die 'cannot inspect matching fixture host sink command'; return; }
+  command_pattern="${command_pattern//\/usr\/local\/libexec\/subyard\/test-vms-host-sink/$sink}"
   [[ "$execution" =~ $command_pattern ]] \
     || { p0_capacity_die 'matching fixture host sink has an unexpected command'; return; }
   for property in DropInPaths EnvironmentFiles ExecStartPre ExecStartPost ExecStop ExecStopPost; do
@@ -135,39 +147,204 @@ p0_capacity_retire_fixture_sink() {
   sudo -n systemctl stop "$service"
 }
 
-p0_capacity_delete_tree() {
-  local path="${1:?tree path is required}" owner
-  owner="$(id -u)"
-  if find "$path" -xdev ! -user "$owner" -print -quit 2>/dev/null | grep -q .; then
-    sudo -n find "$path" -xdev -type d -exec chmod u+rwx {} +
-    sudo -n find "$path" -depth -delete
-  else
-    find "$path" -xdev -type d -exec chmod u+rwx {} +
-    find "$path" -depth -delete
+p0_capacity_cleanup_fixture_sink() {
+  local OWNER_DATA_ROOT="$1" OWNER_TEST_VMS_SINK="$2"
+  local OWNER_TEST_VMS_SINK_SERVICE="$3" OWNER_TEST_VMS_SINK_TIMER="$4" OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$5"
+  local OWNER_TEST_VMS_SINK_SERVICE_NAME="${3##*/}" OWNER_TEST_VMS_SINK_TIMER_NAME="${4##*/}"
+  local path sidecar present=0 touched=0 unsafe=0 installed_before custody_helper
+  local -a sink_homes=()
+  for path in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" \
+    "$OWNER_TEST_VMS_SINK_TIMER"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      present=1
+      [ -f "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = 0:0 ] \
+        || unsafe=1
+    fi
+    for sidecar in native-install.lock native-custody.json; do
+      if [ -e "${path%/*}/.${path##*/}.$sidecar" ] || [ -L "${path%/*}/.${path##*/}.$sidecar" ]; then
+        present=1
+      fi
+    done
+  done
+  if [ "$present" = 1 ]; then
+    [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] \
+      || unsafe=1
   fi
+  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
+    cmp -s "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER" \
+      || unsafe=1
+  fi
+  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] && [ "$unsafe" = 0 ]; then
+    mapfile -t sink_homes < <(sed -n 's/^Environment="SUBYARD_HOME=\([^"[:space:]]*\)"$/\1/p' \
+      "$OWNER_TEST_VMS_SINK_SERVICE")
+    [ "${#sink_homes[@]}" = 1 ] && [[ "${sink_homes[0]}" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+      && grep -Fqx "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
+        "$OWNER_TEST_VMS_SINK_SERVICE" \
+      || unsafe=1
+  fi
+  [ "$unsafe" = 0 ] \
+    || { printf 'p0-guest: refusing unsafe owner test-vms sink artifacts\n' >&2; return 1; }
+  # A retained platform sink can belong to another fixture. Its valid artifacts
+  # are outside this owner's cleanup scope, just as in retire_fixture_sink.
+  if [ "$present" = 1 ] && [ "${sink_homes[0]}" != "$OWNER_DATA_ROOT" ]; then
+    return 0
+  fi
+  custody_helper="$(dirname "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE")/../../scripts/lib/native-install-custody.py"
+  installed_before="$(python3 - "$custody_helper" "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_TIMER" "$OWNER_TEST_VMS_SINK_SERVICE" <<'PY_INSTALLED'
+import runpy,sys
+print(runpy.run_path(sys.argv[1])['installed_files'](sys.argv[2:]))
+PY_INSTALLED
+  )" || return
+  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
+    sudo -n systemctl disable --now "$OWNER_TEST_VMS_SINK_TIMER_NAME" >/dev/null 2>&1 \
+      || return 1
+    touched=1
+  fi
+  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ]; then
+    sudo -n systemctl stop "$OWNER_TEST_VMS_SINK_SERVICE_NAME" >/dev/null 2>&1 \
+      || return 1
+    touched=1
+  fi
+  if [ "$present" = 1 ]; then
+    # Retain all exact resource locks through removal. The account owner barrier
+    # is shared with normal operations and deliberately remains outside this scope.
+    sudo -n python3 - "$custody_helper" "$installed_before" \
+      "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_TIMER" "$OWNER_TEST_VMS_SINK_SERVICE" <<'PY_REMOVE_SINK' || return
+import os,pathlib,runpy,sys
+native=runpy.run_path(sys.argv[1]); paths=list(map(pathlib.Path,sys.argv[3:])); locks=[]; records=[]
+try:
+    for path in paths:
+        lock=path.with_name('.'+path.name+'.native-install.lock')
+        record=path.with_name('.'+path.name+'.native-custody.json')
+        native['safe_parent'](path.parent)
+        if lock.exists() or lock.is_symlink():
+            fd=os.open(lock,os.O_RDWR|os.O_NOFOLLOW);locks.append((lock,fd))
+            native['validate_lock'](lock,fd)
+            native['observe'](record,'test-vms-host-sink');records.append(record)
+        elif record.exists() or record.is_symlink():
+            raise ValueError('sink custody record has no resource lock')
+    if native['installed_files'](list(map(str,paths))) != sys.argv[2]:
+        raise ValueError('sink artifacts changed before cleanup')
+    for path in paths:
+        if path.exists(): path.unlink()
+    for record in records:
+        if record.exists(): record.unlink()
+    for lock,fd in locks:
+        native['validate_lock'](lock,fd);lock.unlink()
+finally:
+    for _,fd in locks: os.close(fd)
+PY_REMOVE_SINK
+    touched=1
+  fi
+  [ "$touched" = 0 ] || sudo -n systemctl daemon-reload >/dev/null 2>&1
+}
+
+# A receipt is only authority to finish an empty directory with this exact inode.
+# Keep it outside the tree so process loss after unlinking the marker is resumable.
+p0_capacity_assert_finalization() {
+  local path="$1" marker="$2" receipt="$1.subyard-p0-cleanup" identity
+  [ "$(realpath -m -- "$path")" = "$path" ] \
+    || p0_capacity_die "unsafe P0 finalization path $path" || return
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -O "$receipt" ] \
+    && [ "$(stat -c %a "$receipt")" = 600 ] \
+    || p0_capacity_die "unsafe P0 cleanup receipt $receipt" || return
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -d "$path" ] && [ ! -L "$path" ] \
+      || p0_capacity_die "unsafe P0 finalization root $path" || return
+    identity="$(stat -c '%d:%i' "$path")" || return
+    [ "$(cat "$receipt")" = "$(printf '%s\n%s\n%s' "$marker" "$path" "$identity")" ] \
+      || p0_capacity_die "P0 finalization identity changed: $path" || return
+    [ -z "$(find "$path" -mindepth 1 -maxdepth 1 ! -name .subyard-p0-marker -print -quit)" ] \
+      || p0_capacity_die "P0 finalization root has unexpected contents: $path" || return
+  else
+    # No inode remains to inspect, but never consume an unrelated receipt.
+    local recorded_marker recorded_path recorded_identity extra
+    { IFS= read -r recorded_marker; IFS= read -r recorded_path; IFS= read -r recorded_identity; extra="$(cat)"; } < "$receipt"
+    [ "$recorded_marker" = "$marker" ] && [ "$recorded_path" = "$path" ] \
+      && [[ "$recorded_identity" =~ ^[0-9]+:[0-9]+$ ]] && [ -z "$extra" ] \
+      || p0_capacity_die "invalid orphan P0 cleanup receipt $receipt" || return
+  fi
+}
+
+p0_capacity_assert_tree_marker() {
+  local path="$1" marker="$2"
+  [ -d "$path" ] && [ ! -L "$path" ] \
+    || p0_capacity_die "unsafe P0 tree $path" || return
+  if [ -e "$path.subyard-p0-cleanup" ] || [ -L "$path.subyard-p0-cleanup" ]; then
+    p0_capacity_assert_finalization "$path" "$marker" || return
+  fi
+  if [ -e "$path/.subyard-p0-marker" ] || [ -L "$path/.subyard-p0-marker" ]; then
+    [ -f "$path/.subyard-p0-marker" ] && [ ! -L "$path/.subyard-p0-marker" ] \
+      && [ "$(cat "$path/.subyard-p0-marker")" = "$marker" ] \
+      || p0_capacity_die "refusing unmarked P0 tree $path"
+  else
+    p0_capacity_assert_finalization "$path" "$marker"
+  fi
+}
+
+p0_capacity_delete_tree() {
+  local path="${1:?tree path is required}" marker="${2:-$P0_CAPACITY_MARKER}"
+  local owner receipt="$path.subyard-p0-cleanup" temporary
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] && return 0
+    p0_capacity_assert_finalization "$path" "$marker" || return
+    find "$receipt" -maxdepth 0 -delete
+    return
+  fi
+  p0_capacity_assert_tree_marker "$path" "$marker" || return
+  owner="$(id -u)"
+  local -a privilege=()
+  if find "$path" -xdev ! -user "$owner" -print -quit 2>/dev/null | grep -q .; then
+    privilege=(sudo -n)
+  fi
+  if [ ! -e "$receipt" ]; then
+    "${privilege[@]}" find "$path" -xdev -type d -exec chmod u+rwx {} + || return
+    "${privilege[@]}" find "$path" -xdev -depth -mindepth 1 \
+      ! -path "$path/.subyard-p0-marker" -delete || return
+    temporary="$(mktemp "$path/.subyard-p0-finalize.XXXXXX")" || return
+    printf '%s\n%s\n%s\n' "$marker" "$path" "$(stat -c '%d:%i' "$path")" > "$temporary"
+    chmod 0600 "$temporary"
+    mv -T -n -- "$temporary" "$receipt" || return
+    [ ! -e "$temporary" ] || { find "$temporary" -delete; return 1; }
+  fi
+  p0_capacity_assert_finalization "$path" "$marker" || return
+  "${privilege[@]}" find "$path/.subyard-p0-marker" -maxdepth 0 -delete 2>/dev/null \
+    || [ ! -e "$path/.subyard-p0-marker" ] || return
+  "${privilege[@]}" rmdir -- "$path" || return
+  find "$receipt" -maxdepth 0 -delete
 }
 
 p0_capacity_recover_stale_roots() {
   local path name token marker
   for path in "$HOME"/.cache/subyard-p0-*; do
-    [ -e "$path" ] || continue
+    path="${path%.subyard-p0-cleanup}"
+    [ -e "$path" ] || [ -e "$path.subyard-p0-cleanup" ] || continue
     [ "$path" != "$P0_CAPACITY_STATE_ROOT" ] || continue
-    [ -d "$path" ] && [ ! -L "$path" ] \
-      || p0_capacity_die "refusing stale non-directory P0 state $path" || return
     name="${path##*/}"
     token="${name#subyard-p0-}"
     [[ "$token" =~ ^[0-9]+$ ]] \
       || p0_capacity_die "refusing stale P0 state with invalid token $path" || return
     marker="subyard-p0-$token"
-    [ "$(cat "$path/.subyard-p0-marker" 2>/dev/null)" = "$marker" ] \
-      || p0_capacity_die "refusing unmarked stale P0 state $path" || return
+    if [ -e "$path" ]; then
+      p0_capacity_assert_tree_marker "$path" "$marker" || return
+    else
+      p0_capacity_assert_finalization "$path" "$marker" || return
+    fi
     if pgrep -u "$(id -u)" -f "$path" >/dev/null 2>&1; then
       p0_capacity_die "stale P0 state still has an active process: $path"
       return
     fi
     printf '  [ .. ] recovering marker-owned stale P0 state %s\n' "$name"
+    # Retire a matching pre-isolation sink too; foreign common sinks remain untouched.
     p0_capacity_retire_fixture_sink "$path/owner/subyard" || return
-    p0_capacity_delete_tree "$path" || return
+    p0_capacity_retire_fixture_sink "$path/owner/subyard" "$token" || return
+    p0_capacity_cleanup_fixture_sink "$path/owner/subyard" \
+      "/usr/local/libexec/subyard/subyard-p0-$token-test-vms-host-sink" \
+      "/etc/systemd/system/subyard-p0-$token-test-vms-host-sink.service" \
+      "/etc/systemd/system/subyard-p0-$token-test-vms-host-sink.timer" \
+      "$(dirname "${BASH_SOURCE[0]}")/../../config/systemd/subyard-test-vms-host-sink.timer.in" || return
+    p0_capacity_delete_tree "$path" "$marker" || return
   done
 }
 
@@ -178,30 +355,25 @@ p0_capacity_remove_subtree() {
     "$P0_CAPACITY_STATE_ROOT"/*) ;;
     *) p0_capacity_die "unsafe P0 subtree cleanup $path"; return ;;
   esac
-  [ ! -e "$path" ] \
-    || [ "$(cat "$path/.subyard-p0-marker" 2>/dev/null)" = "$P0_CAPACITY_MARKER" ] \
-    || p0_capacity_die "refusing unmarked P0 subtree cleanup $path" || return
-  [ ! -e "$path" ] || p0_capacity_delete_tree "$path"
+  p0_capacity_delete_tree "$path"
 }
 
 p0_capacity_remove_root_if_empty() {
   local entry marker="$P0_CAPACITY_STATE_ROOT/.subyard-p0-marker"
-  [ -e "$P0_CAPACITY_STATE_ROOT" ] || return 0
-  p0_capacity_assert_root_marker || return
-  entry="$(find "$P0_CAPACITY_STATE_ROOT" -mindepth 1 ! -path "$marker" -print -quit)"
-  [ -z "$entry" ] || return 0
-  find "$marker" -delete
-  rmdir "$P0_CAPACITY_STATE_ROOT"
+  if [ -e "$P0_CAPACITY_STATE_ROOT" ]; then
+    p0_capacity_assert_root_marker || return
+    # An unpublished private receipt is scratch below the still-marked root.
+    # Its publication is atomic; a published receipt allows no extra children.
+    entry="$(find "$P0_CAPACITY_STATE_ROOT" -mindepth 1 -maxdepth 1 ! -path "$marker" \
+      ! \( -name '.subyard-p0-finalize.*' -type f -user "$(id -u)" -perm 0600 \) -print -quit)"
+    [ -z "$entry" ] || return 0
+  fi
+  p0_capacity_delete_tree "$P0_CAPACITY_STATE_ROOT"
 }
 
 p0_capacity_reset_build_cache() {
   p0_capacity_prepare_root || return
-  if [ -e "$P0_CAPACITY_BUILD_CACHE" ]; then
-    [ "$(cat "$P0_CAPACITY_BUILD_CACHE/.subyard-p0-marker" 2>/dev/null)" = \
-        "$P0_CAPACITY_MARKER" ] \
-      || p0_capacity_die "refusing unmarked build cache $P0_CAPACITY_BUILD_CACHE" || return
-    find "$P0_CAPACITY_BUILD_CACHE" -depth -delete
-  fi
+  p0_capacity_remove_subtree "$P0_CAPACITY_BUILD_CACHE" || return
   install -d -m 0700 "$P0_CAPACITY_BUILD_CACHE"
   printf '%s\n' "$P0_CAPACITY_MARKER" > "$P0_CAPACITY_BUILD_CACHE/.subyard-p0-marker"
   chmod 0600 "$P0_CAPACITY_BUILD_CACHE/.subyard-p0-marker"
@@ -211,6 +383,9 @@ p0_capacity_reset_build_cache() {
 
 p0_capacity_use_build_cache() {
   p0_capacity_prepare_root || return
+  if [ -e "$P0_CAPACITY_BUILD_CACHE.subyard-p0-cleanup" ] || [ -L "$P0_CAPACITY_BUILD_CACHE.subyard-p0-cleanup" ]; then
+    p0_capacity_remove_subtree "$P0_CAPACITY_BUILD_CACHE" || return
+  fi
   if [ ! -e "$P0_CAPACITY_BUILD_CACHE" ]; then
     install -d -m 0700 "$P0_CAPACITY_BUILD_CACHE"
     printf '%s\n' "$P0_CAPACITY_MARKER" > "$P0_CAPACITY_BUILD_CACHE/.subyard-p0-marker"
@@ -224,12 +399,7 @@ p0_capacity_use_build_cache() {
 }
 
 p0_capacity_remove_build_cache() {
-  [ -e "$P0_CAPACITY_BUILD_CACHE" ] || return 0
-  p0_capacity_assert_root_marker || return
-  [ "$(cat "$P0_CAPACITY_BUILD_CACHE/.subyard-p0-marker" 2>/dev/null)" = \
-      "$P0_CAPACITY_MARKER" ] \
-    || p0_capacity_die "refusing unmarked build cache cleanup $P0_CAPACITY_BUILD_CACHE" || return
-  find "$P0_CAPACITY_BUILD_CACHE" -depth -delete
+  p0_capacity_remove_subtree "$P0_CAPACITY_BUILD_CACHE" || return
   p0_capacity_remove_root_if_empty
 }
 

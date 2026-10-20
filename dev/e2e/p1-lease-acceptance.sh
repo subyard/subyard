@@ -41,7 +41,7 @@ status() {
 
 dump_broker_diagnostics() {
   local incident payload
-  sudo -n systemctl start subyard-test-vms-host-sink.service >/dev/null 2>&1 || true
+  sudo -n systemctl start "$(basename "${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-subyard-test-vms-host-sink.service}")" >/dev/null 2>&1 || true
   payload="$(status 2>/dev/null)" || payload=''
   [ -z "$payload" ] || printf '%s\n' "$payload" >&2
   "$ROOT/bin/yard" test-vms logs -n 200 >&2 || true

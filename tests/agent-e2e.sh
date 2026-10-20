@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
@@ -1942,11 +1942,26 @@ grep -Fq 'Environment=INCUS_SECURITY_APPARMOR=false' "$ROOT/dev/e2e/p0-guest.sh"
   && grep -Fq 'refusing foreign Incus compatibility drop-in' \
     "$ROOT/dev/e2e/p0-guest.sh" \
   || fail 'P0 outer Incus AppArmor compatibility is not marker-owned and reversible'
-owner_sink_cleanup_function="$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p' \
-  "$ROOT/dev/e2e/p0-guest.sh")"
+owner_sink_paths="$(sed -n '/^OWNER_ROOT=/,/^OWNER_TEST_VMS_SINK_TIMER_TEMPLATE=/p' "$ROOT/dev/e2e/p0-guest.sh")"
+owner_prepare_function="$(sed -n '/^prepare_owner_go_cache() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+OWNER_SINK_PATHS="$owner_sink_paths" OWNER_PREPARE_FUNCTION="$owner_prepare_function" bash -c '
+  set -euo pipefail
+  TOKEN=123 ROOT=/fixture P0_CAPACITY_STATE_ROOT=/fixture/state
+  p0_capacity_reset_build_cache() { :; }
+  p0_capacity_prepare_subtree() { :; }
+  eval "$OWNER_SINK_PATHS"
+  eval "$OWNER_PREPARE_FUNCTION"
+  prepare_owner_go_cache
+  [ "$SUBYARD_TEST_VMS_SINK_PATH" = /usr/local/libexec/subyard/subyard-p0-123-test-vms-host-sink ]
+  [ "$SUBYARD_TEST_VMS_SINK_SERVICE_PATH" = /etc/systemd/system/subyard-p0-123-test-vms-host-sink.service ]
+  [ "$SUBYARD_TEST_VMS_SINK_TIMER_PATH" = /etc/systemd/system/subyard-p0-123-test-vms-host-sink.timer ]
+' || fail 'P0 owner preparation did not export isolated sink paths'
+owner_sink_cleanup_function="$(sed -n '/^p0_capacity_cleanup_fixture_sink() {/,/^}/p' \
+  "$ROOT/dev/e2e/lib-p0-capacity.sh")
+$(sed -n '/^cleanup_owner_test_vms_sink() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
 owner_capacity_cleanup_function="$(sed -n '/^cleanup_owner_capacity_state() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-guest.sh")"
-for owner_sink_scenario in success absent timer-failure service-failure foreign-service foreign-timer missing-service malformed-command missing-home duplicate-home wrong-owner symlink; do
+for owner_sink_scenario in success absent metadata-only busy-lock unsafe-lock unsafe-custody timer-failure service-failure foreign-service foreign-timer missing-service malformed-command missing-home duplicate-home wrong-owner symlink; do
   owner_sink_fixture="$TMP/owner-sink-$owner_sink_scenario"
   install -d -m 0700 "$owner_sink_fixture"
   OWNER_SINK_SCENARIO="$owner_sink_scenario" OWNER_SINK_FIXTURE="$owner_sink_fixture" \
@@ -1957,13 +1972,15 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
       OWNER_ROOT="$OWNER_SINK_FIXTURE/state"
       OWNER_DATA_ROOT="$OWNER_ROOT/subyard"
       OWNER_TEST_VMS_SINK="$OWNER_SINK_FIXTURE/test-vms-host-sink"
-      OWNER_TEST_VMS_SINK_SERVICE_NAME=subyard-test-vms-host-sink.service
+      OWNER_TEST_VMS_SINK_SERVICE_NAME=subyard-p0-123-test-vms-host-sink.service
       OWNER_TEST_VMS_SINK_SERVICE="$OWNER_SINK_FIXTURE/$OWNER_TEST_VMS_SINK_SERVICE_NAME"
-      OWNER_TEST_VMS_SINK_TIMER_NAME=subyard-test-vms-host-sink.timer
+      OWNER_TEST_VMS_SINK_TIMER_NAME=subyard-p0-123-test-vms-host-sink.timer
       OWNER_TEST_VMS_SINK_TIMER="$OWNER_SINK_FIXTURE/$OWNER_TEST_VMS_SINK_TIMER_NAME"
       OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$OWNER_SINK_TIMER_TEMPLATE"
       OWNER_SINK_LOG="$OWNER_SINK_FIXTURE/calls"
       install -d -m 0700 "$OWNER_DATA_ROOT"
+      printf "subyard-p0-123\n" > "$OWNER_ROOT/.subyard-p0-marker"
+      chmod 0600 "$OWNER_ROOT/.subyard-p0-marker"
       case "$OWNER_SINK_SCENARIO" in
         absent) ;;
         missing-service) cp "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER" ;;
@@ -1975,6 +1992,21 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
             "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
             > "$OWNER_TEST_VMS_SINK_SERVICE"
           ;;
+      esac
+      for resource in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" "$OWNER_TEST_VMS_SINK_TIMER"; do
+        [ -e "$resource" ] || continue
+        lock="${resource%/*}/.${resource##*/}.native-install.lock"
+        record="${resource%/*}/.${resource##*/}.native-custody.json"
+        : > "$lock"
+        chmod 0600 "$lock"
+        printf "{\"generation\":\"%064d\",\"owner\":\"test-vms-host-sink\",\"version\":1}\\n" 0 > "$record"
+        chmod 0644 "$record"
+      done
+      case "$OWNER_SINK_SCENARIO" in
+        metadata-only) find "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" "$OWNER_TEST_VMS_SINK_TIMER" -maxdepth 0 -delete ;;
+        busy-lock) exec {busy_lock_fd}>"$lock"; flock -n "$busy_lock_fd" ;;
+        unsafe-lock) chmod 0644 "$lock" ;;
+        unsafe-custody) printf "foreign\n" > "$record" ;;
       esac
       if [ "$OWNER_SINK_SCENARIO" = foreign-service ]; then
         sed -i "s|$OWNER_DATA_ROOT|$OWNER_SINK_FIXTURE/foreign|" \
@@ -2003,6 +2035,7 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
             ;;
           "-n systemctl daemon-reload") ;;
           "-n find "*) shift 2; command find "$@" ;;
+          "-n python3 "*) shift; command "$@" ;;
           *) return 97 ;;
         esac
       }
@@ -2021,6 +2054,10 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
           [ ! -e "$OWNER_TEST_VMS_SINK" ] \
             && [ ! -e "$OWNER_TEST_VMS_SINK_SERVICE" ] \
             && [ ! -e "$OWNER_TEST_VMS_SINK_TIMER" ]
+          for resource in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" "$OWNER_TEST_VMS_SINK_TIMER"; do
+            [ ! -e "${resource%/*}/.${resource##*/}.native-install.lock" ]
+            [ ! -e "${resource%/*}/.${resource##*/}.native-custody.json" ]
+          done
           [ "$(grep -c "^remove-" "$OWNER_SINK_LOG")" = 3 ]
           ;;
         absent)
@@ -2039,8 +2076,16 @@ for owner_sink_scenario in success absent timer-failure service-failure foreign-
           [ "$cleanup_rc" -ne 0 ]
           ! grep -q "^remove-" "$OWNER_SINK_LOG" 2>/dev/null
           [ -d "$OWNER_ROOT" ]
+          [ "$(cat "$OWNER_ROOT/.subyard-p0-marker")" = subyard-p0-123 ]
+          if [ "$OWNER_SINK_SCENARIO" = metadata-only ]; then
+            [ -f "$lock" ] && [ -f "$record" ]
+          fi
           case "$OWNER_SINK_SCENARIO" in
-            foreign-timer|missing-service|malformed-command|missing-home|duplicate-home|wrong-owner|symlink)
+            busy-lock|unsafe-lock|unsafe-custody)
+              [ -f "$OWNER_TEST_VMS_SINK" ] && [ -f "$OWNER_TEST_VMS_SINK_SERVICE" ] && [ -f "$OWNER_TEST_VMS_SINK_TIMER" ] ;;
+          esac
+          case "$OWNER_SINK_SCENARIO" in
+            metadata-only|foreign-timer|missing-service|malformed-command|missing-home|duplicate-home|wrong-owner|symlink)
               ! grep -q "^-n " "$OWNER_SINK_LOG" 2>/dev/null ;;
           esac
           ;;

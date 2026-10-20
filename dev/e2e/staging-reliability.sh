@@ -198,7 +198,7 @@ collect_evidence() {
   jq -c . "$STATE_PARENT/spool.json" || return 1
   local builder_receipt
   builder_receipt="$(builder_incident_receipt)" || return 1
-  sudo -n systemctl start subyard-test-vms-host-sink.service || return 1
+  sudo -n systemctl start "$(basename "${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-subyard-test-vms-host-sink.service}")" || return 1
   # Native Ack removes pending spool entries, not the builder's durable receipt.
   collect_builder_incident "$builder_receipt" || return 1
   local id host
@@ -689,7 +689,7 @@ parse=lambda value: datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
 if parse(host['observed_at'])<parse(incident['created_at']): raise RuntimeError('host observation predates incident')
 PYCAPTURETIME
   incident_hash="$(sha256sum "$incident")"; host_hash="$(sha256sum "$host")"
-  sudo -n systemctl start subyard-test-vms-host-sink.service
+  sudo -n systemctl start "$(basename "${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-subyard-test-vms-host-sink.service}")"
   [ "$(sha256sum "$incident")" = "$incident_hash" ] && [ "$(sha256sum "$host")" = "$host_hash" ] \
     || die 'sink replay changed immutable captured evidence'
   restore_inventory_fault || die 'inventory configuration restoration refused'
@@ -710,7 +710,7 @@ PYCAPTURETIME
   outer_exec incus storage volume list default --project subyard-e2e-vms-slot-1 --format json \
     | jq -e 'all(.[]; .type!="virtual-machine" and .type!="container")' >/dev/null \
     || die 'recovery retained allocation root volumes'
-  sudo -n systemctl start subyard-test-vms-host-sink.service
+  sudo -n systemctl start "$(basename "${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-subyard-test-vms-host-sink.service}")"
   logs="$(runtime_yard test-vms logs -n 100000 --slot 1)"
   jq -s -e --arg id "$incident_id" --argjson generation "$HOLDER_GENERATION" --argjson epoch "$HOLDER_EPOCH" '
     [.[] | select(.incident_id==$id)] as $events |

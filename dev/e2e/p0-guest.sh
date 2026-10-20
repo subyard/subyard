@@ -28,10 +28,10 @@ OWNER_ROOT="$P0_CAPACITY_STATE_ROOT/owner"
 OWNER_DATA_ROOT="$OWNER_ROOT/subyard"
 OWNER_CONFIG_HOME="$OWNER_ROOT/config"
 OWNER_YARD_DIR="$OWNER_CONFIG_HOME/yards"
-OWNER_TEST_VMS_SINK="/usr/local/libexec/subyard/test-vms-host-sink"
-OWNER_TEST_VMS_SINK_SERVICE_NAME="subyard-test-vms-host-sink.service"
+OWNER_TEST_VMS_SINK="/usr/local/libexec/subyard/subyard-p0-$TOKEN-test-vms-host-sink"
+OWNER_TEST_VMS_SINK_SERVICE_NAME="subyard-p0-$TOKEN-test-vms-host-sink.service"
 OWNER_TEST_VMS_SINK_SERVICE="/etc/systemd/system/$OWNER_TEST_VMS_SINK_SERVICE_NAME"
-OWNER_TEST_VMS_SINK_TIMER_NAME="subyard-test-vms-host-sink.timer"
+OWNER_TEST_VMS_SINK_TIMER_NAME="subyard-p0-$TOKEN-test-vms-host-sink.timer"
 OWNER_TEST_VMS_SINK_TIMER="/etc/systemd/system/$OWNER_TEST_VMS_SINK_TIMER_NAME"
 OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in"
 RENAME_BASE_REVISION="7c67ee3f423cf9f1596c2f5191f462d2b70adcdc"
@@ -159,7 +159,7 @@ owner_cleanup() {
     p0_capacity_assert_root_marker \
       && [ -d "$OWNER_ROOT" ] && [ ! -L "$OWNER_ROOT" ] \
       && [ "$(cat "$OWNER_ROOT/.subyard-p0-marker" 2>/dev/null)" = "$MARKER" ] \
-      && p0_capacity_retire_fixture_sink "$OWNER_ROOT/subyard"
+      && p0_capacity_retire_fixture_sink "$OWNER_ROOT/subyard" "$TOKEN"
   }; then
     cleanup_owner_capacity_state || cleanup_failed=1
   else
@@ -170,58 +170,8 @@ owner_cleanup() {
 }
 
 cleanup_owner_test_vms_sink() {
-  local path present=0 touched=0 unsafe=0
-  local -a sink_homes=()
-  for path in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" \
-    "$OWNER_TEST_VMS_SINK_TIMER"; do
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      present=1
-      [ -f "$path" ] && [ ! -L "$path" ] \
-        && [ "$(stat -c '%u:%g' "$path" 2>/dev/null)" = 0:0 ] \
-        || unsafe=1
-    fi
-  done
-  if [ "$present" = 1 ]; then
-    [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] \
-      || unsafe=1
-  fi
-  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
-    cmp -s "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE" "$OWNER_TEST_VMS_SINK_TIMER" \
-      || unsafe=1
-  fi
-  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ] && [ "$unsafe" = 0 ]; then
-    mapfile -t sink_homes < <(sed -n 's/^Environment="SUBYARD_HOME=\([^"[:space:]]*\)"$/\1/p' \
-      "$OWNER_TEST_VMS_SINK_SERVICE")
-    [ "${#sink_homes[@]}" = 1 ] && [[ "${sink_homes[0]}" =~ ^/[A-Za-z0-9_./-]+$ ]] \
-      && grep -Fqx "ExecStart=$OWNER_TEST_VMS_SINK _test-vms-host-sink sync" \
-        "$OWNER_TEST_VMS_SINK_SERVICE" \
-      || unsafe=1
-  fi
-  [ "$unsafe" = 0 ] \
-    || { printf 'p0-guest: refusing unsafe owner test-vms sink artifacts\n' >&2; return 1; }
-  # A retained platform sink can belong to another fixture. Its valid artifacts
-  # are outside this owner's cleanup scope, just as in retire_fixture_sink.
-  if [ "$present" = 1 ] && [ "${sink_homes[0]}" != "$OWNER_DATA_ROOT" ]; then
-    return 0
-  fi
-  if [ -e "$OWNER_TEST_VMS_SINK_TIMER" ]; then
-    sudo -n systemctl disable --now "$OWNER_TEST_VMS_SINK_TIMER_NAME" >/dev/null 2>&1 \
-      || return 1
-    touched=1
-  fi
-  if [ -e "$OWNER_TEST_VMS_SINK_SERVICE" ]; then
-    sudo -n systemctl stop "$OWNER_TEST_VMS_SINK_SERVICE_NAME" >/dev/null 2>&1 \
-      || return 1
-    touched=1
-  fi
-  for path in "$OWNER_TEST_VMS_SINK_TIMER" "$OWNER_TEST_VMS_SINK_SERVICE" \
-    "$OWNER_TEST_VMS_SINK"; do
-    if [ -e "$path" ]; then
-      sudo -n find "$path" -maxdepth 0 -type f -delete || return 1
-      touched=1
-    fi
-  done
-  [ "$touched" = 0 ] || sudo -n systemctl daemon-reload >/dev/null 2>&1
+  p0_capacity_cleanup_fixture_sink "$OWNER_DATA_ROOT" "$OWNER_TEST_VMS_SINK" \
+    "$OWNER_TEST_VMS_SINK_SERVICE" "$OWNER_TEST_VMS_SINK_TIMER" "$OWNER_TEST_VMS_SINK_TIMER_TEMPLATE"
 }
 
 cleanup_owner_capacity_state() {
@@ -236,6 +186,9 @@ prepare_owner_go_cache() {
   p0_capacity_prepare_subtree "$OWNER_ROOT"
   export SUBYARD_HOME="$OWNER_DATA_ROOT"
   export SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME"
+  export SUBYARD_TEST_VMS_SINK_PATH="$OWNER_TEST_VMS_SINK"
+  export SUBYARD_TEST_VMS_SINK_SERVICE_PATH="$OWNER_TEST_VMS_SINK_SERVICE"
+  export SUBYARD_TEST_VMS_SINK_TIMER_PATH="$OWNER_TEST_VMS_SINK_TIMER"
 }
 
 require_broker_fixture_capacity() {
@@ -1864,10 +1817,20 @@ dependency_bootstrap() (
 )
 
 capacity_verify_cleanup() {
-  local path project leftover
+  local path project leftover sidecar
   restore_p0_incus_apparmor_default
+  [ ! -e "$P0_CAPACITY_STATE_ROOT.subyard-p0-cleanup" ] \
+    && [ ! -L "$P0_CAPACITY_STATE_ROOT.subyard-p0-cleanup" ] \
+    || die "P0 cleanup receipt remains: $P0_CAPACITY_STATE_ROOT.subyard-p0-cleanup"
   [ ! -e "$P0_CAPACITY_STATE_ROOT" ] \
     || die "P0 state root remains after cleanup: $P0_CAPACITY_STATE_ROOT"
+  for path in "$OWNER_TEST_VMS_SINK" "$OWNER_TEST_VMS_SINK_SERVICE" "$OWNER_TEST_VMS_SINK_TIMER"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || die "P0 sink artifact remains: $path"
+    for sidecar in native-install.lock native-custody.json; do
+      [ ! -e "${path%/*}/.${path##*/}.$sidecar" ] && [ ! -L "${path%/*}/.${path##*/}.$sidecar" ] \
+        || die "P0 sink custody artifact remains: $path"
+    done
+  done
   [ ! -e "$HOME/.cache/subyard-p0-peer-$TOKEN" ] \
     || die 'legacy peer data root remains after cleanup'
   for path in \

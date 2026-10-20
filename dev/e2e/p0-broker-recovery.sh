@@ -29,6 +29,8 @@ RECOVERY_STATUS_KILL_AFTER_SECONDS=10
 HOLDER_STOP_GRACE_SECONDS=30
 HOLDER_KILL_GRACE_SECONDS=10
 HOLDER_STARTED_PID=''
+SINK_SERVICE_NAME="${SUBYARD_TEST_VMS_SINK_SERVICE_PATH:-subyard-test-vms-host-sink.service}"
+SINK_SERVICE_NAME="${SINK_SERVICE_NAME##*/}"
 
 die() { printf 'p0-broker-recovery: %s\n' "$*" >&2; exit 2; }
 
@@ -585,7 +587,7 @@ report_slot_diagnostics() {
     printf '%s\n' "$payload" >&2
     incident_id=''
   fi
-  sudo -n systemctl start subyard-test-vms-host-sink.service >/dev/null 2>&1 || true
+  sudo -n systemctl start "$SINK_SERVICE_NAME" >/dev/null 2>&1 || true
   slot_number="${slot#slot-}"
   slot_number="$((10#$slot_number))"
   ./bin/yard test-vms logs -n 200 --slot "$slot_number" >&2 || true
@@ -769,7 +771,7 @@ jq -e --arg project "$NEIGHBOR_PROJECT" '
 
 # Force immediate host-wide collection rather than waiting for the one-minute
 # timer, then use the public global command without -Y.
-sudo -n systemctl start subyard-test-vms-host-sink.service
+sudo -n systemctl start "$SINK_SERVICE_NAME"
 global_log="$(./bin/yard test-vms logs -n 100000 --slot 1)"
 jq -s -e --arg incident "$incident_id" '
   any(.[]; .kind == "slot.quarantined" and .incident_id == $incident) and
@@ -802,7 +804,7 @@ jq -e \
 ' "$incident" >/dev/null \
   || die 'incident did not preserve the exact original command failure'
 incident_hash="$(sha256sum "$incident" | awk '{print $1}')"
-sudo -n systemctl start subyard-test-vms-host-sink.service
+sudo -n systemctl start "$SINK_SERVICE_NAME"
 [ "$(sha256sum "$incident" | awk '{print $1}')" = "$incident_hash" ] \
   || die 'replayed sink delivery overwrote the immutable incident'
 

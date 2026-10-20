@@ -51,7 +51,7 @@ printf '%s\n' \
   '  "-n systemctl restart incus.service")' \
   '    printf "%s\n" "$*" >> "$P0_FAKE_SUDO_LOG"' \
   '    ;;' \
-  '  "-n systemctl disable --now subyard-test-vms-host-sink.timer"|"-n systemctl stop subyard-test-vms-host-sink.service")' \
+  '  "-n systemctl disable --now "*|"-n systemctl stop "*)' \
   '    shift; exec "$@" ;;' \
   '  *) exit 2 ;;' \
   'esac' > "$TMP/bin/sudo"
@@ -78,7 +78,14 @@ chmod 0700 "$TMP/bin/incus"
 cat > "$TMP/bin/systemctl" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-case "$*" in
+arguments="$*"
+if [ "${1:-}" = show ] && [ "${4:-}" = LoadState ] \
+  && [ "$2" != "${P0_FAKE_SINK_SERVICE:-subyard-test-vms-host-sink.service}" ]; then
+  printf 'not-found\n'
+  exit
+fi
+arguments="${arguments//subyard-p0-122-test-vms-host-sink/subyard-test-vms-host-sink}"
+case "$arguments" in
   'show subyard-test-vms-host-sink.service -p LoadState --value')
     printf '%s\n' "${P0_FAKE_SINK_STATE:-not-found}" ;;
   'show subyard-test-vms-host-sink.service -p Environment --value')
@@ -95,7 +102,7 @@ case "$*" in
   'show subyard-test-vms-host-sink.timer -p DropInPaths --value')
     printf '%s\n' "${P0_FAKE_SINK_OVERRIDE:-}" ;;
   'show subyard-test-vms-host-sink.timer -p Unit --value')
-    printf 'subyard-test-vms-host-sink.service\n' ;;
+    printf '%s\n' "${P0_FAKE_SINK_SERVICE:-subyard-test-vms-host-sink.service}" ;;
   'disable --now subyard-test-vms-host-sink.timer'|'stop subyard-test-vms-host-sink.service')
     [ -d "$P0_FAKE_SINK_FIXTURE" ] || exit 2
     printf '%s\n' "$*" >> "$P0_FAKE_SINK_LOG" ;;
@@ -194,19 +201,26 @@ p0_capacity_recover_stale_roots >/dev/null
 [ ! -e "$stale_root" ] || fail "marker-owned stale allocation cache survived recovery"
 
 export P0_FAKE_SINK_STATE=loaded
-export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/test-vms-host-sink
+export P0_FAKE_SINK_SERVICE=subyard-p0-122-test-vms-host-sink.service
+export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/subyard-p0-122-test-vms-host-sink
 export P0_FAKE_SINK_LOG="$TMP/sink.log"
 export P0_FAKE_SINK_FIXTURE="$HOME/.cache/subyard-p0-122"
-for sink_case in matching foreign unsafe-command unsafe-override unsafe-quoted-home; do
+for sink_case in matching foreign legacy-matching legacy-foreign unsafe-command unsafe-override unsafe-quoted-home; do
   install -d -m 0700 "$P0_FAKE_SINK_FIXTURE/owner/subyard"
   printf 'subyard-p0-122\n' > "$P0_FAKE_SINK_FIXTURE/.subyard-p0-marker"
+  export P0_FAKE_SINK_SERVICE=subyard-p0-122-test-vms-host-sink.service
   export P0_FAKE_SINK_HOME="$P0_FAKE_SINK_FIXTURE/owner/subyard"
-  export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/test-vms-host-sink
+  export P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/subyard-p0-122-test-vms-host-sink
   export P0_FAKE_SINK_OVERRIDE=''
   export P0_FAKE_SINK_ENV=''
   : > "$P0_FAKE_SINK_LOG"
   case "$sink_case" in
     foreign) P0_FAKE_SINK_HOME="$TMP/foreign" ;;
+    legacy-matching|legacy-foreign)
+      P0_FAKE_SINK_SERVICE=subyard-test-vms-host-sink.service
+      P0_FAKE_SINK_EXEC=/usr/local/libexec/subyard/test-vms-host-sink
+      [ "$sink_case" != legacy-foreign ] || P0_FAKE_SINK_HOME="$TMP/foreign"
+      ;;
     unsafe-command) P0_FAKE_SINK_EXEC=/foreign/sink ;;
     unsafe-override) P0_FAKE_SINK_OVERRIDE=/foreign/override.conf ;;
     unsafe-quoted-home)
@@ -223,14 +237,131 @@ for sink_case in matching foreign unsafe-command unsafe-override unsafe-quoted-h
   fi
   p0_capacity_recover_stale_roots >/dev/null
   [ ! -e "$P0_FAKE_SINK_FIXTURE" ] || fail "$sink_case fixture survived cleanup"
-  if [ "$sink_case" = matching ]; then
-    [ "$(cat "$P0_FAKE_SINK_LOG")" = $'disable --now subyard-test-vms-host-sink.timer\nstop subyard-test-vms-host-sink.service' ] \
+  if [ "$sink_case" = matching ] || [ "$sink_case" = legacy-matching ]; then
+    [ "$(cat "$P0_FAKE_SINK_LOG")" = "$(printf 'disable --now %s.timer\nstop %s\n' "${P0_FAKE_SINK_SERVICE%.service}" "$P0_FAKE_SINK_SERVICE")" ] \
       || fail 'matching sink was not retired in order before fixture removal'
   else
     [ ! -s "$P0_FAKE_SINK_LOG" ] || fail 'foreign sink was changed'
   fi
 done
 unset P0_FAKE_SINK_STATE
+
+# Interrupt the actual filesystem primitive, then resume through a fresh shell.
+# No timing window or timer tick is needed to reach any finalization boundary.
+export P0_CAPACITY_LIBRARY="$ROOT/dev/e2e/lib-p0-capacity.sh"
+cat > "$TMP/interrupted-cleanup.sh" <<'SCRIPT'
+set -euo pipefail
+. "$P0_CAPACITY_LIBRARY"
+p0_capacity_init 123
+find() {
+  command find "$@"
+  case "${P0_CLEANUP_CUT:-}:$*" in
+    "contents:$P0_CLEANUP_TREE -xdev -depth -mindepth 1 "*|\
+    "marker:$P0_CLEANUP_TREE/.subyard-p0-marker -maxdepth 0 -delete"|\
+    "receipt:$P0_CLEANUP_TREE.subyard-p0-cleanup -maxdepth 0 -delete") kill -KILL "$BASHPID" ;;
+  esac
+}
+mktemp() {
+  command mktemp "$@"
+  [ "${P0_CLEANUP_CUT:-}" != temporary ] || kill -KILL "$BASHPID"
+}
+mv() {
+  command mv "$@"
+  [ "${P0_CLEANUP_CUT:-}" != publish ] || kill -KILL "$BASHPID"
+}
+rmdir() {
+  command rmdir "$@"
+  [ "${P0_CLEANUP_CUT:-}" != root ] || kill -KILL "$BASHPID"
+}
+case "$P0_CLEANUP_KIND" in
+  subtree) p0_capacity_remove_subtree "$P0_CLEANUP_TREE" ;;
+  root) p0_capacity_remove_root_if_empty ;;
+esac
+SCRIPT
+for cleanup_kind in subtree root; do
+  for cleanup_cut in contents temporary publish marker root receipt; do
+    p0_capacity_prepare_root
+    export P0_CLEANUP_KIND="$cleanup_kind" P0_CLEANUP_CUT="$cleanup_cut"
+    export P0_CLEANUP_TREE="$P0_CAPACITY_STATE_ROOT"
+    if [ "$cleanup_kind" = subtree ]; then
+      P0_CLEANUP_TREE="$P0_CAPACITY_STATE_ROOT/interrupted"
+      p0_capacity_prepare_subtree "$P0_CLEANUP_TREE"
+      install -d -m 0700 "$P0_CLEANUP_TREE/nested"
+      printf 'payload\n' > "$P0_CLEANUP_TREE/nested/data"
+    fi
+    set +e
+    bash "$TMP/interrupted-cleanup.sh" > "$TMP/interrupted-output" 2>&1
+    interrupted_rc=$?
+    set -e
+    [ "$interrupted_rc" = 137 ] || fail "$cleanup_kind/$cleanup_cut did not interrupt ($interrupted_rc)"
+    case "$cleanup_cut" in
+      contents|temporary|publish) [ -f "$P0_CLEANUP_TREE/.subyard-p0-marker" ] || fail 'cleanup removed its marker with contents' ;;
+      marker) [ -d "$P0_CLEANUP_TREE" ] && [ ! -e "$P0_CLEANUP_TREE/.subyard-p0-marker" ] || fail 'marker cut missed the empty root' ;;
+    esac
+    unset P0_CLEANUP_CUT
+    bash "$TMP/interrupted-cleanup.sh" || fail "$cleanup_kind/$cleanup_cut fresh-process resume failed"
+    bash "$TMP/interrupted-cleanup.sh" || fail "$cleanup_kind/$cleanup_cut repeat cleanup failed"
+    [ ! -e "$P0_CLEANUP_TREE" ] && [ ! -e "$P0_CLEANUP_TREE.subyard-p0-cleanup" ] \
+      || fail "$cleanup_kind/$cleanup_cut left cleanup state"
+    p0_capacity_remove_root_if_empty
+  done
+done
+
+# Preparation must finish retained finalization before publishing a new marker/inode.
+for prepare_entrypoint in root reset-cache use-cache stale-recovery; do
+  p0_capacity_prepare_root
+  export P0_CLEANUP_KIND=root P0_CLEANUP_CUT=root P0_CLEANUP_TREE="$P0_CAPACITY_STATE_ROOT"
+  set +e
+  bash "$TMP/interrupted-cleanup.sh" > "$TMP/interrupted-output" 2>&1
+  interrupted_rc=$?
+  set -e
+  [ "$interrupted_rc" = 137 ] || fail 'preparation recovery setup did not interrupt'
+  unset P0_CLEANUP_CUT
+  P0_PREPARE_ENTRYPOINT="$prepare_entrypoint" bash -c '
+    set -euo pipefail
+    . "$P0_CAPACITY_LIBRARY"
+    p0_capacity_init 123
+    case "$P0_PREPARE_ENTRYPOINT" in
+      root) p0_capacity_prepare_root ;;
+      reset-cache) p0_capacity_reset_build_cache ;;
+      use-cache) p0_capacity_use_build_cache ;;
+      stale-recovery) p0_capacity_init 124; p0_capacity_recover_stale_roots ;;
+    esac
+    [ ! -e "$P0_CLEANUP_TREE.subyard-p0-cleanup" ]
+  ' || fail "$prepare_entrypoint ignored orphan finalization"
+  p0_capacity_remove_build_cache
+  p0_capacity_remove_root_if_empty
+done
+
+for unsafe_finalization in contents replaced symlink receipt-symlink receipt-mode receipt-marker receipt-path marker; do
+  p0_capacity_prepare_root
+  export P0_CLEANUP_KIND=root P0_CLEANUP_CUT=marker P0_CLEANUP_TREE="$P0_CAPACITY_STATE_ROOT"
+  set +e
+  bash "$TMP/interrupted-cleanup.sh" > "$TMP/interrupted-output" 2>&1
+  interrupted_rc=$?
+  set -e
+  [ "$interrupted_rc" = 137 ] || fail 'unsafe finalization setup did not interrupt'
+  unset P0_CLEANUP_CUT
+  receipt="$P0_CLEANUP_TREE.subyard-p0-cleanup"
+  case "$unsafe_finalization" in
+    contents) printf 'foreign\n' > "$P0_CLEANUP_TREE/foreign" ;;
+    replaced) mv "$P0_CLEANUP_TREE" "$TMP/original-root"; mkdir "$P0_CLEANUP_TREE" ;;
+    symlink) rmdir "$P0_CLEANUP_TREE"; ln -s "$TMP" "$P0_CLEANUP_TREE" ;;
+    receipt-symlink) mv "$receipt" "$TMP/original-receipt"; ln -s "$TMP/original-receipt" "$receipt" ;;
+    receipt-mode) chmod 0644 "$receipt" ;;
+    receipt-marker) sed -i '1s/.*/foreign/' "$receipt" ;;
+    receipt-path) sed -i '2s|.*|/foreign|' "$receipt" ;;
+    marker) printf 'foreign\n' > "$P0_CLEANUP_TREE/.subyard-p0-marker" ;;
+  esac
+  if bash "$TMP/interrupted-cleanup.sh" > "$TMP/refusal" 2>&1; then
+    fail "unsafe $unsafe_finalization finalization was accepted"
+  fi
+  [ -e "$P0_CLEANUP_TREE" ] && [ -e "$receipt" ] || fail 'unsafe finalization changed protected state'
+  if [ -L "$P0_CLEANUP_TREE" ]; then unlink "$P0_CLEANUP_TREE"; else find "$P0_CLEANUP_TREE" -depth -delete; fi
+  if [ -L "$receipt" ]; then unlink "$receipt"; else find "$receipt" -delete; fi
+  [ ! -e "$TMP/original-root" ] || rmdir "$TMP/original-root"
+  [ ! -e "$TMP/original-receipt" ] || find "$TMP/original-receipt" -delete
+done
 
 install -d -m 0700 "$P0_CAPACITY_STATE_ROOT"
 printf 'foreign\n' > "$P0_CAPACITY_STATE_ROOT/data"
