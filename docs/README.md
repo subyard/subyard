@@ -5,6 +5,9 @@ Start with [Getting started](getting-started.md) to install Subyard and create a
 and local or remote yard selection. [Security](security.md) describes the host boundary and the
 choices that widen it.
 
+[Subyard presentation](presentations/subyard/README.md) introduces isolation, profiles,
+leased resources, and shared compute in 12 browser slides with speaker notes.
+
 ## Operator guides
 
 - [CLI reference](cli-reference.md) — generated public command help and invocation syntax.
