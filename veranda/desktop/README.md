@@ -92,6 +92,95 @@ CARGO_TARGET_DIR=.build/veranda-desktop cargo test --manifest-path veranda/deskt
 CARGO_TARGET_DIR=.build/veranda-desktop cargo build --manifest-path veranda/desktop/Cargo.toml --locked
 ```
 
+Default tests run without a display. The navigator and opt-in paint adapter widget
+regressions are explicitly ignored there and run separately on Linux with `xvfb`
+and `xauth` installed:
+
+```sh
+fixture_root="$(mktemp -d /tmp/veranda-gtk-widgets.XXXXXX)"
+chmod 0700 "$fixture_root"
+trap 'rm -rf -- "$fixture_root"' EXIT
+install -d -m 0700 "$fixture_root/runtime"
+GDK_BACKEND=x11 GSK_RENDERER=cairo TMPDIR="$fixture_root" \
+  XDG_RUNTIME_DIR="$fixture_root/runtime" xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+  cargo test --manifest-path veranda/desktop/Cargo.toml --locked --bin veranda \
+  navigation::tests::rebuilt_selection_is_visible_without_stealing_or_stale_callbacks \
+  -- --ignored --exact --test-threads=1
+GDK_BACKEND=x11 GSK_RENDERER=cairo TMPDIR="$fixture_root" \
+  XDG_RUNTIME_DIR="$fixture_root/runtime" xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+  cargo test --manifest-path veranda/desktop/Cargo.toml --locked --lib \
+  paint::tests::adapter_tracks_real_child_frames_and_cancels_owned_lifetimes \
+  -- --ignored --exact --test-threads=1
+```
+
+This private display and Cairo renderer belong only to the widget check; resource
+measurements use their own renderer and lifecycle policy. CI runs both the default
+headless tests and these explicit widget checks. The paint adapter accepts a
+complete represented batch for each caller-authorized revision; callers must merge
+still-covered original starts before applying a newer revision. It records actual
+snapshot plus matching GTK after-paint, not compositor presentation. The application
+does not enable this instrumentation or write measurement files by default.
+
+For an explicitly observed run, set `SUBYARD_VERANDA_TRACE` to a new absolute
+output filename in an existing directory owned by the current user with exact
+mode `0700`. Every ancestor must be a real directory, with no symlinks or `..`
+components. The Linux sink creates a new regular file with exact mode `0600`;
+it never replaces an existing output. No parent directories are created.
+`--version` returns before reading this variable or initializing observation,
+GTK, the store or owner connections.
+
+The run owns one observation context across activations, with distinct opaque
+view ordinals. After `app.run` returns, the ledger seals atomically, retires all
+pending starts as UNKNOWN, and writes only bounded scalar counts, receipt/part
+cohorts and frame timings. Subsequent callbacks and drops cannot change that
+snapshot. Actual matching Worker `Closed` updates are counted separately from
+activations. They do not prove detached monitor/read/execute producers drained:
+producer quiescence remains UNKNOWN. Zero, partial or unsuccessful run lifecycles
+are UNKNOWN. The pending/phase/terminal bounds remain 2048/8192/8192; the encoded
+file has a separate 8 MiB limit, not a completeness guarantee.
+
+Missing, unsafe, incomplete or failed output is UNKNOWN for measurement consumers.
+An opt-in write failure emits only `Veranda trace: UNKNOWN`, without the output
+path or underlying error; consumers must retain that outcome with the file. This
+instrumentation does not change the application exit status or owner cleanup.
+Snapshot plus matching after-paint is measured, not compositor presentation.
+
+For raw owning-child accounting, set `SUBYARD_VERANDA_OBSERVATION_CONFIG` with
+the trace output to a private schema `3` configuration:
+`{"schema":3,"child_usage":{"capacity":8192},"correlation":null}`.
+The existing private-FD rules apply. This is mutually exclusive with
+`SUBYARD_VERANDA_CORRELATION_CONFIG`; an optional `correlation` object contains
+the existing offers, cohorts and ready destination without an inner schema.
+The requested schema `3` trace retains bounded raw kernel rusage and owning
+spawn/wait metadata. Checked interval starts round down and terminal endpoints
+round up; missing, unsupported, dropped or unfinished observations remain
+UNKNOWN. Rust-relative and Python monotonic clocks are separate domains.
+No mixed-clock peak, descendant closure, resource budget or savings is implied.
+The default unset path and plain schema `1`/correlation schema `2` stay separate.
+
+For fixture event correlation, also set `SUBYARD_VERANDA_CORRELATION_CONFIG` to
+a private immutable JSON file before starting the GUI. It uses schema `2` with
+only `schema`, `offers`, `cohorts` and `ready`: offers contain `offer`, `action`
+and the exact actual source URI; cohorts contain an opaque `ordinal`, expected
+`owner`, optional `connection` and optional `yard`. The readiness destination is
+an absent absolute leaf in an existing owned `0700` directory. Configuration is
+bounded to 512 KiB, 2048 unique offers and 64 unique cohort targets, and must be
+an owned single-link regular `0600` file with no symlink ancestors. Private
+identities and URI mappings are never exported. The variable is ignored without
+the trace opt-in; `--version` precedes both environment lookups.
+
+Successful current typed reads bind actual context/source ordinals through the
+existing View guards. Cache identifies a source without claiming an RPC or event
+coverage. After every expected role is bound, one owned background thread freezes
+the table and atomically publishes a scalar acknowledgement without replacing an
+existing leaf. Stale, unsafe or failed publication remains UNKNOWN. After app.run,
+the run finishes that thread, seals observation and writes schema `2`, including
+the independent writer outcome, Cold/Warming/Frozen phase, scalar bindings and
+the original same-clock freeze time. The plain trace remains schema `1`.
+Owner contradictions and later source allocation make final qualification
+UNKNOWN; source ordinals are not logical Owner identities. Readiness establishes
+neither complete event coverage nor paint, resource or latency acceptance.
+
 The selection/error model and worker can also compile without GTK development files:
 
 ```sh
@@ -133,10 +222,51 @@ window again after activation. It does not use
 accessibility actions or synthetic window-directed key events. Both X11 and Wayland support `--remote` and `--remote --ui`;
 text uses their native keyboard injection tools. Each result identifies its backend, screenshot, original
 GUI exit and observed process identities.
+Add `--trace-observations` for a separate per-lifecycle sealed trace from the
+actual GUI. The helper gives only that GUI a unique absent output filename in
+its owned private directory; drivers, services and SSH fixtures remain unobserved.
+Collection occurs after the original successful natural close, before fixture
+state removal. The result retains traces separately from logs/screenshots and
+checks the scalar schema, ownership/modes and the fixed UNKNOWN-output marker.
+At least one original GUI request must have accepted whole coverage and an actual
+snapshot/matching-after-paint terminal. Retired UNKNOWN starts remain visible;
+producer quiescence UNKNOWN is not a cleanup failure. This opt-in establishes
+neither event latency nor p95/resource acceptance. Missing, unsafe, malformed,
+duplicate or unproven-paint output fails trace evidence independently of input
+and GUI outcomes; the original workload and close deadlines do not change.
+Add `--child-usage` with `--trace-observations` to request schema `3` and record
+the actual GUI leader through the same owning Python capture/wait boundary.
+Services, driver and compositor are outside that ledger. This is raw accounting,
+not family/resource acceptance. The normal resource measurement loop is not
+connected to this new trace mode yet.
+
+With `--trace-observations`, `--correlation-config FILE` accepts a private schema2
+template containing only `schema`, `offers` and `cohorts`. The helper authors a
+separate private runtime configuration and absent ready/trace leaves for each GUI
+lifetime; it does not forward the configuration to drivers or services. Its
+bounded `wait_ready` handshake can gate a future producer, but this helper does
+not launch a burst. A matching final context, freeze table and successful writer
+outcome are still mandatory after natural GUI exit: a visible acknowledgement
+alone cannot qualify a run, including a later publication/stop failure.
 Connect requires the actual owned panel title and unique focused editable destination
 before physical text and Return. Editor continuity compares the same visible typed
 editor's text, caret and selection while Refresh has focus, before any return-focus
 navigation: [GTK keyboard refocus can select all entry text](https://github.com/GNOME/gtk/blob/4.18.6/gtk/gtktext.c#L3229-L3249).
+
+For a focused local diagnosis, use `wayland-short.py GUI ENGINE --x11
+--profile-diagnostic --prepared-assets ASSETS` on an allocated disposable VM.
+This diagnostic runs one configured-fleet GTK lifetime through the same physical
+Profiles → Review profile selection → Discard plan sequence as `--remote --ui`,
+then closes naturally. It excludes SSH onboarding and restoration and establishes
+no acceptance or timing result. Its local workload budget stays 90 seconds.
+The existing full remote UI workload and its 600-second per-lifetime budget are
+unchanged. The input driver keeps at most 512 cached progress records on stdout
+and atomically replaces one private checkpoint of at most 1024 bytes afterward.
+The watchdog retains that last checkpoint before attempting a screenshot;
+checkpoint, screenshot and primary timeout outcomes remain separate. Neither
+progress writer performs accessibility queries or retains UI text or typed data.
+X11 watchdog capture requires exactly one visible window of the owned GUI PID;
+hidden auxiliary windows do not count toward that visible singleton.
 
 Use the existing [candidate-bundle transport](../../docs/test-vms.md) to include
 prebuilt ELFs with the current public source. This example uses synthetic product
@@ -280,6 +410,23 @@ peak proof. Missing/partial metrics
 cannot PASS. The sampler closes its observed app tree through owned cleanup after each
 launch; natural close remains a separate SHORT assertion.
 
+Add `--child-usage` to request per-launch schema `3` app traces and the owning
+Python GUI-child usage record. Optional `--correlation-config /absolute/private.json`
+also performs the existing one-shot live readiness handshake after warmup, within
+the original readiness deadline; it starts no event producer. The resource loop
+uses the same private collector and strict validators as SHORT. Each launch gets
+a separate initially absent trace destination. Collection follows an owned-window
+natural close request and the original wait; refusal or timeout retains the
+existing process cleanup fallback and reports trace `UNKNOWN`. Valid partial raw
+records survive incomplete direct-child coverage, with the requested measurement
+still `UNKNOWN` and the original GUI result recorded separately.
+
+Schema `3` may also record the naturally mapped GTK native renderer and surface as
+fixed Cairo/GL/Vulkan/Other/Unknown and Wayland/X11/Unknown enums. Missing observations
+remain unknown. These class observations do not establish hardware acceleration.
+Rust-relative and Python monotonic intervals remain separate coordinates; the raw
+records establish no combined family peak or resource-budget result.
+
 The fixture uses a private bus and owned Xvfb/Openbox at 1920×1080, or labwc/Pixman at
 1920×1080@60 Hz, scale 1. X11 refresh rate is unmeasured. Resource children use the shipping GTK default/auto renderer with `GSK_RENDERER` unset,
 recorded separately from the known compositor renderer and runtime packages. [`GSK_DEBUG=renderer`](https://sources.debian.org/src/gtk4/4.18.6%2Bds-2/gsk/gskrenderer.c/)
@@ -297,11 +444,23 @@ baseline does not promote them to PASS.
 
 ## Local GTK IBus composition probe
 
+For a focused Wayland navigation diagnostic, the SHORT also accepts
+`--remote --owner-focus` with the normal GUI, engine and `--prepared-assets` inputs.
+It uses real SSH onboarding and product trust storage, saves Local/default/Projects,
+closes naturally, then restores that context and navigates to the saved remote owner.
+These two lifetimes are diagnostic only. After a strict focus rejection it records
+at most one fresh observation within the same remaining observation deadline,
+sends no further input, and retains the original failure even if focus converges.
+Focused role/PID and actual parent relations are recorded as bounded opaque scalars;
+missing relations remain unknown. The local `--owner-focus` mode is unchanged.
+
 The SHORT's optional `--ime` mode is separate from `--remote --ui`: it runs two
 local GUI lifetimes against the same genuine owner, without repeating SSH flows.
-It adds `ibus`, `ibus-hangul`, `ibus-gtk4` and `fonts-noto-cjk` only in this mode.
+It adds `libglib2.0-bin` (the `gsettings` provider), `ibus`, `ibus-hangul`,
+`ibus-gtk4` and `fonts-noto-cjk` only in this mode.
 The fixture owns a foreground IBus daemon on a private address and bus, with
 private HOME/XDG and keyfile settings; it records installed package/input hashes,
+including the `gsettings` executable,
 selects the `hangul` engine and verifies the two-set, initial-Latin, syllable-preedit
 settings by readback. `GTK_IM_MODULE=ibus` explicitly tests the GTK module, including
 on Wayland; it does not establish compositor-native input-method support.

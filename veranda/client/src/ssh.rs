@@ -1,4 +1,5 @@
 //! Fixed SSH launch surface. No caller-controlled shell command or SSH options.
+use crate::child_usage::{ChildKind, OwnedChild, UsageContext};
 use crate::local_fleet::NativeError;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -116,7 +117,10 @@ pub(crate) struct HostKey {
 }
 
 /// This only obtains public keys. It never authenticates or starts a trusted RPC session.
-pub(crate) fn assess_host_key(endpoint: &Endpoint) -> Result<HostKey, NativeError> {
+pub(crate) fn assess_host_key(
+    endpoint: &Endpoint,
+    usage: Option<&UsageContext>,
+) -> Result<HostKey, NativeError> {
     let mut scan = Command::new("ssh-keyscan");
     scan.args([
         "-T",
@@ -127,7 +131,7 @@ pub(crate) fn assess_host_key(endpoint: &Endpoint) -> Result<HostKey, NativeErro
         "ed25519,ecdsa,rsa",
         &endpoint.host,
     ]);
-    let output = bounded_output(&mut scan, None)?;
+    let output = bounded_output_with_usage(&mut scan, None, usage, ChildKind::HostKeyScan)?;
     let output = std::str::from_utf8(&output).map_err(|_| invalid_key())?;
     // Prefer Ed25519, without depending on scan output ordering.
     for algorithm in [
@@ -144,14 +148,17 @@ pub(crate) fn assess_host_key(endpoint: &Endpoint) -> Result<HostKey, NativeErro
                 let key = format!("{} {}", fields[1], fields[2]);
                 validate_key(&key)?;
                 if found.as_ref().is_some_and(|found| found != &key) {
-                    return Err(NativeError::new("ambiguous_host_key", "The endpoint returned conflicting host keys. Verify the endpoint before connecting."));
+                    return Err(NativeError::new(
+                        "ambiguous_host_key",
+                        "The endpoint returned conflicting host keys. Verify the endpoint before connecting.",
+                    ));
                 }
                 found = Some(key);
             }
         }
         if let Some(key) = found {
             return Ok(HostKey {
-                fingerprint: fingerprint(&key)?,
+                fingerprint: fingerprint_with_usage(&key, usage)?,
                 key,
             });
         }
@@ -185,11 +192,20 @@ pub(crate) fn validate_key(key: &str) -> Result<(), NativeError> {
     }
     Ok(())
 }
+#[cfg(test)]
 fn fingerprint(key: &str) -> Result<String, NativeError> {
+    fingerprint_with_usage(key, None)
+}
+fn fingerprint_with_usage(key: &str, usage: Option<&UsageContext>) -> Result<String, NativeError> {
     let mut command = Command::new("ssh-keygen");
     command.args(["-l", "-E", "sha256", "-f", "-"]);
     let public_key = format!("{key}\n");
-    let output = bounded_output(&mut command, Some(public_key.as_bytes()))?;
+    let output = bounded_output_with_usage(
+        &mut command,
+        Some(public_key.as_bytes()),
+        usage,
+        ChildKind::HostKeyFingerprint,
+    )?;
     let output = std::str::from_utf8(&output).map_err(|_| invalid_key())?;
     let value = output.split_whitespace().nth(1).ok_or_else(invalid_key)?;
     if !valid_fingerprint(value) {
@@ -400,7 +416,18 @@ pub(crate) fn bounded_output(
     command: &mut Command,
     input: Option<&[u8]>,
 ) -> Result<Vec<u8>, NativeError> {
-    capture_with_timeout(command, input, COMMAND_TIMEOUT)
+    capture_owned(command, input, COMMAND_TIMEOUT, None, ChildKind::ShortTool)
+}
+pub(crate) fn bounded_output_with_usage(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    usage: Option<&UsageContext>,
+    kind: ChildKind,
+) -> Result<Vec<u8>, NativeError> {
+    if usage.is_none() {
+        return bounded_output(command, input);
+    }
+    capture_owned(command, input, COMMAND_TIMEOUT, usage, kind)
 }
 
 #[cfg(test)]
@@ -423,24 +450,43 @@ pub(crate) fn bounded_output_until(
 
 /// Credential material stays in the system agent. Only readiness crosses the
 /// native boundary; the public fingerprint listing is discarded immediately.
-pub(crate) fn require_agent() -> Result<(), NativeError> {
+pub(crate) fn require_agent(usage: Option<&UsageContext>) -> Result<(), NativeError> {
     let mut command = Command::new("ssh-add");
     command.arg("-l");
-    agent_readiness(&mut command)
+    agent_readiness_with_usage(&mut command, usage)
 }
+#[cfg(test)]
 fn agent_readiness(command: &mut Command) -> Result<(), NativeError> {
-    bounded_output(command, None).map(|_| ()).map_err(|_| {
-        NativeError::new(
-            "ssh_agent_unavailable",
-            "Start or unlock the system SSH agent and load an authorized key, then reconnect.",
-        )
-    })
+    agent_readiness_with_usage(command, None)
+}
+fn agent_readiness_with_usage(
+    command: &mut Command,
+    usage: Option<&UsageContext>,
+) -> Result<(), NativeError> {
+    bounded_output_with_usage(command, None, usage, ChildKind::AgentReadiness)
+        .map(|_| ())
+        .map_err(|_| {
+            NativeError::new(
+                "ssh_agent_unavailable",
+                "Start or unlock the system SSH agent and load an authorized key, then reconnect.",
+            )
+        })
 }
 
+#[cfg(test)]
 fn capture_with_timeout(
     command: &mut Command,
     input: Option<&[u8]>,
     timeout: Duration,
+) -> Result<Vec<u8>, NativeError> {
+    capture_owned(command, input, timeout, None, ChildKind::ShortTool)
+}
+fn capture_owned(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    usage: Option<&UsageContext>,
+    kind: ChildKind,
 ) -> Result<Vec<u8>, NativeError> {
     command
         .stdin(if input.is_some() {
@@ -455,13 +501,13 @@ fn capture_with_timeout(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().map_err(|_| {
+    let mut child = OwnedChild::spawn(command, usage, kind).map_err(|_| {
         NativeError::new(
             "ssh_tool_unavailable",
             "Install OpenSSH client tools (ssh, ssh-keyscan and ssh-keygen) and try again.",
         )
     })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+    let stdout = child.take_stdout().ok_or_else(|| {
         NativeError::new("ssh_io_failed", "Could not read the SSH tool response.")
     })?;
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -473,7 +519,7 @@ fn capture_with_timeout(
             .map(|_| bytes);
         let _ = sender.send(result);
     });
-    let writer = if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+    let writer = if let (Some(mut stdin), Some(input)) = (child.take_stdin(), input) {
         let input = input.to_vec();
         Some(thread::spawn(move || {
             let _ = stdin.write_all(&input);
@@ -560,7 +606,10 @@ fn capture_with_timeout(
             NativeError::new("ssh_io_failed", "Could not read the SSH tool response.")
         })
     } else {
-        Err(NativeError::new("ssh_probe_failed", "SSH could not obtain or validate the host key. Check the address, SSH port and network."))
+        Err(NativeError::new(
+            "ssh_probe_failed",
+            "SSH could not obtain or validate the host key. Check the address, SSH port and network.",
+        ))
     };
     if let Some(writer) = writer {
         let _ = writer.join();
@@ -569,24 +618,8 @@ fn capture_with_timeout(
     result
 }
 
-fn capture_child_exited(child: &mut std::process::Child) -> bool {
-    #[cfg(unix)]
-    {
-        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut status,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        result != 0 || unsafe { status.si_pid() } != 0
-    }
-    #[cfg(not(unix))]
-    {
-        matches!(child.try_wait(), Ok(Some(_)))
-    }
+fn capture_child_exited(child: &mut OwnedChild) -> bool {
+    child.exited()
 }
 
 #[cfg(test)]
@@ -622,15 +655,17 @@ mod tests {
             vec!["yard", "-Y", "default", "shell", "--", "anything"],
             vec!["yard", "-Y", "default", "shell", "project;bad"],
         ] {
-            assert!(owner_command(
-                &endpoint,
-                Path::new("/synthetic"),
-                "alias",
-                "ssh-ed25519 AAAA",
-                &invalid.into_iter().map(str::to_owned).collect::<Vec<_>>(),
-                true
-            )
-            .is_err());
+            assert!(
+                owner_command(
+                    &endpoint,
+                    Path::new("/synthetic"),
+                    "alias",
+                    "ssh-ed25519 AAAA",
+                    &invalid.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    true
+                )
+                .is_err()
+            );
         }
     }
     #[test]
@@ -648,19 +683,22 @@ mod tests {
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
-        assert!(args
-            .windows(2)
-            .any(|values| values == ["-W", "127.0.0.1:2222"]));
+        assert!(
+            args.windows(2)
+                .any(|values| values == ["-W", "127.0.0.1:2222"])
+        );
         assert_eq!(&args[args.len() - 2..], ["--", "host"]);
         assert!(args.contains(&"IdentityFile=none".into()));
-        assert!(proxy_command(
-            &endpoint,
-            Path::new("/synthetic"),
-            "alias",
-            "ssh-ed25519 AAAA",
-            0
-        )
-        .is_err());
+        assert!(
+            proxy_command(
+                &endpoint,
+                Path::new("/synthetic"),
+                "alias",
+                "ssh-ed25519 AAAA",
+                0
+            )
+            .is_err()
+        );
     }
     #[test]
     fn endpoint_options_and_shell_metacharacters_are_rejected() {
@@ -715,9 +753,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(command
-            .get_args()
-            .any(|argument| argument == "UserKnownHostsFile=\"/synthetic%%h/pin%%file\""));
+        assert!(
+            command
+                .get_args()
+                .any(|argument| argument == "UserKnownHostsFile=\"/synthetic%%h/pin%%file\"")
+        );
     }
     #[test]
     fn launch_is_fixed_and_strictly_pinned() {
@@ -827,3 +867,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[path = "ssh_child_usage_tests.rs"]
+mod child_usage_tests;

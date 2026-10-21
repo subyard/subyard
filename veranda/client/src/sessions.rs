@@ -1,13 +1,13 @@
 //! Typed owner launch descriptors become fixed native invocations, never frontend paths.
 use crate::connections::{ConnectionStore, ConsentedConnection};
-use crate::local_fleet::{safe_id, safe_name, NativeError};
+use crate::local_fleet::{NativeError, safe_id, safe_name};
 use crate::{ssh, transport};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
 
@@ -154,6 +154,16 @@ pub fn launch(
     count: Arc<AtomicUsize>,
     editor_id: &str,
 ) -> Result<Launch, NativeError> {
+    launch_with_usage(descriptor, pin, store, count, editor_id, None)
+}
+pub(crate) fn launch_with_usage(
+    descriptor: Descriptor,
+    pin: Option<ConsentedConnection>,
+    store: &mut ConnectionStore,
+    count: Arc<AtomicUsize>,
+    editor_id: &str,
+    usage: Option<&crate::child_usage::UsageContext>,
+) -> Result<Launch, NativeError> {
     if count.fetch_add(1, Ordering::AcqRel) >= 16 {
         count.fetch_sub(1, Ordering::AcqRel);
         return Err(NativeError::new(
@@ -164,7 +174,7 @@ pub fn launch(
     let result = (|| {
         let mut command = if descriptor.kind == "vscode" {
             if let Some(pin) = &pin {
-                require_remote_ssh()?;
+                require_remote_ssh(usage)?;
                 let target = descriptor.vscode.as_ref().ok_or_else(transport::invalid)?;
                 let owner_pin = pin.public_pin();
                 let guest_pin = format!("veranda-guest-{editor_id} {}\n", target.host_key);
@@ -178,8 +188,13 @@ pub fn launch(
                 )?;
                 let proxy =
                     pin.proxy_command_with_pin(target.port, &root.join("owner-known-hosts"))?;
-                let config = format!("Host veranda-{editor_id}\n HostName 127.0.0.1\n User {}\n Port {}\n HostKeyAlias veranda-guest-{editor_id}\n UserKnownHostsFile {}\n GlobalKnownHostsFile none\n StrictHostKeyChecking yes\n UpdateHostKeys no\n VerifyHostKeyDNS no\n BatchMode yes\n IdentityFile none\n IdentitiesOnly no\n ForwardAgent no\n ProxyCommand {}\n", target.dev_user, target.port,
-                    ssh_config_path(&root.join("guest-known-hosts"))?, display_command(&proxy)?.replace('%', "%%"));
+                let config = format!(
+                    "Host veranda-{editor_id}\n HostName 127.0.0.1\n User {}\n Port {}\n HostKeyAlias veranda-guest-{editor_id}\n UserKnownHostsFile {}\n GlobalKnownHostsFile none\n StrictHostKeyChecking yes\n UpdateHostKeys no\n VerifyHostKeyDNS no\n BatchMode yes\n IdentityFile none\n IdentitiesOnly no\n ForwardAgent no\n ProxyCommand {}\n",
+                    target.dev_user,
+                    target.port,
+                    ssh_config_path(&root.join("guest-known-hosts"))?,
+                    display_command(&proxy)?.replace('%', "%%")
+                );
                 // VS Code's dedicated app-local user data keeps global SSH/Code settings untouched.
                 let settings = serde_json::to_string(&serde_json::json!({"remote.SSH.configFile":root.join("ssh-config"),"remote.SSH.showLoginTerminal":false})).map_err(|_| transport::invalid())?;
                 store.write_editor_profile(
@@ -241,16 +256,18 @@ fn from_arguments(arguments: &[String]) -> Result<Command, NativeError> {
     Ok(command)
 }
 fn code_program() -> &'static str {
-    if cfg!(windows) {
-        "code.cmd"
-    } else {
-        "code"
-    }
+    if cfg!(windows) { "code.cmd" } else { "code" }
 }
-fn require_remote_ssh() -> Result<(), NativeError> {
+fn require_remote_ssh(usage: Option<&crate::child_usage::UsageContext>) -> Result<(), NativeError> {
     let mut command = Command::new(code_program());
     command.arg("--list-extensions");
-    let extensions = ssh::bounded_output(&mut command, None).map_err(|_| {
+    let extensions = ssh::bounded_output_with_usage(
+        &mut command,
+        None,
+        usage,
+        crate::child_usage::ChildKind::EditorExtensionProbe,
+    )
+    .map_err(|_| {
         NativeError::new(
             "editor_unavailable",
             "Veranda could not check VS Code. Install its code command and try again.",
@@ -271,6 +288,12 @@ fn require_remote_ssh() -> Result<(), NativeError> {
         ))
     }
 }
+#[cfg(test)]
+pub(crate) fn extension_probe_for_test(
+    usage: Option<&crate::child_usage::UsageContext>,
+) -> Result<(), NativeError> {
+    require_remote_ssh(usage)
+}
 fn terminal(command: Command) -> Result<Command, NativeError> {
     #[cfg(target_os = "linux")]
     {
@@ -289,11 +312,17 @@ fn terminal(command: Command) -> Result<Command, NativeError> {
                 return Ok(terminal);
             }
         }
-        Err(NativeError::new("terminal_missing", "Install xterm, GNOME Terminal, Konsole or XFCE Terminal on this client, then open the session again."))
+        Err(NativeError::new(
+            "terminal_missing",
+            "Install xterm, GNOME Terminal, Konsole or XFCE Terminal on this client, then open the session again.",
+        ))
     }
     #[cfg(target_os = "macos")]
     {
-        let script = format!("tell application \"Terminal\"\nactivate\nset sessionTab to do script {}\ndelay 1\nrepeat while busy of sessionTab\ndelay 1\nend repeat\nend tell", serde_json::to_string(&display_command(&command)?).map_err(|_| transport::invalid())?);
+        let script = format!(
+            "tell application \"Terminal\"\nactivate\nset sessionTab to do script {}\ndelay 1\nrepeat while busy of sessionTab\ndelay 1\nend repeat\nend tell",
+            serde_json::to_string(&display_command(&command)?).map_err(|_| transport::invalid())?
+        );
         let mut terminal = Command::new("osascript");
         terminal.args(["-e", &script]);
         Ok(terminal)
@@ -373,9 +402,11 @@ mod tests {
             descriptor
                 .validate(kind, "default", false, Some("Demo"))
                 .unwrap();
-            assert!(descriptor
-                .validate(kind, "another", false, Some("Demo"))
-                .is_err());
+            assert!(
+                descriptor
+                    .validate(kind, "another", false, Some("Demo"))
+                    .is_err()
+            );
         }
     }
     #[test]

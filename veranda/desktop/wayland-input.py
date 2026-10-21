@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read GTK accessibility, send actual Wayland/XTEST keys, then close naturally."""
 import hashlib
+import contextlib
 import importlib.util
 import json
 import os
@@ -31,8 +32,6 @@ def process_identity(pid):
 
 def input_progress(result, stage, phase, site, key, snapshot, tree, state):
     """Bounded cached diagnostics only; never read accessibility or typed text."""
-    if state.get('count', 0) >= 512:
-        return
     label = lambda value, size: value if isinstance(value, str) and re.fullmatch(r'[a-z0-9:-]{1,' + str(size) + '}', value) else 'other'
     number = lambda value: value if type(value) is int and 0 <= value <= 1_000_000_000 else None
     navigation = result.get('selection_trace', [{}])[-1] if result.get('selection_trace') else {}
@@ -53,14 +52,64 @@ def input_progress(result, stage, phase, site, key, snapshot, tree, state):
     previous[data['phase']] = signature
     state['count'] = state.get('count', 0) + 1
     now = time.monotonic()
-    data.update(sequence=state['count'], truncated=state['count'] == 512,
+    data.update(sequence=state['count'], truncated=state['count'] >= 512,
                 elapsed_seconds=round(max(0, now - state.setdefault('started', now)), 3))
     encoded = json.dumps(data, sort_keys=True)
     assert len(encoded.encode()) <= 1024
     try:
+        if state.get('checkpoint') is not None:
+            ssh_fixture.replace_private_json(state['checkpoint'], data)
+    except BaseException as error:
+        result['checkpoint_failure_type'] = type(error).__name__
+    if state['count'] > 512:
+        return
+    try:
         print('VERANDA_GTK_PROGRESS ' + encoded, flush=True)
     except BaseException as error:
         result['progress_failure_type'] = type(error).__name__
+
+
+def read_input_checkpoint(path):
+    # Validate an exact, scalar-only schema before including child evidence.
+    path = Path(path)
+    root = ssh_fixture.private_root(path.parent)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        with os.fdopen(fd) as source:
+            info = os.fstat(source.fileno())
+            assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+            assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 1024
+            value = json.loads(source.read(1025))
+    finally:
+        os.close(root)
+    integers = {'key_commands', 'cached_selected', 'cached_navigation_focus', 'cached_control_focus',
+                'cached_tree_nodes', 'incomplete_reads', 'read_errors'}
+    booleans = {'cached_heading', 'cached_control_matched', 'snapshot_truncated', 'truncated'}
+    assert type(value) is dict and set(value) == integers | booleans | {
+        'stage', 'phase', 'site', 'key', 'cached_focused_roles', 'sequence', 'elapsed_seconds'}
+    for key in integers:
+        assert value[key] is None or type(value[key]) is int and 0 <= value[key] <= 1_000_000_000
+    assert all(type(value[key]) is bool for key in booleans)
+    assert type(value['sequence']) is int and 1 <= value['sequence'] <= 1_000_000_000
+    assert type(value['elapsed_seconds']) in (float, int) and 0 <= value['elapsed_seconds'] <= 1_000_000_000
+    assert isinstance(value['stage'], str) and re.fullmatch(r'[a-z0-9:-]{1,80}', value['stage'])
+    assert isinstance(value['site'], str) and re.fullmatch(r'[a-z0-9-]{1,40}', value['site'])
+    assert value['phase'] in ('read-start', 'read-end', 'key-start', 'key-end', 'other')
+    assert value['key'] in ('Tab', 'F6', 'other', 'none')
+    assert type(value['cached_focused_roles']) is list and len(value['cached_focused_roles']) <= 4
+    assert all(role is None or type(role) is int and 0 <= role <= 1_000_000_000 for role in value['cached_focused_roles'])
+    return value
+
+
+def profile_plan_discard(tab, wait, names, focus, keys, activate, scope, result):
+    """The shared exact physical profile flow; diagnostic callers claim no acceptance."""
+    tab('Profiles', scope)
+    wait(lambda: any('Effective profile selection:' in name for name in names()))
+    focus('Review profile selection'); keys('-k', 'space')
+    wait(lambda: any('Confirmation:' in name and 'Expires:' in name for name in names()))
+    activate('Discard plan')
+    wait(lambda: any('Plan discarded.' in name for name in names()))
+    result['typed_profile_exact_plan_discard'] = True
 
 
 def owned_tree(app, pid, defunct, deadline):
@@ -202,11 +251,20 @@ def x11_keys(pid, arguments, owned):
     if modifiers:
         raise ValueError('unreleased physical modifier')
     for kind, value in events:
-        owned()
         if kind == 'key':
+            owned()
             x11_key(pid, value)
         else:
-            x11_input(pid, ['type', '--clearmodifiers', '--delay', '25', '--', value])
+            # xdotool temporarily remaps Unicode keycodes. A busy GTK consumer
+            # can read queued events after those mappings have been restored.
+            # GTK's native Unicode entry uses stable physical ASCII keys.
+            for chunk in re.findall(r'[\x20-\x7e]+|[^\x20-\x7e]', value):
+                owned()
+                if len(chunk) == 1 and not 32 <= ord(chunk) < 127:
+                    x11_input(pid, ['key', '--clearmodifiers', '--delay', '25',
+                                   'ctrl+shift+u', *format(ord(chunk), 'x'), 'Return'])
+                else:
+                    x11_input(pid, ['type', '--clearmodifiers', '--delay', '25', '--', chunk])
 
 
 def retain_failure_diagnostics(result, collect):
@@ -216,8 +274,13 @@ def retain_failure_diagnostics(result, collect):
         result['diagnostic_failure_type'] = type(error).__name__
 
 
-def capture_view(backend, capture, env=None):
+def capture_view(backend, capture, env=None, deadline=None):
     env = os.environ if env is None else env
+    def timeout():
+        remaining = 5 if deadline is None else min(5, deadline - time.monotonic())
+        assert remaining > 0, 'diagnostic_deadline_expired'
+        return remaining
+    if deadline is not None: timeout()
     assert capture.parent.resolve() == capture.parent and not capture.exists()
     fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)
@@ -226,7 +289,7 @@ def capture_view(backend, capture, env=None):
         with os.fdopen(fd, 'wb') as output:
             if backend == 'wayland':
                 subprocess.run(['grim', '-'], check=True, env=env,
-                               stdout=output, stderr=subprocess.DEVNULL, timeout=5)
+                               stdout=output, stderr=subprocess.DEVNULL, timeout=timeout())
         if backend == 'x11':
             code = ('import importlib.util,pathlib,sys\n'
                     'spec=importlib.util.spec_from_file_location("probe",sys.argv[1])\n'
@@ -234,11 +297,12 @@ def capture_view(backend, capture, env=None):
                     'assert probe.screenshot(sys.argv[2],pathlib.Path(sys.argv[3]))\n')
             subprocess.run([sys.executable, '-c', code,
                 str(Path(__file__).resolve().parents[2] / 'dev/measure-veranda.py'),
-                env['DISPLAY'], str(capture)], env=env, check=True, timeout=5,
+                env['DISPLAY'], str(capture)], env=env, check=True, timeout=timeout(),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         info = capture.lstat()
         assert (os.path.samestat(original, info) and stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and info.st_size <= 2 * 1024 * 1024)
+        if deadline is not None: assert time.monotonic() < deadline, 'diagnostic_deadline_expired'
     except BaseException:
         # A partial diagnostic image must not break the parent's evidence retention.
         if capture.exists() and os.path.samestat(original, capture.lstat()):
@@ -273,11 +337,14 @@ def focus_matches(items, pid, name, atspi, owner_row=False):
 
 def navigation_snapshot(items, pid, atspi):
     def valid(node, role):
-        assert node is not None and node in items, 'focus_target_unavailable'
+        if node is None:
+            raise IncompleteTree()
         states = node.get_state_set()
         assert (node.get_process_id() == pid and node.get_role() == role
                 and states.contains(atspi.StateType.SHOWING)
                 and not states.contains(atspi.StateType.DEFUNCT)), 'focus_target_unavailable'
+        if node not in items:
+            raise IncompleteTree()
         return states
     lists = [node for node in items if node.get_role() == atspi.Role.LIST
              and node.get_name() == 'Owner hosts and yards']
@@ -340,12 +407,33 @@ def remote_editor_ready(items, pid, atspi):
     return len(titles) == 1
 
 
-def interface_text(interface, text_api):
+def record_ime_read(observation, count, text, value, proof):
+    """Bounded original read data for the fixture-owned empty Yard name field."""
+    assert set(proof) == {'scope', 'owned', 'unique_editor', 'focused', 'same_editor'} and all(value is True for value in proof.values())
+    raw_type = type(text).__name__ if type(text) in (str, type(None), bytes, int, bool, float, list, tuple, dict) else 'other'
+    row = {'character_count': count, 'raw_type': raw_type,
+           'raw_length': len(text) if isinstance(text, str) else None,
+           'normalized_kind': 'none' if value is None else 'empty' if value == '' else 'nonempty',
+           'codepoints': [ord(char) for char in text[:16]] if isinstance(text, str) else [],
+           'truncated': isinstance(text, str) and len(text) > 16, 'proof': dict(proof)}
+    if len(observation['reads']) == 16:
+        observation['reads'].pop(0)
+        observation['dropped'] += 1
+    observation['reads'].append(row)
+
+
+def interface_text(interface, text_api, observation=None, proof=None):
     # Accessible.get_text() shadows the Text interface's content method in GI.
     count = text_api.get_character_count(interface)
     assert type(count) is int and 0 <= count <= 32768, 'accessible_text_limit_exceeded'
     text = text_api.get_text(interface, 0, count)
-    return text if isinstance(text, str) and len(text) == count else None
+    value = text if isinstance(text, str) and len(text) == count else None
+    if observation is not None:
+        try:
+            record_ime_read(observation, count, text, value, proof)
+        except BaseException as error:
+            with contextlib.suppress(BaseException): observation['failure_type'] = type(error).__name__
+    return value
 
 
 def committed_host_editor(items, pid, scope, expected, atspi, observation):
@@ -529,6 +617,87 @@ def navigate_owner(read, send, target, trace=None):
         send(key)
 
 
+def diagnostic_navigate_owner(read, send, target, trace, evidence, next_deadline, now=time.monotonic, validate=None, capture=None):
+    """One post-rejection observation, never another key or a replacement verdict."""
+    deadline, current = None, None
+    def observe():
+        nonlocal deadline, current
+        deadline, current = next_deadline(), None
+        current = read(deadline)
+        return current
+    def scalars(view):
+        return None if view is None else {key: view.get(key) for key in ('focused', 'selected_indices', 'focus_probe')}
+    try:
+        navigate_owner(observe, send, target, trace)
+        if validate is not None:
+            deadline, current = next_deadline(), None
+            validate(deadline)
+    except AssertionError as error:
+        if str(error) == 'focus_target_unavailable':
+            evidence.update(original_failure='focus_target_unavailable', original=scalars(current),
+                            original_provenance='NOT_COLLECTED', observation_deadline=deadline, convergence_attempted=False)
+            if deadline is not None and now() < deadline:
+                evidence['convergence_attempted'] = True
+                evidence['fresh_provenance'] = 'fresh-post-rejection'
+                try:
+                    fresh = (capture or read)(deadline)
+                    evidence['fresh'] = scalars(fresh)
+                    evidence['fresh_within_original_deadline'] = now() < deadline
+                except Exception as secondary:
+                    evidence['fresh_failure_type'] = type(secondary).__name__
+        raise
+
+
+def opaque_focus_relations(items, pid, atspi, deadline):
+    """Fresh actual parent/child links only; no UI text or inferred ancestry."""
+    started = time.monotonic()
+    def valid(node):
+        assert time.monotonic() < deadline, 'focus_diagnostic_deadline'
+        matches = [index for index, item in enumerate(items) if node == item]
+        assert len(matches) == 1, 'focus_diagnostic_relationship'
+        states = node.get_state_set()
+        assert (node.get_process_id() == pid and states.contains(atspi.StateType.SHOWING)
+                and not states.contains(atspi.StateType.DEFUNCT)), 'focus_diagnostic_relationship'
+        return matches[0] + 1
+    navigation = [node for node in items if node.get_role() == atspi.Role.LIST
+                  and node.get_name() == 'Owner hosts and yards']
+    windows = [node for node in items if node.get_role() == atspi.Role.FRAME
+               and node.get_state_set().contains(atspi.StateType.SHOWING)]
+    focused = [node for node in items if node.get_state_set().contains(atspi.StateType.FOCUSED)]
+    assert len(navigation) == len(windows) == 1 and len(focused) <= 1, 'focus_diagnostic_relationship'
+    window, nav = windows[0], navigation[0]
+    window_id, nav_id = valid(window), valid(nav)
+    def chain(node):
+        links = []
+        for _ in range(16):
+            ordinal = valid(node)
+            assert ordinal not in links, 'focus_diagnostic_relationship'
+            links.append(ordinal)
+            if node == window: return links
+            parent = node.get_parent()
+            if parent is None: raise IncompleteTree()
+            valid(parent)
+            count = parent.get_child_count()
+            assert 0 < count <= 128, 'focus_diagnostic_relationship'
+            matches = 0
+            for index in range(count):
+                assert time.monotonic() < deadline, 'focus_diagnostic_deadline'
+                child = parent.get_child_at_index(index)
+                if child is None: raise IncompleteTree()
+                matches += child == node
+            assert matches == 1, 'focus_diagnostic_relationship'
+            node = parent
+        raise AssertionError('focus_diagnostic_relationship')
+    nav_chain = chain(nav)
+    focus_chain = chain(focused[0]) if focused else []
+    return {'status': 'OBSERVED', 'started_monotonic': started, 'ended_monotonic': time.monotonic(),
+            'pid': pid, 'navigation': nav_id, 'window': window_id, 'navigation_ancestors': nav_chain,
+            'focused': valid(focused[0]) if focused else None,
+            'focused_role': int(focused[0].get_role()) if focused else None,
+            'focused_ancestors': focus_chain, 'navigation_contains_focus': nav_id in focus_chain,
+            'focus_contains_navigation': bool(focus_chain and focus_chain[0] in nav_chain)}
+
+
 def owner_focus_observation(items, pid, name, atspi):
     """Whitelist actual accessible relations; never derive ancestry from order."""
     def describe(node):
@@ -654,8 +823,9 @@ def main():
     original_identity = identity()
     assert original_identity[0] == os.getuid()
     last_tree, last_accessibility = [], {}
+    ime_observation = None
     snapshot_state = {'next': 0, 'truncated': False}
-    progress_state = {'started': started}
+    progress_state = {'started': started, 'checkpoint': Path(os.environ['VERANDA_GTK_CHECKPOINT']) if os.environ.get('VERANDA_GTK_CHECKPOINT') else None}
     def progress(phase, site='navigation', key='none'):
         input_progress(result, stage, phase, site, key, snapshot_state, last_tree, progress_state)
     try:
@@ -699,10 +869,10 @@ def main():
             app.clear_cache()
             return owned_tree(app, pid, Atspi.StateType.DEFUNCT, deadline)
 
-        def nodes(observe=None, site='navigation'):
+        def nodes(observe=None, site='navigation', deadline=None):
             progress('read-start', site)
             if observe is not None:
-                value = coherent_observation(read_tree, observe, read_deadline or time.monotonic() + 20,
+                value = coherent_observation(read_tree, observe, deadline if deadline is not None else read_deadline or time.monotonic() + 20,
                     result.setdefault('navigation_read', {}), GLib.Error, site)
                 progress('read-end', site)
                 return value
@@ -786,6 +956,8 @@ def main():
                 if match: return match[1]
 
         scenario = os.environ.get('VERANDA_GTK_SCENARIO', 'local')
+        if scenario in ('owner-focus-connect', 'owner-focus-restore'):
+            result['diagnostic_only'] = True
         destination = os.environ.get('VERANDA_GTK_DESTINATION', '')
         def names():
             return {node.get_name() for node in nodes() if node.get_state_set().contains(Atspi.StateType.SHOWING)}
@@ -794,18 +966,37 @@ def main():
             return destination in visible and 'Connected' in visible and any('20 yards' in name for name in visible)
         def focus(name, owner_row=False, workspace=False, expected_scope=None):
             if owner_row:
-                def read_navigation():
+                diagnostic = scenario in ('owner-focus-connect', 'owner-focus-restore',
+                                          'connect', 'remote-restore', 'local-restore')
+                observation = [0]
+                def read_navigation(deadline=None, auxiliary=False):
                     def observe(items):
                         snapshot = navigation_snapshot(items, pid, Atspi)
-                        diagnostic = owner_focus_observation(items, pid, name, Atspi) if scenario == 'owner-focus' else None
-                        return snapshot, diagnostic
-                    snapshot, diagnostic = nodes(observe)
-                    if diagnostic is not None:
-                        result.setdefault('focus_trace', []).append(dict(diagnostic, target=name, owner_row=True))
+                        detail = owner_focus_observation(items, pid, name, Atspi) if scenario == 'owner-focus' else None
+                        if auxiliary:
+                            observation[0] += 1
+                            try: snapshot['focus_probe'] = opaque_focus_relations(items, pid, Atspi, deadline)
+                            except Exception as error:
+                                snapshot['focus_probe'] = {'status': 'UNKNOWN', 'failure_type': type(error).__name__}
+                            snapshot['focus_probe']['observation'] = observation[0]
+                        return snapshot, detail
+                    snapshot, detail = nodes(observe, deadline=deadline)
+                    if detail is not None:
+                        result.setdefault('focus_trace', []).append(dict(detail, target=name, owner_row=True))
                     return snapshot
-                navigate_owner(read_navigation, lambda key: keys('-k', key), name,
-                               result.setdefault('owner_navigation', []))
-                assert nodes(lambda items: focus_matches(items, pid, name, Atspi, True), 'final-focus'), 'focus_target_unavailable'
+                if diagnostic:
+                    def validate_navigation(deadline):
+                        assert nodes(lambda items: focus_matches(items, pid, name, Atspi, True),
+                                     'final-focus', deadline=deadline), 'focus_target_unavailable'
+                    diagnostic_navigate_owner(read_navigation, lambda key: keys('-k', key), name,
+                        result.setdefault('owner_navigation', []), result.setdefault('focus_rejection', {}),
+                        lambda: read_deadline if read_deadline is not None else time.monotonic() + 20,
+                        validate=validate_navigation,
+                        capture=lambda end: read_navigation(end, auxiliary=True))
+                else:
+                    navigate_owner(read_navigation, lambda key: keys('-k', key), name,
+                                   result.setdefault('owner_navigation', []))
+                    assert nodes(lambda items: focus_matches(items, pid, name, Atspi, True), 'final-focus'), 'focus_target_unavailable'
                 return
             def read_control():
                 def observe(items):
@@ -876,6 +1067,15 @@ def main():
                     return expected <= {node.get_name() for node in items if node.get_state_set().contains(Atspi.StateType.SHOWING)}
                 return nodes(observe, stage)
             wait(visible)
+        def authenticate_owner():
+            review()
+            activate('Accept and connect')
+            wait(connected_owner)
+            result['authenticated_owner_discovered_and_saved'] = True
+            root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
+            saved = (root / 'connections.json').read_bytes()
+            result['saved_store_sha256'] = hashlib.sha256(saved).hexdigest()
+            return root, saved
         if scenario == 'connect':
             stage = 'initial-local-fleet'
             wait(lambda: 'Connected' in names())
@@ -891,12 +1091,7 @@ def main():
             result['first_key_decline_preserved_empty_store'] = True
             result['first_key_decline_preserved_entry_scope'] = True
             stage = 'first-key-accept'
-            review()
-            activate('Accept and connect')
-            wait(connected_owner)
-            result['authenticated_owner_discovered_and_saved'] = True
-            saved = (root / 'connections.json').read_bytes()
-            result['saved_store_sha256'] = hashlib.sha256(saved).hexdigest()
+            root, saved = authenticate_owner()
             stage = 'cancel-active-connect'
             block = Path(os.environ['VERANDA_GTK_BLOCK'])
             cancel_entry = review(known_key=True)
@@ -943,6 +1138,16 @@ def main():
             select_default(destination, 'remote-yard-navigation')
             projects(destination + ' / default', 'remote-yard-navigation')
             result['visible_remote_project_names'] = 10
+        elif scenario == 'owner-focus-connect':
+            result['diagnostic_only'] = True
+            stage = 'diagnostic-authenticate-owner'
+            wait(lambda: 'Connected' in names())
+            wait_scope('Local owner / default', stage)
+            authenticate_owner()
+            stage = 'diagnostic-save-local-selection'
+            select_default('Local owner', stage)
+            projects('Local owner / default', stage)
+            result['diagnostic_local_default_projects_saved'] = True
         elif scenario == 'remote-restore':
             stage = 'restore-remote-selection'
             wait(lambda: 'Connected' in names())
@@ -954,7 +1159,7 @@ def main():
             select_default('Local owner', 'switch-local-owner')
             projects('Local owner / default', 'switch-local-owner')
             result['local_owner_selected_and_saved'] = True
-        elif scenario == 'local-restore':
+        elif scenario in ('local-restore', 'owner-focus-restore'):
             stage = 'restore-local-selection'
             wait(lambda: 'Connected' in names())
             wait_scope('Local owner / default', stage)
@@ -966,24 +1171,31 @@ def main():
             wait_scope(destination, stage)
             wait(connected_owner)
             result['saved_remote_selected_with_fresh_inventory'] = True
-            stage = 'repair-host-key'
-            block = Path(os.environ['VERANDA_GTK_BLOCK'])
-            rotate = block.with_name('rotate')
-            rotate.write_text('rotate-v1\n'); rotate.chmod(0o600)
-            wait(lambda: block.with_name('rotated').exists())
-            activate('Repair host key', workspace=True)
-            wait(lambda: 'Repair host key' in names())
-            focus('Remote SSH destination')
-            keys('-k', 'Return')
-            wait(lambda: any(os.environ['VERANDA_GTK_REPLACEMENT'] in name and 'Previous fingerprint:' in name and os.environ['VERANDA_GTK_FINGERPRINT'] in name for name in names()))
-            root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
-            previous = json.loads((root / 'connections.json').read_bytes())['connections'][0]
-            activate('Accept and connect')
-            wait(connected_owner)
-            current = json.loads((root / 'connections.json').read_bytes())['connections'][0]
-            assert current['id'] == previous['id'] and current['hostId'] == previous['hostId'], 'repair_changed_owner'
-            assert current['fingerprint'] == os.environ['VERANDA_GTK_REPLACEMENT'], 'repair_missing_replacement'
-            result['separate_replacement_repair_preserved_owner'] = True
+            if scenario == 'owner-focus-restore':
+                result['diagnostic_only'] = True
+                view = scope_snapshot(stage)
+                assert len(view['order']) == 42 and sum(view['owners']) == 2, 'local_scope_changed'
+                result['diagnostic_owner_rows'] = 42
+                result['diagnostic_remote_owner_focused'] = True
+            else:
+                stage = 'repair-host-key'
+                block = Path(os.environ['VERANDA_GTK_BLOCK'])
+                rotate = block.with_name('rotate')
+                rotate.write_text('rotate-v1\n'); rotate.chmod(0o600)
+                wait(lambda: block.with_name('rotated').exists())
+                activate('Repair host key', workspace=True)
+                wait(lambda: 'Repair host key' in names())
+                focus('Remote SSH destination')
+                keys('-k', 'Return')
+                wait(lambda: any(os.environ['VERANDA_GTK_REPLACEMENT'] in name and 'Previous fingerprint:' in name and os.environ['VERANDA_GTK_FINGERPRINT'] in name for name in names()))
+                root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
+                previous = json.loads((root / 'connections.json').read_bytes())['connections'][0]
+                activate('Accept and connect')
+                wait(connected_owner)
+                current = json.loads((root / 'connections.json').read_bytes())['connections'][0]
+                assert current['id'] == previous['id'] and current['hostId'] == previous['hostId'], 'repair_changed_owner'
+                assert current['fingerprint'] == os.environ['VERANDA_GTK_REPLACEMENT'], 'repair_missing_replacement'
+                result['separate_replacement_repair_preserved_owner'] = True
         elif scenario in ('ime', 'ime-restore'):
             stage = 'ime-local-owner'
             if scenario == 'ime':
@@ -1010,7 +1222,10 @@ def main():
                         and not node.get_state_set().contains(Atspi.StateType.DEFUNCT)]
                     assert len(editors) == 1 and focused == editors, 'focus_target_unavailable'
                     assert original_editor is None or editors[0] == original_editor, 'ime_editor_replaced'
-                    return editors[0], interface_text(editors[0].get_text_iface(), Atspi.Text)
+                    if ime_observation is None:
+                        return editors[0], interface_text(editors[0].get_text_iface(), Atspi.Text)
+                    proof = dict(scope=True, owned=True, unique_editor=True, focused=True, same_editor=True)
+                    return editors[0], interface_text(editors[0].get_text_iface(), Atspi.Text, ime_observation, proof)
                 return nodes(observe, stage)
             original_editor, initial = read_ime_editor()
             store = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
@@ -1018,6 +1233,8 @@ def main():
             if scenario == 'ime':
                 stage = 'ime-two-set-composition'
                 assert local_ime_draft(store, ''), 'ime_preedit_committed_early'
+                if os.environ.get('VERANDA_GTK_IME_OBSERVE') == '1':
+                    ime_observation = {'reads': [], 'dropped': 0}
                 result['ime_captures'] = {}
                 def capture_ime(name, committed):
                     # Settling delay is not a preedit/paint measurement or assertion.
@@ -1050,6 +1267,11 @@ def main():
             wait(saved_ime_context)
             result['ime_scope'] = {'connection': None, 'yard': None, 'tab': 'Yards'}
             result['ime_visual_observation'] = 'pending native screenshot inspection'
+        elif scenario == 'profile-diagnostic':
+            stage = 'diagnostic-local-profile-ready'
+            wait(lambda: 'Connected' in names())
+            wait_scope('Local owner / default', stage)
+            result['diagnostic_only'] = True
         elif scenario == 'owner-focus':
             stage = 'diagnostic-local-default'
             wait(lambda: 'Connected' in names())
@@ -1103,7 +1325,7 @@ def main():
             default_nodes(deadline)
             result["visible_real_project_names"] = 10
 
-        if os.environ.get('VERANDA_GTK_UI') == '1':
+        if os.environ.get('VERANDA_GTK_UI') == '1' or scenario == 'profile-diagnostic':
             unicode_draft = '庭院 مرحبا α'
             def host():
                 focus(destination, owner_row=True)
@@ -1116,15 +1338,12 @@ def main():
                 focus(name, workspace=True, expected_scope=expected_scope)
                 assert nodes(lambda items: workspace_tab_ready(items, pid, name, expected_scope, Atspi), 'ui-tab-activate')
                 keys('-k', 'space')
-            if scenario == 'connect':
+            if scenario == 'profile-diagnostic':
                 stage = 'yard-profiles-exact-plan-discard'
-                tab('Profiles', destination + ' / default')
-                wait(lambda: any('Effective profile selection:' in name for name in names()))
-                focus('Review profile selection'); keys('-k', 'space')
-                wait(lambda: any('Confirmation:' in name and 'Expires:' in name for name in names()))
-                activate('Discard plan')
-                wait(lambda: any('Plan discarded.' in name for name in names()))
-                result['typed_profile_exact_plan_discard'] = True
+                profile_plan_discard(tab, wait, names, focus, keys, activate, 'Local owner / default', result)
+            elif scenario == 'connect':
+                stage = 'yard-profiles-exact-plan-discard'
+                profile_plan_discard(tab, wait, names, focus, keys, activate, destination + ' / default', result)
                 stage = 'host-refresh-overview-observation'
                 host(); tab('Overview', destination)
                 overview_detail = wait(lambda: nodes(lambda items: overview_observed_label(items, pid, destination, Atspi), stage))
@@ -1184,15 +1403,17 @@ def main():
                 node = next(node for node in nodes() if node.get_name() == 'Yard name' and node.get_state_set().contains(Atspi.StateType.FOCUSED))
                 assert interface_text(node.get_text_iface(), Atspi.Text) == unicode_draft, 'draft_restart_missing'
                 result['draft_restart_rendered'] = True
-        if scenario in ('connect', 'remote-restore', 'local-restore'):
+                tab('Overview', destination)
+        if scenario in ('connect', 'remote-restore', 'local-restore', 'owner-focus-connect', 'owner-focus-restore'):
             stage = 'saved-navigation-context'
             root = Path(os.environ['XDG_DATA_HOME']) / 'subyard/veranda'
-            expected_yard = None if scenario == 'local-restore' else 'default'
-            expected_tab = 'Overview' if scenario == 'local-restore' else 'Projects'
+            restored_owner = scenario in ('local-restore', 'owner-focus-restore')
+            expected_yard = None if restored_owner else 'default'
+            expected_tab = 'Overview' if restored_owner else 'Projects'
             def saved_context():
                 record = json.loads((root / 'connections.json').read_bytes())['connections'][0]
                 selected = json.loads((root / 'navigation.json').read_bytes())
-                expected_connection = None if scenario == 'remote-restore' else record['id']
+                expected_connection = None if scenario in ('remote-restore', 'owner-focus-connect') else record['id']
                 return (selected['connectionId'] == expected_connection
                         and selected['yardName'] == expected_yard and selected['tab'] == expected_tab)
             wait(saved_context)
@@ -1206,10 +1427,12 @@ def main():
         else:
             local_key('alt+F4')
         result["original_exit_code"] = 0
-        result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1" and scenario not in ('ime', 'ime-restore')
+        result["read_only_scope_verified"] = os.environ.get("VERANDA_GTK_UI") != "1" and scenario not in ('ime', 'ime-restore', 'profile-diagnostic')
         result["owner_mutation_executed"] = False
     except BaseException as error:
         result.update(failure_stage=stage, failure_type=type(error).__name__)
+        if ime_observation is not None:
+            result['ime_observation'] = ime_observation
         reasons = {'owned_process_terminated', 'owned_process_identity_changed',
                    'duplicate_owned_accessible_application', 'accessible_depth_exceeded',
                    'accessible_node_limit_exceeded', 'accessible_children_unavailable', 'foreign_accessible_node', 'local_scope_changed',

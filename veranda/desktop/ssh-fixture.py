@@ -37,6 +37,48 @@ def read_private_json(path):
         return json.load(source)
 
 
+def private_root(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def replace_private_json(path, value):
+    """Atomic bounded checkpoint in an exact private, owned, non-symlink root."""
+    path = Path(path)
+    encoded = json.dumps(value, sort_keys=True).encode()
+    assert len(encoded) <= 1024
+    root = private_root(path.parent)
+    temporary = path.name + '.next'
+    created = False
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(fd) as existing:
+                info = os.fstat(existing.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                assert stat.S_IMODE(info.st_mode) == 0o600
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
+        created = True
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(encoded)
+        os.replace(temporary, path.name, src_dir_fd=root, dst_dir_fd=root)
+        created = False
+    finally:
+        if created:
+            os.unlink(temporary, dir_fd=root)
+        os.close(root)
+
+
 def identity(pid, proc=Path('/proc')):
     try:
         path = proc / str(pid)
