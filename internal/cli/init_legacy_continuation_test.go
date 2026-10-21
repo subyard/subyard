@@ -278,7 +278,7 @@ func TestLegacyContinuationUnsafeRecordAndChangedOwner(t *testing.T) {
 }
 
 func TestLegacyContinuationInstalledSourceAndTypedConsent(t *testing.T) {
-	for _, scenario := range []string{"decline", "accept", "implicit-decline", "implicit-accept", "changed-uuid", "changed-config", "changed-record", "changed-resource", "changed-project", "changed-epoch", "changed-host-id", "replaced-registration", "missing-history", "unsafe-provenance"} {
+	for _, scenario := range []string{"decline", "accept", "implicit-decline", "implicit-accept", "changed-uuid", "changed-config", "changed-record", "changed-resource", "changed-project", "changed-epoch", "changed-host-id", "changed-disk-tmp", "replaced-registration", "missing-history", "unsafe-provenance"} {
 		t.Run(scenario, func(t *testing.T) {
 			implicit := strings.HasPrefix(scenario, "implicit-")
 			scenario = strings.TrimPrefix(scenario, "implicit-")
@@ -343,6 +343,9 @@ func TestLegacyContinuationInstalledSourceAndTypedConsent(t *testing.T) {
 				incus.Reconcile.Instance.Config["volatile.uuid"] = "replacement"
 			case "changed-config":
 				writeConfigCommandFile(t, path, "SSH_PORT=2241\n")
+			case "changed-disk-tmp":
+				incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = "v1"
+				incus.Reconcile.Instance.LocalConfig["user.subyard.disk_tmp"] = "v1"
 			case "changed-host-id":
 				testkit.WriteFile(t, configsync.HostIDPath(configHome), []byte("other-owner\n"), 0600)
 			case "replaced-registration":
@@ -501,7 +504,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 }
 
 func TestLegacyContinuationRejectsUnknownInitialPermission(t *testing.T) {
-	for _, kind := range []string{"GPU", "profile-raw", "profile-security", "network-drift", "escape-disk", "instance-security", "instance-raw", "unknown-proxy", "nic-override", "instance-environment", "device-permission", "idmap-privileged", "idmap-duplicate", "idmap-unknown", "idmap-overflow", "idmap-negative", "idmap-empty", "fake-apparmor", "fake-preview", "unverified-kvm"} {
+	for _, kind := range []string{"GPU", "profile-raw", "profile-security", "network-drift", "escape-disk", "instance-security", "instance-raw", "unknown-proxy", "nic-override", "instance-environment", "unknown-config", "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited", "device-permission", "idmap-privileged", "idmap-duplicate", "idmap-unknown", "idmap-overflow", "idmap-negative", "idmap-empty", "fake-apparmor", "fake-preview", "unverified-kvm"} {
 		t.Run(kind, func(t *testing.T) {
 			program, execution, incus, _ := legacyContinuationInstalledFixture(t)
 			switch kind {
@@ -559,6 +562,15 @@ func TestLegacyContinuationRejectsUnknownInitialPermission(t *testing.T) {
 			case "instance-environment":
 				incus.Reconcile.Instance.Config["environment.LD_PRELOAD"] = "/escape"
 				incus.Reconcile.Instance.LocalConfig["environment.LD_PRELOAD"] = "/escape"
+			case "unknown-config":
+				incus.Reconcile.Instance.Config["user.subyard.unapproved"] = "true"
+				incus.Reconcile.Instance.LocalConfig["user.subyard.unapproved"] = "true"
+			case "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited":
+				value := map[string]string{"disk-tmp-empty": "", "disk-tmp-unknown": "v2", "disk-tmp-inherited": "v1"}[kind]
+				incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = value
+				if kind != "disk-tmp-inherited" {
+					incus.Reconcile.Instance.LocalConfig["user.subyard.disk_tmp"] = value
+				}
 			case "device-permission":
 				incus.Reconcile.Instance.LocalDevices["srv"]["readonly"] = "false"
 				incus.Reconcile.Instance.Devices["srv"]["readonly"] = "false"
@@ -585,9 +597,13 @@ func TestLegacyContinuationRejectsUnknownInitialPermission(t *testing.T) {
 }
 
 func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
-	for _, change := range []string{"GPU", "project-feature", "profile-device", "profile-nic-security", "profile-config", "escape-disk", "instance-security", "instance-raw", "device-source", "device-permission", "nic-override", "unknown-config", "idmap-change", "runtime-only", "managed-apparmor", "managed-preview", "publication-only", "canonical-kvm"} {
+	for _, change := range []string{"GPU", "project-feature", "profile-device", "profile-nic-security", "profile-config", "escape-disk", "instance-security", "instance-raw", "device-source", "device-permission", "nic-override", "unknown-config", "idmap-change", "runtime-only", "managed-apparmor", "managed-preview", "publication-only", "canonical-kvm", "managed-disk-tmp", "preexisting-disk-tmp", "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited"} {
 		t.Run(change, func(t *testing.T) {
 			program, execution, incus, _ := legacyContinuationInstalledFixture(t)
+			if change == "preexisting-disk-tmp" {
+				incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = "v1"
+				incus.Reconcile.Instance.LocalConfig["user.subyard.disk_tmp"] = "v1"
+			}
 			if change == "canonical-kvm" {
 				device := map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm", "mode": "0660", "gid": "108"}
 				incus.Reconcile.Instance.LocalDevices["kvm"] = maps.Clone(device)
@@ -644,6 +660,12 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 			case "unknown-config":
 				incus.Reconcile.Instance.Config["user.subyard.unapproved"] = "true"
 				incus.Reconcile.Instance.LocalConfig["user.subyard.unapproved"] = "true"
+			case "managed-disk-tmp", "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited":
+				value := map[string]string{"managed-disk-tmp": "v1", "disk-tmp-empty": "", "disk-tmp-unknown": "v2", "disk-tmp-inherited": "v1"}[change]
+				incus.Reconcile.Instance.Config["user.subyard.disk_tmp"] = value
+				if change != "disk-tmp-inherited" {
+					incus.Reconcile.Instance.LocalConfig["user.subyard.disk_tmp"] = value
+				}
 			case "idmap-change":
 				incus.Reconcile.Instance.Config["volatile.idmap.next"] = "[]"
 				incus.Reconcile.Instance.LocalConfig["volatile.idmap.next"] = "[]"
@@ -688,7 +710,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 			}
 			nativeApply := execution.platform.(reconcileruntime.Runtime)
 			nativeErr := nativeApply.ApplyStage(context.Background(), ports.ReconcileStageProject)
-			if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" {
+			if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp" {
 				if nativeErr != nil {
 					t.Fatal("runtime guard rejected unchanged policy", nativeErr)
 				}
@@ -709,7 +731,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 				native.Yard = loaded.Context
 				request := &initExecution{loaded: loaded, platform: native, hostID: execution.hostID}
 				err = fresh.prepareLegacyContinuation(context.Background(), request, initArguments{continueLegacy: optIn})
-				if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" {
+				if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp" {
 					if err != nil {
 						t.Fatal("ephemeral runtime state invalidated stable authority", err)
 					}

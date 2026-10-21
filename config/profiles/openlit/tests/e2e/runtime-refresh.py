@@ -14,7 +14,10 @@ FILES = ('guest.sh', 'native.py', 'runtime.py', 'trace_cutover.py', 'account.py'
 
 
 def command(arguments, success=True):
-    result = subprocess.run(arguments, capture_output=True, timeout=115)
+    try:
+        result = subprocess.run(arguments, capture_output=True, timeout=115)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('guest runtime acceptance command timed out') from None
     if (result.returncode == 0) != success:
         raise RuntimeError('guest runtime acceptance command had an unexpected result')
     return result.stdout

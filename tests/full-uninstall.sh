@@ -4,6 +4,69 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d /tmp/subyard-full-uninstall.XXXXXX)"
 trap '/bin/rm -rf -- "$fixture"' EXIT
+python3 - "$ROOT" "$fixture" <<'PY_SIGNING_PTY'
+import json,os,pathlib,subprocess,sys,time
+root,temporary=map(pathlib.Path,sys.argv[1:])
+driver=(root/'dev/e2e/full-uninstall.sh').read_text().split("<<'PY_AGENT'\n",1)[1].split('\nPY_AGENT',1)[0]
+child='''import json,os,pathlib,select,sys,termios,time
+state=pathlib.Path(sys.argv[0]).parent.parent
+state.joinpath('child-pid').write_text(str(os.getpid()))
+mode=state.joinpath('mode').read_text()
+settings=termios.tcgetattr(0);settings[3]&=~termios.ECHO;termios.tcsetattr(0,termios.TCSANOW,settings)
+if mode=='child-exit':sys.exit(42)
+if mode=='no-prompt':sys.exit(0)
+if mode=='timeout':time.sleep(60);sys.exit(45)
+if mode=='misleading':
+ print('Plan: key passphrase is read on the owner terminal after confirmation',flush=True)
+ time.sleep(0.2);termios.tcflush(0,termios.TCIFLUSH)
+prompt='Bad passphrase, try again for ' if mode=='bad-prompt' else 'Enter passphrase for '
+os.write(1,(prompt+'synthetic-key: ').encode())
+ready=select.select([0],[],[],3)[0]
+accepted=bool(ready) and os.read(0,4096)==b'synthetic-fixture-passphrase\\n'
+state.joinpath('accepted').write_text(json.dumps(accepted))
+if mode=='repeat':
+ os.write(1,b'Enter passphrase for synthetic-key: ')
+ select.select([0],[],[],3)
+ sys.exit(44)
+sys.exit(0 if accepted else 42)
+'''
+sentinel=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])
+try:
+ for mode in ('misleading','normal','bad-prompt','repeat','child-exit','no-prompt','timeout'):
+  state=temporary/('signing-'+mode);(state/'bin').mkdir(parents=True)
+  (state/'mode').write_text(mode)
+  executable=state/'bin/yard';executable.write_text('#!'+sys.executable+'\n'+child);executable.chmod(0o700)
+  code=driver
+  if mode=='timeout':
+   # Accelerate only the deadline case; execute the actual unchanged 30s loop.
+   code='import time\nclock=time.monotonic;start=clock()\ntime.monotonic=lambda:start+(clock()-start)*10\n'+driver
+  result=subprocess.run([sys.executable,'-c',code,str(state)],capture_output=True,text=True,timeout=38)
+  if mode in ('normal','misleading'):
+   assert result.returncode==0 and (state/'accepted').read_text()=='true', mode+': real prompt was not answered'
+  else:assert result.returncode!=0, mode+': refusal became success'
+  assert 'synthetic-fixture-passphrase' not in result.stdout+result.stderr, mode+': private input escaped'
+  facts=[json.loads(line.split('=',1)[1]) for line in result.stdout.splitlines() if line.startswith('FULL_UNINSTALL_SIGNING_PTY=')]
+  assert len(facts)==1, mode+': missing bounded outcome'
+  fact=facts[0]
+  assert set(fact)=={'saw_prompt','sent_count','child_exit','deadline_reached','child_reaped','outcome'}, mode+': unexpected diagnostic fields'
+  expected={'misleading':'unlocked','normal':'unlocked','bad-prompt':'bad_passphrase_prompt',
+   'repeat':'repeated_prompt','child-exit':'child_failed','no-prompt':'missing_prompt','timeout':'deadline'}
+  assert fact['outcome']==expected[mode], mode+': wrong outcome'
+  assert fact['child_reaped'] and fact['sent_count'] in (0,1), mode+': child custody differs'
+  if mode=='bad-prompt':assert fact['saw_prompt'] and fact['sent_count']==0, 'bad prompt received private input'
+  if mode=='repeat':assert fact['sent_count']==1, 'repeated prompt received another response'
+  if mode in ('normal','misleading'):assert fact['saw_prompt'] and fact['sent_count']==1 and fact['child_exit']==0, mode
+  if mode=='child-exit':assert fact['child_exit']==42, 'native child exit was lost'
+  if mode=='timeout':assert fact['deadline_reached'] and fact['child_exit']==-9, 'timeout did not reap owned child'
+  pid=int((state/'child-pid').read_text())
+  try:os.kill(pid,0)
+  except ProcessLookupError:pass
+  else:raise AssertionError(mode+': owned child survived')
+  assert sentinel.poll() is None, mode+': unrelated child was signalled'
+finally:
+ sentinel.terminate();sentinel.wait(timeout=5)
+print('ok: actual signing PTY waits for OpenSSH prompts, refuses repeats, retains exits and cleans only its child')
+PY_SIGNING_PTY
 version=0.17.0-test.full-uninstall
 release="$fixture/release"
 bash "$ROOT/dev/package-engine.sh" --output-dir "$release" --version "$version" --arch amd64 >/dev/null

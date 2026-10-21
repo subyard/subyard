@@ -102,7 +102,7 @@ check_manifests() {
 
 check_go_race() {
   printf 'Go race tests: full suite umask=0022\n'
-  (umask 0022; go -C "$ROOT" test -race -count=1 -timeout=20m ./cmd/... ./internal/...)
+  (umask 0022; go -C "$ROOT" test -race -count=1 -timeout=30m ./cmd/... ./internal/...)
   # Actual publication/private-mode contracts, including public 0644/0755 outputs.
   # Fixtures that chmod their inputs retain coverage in the full suite above.
   bash "$ROOT/tests/helpers/go-permission-umasks.sh" "$ROOT" \

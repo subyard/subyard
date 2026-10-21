@@ -332,11 +332,6 @@ func TestOwnerImageSecretDelayedTerminalReconcilesCleanupAbsence(t *testing.T) {
 	for _, mode := range []string{"terminal", "wrong-UUID", "publication-failure", "late-terminal"} {
 		t.Run(mode, func(t *testing.T) {
 			f, args, expected, observer, ctx := newOwnerSecretFixture(t)
-			if mode == "late-terminal" {
-				var stop context.CancelFunc
-				ctx, stop = context.WithTimeout(ctx, 250*time.Millisecond)
-				defer stop()
-			}
 			body := make(chan struct{})
 			f.waitBody, f.lookupObserved = body, make(chan struct{})
 			if mode == "publication-failure" {
@@ -360,7 +355,11 @@ func TestOwnerImageSecretDelayedTerminalReconcilesCleanupAbsence(t *testing.T) {
 				t.Fatal("cleanup did not observe original map eviction")
 			}
 			if mode == "late-terminal" {
-				<-ctx.Done()
+				// Cancel custody after setup and the exact cleanup lookup, so
+				// scheduling cannot expire the fixture before this scenario.
+				// The separate deadline test retains real expiry coverage.
+				handle.stop()
+				<-handle.custody.Done()
 			}
 			close(body)
 			select {
@@ -373,6 +372,9 @@ func TestOwnerImageSecretDelayedTerminalReconcilesCleanupAbsence(t *testing.T) {
 			}
 			observer.mu.Lock()
 			defer observer.mu.Unlock()
+			if mode == "late-terminal" && (!observer.uncertain || len(observer.terminal) != 0) {
+				t.Fatal("terminal after custody cancellation gained closure")
+			}
 			if mode == "terminal" && (observer.uncertain || len(observer.terminal) != 1 || observer.terminal[0].ID != handle.operation.ID || observer.terminal[0].Status != 401) {
 				t.Fatal("exact delayed token terminal lost")
 			}

@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-fetch-init-', dir='/tmp') as te
         script = function('initialize_yard') + function('cleanup') + r'''
 set -euo pipefail
 STATE=fixture PROJECT=project INSTANCE=yard NAME=named
-claimed=1 initialized=0 init_attempted=0 project_state=probe
+claimed=1 initialized=0 init_attempted=0 loss_unknown=0 project_state=probe
 calls=$1 failure=$2
 [ "$failure" != -1 ] || project_state=foreign
 die() { printf '%s\n' "$*" >&2; exit 2; }

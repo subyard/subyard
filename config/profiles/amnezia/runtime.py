@@ -177,11 +177,11 @@ def storage_policy_ready(name):
 
 def storage_global_bound(name):
     target = Path('/var/lib') / name
-    mounted = run('findmnt', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
+    mounted = run('findmnt', '--task', '1', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
     if mounted.returncode or mounted.stdout.decode().strip() != str(target):
         return False
     try:
-        source, destination = (STATE / name).stat(), target.stat()
+        source, destination = (STATE / name).stat(), (Path('/proc/1/root/var/lib') / name).stat()
         return (source.st_dev, source.st_ino) == (destination.st_dev, destination.st_ino)
     except OSError:
         return False
@@ -205,10 +205,11 @@ def storage_preflight():
                 raise RuntimeError('container storage conflicts with an existing filesystem definition')
     for name in ('docker', 'containerd'):
         target = Path('/var/lib') / name
-        if target.exists() or target.is_symlink():
-            info = target.lstat()
-            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
-                raise RuntimeError('container storage has an unsafe file type or ownership')
+        for view in (target, Path('/proc/1/root/var/lib') / name):
+            if view.exists() or view.is_symlink():
+                info = view.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                    raise RuntimeError('container storage has an unsafe file type or ownership')
         unit, _ = storage_mount_policy(name)
         for directory in ('/usr/lib/systemd/system', '/lib/systemd/system', '/run/systemd/system',
                           '/run/systemd/generator', '/run/systemd/generator.early', '/run/systemd/generator.late'):
@@ -234,7 +235,7 @@ def storage_preflight():
                 protected(path, modes=(0o600, 0o644))
                 if path.lstat().st_gid != 0 or not path.read_text().startswith('# Managed by the Subyard Amnezia environment.\n'):
                     raise RuntimeError('refusing foreign container service configuration')
-        mounted = run('findmnt', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
+        mounted = run('findmnt', '--task', '1', '--mountpoint', str(target), '--noheadings', '--output', 'TARGET', check=False)
         if mounted.returncode == 0 and (not storage_initialized() or not storage_global_bound(name)):
             raise RuntimeError('refusing an unexpected container storage mount')
 

@@ -18,14 +18,16 @@ run_guest() {
       case "$FIXTURE_SCENARIO" in
         failure|cleanup-failure) return 23 ;;
         term|int)
-          printf '%s\n' "$BASHPID" > "$FIXTURE_PID"
+          printf '%s\n' "$BASHPID" > "$FIXTURE_PID.tmp"
+          mv -- "$FIXTURE_PID.tmp" "$FIXTURE_PID"
           # The separate parent signals the launched script's PID while this
           # builtin waits; no unowned background process is needed.
           read -r -t 20 fixture_input ;;
         term-external|int-external|term-group|int-group)
-          printf '%s\n' "$BASHPID" > "$FIXTURE_PID"
+          printf '%s\n' "$BASHPID" > "$FIXTURE_PID.tmp"
+          mv -- "$FIXTURE_PID.tmp" "$FIXTURE_PID"
           # A real foreground external process models Bash waiting for SSH.
-          python3 -c 'import os,pathlib,time; pathlib.Path(os.environ["FIXTURE_TRANSPORT_PID"]).write_text(str(os.getpid())); time.sleep(float(os.environ["FIXTURE_TRANSPORT_SECONDS"]))' ;;
+          python3 -c 'import os,pathlib,time; pid=pathlib.Path(os.environ["FIXTURE_TRANSPORT_PID"]); scratch=pid.with_name(pid.name+".tmp"); scratch.write_text(str(os.getpid())+"\n"); scratch.replace(pid); time.sleep(float(os.environ["FIXTURE_TRANSPORT_SECONDS"]))' ;;
       esac ;;
     *' clean '*) printf 'clean\n' >> "$FIXTURE_LOG" ;;
     *) return 99 ;;

@@ -390,26 +390,61 @@ PY_HOST_PATHS
     # key and a controlling terminal. Private key/passphrase bytes are never output.
     operator_env ssh-keygen -q -t ed25519 -N synthetic-fixture-passphrase -f "$state/signing-key"
     operator_env python3 - "$state" <<'PY_AGENT'
-import fcntl,os,pty,select,signal,sys,termios,time
+import errno,fcntl,json,os,pty,select,signal,sys,termios,time
 state=sys.argv[1];master,slave=pty.openpty();pid=os.fork()
 if pid==0:
  os.setsid();fcntl.ioctl(slave,termios.TIOCSCTTY,0)
  for target in (0,1,2):os.dup2(slave,target)
  os.close(master);os.close(slave)
  os.execv(state+"/bin/yard",[state+"/bin/yard","ssh-agent","unlock","--key",state+"/signing-key","--ttl","15m","--yes"])
-os.close(slave);deadline=time.monotonic()+30;buffer=b"";sent=False
-while time.monotonic()<deadline:
- ready=select.select([master],[],[],0.1)[0]
- if ready:
-  try:buffer=(buffer+os.read(master,4096))[-8192:]
-  except OSError:break
-  if b"passphrase" in buffer.lower() and not sent:os.write(master,b"synthetic-fixture-passphrase\n");sent=True
- child,status=os.waitpid(pid,os.WNOHANG)
- if child:
-  os.close(master)
-  if not os.WIFEXITED(status) or os.WEXITSTATUS(status)!=0:raise SystemExit("signing grant fixture did not unlock")
-  break
-else:os.killpg(pid,signal.SIGKILL);os.waitpid(pid,0);raise SystemExit("signing grant fixture exceeded 30 seconds")
+os.close(slave);deadline=time.monotonic()+30;buffer=b""
+facts=dict(saw_prompt=False,sent_count=0,child_exit=None,deadline_reached=False,child_reaped=False,outcome=None)
+try:
+ while True:
+  child,status=os.waitpid(pid,os.WNOHANG)
+  if child:
+   facts.update(child_exit=os.waitstatus_to_exitcode(status),child_reaped=True)
+   break
+  if time.monotonic()>=deadline:
+   facts.update(deadline_reached=True,outcome="deadline")
+   break
+  if not select.select([master],[],[],0.1)[0]:continue
+  try:data=os.read(master,4096)
+  except OSError as error:
+   if error.errno!=errno.EIO:raise
+   data=b""
+  if not data:
+   # PTY EOF can precede waitpid observing exit; retain the same deadline.
+   time.sleep(0.01)
+   continue
+  buffer=(buffer+data)[-8192:]
+  if b"Bad passphrase, try again for " in buffer:
+   facts.update(saw_prompt=True,outcome="bad_passphrase_prompt")
+   break
+  if b"Enter passphrase for " in buffer:
+   facts["saw_prompt"]=True
+   if facts["sent_count"]:
+    facts["outcome"]="repeated_prompt"
+    break
+   os.write(master,b"synthetic-fixture-passphrase\n")
+   facts["sent_count"]+=1;buffer=b""
+except OSError:
+ facts["outcome"]="native_error"
+finally:
+ if not facts["child_reaped"]:
+  # Until waitpid reaps our child, its PID cannot be reused by another group.
+  try:os.killpg(pid,signal.SIGKILL)
+  except ProcessLookupError:
+   try:os.kill(pid,signal.SIGKILL)
+   except ProcessLookupError:pass
+  _,status=os.waitpid(pid,0)
+  facts.update(child_exit=os.waitstatus_to_exitcode(status),child_reaped=True)
+ os.close(master)
+if facts["outcome"] is None:
+ facts["outcome"]="child_failed" if facts["child_exit"]!=0 else "unlocked" if facts["sent_count"]==1 else "missing_prompt"
+print("FULL_UNINSTALL_SIGNING_PTY="+json.dumps(facts,separators=(',',':')))
+if facts["outcome"]!="unlocked":
+ raise SystemExit("signing grant fixture exceeded 30 seconds" if facts["deadline_reached"] else "signing grant fixture did not unlock")
 PY_AGENT
     yard ssh-agent status --json | jq -e '.state == "unlocked"' >/dev/null
     operator_env bash -c 'mkdir -p "$HOME/.ssh"; printf "\nHost %s\n  HostName 127.0.0.1\n  Port 1\n" "$2" >> "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"' _ "$state" "$foreign"

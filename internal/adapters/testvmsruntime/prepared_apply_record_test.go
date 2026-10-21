@@ -29,7 +29,11 @@ func TestPreparedBackendOriginalRecordRestoresSealedPayloads(t *testing.T) {
 			case "scope":
 				backend.Instance = "foreign"
 			case "record":
-				record.Binding = "a" + record.Binding[1:]
+				first := byte('0')
+				if record.Binding[0] == first {
+					first = '1'
+				}
+				record.Binding = string(first) + record.Binding[1:]
 			case "uuid":
 				*uuid = "replacement"
 			}

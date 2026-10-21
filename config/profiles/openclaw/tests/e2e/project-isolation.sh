@@ -1,11 +1,98 @@
 #!/usr/bin/env bash
 # Sourced by the owning disposable-VM fixture after OpenClaw provisioning.
 
+openclaw_cache_isolation() (
+  instance=$1 project=$2 box_a=$3 box_b=$4 shared=$5
+  cache_worker='' cache_native_rc=0
+  cache_holder=reader cache_mode=READ
+  cache_transport=(docker exec "$box_a")
+  cache_wait() {
+    cache_native_rc=0
+    wait "$cache_worker" || cache_native_rc=$?
+    cache_worker=''
+    return "$cache_native_rc"
+  }
+  cache_finish() {
+    original=$?
+    trap - EXIT
+    set +e
+    if [ -n "$cache_worker" ]; then cache_wait; fi
+    exit "$original"
+  }
+  trap cache_finish EXIT
+  cache_holder_live() {
+    incus exec "$instance" --project "$project" -- "${cache_transport[@]}" sh -eu -c '
+      read -r pid fd < "$1/$2-ready"
+      case "$pid:$fd" in *[!0-9:]*) exit 1 ;; esac
+      [ -n "$pid" ] && [ -n "$fd" ]
+      [ "$(stat -Lc %d:%i "/proc/$pid/fd/$fd")" = "$(stat -c %d:%i /srv/cache/.sy-cache.lock)" ]
+      awk -v mode="$3" '\''$1 == "lock:" && $3 == "FLOCK" && $4 == "ADVISORY" && $5 == mode && $8 == "0" && $9 == "EOF" { held=1 } END { exit !held }'\'' "/proc/$pid/fdinfo/$fd"
+    ' _ "$shared" "$cache_holder" "$cache_mode" 2>/dev/null
+  }
+  cache_reject() {
+    local phase=$1 message=$2
+    shift 2
+    cache_holder_live || die "cache holder expired before $phase"
+    result=0
+    "$@" || result=$?
+    cache_holder_live || die "cache holder expired during $phase"
+    [ "$result" != 0 ] || die "$message"
+  }
+  # Keep the original finite holder and client bounds; every rejection must
+  # occur while the same-inode native lock is still held by the live holder.
+  incus exec "$instance" --project "$project" -- timeout 40 docker exec "$box_a" \
+    sy-cache shared -- sh -eu -c '
+      install -m 0600 /dev/null "$1/reader-ready"
+      printf "%s %s\n" "$$" "$_SY_CACHE_FD" > "$1/reader-ready"
+      for attempt in $(seq 1 200); do
+        [ ! -e "$1/release-reader" ] || exit 0
+        sleep 0.1
+      done
+      exit 1
+    ' _ "$shared" > "$STATE/isolation-reader.log" 2>&1 &
+  cache_worker=$!
+  for ((attempt=0; attempt<100; attempt++)); do
+    incus exec "$instance" --project "$project" -- test -s "$shared/reader-ready" && break
+    sleep 0.1
+  done
+  cache_holder_live || die 'L2 reader did not acquire cache lock'
+  incus exec "$instance" --project "$project" -- docker exec "$box_b" sy-cache shared -- true
+  cache_reject l2-exclusive 'L2 exclusive mutation bypassed a concurrent shared cache operation' \
+    incus exec "$instance" --project "$project" -- docker exec "$box_b" env SY_CACHE_WAIT_SECONDS=1 sy-cache exclusive -- true
+  cache_reject l1-exclusive 'L1 maintenance bypassed a concurrent L2 cache operation' \
+    incus exec "$instance" --project "$project" -- runuser -u dev -- env SY_CACHE_WAIT_SECONDS=1 sy-cache exclusive -- true
+  incus exec "$instance" --project "$project" -- docker exec "$box_b" touch "$shared/release-reader"
+  cache_wait
+  cache_holder=writer cache_mode=WRITE
+  cache_transport=(runuser -u dev --)
+  incus exec "$instance" --project "$project" -- timeout 40 runuser -u dev -- \
+    sy-cache exclusive -- sh -eu -c '
+      install -m 0600 /dev/null "$1/writer-ready"
+      printf "%s %s\n" "$$" "$_SY_CACHE_FD" > "$1/writer-ready"
+      for attempt in $(seq 1 200); do
+        [ ! -e "$1/release-writer" ] || exit 0
+        sleep 0.1
+      done
+      exit 1
+    ' _ "$shared" > "$STATE/isolation-writer.log" 2>&1 &
+  cache_worker=$!
+  for ((attempt=0; attempt<100; attempt++)); do
+    incus exec "$instance" --project "$project" -- test -s "$shared/writer-ready" && break
+    sleep 0.1
+  done
+  cache_holder_live || die 'L1 writer did not acquire cache lock'
+  cache_reject l2-shared 'L2 cache writer bypassed L1 maintenance' \
+    incus exec "$instance" --project "$project" -- docker exec "$box_a" env SY_CACHE_WAIT_SECONDS=1 sy-cache shared -- true
+  incus exec "$instance" --project "$project" -- docker exec "$box_b" touch "$shared/release-writer"
+  cache_wait
+  incus exec "$instance" --project "$project" -- docker exec "$box_a" sy-cache exclusive -- true
+)
+
 openclaw_project_isolation() {
 	local instance="${1:?}" project="${2:?}" attempt
   local root="/tmp/subyard-p0-project-$TOKEN"
   local name_a="IsolationA$TOKEN" name_b="IsolationB$TOKEN"
-  local box_a box_b uid gid shared lock_inode worker
+  local box_a box_b uid gid shared lock_inode
   project_contract_clean_tree "$root" "$MARKER"
   install -d -m 0700 "$root/a" "$root/b"
   printf '%s\n' "$MARKER" > "$root/.subyard-p0-marker"
@@ -56,56 +143,7 @@ openclaw_project_isolation() {
     [ "$(cat project.marker)" = second ]
     [ ! -e node_modules/first-only ] && [ ! -e .venv/first-only ] && [ ! -e /tmp/private-runtime/first-only ]
   '
-  # A real shared operation in L2 A permits L2 B readers and excludes both an
-  # L2 B writer and L1 maintenance, through the very same read-only-bound inode.
-  incus exec "$instance" --project "$project" -- timeout 40 docker exec "$box_a" \
-    sy-cache shared -- sh -eu -c '
-      touch "$1/reader-ready"
-      for attempt in $(seq 1 200); do
-        [ ! -e "$1/release-reader" ] || exit 0
-        sleep 0.1
-      done
-      exit 1
-    ' _ "$shared" > "$STATE/isolation-reader.log" 2>&1 &
-  worker=$!
-  for ((attempt=0; attempt<100; attempt++)); do
-    incus exec "$instance" --project "$project" -- test -f "$shared/reader-ready" && break
-    sleep 0.1
-  done
-  incus exec "$instance" --project "$project" -- test -f "$shared/reader-ready" || die 'L2 reader did not acquire cache lock'
-  incus exec "$instance" --project "$project" -- docker exec "$box_b" sy-cache shared -- true
-  if incus exec "$instance" --project "$project" -- docker exec "$box_b" \
-    env SY_CACHE_WAIT_SECONDS=1 sy-cache exclusive -- true; then
-    die 'L2 exclusive mutation bypassed a concurrent shared cache operation'
-  fi
-  if yard shell -- env SY_CACHE_WAIT_SECONDS=1 sy-cache exclusive -- true; then
-    die 'L1 maintenance bypassed a concurrent L2 cache operation'
-  fi
-  incus exec "$instance" --project "$project" -- docker exec "$box_b" touch "$shared/release-reader"
-  wait "$worker"
-  # Reverse direction: L1 exclusive maintenance excludes an L2 cache writer.
-  incus exec "$instance" --project "$project" -- timeout 40 runuser -u dev -- \
-    sy-cache exclusive -- sh -eu -c '
-      touch "$1/writer-ready"
-      for attempt in $(seq 1 200); do
-        [ ! -e "$1/release-writer" ] || exit 0
-        sleep 0.1
-      done
-      exit 1
-    ' _ "$shared" > "$STATE/isolation-writer.log" 2>&1 &
-  worker=$!
-  for ((attempt=0; attempt<100; attempt++)); do
-    incus exec "$instance" --project "$project" -- test -f "$shared/writer-ready" && break
-    sleep 0.1
-  done
-  incus exec "$instance" --project "$project" -- test -f "$shared/writer-ready" || die 'L1 writer did not acquire cache lock'
-  if incus exec "$instance" --project "$project" -- docker exec "$box_a" \
-    env SY_CACHE_WAIT_SECONDS=1 sy-cache shared -- true; then
-    die 'L2 cache writer bypassed L1 maintenance'
-  fi
-  incus exec "$instance" --project "$project" -- docker exec "$box_b" touch "$shared/release-writer"
-  wait "$worker"
-  incus exec "$instance" --project "$project" -- docker exec "$box_a" sy-cache exclusive -- true
+  openclaw_cache_isolation "$instance" "$project" "$box_a" "$box_b" "$shared"
   # Deselection denies fresh admission and up, while retained cleanup stays usable.
   yard config set ENVIRONMENT_PROFILES '' --scope yard --local --yes >/dev/null
   if yard up "$name_a" --yes > "$STATE/isolation-deselected-up.log" 2>&1; then

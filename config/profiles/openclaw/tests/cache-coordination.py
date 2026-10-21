@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -36,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="subyard-cache-", dir="/tmp") as directo
     env.update(SY_CACHE_LOCK=str(lock), SY_CACHE_TOOL=str(HELPER), SY_CACHE_WAIT_SECONDS="2")
     worker = root / "worker.py"
     worker.write_text('''import os, pathlib, sys, time
-pathlib.Path(sys.argv[1]).write_text("started")
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid())+" "+os.environ["_SY_CACHE_FD"]+"\\n")
 while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
 ''')
     children = []
@@ -443,6 +444,33 @@ while not pathlib.Path(os.environ["CACHE_TEST_RELEASE"]).exists(): time.sleep(.0
         result = subprocess.run([str(python), "-m", "pip", "install"],
                                 env=toolenv | {"SY_CACHE_LOCK": str(root / "missing")}, capture_output=True)
         assert result.returncode != 0
+        # The physical fixture must reject a negative probe whose holder expired.
+        source = (PROFILE / 'tests/e2e/project-isolation.sh').read_text()
+        guards = '\n'.join(re.search(r'^  '+name+r'\(\) \{\n.*?^  \}', source, re.M | re.S)[0]
+                           for name in ('cache_holder_live', 'cache_reject'))
+        guards = guards.replace('/srv/cache/.sy-cache.lock', str(lock))
+        marker, release = root/'reader-ready', root/'release'
+        holder = start(shared, marker, release)
+        wait_file(marker, holder)
+        script = '''set -euo pipefail
+instance=fixture project=fixture shared=$1 cache_holder=reader cache_mode=READ
+cache_transport=()
+incus() { shift 5; "$@"; }
+die() { printf '%s\\n' "$*" >&2; exit 2; }
+expire_holder() {
+  touch "$shared/release"
+  for attempt in $(seq 1 1000); do
+    cache_holder_live || return 0
+    sleep .01
+  done
+  return 98
+}
+'''+guards+'\ncache_reject l1-exclusive bypass expire_holder\n'
+        expired = subprocess.run(['bash', '-c', script, 'fixture', str(root)],
+                                 env=env, capture_output=True, text=True, timeout=15)
+        finish(holder, release)
+        assert expired.returncode == 2 and 'holder expired during l1-exclusive' in expired.stderr, expired
+        assert 'bypass' not in expired.stderr
         print("ok: cache shared/exclusive exclusion, wrappers, cancellation, inode repair, keys and pip interpreter hook")
     finally:
         for proc in children:

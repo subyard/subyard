@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import unittest
 
 OWNER = Path(__file__).parent/'e2e/owner.sh'
@@ -16,7 +17,7 @@ class OwnerDiagnosticsTest(unittest.TestCase):
         cleanup = source[source.index('\ncleanup() {'):source.index('\nensure_owner_incus\n')]
         setup = '''set -euo pipefail
 STATE='' YARD_NAME='' secondary_name='' occupied_pid='' tunnel_pid=''
-synthetic_address='' synthetic_address_active='' auth_only='' kind=container
+synthetic_address='' synthetic_address_active='' auth_only='' native_loss='' kind=container
 SECONDS=17
 '''
         for command, trigger, status in (
@@ -42,7 +43,7 @@ SECONDS=17
         cleanup = source[source.index('\ncleanup() {'):source.index('\nensure_owner_incus\n')]
         setup = '''set -euo pipefail
 STATE='' YARD_NAME='' secondary_name='' occupied_pid=fixture tunnel_pid=''
-synthetic_address='' synthetic_address_active='' auth_only='' kind=container
+synthetic_address='' synthetic_address_active='' auth_only='' native_loss='' kind=container
 kill() { printf 'kill-owned-child\\n'; }
 wait() { printf 'wait-owned-child\\n'; }
 '''
@@ -51,6 +52,7 @@ wait() { printf 'wait-owned-child\\n'; }
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stdout, 'kill-owned-child\nwait-owned-child\n')
         self.assertEqual(result.stderr, '')
+
 
 
 if __name__ == '__main__':

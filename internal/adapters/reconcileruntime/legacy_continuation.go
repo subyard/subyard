@@ -214,6 +214,10 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 				if value == "true" {
 					continue
 				}
+			case "user.subyard.disk_tmp":
+				if value == "v1" {
+					continue
+				}
 			case "limits.cpu", "limits.memory":
 				setting := map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"}[key]
 				if value != "" && value == runtime.environmentValue(setting) {
@@ -365,6 +369,10 @@ func legacyStableConfig(values map[string]string) map[string]string {
 	// publication owners. ID maps, MACs and every other property remain bound.
 	for _, key := range []string{"user.subyard.initialized", "user.subyard.desired_power", "user.subyard.ccusage_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses", previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName} {
 		delete(result, key)
+	}
+	// Base provisioning can publish this canonical policy after consent.
+	if result["user.subyard.disk_tmp"] == "v1" {
+		delete(result, "user.subyard.disk_tmp")
 	}
 	return result
 }

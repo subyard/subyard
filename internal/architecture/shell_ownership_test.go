@@ -388,6 +388,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/07-ssh-access.sh":            {"leaf", goReconcile, `"07-ssh-access.sh"`},
 		"scripts/09-yard-extras.sh":           {"leaf", goReconcile, `"09-yard-extras.sh"`},
 		"scripts/e2e-lab/invoke.sh":           {"leaf", goPrepared, `e2e-lab/invoke.sh`},
+		"scripts/guest-disk-tmp.sh":           {"embedded", "internal/adapters/reconcileruntime/disk_tmp.go", `"guest-disk-tmp.sh"`},
 		"scripts/e2e-lab/base.sh":             {"embedded", "internal/adapters/testvmsruntime/images.go", `scripts/e2e-lab/base.sh`},
 		"scripts/e2e-lab/provision.sh":        {"embedded", "internal/adapters/testvmsruntime/backend.go", `"provision.sh"`},
 		"scripts/install-key-tools.sh":        {"leaf", goReconcile, `"install-key-tools.sh"`},

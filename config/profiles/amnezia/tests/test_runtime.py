@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import runpy
 from pathlib import Path
 import shutil
@@ -42,6 +43,76 @@ def result(stdout=b'', code=0):
 
 
 class AcceptanceDiagnosticsTest(unittest.TestCase):
+    def test_post_reboot_probes_wait_for_terminal_power_success(self):
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+                              for name in ('reboot_owner', 'verify_boot_result'))
+        running = '1000000 success 0 active running 1'
+        done = '1000000 success 0 inactive dead 2'
+        cases = (
+            ('queued-start', ['0 success 0 inactive dead 0', '29815732 success 0 activating start 29',
+                              '29815732 success 0 inactive dead 31'], 1, 0),
+            ('running', [running, done], 1, 0),
+            ('retry75', [running, '121000000 exit-code 75 activating auto-restart 121',
+                         '241000000 success 0 inactive dead 241'], 120, 0),
+            ('retry75-success', [running, '121000000 success 75 activating auto-restart 121',
+                                 '241000000 success 0 inactive dead 241'], 120, 0),
+            ('failed', ['1000000 exit-code 1 failed failed 1'], 1, 2),
+            ('malformed', ['invalid success 0 active running 1'], 1, 2),
+            ('future', ['2000000 success 0 active running 1'], 1, 2),
+            ('transport', [running], 1, 255),
+            ('queued-deadline', ['0 success 0 inactive dead 0'], 10, 2),
+            ('stalled-clock', ['1000000 success 75 activating auto-restart 1'], 300, 2))
+        for scenario, frames, step, expected in cases:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                directory = Path(temporary)
+                (directory / 'frames').write_text('\n'.join(frames)+'\n')
+                (directory / 'samples').write_text('0\n')
+                script = r'''set -euo pipefail
+fixture=$1 scenario=$2 step=$3 clock=0
+CLIENT_CONFIG=fixture-config bundle=fixture-bundle bundle_hash=fixture-hash
+die() { printf '%s\n' "$*" >&2; exit 2; }
+cleanup_guest() { :; }
+prepare_guest() { :; }
+sleep() { clock=$((clock + step)); }
+read() { printf -v uptime '%s.00' "$clock"; }
+quote_ssh_command() { printf '%q ' "$@"; }
+guest() { printf 'old-boot\n'; }
+ssh() {
+  case "$*" in
+    *'systemctl reboot'*) return 0 ;;
+    *'-- true') return 255 ;;
+    *boot_id*) printf 'new-boot\n' ;;
+    *systemctl*show*)
+      [ "$scenario" != transport ] || return 255
+      sample=$(cat "$fixture/samples"); sample=$((sample + 1))
+      printf '%s\n' "$sample" > "$fixture/samples"
+      frame=$(sed -n "${sample}p" "$fixture/frames")
+      [ -n "$frame" ] || frame=$(tail -n 1 "$fixture/frames")
+      builtin read -r started result status active sub uptime <<<"$frame"
+      printf '%s\n' LoadState=loaded "ExecMainStartTimestampMonotonic=$started" \
+        "Result=$result" "ExecMainStatus=$status" "ActiveState=$active" "SubState=$sub" "BootUptimeSeconds=$uptime" ;;
+    *) return 92 ;;
+  esac
+}
+timeout() {
+  while [[ "$1" = --* ]]; do shift; done
+  bound=$1; shift
+  if [[ "$*" = *systemctl*show* ]]; then
+    [ "$bound" -gt 0 ] && [ "$bound" -le 10 ] || return 95
+  fi
+  "$@"
+}
+'''
+                observed = subprocess.run(['bash', '-c', script+functions+'\nreboot_owner\nprintf "after-wait\n"\n',
+                                           '_', temporary, scenario, str(step)], capture_output=True, timeout=5)
+                self.assertEqual(observed.returncode, expected, observed.stderr.decode())
+                self.assertEqual(b'after-wait' in observed.stdout, expected == 0)
+                if expected == 0:
+                    self.assertGreaterEqual(int((directory / 'samples').read_text()), len(frames))
+                if scenario in ('queued-deadline', 'stalled-clock'):
+                    self.assertIn(b'deadline', observed.stderr)
+
     def test_private_failure_bytes_survive_cleanup_with_original_exit(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
         functions = source.split('diagnose_failure() {', 1)[1].split('trap cleanup_acceptance EXIT', 1)[0]
@@ -1080,7 +1151,8 @@ class GuestRuntimeTest(unittest.TestCase):
             def isolated_path(value):
                 if str(value).startswith(('/run/systemd/', '/usr/lib/systemd/', '/lib/systemd/')) or str(value) == '/etc/fstab':
                     return state / 'foreign' / str(value).lstrip('/')
-                return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
+                return {'/var/lib': sources, '/proc/1/root/var/lib': sources,
+                        '/etc/systemd/system': etc}.get(str(value), original_path(value))
             calls = []
             foreign_ownership = set()
             missing_views = set()
@@ -1090,7 +1162,8 @@ class GuestRuntimeTest(unittest.TestCase):
                 if args[:2] == ('systemctl', 'show'):
                     return result()
                 if args[0] == 'findmnt':
-                    return result(args[2].encode(), code=0) if Path(args[2]).name in global_mounts else result(code=1)
+                    target = args[args.index('--mountpoint') + 1]
+                    return result(target.encode(), code=0) if Path(target).name in global_mounts else result(code=1)
                 calls.append(args)
                 if args[0] == 'cp':
                     return original_run(*args, data=data, **kwargs)
@@ -1255,7 +1328,7 @@ class GuestRuntimeTest(unittest.TestCase):
             self.assertFalse((state / 'storage-seeded').exists())
 
     def test_storage_rejects_foreign_definitions_and_mounts_before_mutation(self):
-        for collision in ('unit', 'vendor', 'generated', 'dropin', 'fragment', 'fstab', 'escaped-fstab', 'symlink', 'writable-target', 'active-mount'):
+        for collision in ('unit', 'vendor', 'generated', 'dropin', 'fragment', 'fstab', 'escaped-fstab', 'symlink', 'writable-target', 'manager-writable-target', 'private-writable', 'private-uid', 'private-gid', 'private-symlink', 'active-mount'):
             with self.subTest(collision=collision), self.environment() as state:
                 etc, sources = state / 'systemd', state / 'sources'
                 etc.mkdir()
@@ -1267,7 +1340,16 @@ class GuestRuntimeTest(unittest.TestCase):
                 def isolated_path(value):
                     if str(value).startswith(('/run/systemd/', '/usr/lib/systemd/', '/lib/systemd/')) or str(value) == '/etc/fstab':
                         return state / 'foreign' / str(value).lstrip('/')
-                    return {'/var/lib': sources, '/etc/systemd/system': etc}.get(str(value), original_path(value))
+                    manager = state / 'manager' if collision == 'manager-writable-target' or collision.startswith('private-') else sources
+                    return {'/var/lib': sources, '/proc/1/root/var/lib': manager,
+                            '/etc/systemd/system': etc}.get(str(value), original_path(value))
+                if collision.startswith('private-'):
+                    for name in ('docker', 'containerd'):
+                        (state / 'manager' / name).mkdir(parents=True, mode=0o755)
+                    if collision == 'private-writable': (sources / 'docker').chmod(0o777)
+                    if collision == 'private-symlink':
+                        (sources / 'docker').rmdir()
+                        (sources / 'docker').symlink_to(state / 'missing')
                 if collision == 'unit':
                     (etc / 'var-lib-docker.mount').write_text('[Mount]\nWhat=/foreign\n')
                     (etc / 'var-lib-docker.mount').chmod(0o644)
@@ -1293,28 +1375,50 @@ class GuestRuntimeTest(unittest.TestCase):
                     (sources / 'docker').symlink_to(state)
                 elif collision == 'writable-target':
                     (sources / 'docker').chmod(0o777)
+                elif collision == 'manager-writable-target':
+                    (state / 'manager' / 'docker').mkdir(parents=True)
+                    (state / 'manager' / 'docker').chmod(0o777)
                 calls = []
                 def command(*args, **kwargs):
                     calls.append(args)
                     if args[:2] == ('systemctl', 'show'):
                         return result(b'/run/systemd/generator/var-lib-docker.mount' if collision == 'fragment' else b'')
                     if args[0] == 'findmnt':
-                        return result(args[2].encode(), code=0) if collision == 'active-mount' else result(code=1)
+                        mounted = collision == 'active-mount' and args[1:3] == ('--task', '1')
+                        target = args[args.index('--mountpoint') + 1]
+                        return result(target.encode(), code=0) if mounted else result(code=1)
                     self.fail('unsafe storage mutated the environment')
+                original_lstat = Path.lstat
+                def inspected(path):
+                    info = original_lstat(path)
+                    if path == sources / 'docker' and collision in ('private-uid', 'private-gid'):
+                        return SimpleNamespace(st_mode=info.st_mode, st_uid=1000 if collision == 'private-uid' else 0,
+                                               st_gid=1000 if collision == 'private-gid' else 0)
+                    return info
                 with mock.patch.object(runtime, 'Path', side_effect=isolated_path), \
+                        mock.patch.object(Path, 'lstat', autospec=True, side_effect=inspected), \
                         mock.patch.object(runtime, 'run', side_effect=command):
                     with self.assertRaises(RuntimeError):
                         runtime.prepare_storage()
+                if collision.startswith('private-'):
+                    self.assertEqual(calls, [])
                 self.assertFalse((state / 'storage-seeded').exists())
                 self.assertFalse((state / 'docker').exists())
 
     def test_global_storage_readiness_requires_mountpoint_and_matching_inode(self):
         with self.environment() as state:
             (state / 'docker').mkdir()
+            caller = state / 'private-caller'
+            (caller / 'docker').mkdir(parents=True)
             original_path = runtime.Path
+            def manager_query(*args, **kwargs):
+                # The manager bind exists after the producer's private snapshot.
+                if args[1:3] != ('--task', '1'):
+                    return result(code=1)
+                return result(args[args.index('--mountpoint') + 1].encode())
             with mock.patch.object(runtime, 'Path', side_effect=lambda value:
-                                   state if str(value) == '/var/lib' else original_path(value)), \
-                    mock.patch.object(runtime, 'run', return_value=result(str(state / 'docker').encode())):
+                                   {'/var/lib': caller, '/proc/1/root/var/lib': state}.get(str(value), original_path(value))), \
+                    mock.patch.object(runtime, 'run', side_effect=manager_query):
                 self.assertTrue(runtime.storage_global_bound('docker'))
                 with mock.patch.object(runtime, 'run', return_value=result(code=1)):
                     self.assertFalse(runtime.storage_global_bound('docker'))
@@ -1323,8 +1427,8 @@ class GuestRuntimeTest(unittest.TestCase):
             elsewhere = state / 'other'
             (elsewhere / 'docker').mkdir(parents=True)
             with mock.patch.object(runtime, 'Path', side_effect=lambda value:
-                                   elsewhere if str(value) == '/var/lib' else original_path(value)), \
-                    mock.patch.object(runtime, 'run', return_value=result(str(elsewhere / 'docker').encode())):
+                                   {'/var/lib': caller, '/proc/1/root/var/lib': elsewhere}.get(str(value), original_path(value))), \
+                    mock.patch.object(runtime, 'run', side_effect=manager_query):
                 self.assertFalse(runtime.storage_global_bound('docker'))
 
     def test_lost_storage_marker_rejects_existing_data_before_commands_or_copy(self):

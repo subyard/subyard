@@ -161,11 +161,13 @@ with tempfile.TemporaryDirectory(prefix='subyard-acked-builder-', dir='/tmp') as
     config.write_text('E2E_VM_STATE_DIR=/var/lib/subyard/test-vms\nE2E_BROKER_SOURCE=test-yard\n')
     config.chmod(0o644)
     incident_id = '00000000000000000001-'+'a'*16
-    receipt = {'incident_id': incident_id, 'owner': 'b'*32, 'build_key': 'c'*64}
+    fallback_slot = {'slot_id': 'slot-000', 'resource_generation': 0, 'lease_epoch': 0}
+    receipt = {'incident_id': incident_id, 'owner': 'b'*32, 'build_key': 'c'*64,
+        'incident_slot': fallback_slot}
     registry = {'schema_version': 1, 'owner': receipt['owner'], 'build': {
         'key': receipt['build_key'], 'environment': 'subyard-pair', 'project': 'subyard-e2e-vms-builder',
         'memory_bytes': 2684354560, 'disk_peak_bytes': 32212254720,
-        'incident_id': incident_id, 'incident_slot': {'slot_id': 'slot-000', 'resource_generation': 0, 'lease_epoch': 0},
+        'incident_id': incident_id, 'incident_slot': fallback_slot,
         # Persisted readinessFailure has exported Go field names, unlike diagnostics.
         'readiness_failure': {'Label': 'waiting for e2e-base-1 Incus agent',
             'Project': 'subyard-e2e-vms-builder', 'VM': 'e2e-base-1', 'Phase': 'incus-agent',
@@ -180,7 +182,7 @@ with tempfile.TemporaryDirectory(prefix='subyard-acked-builder-', dir='/tmp') as
     host_root.chmod(0o750)
     (host_root/'host').chmod(0o750)
     incident = {'schema_version': 1, 'incident_id': incident_id, 'source': 'test-yard',
-        'slot_id': 'slot-000', 'created_at': '2026-10-12T00:00:00Z', 'diagnostics': {
+        **fallback_slot, 'created_at': '2026-10-12T00:00:00Z', 'diagnostics': {
             'resource': json.dumps({'resource_kind': 'base_builder', 'project': 'subyard-e2e-vms-builder',
                 'vm': 'e2e-base-1', 'build_key': receipt['build_key']})}}
     memory = {'outer_host_evidence': 'collected by physical-owner host sink',
@@ -255,6 +257,44 @@ outer_exec() {{
         assert json.loads(next(line.split('=', 1)[1] for line in lines if line.startswith('STAGING_SPOOL='))) == spool
         assert [json.loads(line.split('=', 1)[1]) for line in lines if line.startswith('STAGING_BUILDER_INCIDENT=')] == [incident]
         assert [json.loads(line.split('=', 1)[1]) for line in lines if line.startswith('STAGING_HOST_OBSERVATION=')] == [host]
+    # An acquire-driven builder retains its triggering allocation identity even
+    # after the host sink acknowledges the pending spool entry.
+    acquiring_slot = {'slot_id': 'slot-001', 'resource_generation': 7, 'lease_epoch': 11}
+    acquiring_registry = {**registry, 'build': {**registry['build'], 'incident_slot': acquiring_slot}}
+    acquiring_incident = {**incident, **acquiring_slot}
+    registry_path.write_text(json.dumps(acquiring_registry))
+    incident_path.write_text(json.dumps(acquiring_incident))
+    result = run_capture()
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert [json.loads(line.split('=', 1)[1]) for line in result.stdout.splitlines()
+        if line.startswith('STAGING_BUILDER_INCIDENT=')] == [acquiring_incident]
+    result = run_capture(preflight=True)
+    assert result.returncode == 0 and json.loads(result.stdout) == {**receipt, 'incident_slot': acquiring_slot}, result
+    for key, bad in (('slot_id', 'slot-002'), ('resource_generation', 8), ('lease_epoch', 12),
+        ('resource_generation', True), ('lease_epoch', 11.0)):
+        incident_path.write_text(json.dumps({**acquiring_incident, key: bad}))
+        result = run_capture()
+        assert result.returncode == 1 and 'STAGING_BUILDER_INCIDENT=' not in result.stdout, (key, bad, result)
+    incident_path.write_text(json.dumps(acquiring_incident))
+    for slot in (fallback_slot, acquiring_slot):
+        for key, bad in (('slot_id', 'slot-0000'), ('slot_id', '../foreign'),
+            ('resource_generation', True), ('resource_generation', -1), ('resource_generation', 2**64),
+            ('lease_epoch', False), ('lease_epoch', 1.0), ('lease_epoch', -1), ('lease_epoch', 2**64)):
+            registry_path.write_text(json.dumps({**registry, 'build': {**registry['build'],
+                'incident_slot': {**slot, key: bad}}}))
+            result = run_capture(preflight=True)
+            assert result.returncode == 1 and not result.stdout, (slot, key, bad, result)
+        for key in ('slot_id', 'resource_generation', 'lease_epoch'):
+            registry_path.write_text(json.dumps({**registry, 'build': {**registry['build'],
+                'incident_slot': {name: value for name, value in slot.items() if name != key}}}))
+            result = run_capture(preflight=True)
+            assert result.returncode == 1 and not result.stdout, (slot, key, result)
+    for key in ('resource_generation', 'lease_epoch'):
+        registry_path.write_text(json.dumps({**registry, 'build': {**registry['build'],
+            'incident_slot': {**fallback_slot, key: 1}}}))
+        assert run_capture(preflight=True).returncode == 1
+    registry_path.write_text(json.dumps(registry))
+    incident_path.write_text(json.dumps(incident))
     assert run_capture(project_marker='foreign').returncode == 1
     for path, bad, original in ((config, 'E2E_VM_STATE_DIR=/foreign\nE2E_BROKER_SOURCE=test-yard\n', config.read_text()),
         (registry_path, json.dumps({**registry, 'build': {**registry['build'], 'incident_id': '../foreign'}}), registry_path.read_text()),
@@ -281,7 +321,7 @@ outer_exec() {{
     host_path.rename(saved)
     assert run_capture().returncode == 1
     saved.rename(host_path)
-print('marker-free native preflight, acknowledged builder capture and provenance refusal checks passed')
+print('marker-free preflight, fallback/acquire builder capture, exact slot identity and provenance refusal checks passed')
 
 verify_worker = re.search(r'^verify_broker_installation\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-bootstrap-worker-', dir='/tmp') as directory:

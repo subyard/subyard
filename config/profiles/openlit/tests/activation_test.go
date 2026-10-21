@@ -50,9 +50,20 @@ set -euo pipefail
 if [ "$1" = list ]; then echo RUNNING; exit; fi
 if [ "$1" = query ]; then printf '{"config":{},"devices":{}}\n'; exit; fi
 [ "$1" = exec ] || exit 1
-tar -tf - >/dev/null
 while [ "$1" != subyard ]; do shift; done
 shift
+python3 -c '
+import io,sys,tarfile
+stream=sys.stdin.buffer
+if sys.argv[1]=="refresh":
+    remaining,grace,size=stream.readline().split()
+    assert float(remaining)>0 and int(grace)>0 and int(size)>0
+    payload=stream.read(int(size))
+    assert len(payload)==int(size)
+    stream=io.BytesIO(payload)
+with tarfile.open(fileobj=stream,mode="r|") as archive:
+    list(archive)
+' "$1"
 [ "$2" = 1 ] && [ "$3" = dev ] && [ "$4" = 'claude codex' ]
 actual="$(cat "$FIXTURE_ACTUAL")"
 desired="$(cat "$FIXTURE_DESIRED")"

@@ -1177,9 +1177,16 @@ while True: time.sleep(1)
 ''')
             def interrupt_when_ready():
                 deadline = time.monotonic() + 3
-                while not ready.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                m.STOP.set()
+                while not ready.exists():
+                    if cancelled.wait(0.01):
+                        return
+                    if time.monotonic() >= deadline:
+                        break
+                readiness["ready"] = ready.exists()
+                # A startup failure also drains our group, but cannot satisfy the
+                # handler-ready assertion for the intended interruption below.
+                if not cancelled.is_set():
+                    m.STOP.set()
             for ignores_term in (False, True):
                 ready.unlink(missing_ok=True)
                 finished.unlink(missing_ok=True)
@@ -1187,21 +1194,28 @@ while True: time.sleep(1)
                     child.write_text(child.read_text().replace("signal.signal(signal.SIGTERM, finish)",
                                                              "signal.signal(signal.SIGTERM, signal.SIG_IGN)"))
                 m.STOP.clear()
+                cancelled = threading.Event()
+                readiness = {"ready": False}
                 timer = threading.Thread(target=interrupt_when_ready)
                 timer.start()
                 try:
-                    with patch.object(m, "TERM_GRACE_SECONDS", 0.5), patch.object(m, "KILL_GRACE_SECONDS", 1):
+                    with patch.object(m, "TERM_GRACE_SECONDS", 2), patch.object(m, "KILL_GRACE_SECONDS", 1):
                         result = m.execute("profile:sample/one", [sys.executable, str(parent), str(child), str(ready), str(finished)],
                                            output, output, m.clean_environment(), 1)
                 finally:
+                    cancelled.set()
                     timer.join(3)
                     m.STOP.clear()
+                self.assertFalse(timer.is_alive())
+                self.assertTrue(readiness["ready"])
                 self.assertEqual(result["cleanup_status"], "drained")
                 self.assertEqual(result["status"], "interrupted")
                 self.assertEqual(result["exit_code"], -15)
                 if not ignores_term:
                     self.assertTrue(finished.exists())
-                    self.assertIn("child cleanup completed", (output / result["log"]).read_text())
+                    self.assertTrue("child cleanup completed" in (output / result["log"]).read_text())
+                else:
+                    self.assertFalse(finished.exists())
                 self.assertEqual(result["log_sha256"], m.digest(output / result["log"]))
 
     def test_execution_environment_drift_rejected_before_any_check(self):

@@ -43,8 +43,9 @@ def observe(runtime, shims, rejected):
     environment['SUBYARD_CONFIG_DIR'] = str(runtime/'config')
     result = subprocess.run(['bash', str(runtime/'config/profiles/openlit/runtime.sh'), 'observe'],
                             env=environment, capture_output=True, timeout=30)
-    # The exact canned observation succeeded, even if the archive producer failed.
-    assert json.loads(result.stdout) == {'state': 'absent', 'actual': '', 'desired': ''}
+    # Early native refusal may have no JSON; any returned observation stays exact.
+    if result.returncode == 0 or result.stdout:
+        assert json.loads(result.stdout) == {'state': 'absent', 'actual': '', 'desired': ''}
     assert not rejected.exists()
     return result.returncode
 

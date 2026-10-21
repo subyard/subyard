@@ -128,12 +128,17 @@ def receipt(root,config):
     if build is None: return {}
     failure=build.get('readiness_failure')
     if failure is None: return {}
+    slot=build.get('incident_slot',{})
     if (build.get('project')!='subyard-e2e-vms-builder' or failure.get('Project')!=build['project']
         or failure.get('VM')!='e2e-base-1' or not re.fullmatch('[0-9a-f]{64}',build.get('key',''))
         or not re.fullmatch('[0-9]{20}-[0-9a-f]{16}',build.get('incident_id',''))
-        or build.get('incident_slot',{}).get('slot_id')!='slot-000'):
+        or not re.fullmatch('slot-[0-9]{3}',slot.get('slot_id',''))
+        or any(type(slot.get(key)) is not int or not 0<=slot[key]<2**64
+            for key in ('resource_generation','lease_epoch'))
+        or (slot['slot_id']=='slot-000' and (slot['resource_generation']!=0 or slot['lease_epoch']!=0))):
         raise RuntimeError('failed builder lacks a matching durable incident receipt')
-    return {'incident_id':build['incident_id'],'owner':registry['owner'],'build_key':build['key']}
+    return {'incident_id':build['incident_id'],'owner':registry['owner'],'build_key':build['key'],
+        'incident_slot':{key:slot[key] for key in ('slot_id','resource_generation','lease_epoch')}}
 print(json.dumps(receipt(pathlib.Path('/var/lib/subyard/test-vms'),pathlib.Path('/etc/subyard/test-vms.env'))))
 PYBUILDERRECEIPT
 }
@@ -164,7 +169,9 @@ def capture(home,receipt):
     host=read(root/'host'/(incident_id+'.json'))
     resource=json.loads(incident.get('diagnostics',{}).get('resource','{}'))
     if (incident.get('schema_version')!=1 or incident.get('incident_id')!=incident_id
-        or incident.get('source')!='test-yard' or incident.get('slot_id')!='slot-000'
+        or incident.get('source')!='test-yard'
+        or any(type(incident.get(key)) is not type(value) or incident[key]!=value
+            for key,value in receipt['incident_slot'].items())
         or resource!={'resource_kind':'base_builder','project':'subyard-e2e-vms-builder','vm':'e2e-base-1','build_key':receipt['build_key']}):
         raise RuntimeError('foreign builder incident')
     parse=lambda value: datetime.datetime.fromisoformat(value.replace('Z','+00:00'))

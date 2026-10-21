@@ -118,9 +118,10 @@ grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKF
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
   || fail 'Release must use the same explicit Ubuntu baseline as CI'
 for workflow in "$PASEO_WORKFLOW" "$RELEASE_WORKFLOW"; do
-  grep -Fq 'path: .build/paseo-npm-cache' "$workflow" \
-    && grep -Fq 'path: .build/paseo-diagnostics/' "$workflow" \
-    || fail "$(basename "$workflow") must cache npm downloads and preserve safe diagnostics"
+  grep -Fq 'unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true' "$workflow" \
+    && grep -Fq 'artifact="$(dev/build-paseo-headless.sh --arch "${{ matrix.arch }}"' "$workflow" \
+    && grep -Fq 'tests/native/paseo-headless.sh --artifact "$artifact"' "$workflow" \
+    || fail "$(basename "$workflow") must preflight producer namespaces and smoke-test its native Paseo build"
 done
 
 printf 'ok: CI and Release share the prepared-context real-adapter gate\n'

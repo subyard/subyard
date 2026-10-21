@@ -259,28 +259,92 @@ reboot_owner() {
   done
   [ "$ready" = 1 ] || die 'owner host did not return with a new boot ID'
   prepare_guest 1 "$bundle" "$bundle_hash"
+  verify_boot_result
 }
 
 verify_boot_result() {
-  local state started rc
+  local state started rc command uptime _ now remaining active sub result status
+  local policy_deadline=0 local_deadline=0
+  # Match P0's 900-second fixture observation policy, anchored to the first
+  # current-boot service start. The native 120-second attempt can retry exit 75.
+  IFS=' ' read -r uptime _ < /proc/uptime || return 2
+  # SSH can return while the unit is still queued behind network-online/Incus.
+  # Match P0's separate, fixed 30-second wait for its first current-boot start.
+  local_deadline=$((${uptime%%.*} + 30))
+  command="$(quote_ssh_command sh -ceu '
+    systemctl show subyard-power-reconcile.service \
+      --property=LoadState --property=ActiveState --property=SubState \
+      --property=Result --property=ExecMainStatus \
+      --property=ExecMainStartTimestampMonotonic
+    printf "BootUptimeSeconds="
+    cut -d. -f1 /proc/uptime
+  ')" || return 2
   printf 'amnezia_acceptance_stage=verify-boot-result\n'
-  state="$(guest 1 systemctl show subyard-power-reconcile.service \
-    --property=LoadState --property=ActiveState --property=SubState \
-    --property=Result --property=ExecMainStatus \
-    --property=ExecMainStartTimestampMonotonic </dev/null)" || {
-      rc=$?
+  while :; do
+    rc=0
+    IFS=' ' read -r uptime _ < /proc/uptime || return 2
+    now="${uptime%%.*}"
+    remaining=$((local_deadline - now))
+    [ "$remaining" -gt 0 ] || die 'boot power reconciliation observation deadline expired'
+    [ "$remaining" -le 10 ] || remaining=10
+    state="$(timeout --foreground --signal=KILL "$remaining" ssh -F "$CLIENT_CONFIG" -T \
+      -o ConnectTimeout=3 -o ConnectionAttempts=1 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+      e2e-vm-1 -- "$command" </dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
       printf 'amnezia_acceptance_boot_state_read_exit=%s\n' "$rc" >&2
       return "$rc"
-    }
-  printf '%s\n' "$state"
-  started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$state")"
-  grep -Fxq 'LoadState=loaded' <<<"$state" \
-    && grep -Fxq 'ActiveState=inactive' <<<"$state" \
-    && grep -Fxq 'SubState=dead' <<<"$state" \
-    && grep -Fxq 'Result=success' <<<"$state" \
-    && grep -Fxq 'ExecMainStatus=0' <<<"$state" \
-    && [[ "$started" =~ ^[1-9][0-9]*$ ]] \
-    || die 'boot power reconciliation did not succeed in the current boot'
+    fi
+    started="$(sed -n 's/^ExecMainStartTimestampMonotonic=//p' <<<"$state")"
+    uptime="$(sed -n 's/^BootUptimeSeconds=//p' <<<"$state")"
+    if [ "$policy_deadline" -eq 0 ] && [ "$started" = 0 ] \
+      && [[ "$uptime" =~ ^(0|[1-9][0-9]{0,11})$ ]] \
+      && [ "$(sed -n 's/^LoadState=//p' <<<"$state")" = loaded ] \
+      && [ "$(sed -n 's/^ActiveState=//p' <<<"$state")" = inactive ] \
+      && [ "$(sed -n 's/^SubState=//p' <<<"$state")" = dead ] \
+      && [ "$(sed -n 's/^Result=//p' <<<"$state")" = success ] \
+      && [ "$(sed -n 's/^ExecMainStatus=//p' <<<"$state")" = 0 ]; then
+      IFS=' ' read -r uptime _ < /proc/uptime || return 2
+      [ "${uptime%%.*}" -lt "$local_deadline" ] \
+        || die 'boot power reconciliation did not start before its observation deadline'
+      sleep 1
+      continue
+    fi
+    grep -Fxq 'LoadState=loaded' <<<"$state" \
+      && [[ "$started" =~ ^[1-9][0-9]{0,17}$ ]] && [[ "$uptime" =~ ^(0|[1-9][0-9]{0,11})$ ]] \
+      && [ "$((started / 1000000))" -le "$uptime" ] \
+      || die 'boot power reconciliation current-boot state is unavailable or invalid'
+    if [ "$policy_deadline" -eq 0 ]; then
+      policy_deadline=$(((started + 999999) / 1000000 + 900))
+      remaining=$((policy_deadline - uptime))
+      [ "$remaining" -ge 0 ] || remaining=0
+      # This never resets when exit 75 schedules another native attempt.
+      IFS=' ' read -r uptime _ < /proc/uptime || return 2
+      local_deadline=$((${uptime%%.*} + remaining))
+      uptime="$(sed -n 's/^BootUptimeSeconds=//p' <<<"$state")"
+    fi
+    if grep -Fxq 'LoadState=loaded' <<<"$state" \
+      && grep -Fxq 'ActiveState=inactive' <<<"$state" \
+      && grep -Fxq 'SubState=dead' <<<"$state" \
+      && grep -Fxq 'Result=success' <<<"$state" \
+      && grep -Fxq 'ExecMainStatus=0' <<<"$state" \
+      && [[ "$started" =~ ^[1-9][0-9]*$ ]]; then
+      printf '%s\n' "$state"
+      return 0
+    fi
+    if [ "$uptime" -ge "$policy_deadline" ]; then
+      printf '%s\n' "$state"
+      die 'boot power reconciliation did not succeed in the current boot'
+    fi
+    active="$(sed -n 's/^ActiveState=//p' <<<"$state")"
+    sub="$(sed -n 's/^SubState=//p' <<<"$state")"
+    result="$(sed -n 's/^Result=//p' <<<"$state")"
+    status="$(sed -n 's/^ExecMainStatus=//p' <<<"$state")"
+    case "$active/$sub/$result/$status" in
+      activating/start/success/0 | active/running/success/0 | activating/auto-restart/success/75 | activating/auto-restart/exit-code/75) ;;
+      *) printf '%s\n' "$state"; die 'boot power reconciliation has no pending retry or terminal success' ;;
+    esac
+    sleep 1
+  done
 }
 
 # A fresh dev session receives product platform enrollment for the remaining commands.
@@ -326,7 +390,6 @@ if [ "$lane" = resources ]; then
   client_reboot_traffic
   reboot_owner
   owner_phase verify-enabled
-  verify_boot_result
   client_probe
   printf 'amnezia_acceptance_stage=free-page-reporting-after-reboot\n'
   guest 1 env SUBYARD_E2E_VM=1 bash "${GUEST_DIRS[1]}/src/dev/e2e/vm-page-reporting.sh" \
@@ -385,7 +448,6 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
   reboot_owner
   owner_phase verify-enabled
   native_app discover --name acceptance-two
-  verify_boot_result
   client_probe
   if [ "$lane" != startup ]; then
     printf 'amnezia_acceptance_stage=free-page-reporting\n'
@@ -397,7 +459,6 @@ if [ "$lane" != disabled ] && [ "$lane" != reconnect ]; then
     reboot_owner
     owner_phase verify-enabled
     native_app discover --name acceptance-two
-    verify_boot_result
     client_probe
   fi
 fi
@@ -409,7 +470,6 @@ fi
 client_reboot_traffic
 reboot_owner
 owner_phase verify-disabled
-verify_boot_result
 client_denied
 if [ "$lane" = reconnect ] || [ "$lane" = full ]; then
   # Prove that packets sent while disabled created the stale pre-NAT flow.
