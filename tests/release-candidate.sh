@@ -180,16 +180,21 @@ printf '{"version":"test","runtime_file":"runtime.tar.gz","runtime_sha256":"%s"}
 printf 'ok: release candidate helper validates packaged runtime\n'
 printf 'ok: fresh release fixture installs isolated entrypoints and requires unselected migration readiness\n'
 
-# Compatibility fault controls must identify the native runtime even when the
-# final release directory contains both architectures in either traversal order.
+# Compatibility controls bind the native runtime and bound owned scratch lifetime
+# without changing deliberate interruption or shared fixture ownership.
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
+import contextlib
 import hashlib
+import io
+import json
 from pathlib import Path
 import runpy
+import signal
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 root = Path(sys.argv[1])
 helper = runpy.run_path(str(root / 'dev/verify-release-upgrades.py'))['history_materialized_fixture']
@@ -221,4 +226,160 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
             assert history['target'] == expected, (arch, history['target'], expected)
             assert captured[0]['target'] == expected
 print('ok: migration-history apply control binds the selected architecture in a mixed release inventory')
+
+globals_ = helper.__globals__
+verify = globals_['verify']
+with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') as temporary:
+    base = Path(temporary)
+    owned = base / 'owned'
+    owned.mkdir()
+    sentinels = [base / 'outside', owned / 'incus.socket', owned / 'incus-observation.json',
+                 owned / 'empty-incus', owned / 'baseline-assets/payload',
+                 owned / 'compatible-power-release/payload', owned / 'compatible-power-source/payload']
+    for sentinel in sentinels:
+        sentinel.parent.mkdir(exist_ok=True)
+        sentinel.write_text('retained')
+    previous = []
+    completed = []
+    fail_final = False
+    interrupted_result = -signal.SIGKILL
+
+    class ScratchFixture:
+        def __init__(self, path, *args):
+            assert all(not prior.exists() for prior in previous), previous
+            assert path.parent == owned
+            self.root = path
+            self.root.mkdir()
+            (path / 'bulk').write_bytes(b'payload')
+            self.runtime = path / 'runtime'
+            self.runtime.mkdir()
+            self.initial = 'initial'
+            (self.runtime / 'current').symlink_to(self.initial)
+            self.journal = path / 'journal.json'
+            self.journal.write_text(json.dumps({'checkpoint': 'incomplete', 'transaction': 'authorized'}))
+            self.old_launcher = path / 'old/bin/yard'
+            self.env = {}
+            self.checks = 0
+            self.completions = 0
+            previous.append(path)
+
+        def alive(self):
+            assert (self.root / 'bulk').read_bytes() == b'payload'
+            assert all(sentinel.read_text() == 'retained' for sentinel in sentinels)
+
+        def check(self):
+            self.alive()
+            self.checks += 1
+            return {'outcome': {'status': 'migration-required' if self.checks == 1 else 'recovering',
+                                'target': 'candidate'}}
+
+        def update(self, *args, **kwargs):
+            self.alive()
+
+        def complete(self):
+            self.alive()
+            self.completions += 1
+            if fail_final and self.completions == 2:
+                raise RuntimeError('workload final assertion')
+            completed.append(self.root)
+
+    def consume(fixture):
+        fixture.alive()
+
+    def interrupted(command, env, timeout):
+        fixture_root = Path(command[command.index('--marker') + 1]).parent
+        assert (fixture_root / 'bulk').is_file()
+        (fixture_root / 'activation-observed.json').write_text('observed')
+        return SimpleNamespace(returncode=interrupted_result, stdout='', stderr='')
+
+    with patch.dict(globals_, {'Fixture': ScratchFixture,
+            'compatible_power_release': lambda *args: (owned / 'compatible-power-release', 'bridge'),
+            'verify_checkpoint_refusal': consume, 'verify_completed_activation_drift': consume,
+            'verify_power_rollback_refusal': consume, 'verify_epoch_one_publication_gate': consume,
+            'run_process': interrupted}):
+        for baseline_version in ('first', 'second'):
+            verify(base, 'candidate', base, 'amd64', owned, baseline_version)
+            assert all(not path.exists() for path in previous)
+        assert len(completed) == 10
+        assert all(sentinel.read_text() == 'retained' for sentinel in sentinels)
+
+        fail_final = True
+        with patch.object(globals_['shutil'], 'rmtree', side_effect=AssertionError('cleanup hid workload failure')):
+            try:
+                verify(base, 'candidate', base, 'amd64', owned, 'failed')
+                raise AssertionError('workload failure passed')
+            except RuntimeError as error:
+                assert str(error) == 'workload final assertion'
+        assert (previous[-1] / 'bulk').is_file()
+        previous.clear()
+        fail_final = False
+        with patch.object(globals_['shutil'], 'rmtree', side_effect=OSError('cleanup refused')):
+            try:
+                verify(base, 'candidate', base, 'amd64', owned, 'cleanup-failed')
+                raise AssertionError('cleanup failure passed')
+            except OSError as error:
+                assert str(error) == 'cleanup refused'
+        assert (previous[-1] / 'bulk').is_file()
+        previous.clear()
+        interrupted_result = 0
+        try:
+            verify(base, 'candidate', base, 'amd64', owned, 'not-interrupted')
+            raise AssertionError('missing deliberate SIGKILL passed')
+        except RuntimeError as error:
+            assert 'did not interrupt the real update' in str(error)
+        assert (previous[-1] / 'bulk').is_file()
+
+    release = base / 'release'
+    release.mkdir()
+    archive = release / 'subyard-candidate-linux-amd64.tar.gz'
+    with tarfile.open(archive, 'w:gz') as output:
+        member = tarfile.TarInfo('bin/yard')
+        member.size = 32
+        output.addfile(member, io.BytesIO(b'x' * 32))
+    assert globals_['archive_footprint'](archive) == (32, 2)
+    baseline = base / 'baseline'
+    baseline.mkdir()
+    baseline_archive = baseline / 'subyard-0.19.0-linux-amd64.tar.gz'
+    baseline_archive.write_bytes(archive.read_bytes())
+    process = Mock(side_effect=AssertionError('subprocess started before capacity refusal'))
+    for resource, available in (
+            ('bytes', SimpleNamespace(f_bavail=15, f_frsize=4, f_files=100, f_favail=100)),
+            ('inodes', SimpleNamespace(f_bavail=100, f_frsize=4, f_files=100, f_favail=3))):
+        with patch.dict(globals_, {'run_process': process}), \
+             patch.dict(globals_['DIRECT_BASELINE_SHA256'], {'amd64': hashlib.sha256(archive.read_bytes()).hexdigest()}), \
+             patch.object(globals_['subprocess'], 'Popen', process), \
+             patch.object(globals_['os'], 'statvfs', return_value=available) as statvfs, \
+             patch.object(sys, 'argv', ['verify', '--release-dir', str(release), '--version', 'candidate',
+                                        '--only-direct-019', '--direct-baseline-dir', str(baseline)]), \
+             patch.object(globals_['platform'], 'machine', return_value='x86_64'), \
+             patch.object(globals_['platform'], 'system', return_value='Linux'):
+            try:
+                globals_['main']()
+                raise AssertionError('known capacity shortage passed')
+            except RuntimeError as error:
+                assert 'insufficient /tmp ' + resource in str(error)
+            statvfs.assert_called_once_with('/tmp')
+            statvfs.reset_mock()
+            refused_root = base / 'refused-fixture'
+            try:
+                globals_['Fixture'](refused_root, release, 'candidate', baseline, 'amd64', '0.19.0')
+                raise AssertionError('fixture install ignored capacity shortage')
+            except RuntimeError as error:
+                assert 'insufficient /tmp ' + resource in str(error)
+            assert not refused_root.exists()
+            statvfs.assert_called_once_with('/tmp')
+        process.assert_not_called()
+    unknown = io.StringIO()
+    with contextlib.redirect_stdout(unknown), \
+         patch.object(globals_['os'], 'statvfs', return_value=SimpleNamespace(
+             f_bavail=0, f_frsize=4096, f_files=0, f_favail=0)):
+        globals_['check_scratch_capacity'](base / 'unavailable', [None])
+    assert 'UNKNOWN: 2 unavailable archive(s)' in unknown.getvalue()
+    assert 'UNKNOWN inodes' in unknown.getvalue()
+    assert 'passing this floor does not guarantee capacity' in unknown.getvalue()
+    assert 'PASS' not in unknown.getvalue()
+    with patch.object(globals_['os'], 'statvfs', return_value=SimpleNamespace(
+            f_bavail=8, f_frsize=4, f_files=0, f_favail=0)):
+        globals_['check_scratch_capacity'](archive)
+print('ok: compatibility scratch cleanup follows final consumers and refuses known capacity shortages before subprocesses')
 PY

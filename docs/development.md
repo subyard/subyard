@@ -255,6 +255,15 @@ group. Use `--baseline-dir PATH`, `--legacy-baseline-dir PATH`, `--activation-ba
 installer). For a focused legacy-retirement regression, use `--only-legacy-retirement`.
 For a focused v0.17.3 regression, add `--only-activation-recovery`; publication requires
 the complete check after building the release assets.
+
+The check releases each successful normal, compatible-rollback and interrupted-update fixture
+immediately after its final assertions, retaining the shared bridge and control assets. Before
+preparation, after baseline assets arrive and before fixture installation, it compares `/tmp`
+available bytes and meaningful inode counts with a known unpacked archive lower bound for the
+selected cases. Unavailable archives, download/build/output overhead and the full peak remain
+unknown; passing the floor does not guarantee capacity or reserve space against concurrent work.
+Full peak usage and elapsed-time savings require measurement during the next complete gate.
+
 The fresh recovery fixture preserves stopped-yard deferred evidence: equal migration epochs do
 not make its installed component contracts compatible with v0.11.2, which has no preview owner
 payload or runtime-owner advertisement. That branch requires typed rollback refusal with unchanged

@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -90,6 +91,106 @@ def require(condition, message):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def archive_footprint(bundle):
+    """Count known unpacked payload only; this is not a peak-space estimate."""
+    if bundle is None or not bundle.is_file():
+        return None
+    entries = {}
+    parents = set()
+    try:
+        with tarfile.open(bundle, "r:gz") as archive:
+            for member in archive:
+                path = Path(member.name)
+                if path != Path("."):
+                    entries[path] = member
+                    parents.update(parent for parent in path.parents if parent != Path("."))
+    except tarfile.TarError as error:
+        raise RuntimeError(f"cannot inspect scratch payload {bundle.name}: {error}") from None
+    size = sum(member.size for member in entries.values() if member.isfile())
+    # Hard links reuse an inode; implicit parent directories still need one.
+    inodes = len(parents | {path for path, member in entries.items() if not member.islnk()})
+    return size, inodes
+
+
+def check_scratch_capacity(candidate, baselines=(), stage="before fixture install"):
+    # Selected baselines are alternatives: at least one baseline and candidate
+    # coexist in a Fixture. Other retained cases and all build/output overhead
+    # are unknown, rather than an invented reserve or a complete peak budget.
+    candidate_size = archive_footprint(candidate)
+    baseline_sizes = [archive_footprint(bundle) for bundle in baselines]
+    known = [size for size in baseline_sizes if size is not None]
+    byte_floor, inode_floor = candidate_size or (0, 0)
+    byte_floor += max((size[0] for size in known), default=0)
+    inode_floor += max((size[1] for size in known), default=0)
+    available = os.statvfs("/tmp")
+    available_bytes = available.f_bavail * available.f_frsize
+    available_inodes = (available.f_favail if available.f_files > 0
+                        and 0 <= available.f_favail <= available.f_files else None)
+    unknown_assets = (candidate_size is None) + sum(size is None for size in baseline_sizes)
+    print(f"Scratch capacity ({stage}): known unpacked floor {byte_floor} bytes, {inode_floor} inodes; "
+          f"available {available_bytes} bytes, "
+          f"{available_inodes if available_inodes is not None else 'UNKNOWN'} inodes. "
+          f"UNKNOWN: {unknown_assets} unavailable archive(s), download/build/output overhead and total peak; "
+          "passing this floor does not guarantee capacity.", flush=True)
+    require(available_bytes >= byte_floor,
+            f"insufficient /tmp bytes {stage}: available {available_bytes}, known floor {byte_floor}")
+    require(available_inodes is None or available_inodes >= inode_floor,
+            f"insufficient /tmp inodes {stage}: available {available_inodes}, known floor {inode_floor}")
+
+
+def selected_baseline_archives(args, release, arch):
+    """Name only inputs used by the selected case, without downloading them."""
+    normal = [(BASELINE, args.baseline_dir), (PUBLISHED_BASELINE, args.published_baseline_dir),
+              (SOURCE_BASELINE, args.source_baseline_dir)]
+    activation = (ACTIVATION_BASELINE, args.activation_baseline_dir)
+    direct = (DIRECT_BASELINE, args.direct_baseline_dir)
+    history = [(version, args.migration_history_baselines / ("baseline-" + version)
+                if args.migration_history_baselines is not None else None)
+               for version in HISTORY_BASELINES
+               if (args.migration_history_case in ("all", "checkpoint")
+                   if version in (SOURCE_BASELINE, HISTORY_BASELINE)
+                   else args.migration_history_case in ("all", "legacy", "cuts"))]
+    if args.only_migration_history:
+        selected = history
+    elif args.only_legacy_retirement:
+        selected = [(v, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
+                    for v in RETIRED_BASELINES] + [(MINIMUM_BASELINE, None)]
+    elif args.only_direct_019:
+        selected = [direct]
+    elif args.only_migration_owner_replacement:
+        selected = [(MIGRATION_OWNER_BASELINE, args.migration_owner_baseline_dir), direct]
+    elif args.only_fresh_activation_recovery:
+        selected = normal[:1]
+    elif args.only_activation_recovery:
+        selected = [activation, normal[2]]
+    elif args.only_runtime_recovery:
+        selected = [normal[2], activation]
+    elif args.only_source_repair:
+        selected = [normal[2]]
+    elif args.only_power_publication or args.only_power_transition_regression:
+        selected = normal[1:] if args.only_power_publication else normal
+        selected = [(v, directory if directory is not None else
+                     release.parent / "power-publication-baselines" / v) for v, directory in selected]
+    elif args.only_checkpoint_source:
+        selected = normal
+    else:
+        selected = normal + [activation, direct] + history + [
+            (v, args.legacy_baseline_dir if v == LEGACY_BASELINE else None)
+            for v in RETIRED_BASELINES] + [(MINIMUM_BASELINE, None)]
+    pins = {BASELINE: BASELINE_SHA256, ACTIVATION_BASELINE: ACTIVATION_BASELINE_SHA256,
+            PUBLISHED_BASELINE: PUBLISHED_BASELINE_SHA256, SOURCE_BASELINE: SOURCE_BASELINE_SHA256,
+            DIRECT_BASELINE: DIRECT_BASELINE_SHA256, MIGRATION_OWNER_BASELINE: MIGRATION_OWNER_SHA256,
+            MINIMUM_BASELINE: MINIMUM_BASELINE_SHA256, **RETIRED_BASELINES}
+    archives = []
+    for version, directory in selected:
+        bundle = directory.resolve() / f"subyard-{version}-linux-{arch}.tar.gz" if directory is not None else None
+        if bundle is not None and bundle.is_file():
+            require(digest(bundle) == pins[version][arch],
+                    "official baseline checksum does not match the pinned release")
+        archives.append(bundle)
+    return archives
 
 
 def write_observation_incus(shims, control, unexpected, package_roots=(), activation_failure=None):
@@ -369,6 +470,8 @@ def set_fixture_observation(control, status=None, journal=None, history=None):
 class Fixture:
     def __init__(self, root, release, version, baseline, arch, baseline_version=BASELINE,
                  preserve_observation=False):
+        check_scratch_capacity(release / f"subyard-{version}-linux-{arch}.tar.gz",
+                               [baseline / f"subyard-{baseline_version}-linux-{arch}.tar.gz"])
         self.root = root
         self.home = root / "home"
         self.data = self.home / ".subyard"
@@ -872,6 +975,7 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
     verify_power_rollback_refusal(normal)
     normal.update("--offline", "--version", version, "--yes")
     normal.complete()
+    shutil.rmtree(normal.root)
     print(f"PASS: released {baseline_version} updater -> {version}, fixed point and power rollback refusal", flush=True)
 
     bridge_release, bridge_version = compatible_power_release(release, version, arch, root)
@@ -885,6 +989,7 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
             "matching-epoch rollback lost the old runtime")
     compatible.update("--offline", "--version", bridge_version, "--yes")
     compatible.complete()
+    shutil.rmtree(compatible.root)
     print(f"PASS: actual released {baseline_version} matching-epoch rollback and forward retry "
           "with sealed compatible fixture bridge", flush=True)
 
@@ -913,6 +1018,7 @@ def verify(release, version, baseline, arch, root, baseline_version=BASELINE):
     interrupted.complete()
     require(json.loads(interrupted.journal.read_text())["transaction"] == transaction,
             "resume replaced the authorized transaction")
+    shutil.rmtree(interrupted.root)
     print(f"PASS: released {baseline_version} updater resumes the candidate's journal after SIGKILL", flush=True)
 
 
@@ -2323,6 +2429,8 @@ def main():
     release = args.release_dir.resolve()
     require(args.version not in (BASELINE, LEGACY_BASELINE, ACTIVATION_BASELINE, PUBLISHED_BASELINE, SOURCE_BASELINE),
             "candidate must differ from the released baselines")
+    check_scratch_capacity(release / f"subyard-{args.version}-linux-{arch}.tar.gz",
+                           selected_baseline_archives(args, release, arch), "before preparation")
     os.umask(0o077)
     # Protected runtime roots reject writable workspace ancestors. All mutable
     # state and deliberate process interruption are confined to this owned root.
@@ -2519,6 +2627,7 @@ def baseline_assets(root, directory, version, hashes, arch):
     if version in RETIRED_BASELINES:
         require(digest(baseline / "subyard-install-runtime-release.sh") == RETIRED_INSTALLER_SHA256[version],
                 "official legacy installer does not match the pinned release")
+    check_scratch_capacity(baseline / bundle_name, stage=f"after {version} assets")
     return baseline
 
 
