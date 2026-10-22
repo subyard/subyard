@@ -109,6 +109,8 @@ type CLI struct {
 	commandInputs                releaseruntime.CommandInputs
 	manifest                     command.Manifest
 	resources                    resource.Registry
+	configResources              *resource.Registry
+	configResourcesRoot          string
 	inventoryRoutes              map[string]config.Loaded
 	discoveredOwners             map[string]ownerinventory.Connection
 	coreActions                  *domain.ActionRegistry
@@ -137,6 +139,7 @@ type CLI struct {
 func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation := *cli
 	operation.updateProgress = nil
+	operation.configResources, operation.configResourcesRoot = nil, ""
 	// The session owns framed stdin; native children must see EOF, not RPC frames.
 	operation.options.Stdin = strings.NewReader("")
 	operation.env = maps.Clone(cli.env)
@@ -423,6 +426,7 @@ func New(options Options) (*CLI, error) {
 }
 
 func (cli *CLI) Run(ctx context.Context) int {
+	cli.configResources, cli.configResourcesRoot = nil, ""
 	cli.resourceShutdownRepair = nil
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
@@ -523,7 +527,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		(core && definition.Handler == "@host" && hostReadOnlyInvocation(commandArguments)) ||
 		resourceReadOnly || keysReadOnly ||
 		(core && definition.Handler == "@config" && (configReadOnlyInvocation(commandArguments) || configSyncCheck || configSyncStatus)) ||
-		(core && definition.Handler == "@test-vms" && testVMStatusInvocation(commandArguments)) ||
+		(core && definition.Handler == "@test-vms" && (testVMStatusInvocation(commandArguments) || testVMLogsInvocation(commandArguments))) ||
 		(core && definition.Handler == "@integration" && integrationReadOnlyInvocation(commandArguments)) ||
 		(core && definition.Handler == "@profile" && profileReadOnlyInvocation(commandArguments)) ||
 		(core && definition.Handler == "@project-state" && len(commandArguments) > 0 &&
@@ -576,13 +580,6 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if core && definition.Handler == "@release-transition" {
 		return cli.runReleaseTransition(ctx, commandArguments)
-	}
-	if core && definition.Handler == "@test-vms" &&
-		testVMLogsInvocation(commandArguments) {
-		if cli.env["SUBYARD_NO_AUDIT"] == "" {
-			cli.audit(name, commandArguments, "", "")
-		}
-		return cli.runTestVMLogs(ctx, commandArguments)
 	}
 	if core && definition.Handler == "@logs" && !explicit && hostLogInvocation(commandArguments) {
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
@@ -758,7 +755,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		} else {
 			readOnlyRoute := readOnlyInvocation || registrationRepair || (core && (definition.Handler == "@project" || definition.Handler == "@integration" || definition.Handler == "@profile" || definition.Handler == "@teardown"))
 			var results []ownerInventoryResult
-			if readOnlyInvocation && !commandHelpRequested(commandArguments) {
+			if readOnlyInvocation && !commandHelpRequested(commandArguments) && !(core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments)) {
 				results = cli.allOwnerInventoriesForQueries(ctx, base, false)
 			} else if readOnlyRoute {
 				results = cli.allOwnerInventoriesReadOnly(ctx, base, false)
@@ -2268,7 +2265,7 @@ func (cli *CLI) loadInventoryLoaded(name string, loaded config.Loaded) (config.L
 	} {
 		delete(environment, key)
 	}
-	return config.Load(config.LoadOptions{
+	return config.Load(config.LoadOptions{Resources: cli.operationResourceRegistry,
 		Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
 		OperatorHome: loaded.Context.Paths.OperatorHome,
 		YardName:     name,
@@ -3325,10 +3322,7 @@ func (cli *CLI) operationOrchestrator(
 	events ports.EventSink,
 	definition *command.Definition,
 ) *application.Orchestrator {
-	clock := cli.options.Clock
-	if clock == nil {
-		clock = wallClock{}
-	}
+	orchestrator := cli.operationPlanner(operationID)
 	prompt := cli.options.Prompt
 	if prompt == nil {
 		prompt = streamPrompt{input: cli.options.Stdin, output: cli.options.Stdout, interactive: cli.promptInputTerminal}
@@ -3384,10 +3378,17 @@ func (cli *CLI) operationOrchestrator(
 			Remote: loaded.Context.OwnerEndpoint, Maximum: audit.MaximumFrom(cli.env["SUBYARD_AUDIT_MAX_BYTES"]), BeforeWrite: cli.auditWriteAdmission(home),
 		}
 	}
-	return &application.Orchestrator{
-		Clock: clock, IDs: fixedIDSource{value: operationID}, Prompt: prompt,
-		Runner: runner, Audit: auditSink, Events: events, Actions: cli.coreActions,
+	orchestrator.Prompt, orchestrator.Runner = prompt, runner
+	orchestrator.Audit, orchestrator.Events = auditSink, events
+	return orchestrator
+}
+
+func (cli *CLI) operationPlanner(operationID string) *application.Orchestrator {
+	clock := cli.options.Clock
+	if clock == nil {
+		clock = wallClock{}
 	}
+	return &application.Orchestrator{Clock: clock, IDs: fixedIDSource{value: operationID}, Actions: cli.coreActions}
 }
 
 func structuredAdapterContext(yard domain.Context) map[string]string {
@@ -3757,6 +3758,20 @@ func (cli *CLI) usageSection(title, section string) {
 	fmt.Fprintln(cli.options.Stdout)
 }
 
+// Capture declarations once for this CLI/RPC operation and repository root. RPC
+// copies and new Run calls start a fresh capture; mutable endpoint files are not
+// part of it. Execution's independent package/source revalidation stays fresh.
+func (cli *CLI) operationResourceRegistry(root string) (resource.Registry, error) {
+	if cli.configResources == nil || cli.configResourcesRoot != root {
+		registry, err := resource.Load(root)
+		if err != nil {
+			return resource.Registry{}, err
+		}
+		cli.configResources, cli.configResourcesRoot = &registry, root
+	}
+	return *cli.configResources, nil
+}
+
 func (cli *CLI) loadContext(yard string) (config.Loaded, error) {
 	return cli.loadContextWithYardSettings(yard, "")
 }
@@ -3775,7 +3790,7 @@ func (cli *CLI) resolveContextWithYardSettings(yard, yardSettingsFile string) (c
 	if operatorHome == "" {
 		operatorHome = cli.env["HOME"]
 	}
-	return config.Load(config.LoadOptions{
+	return config.Load(config.LoadOptions{Resources: cli.operationResourceRegistry,
 		Catalog:          &cli.catalog,
 		RepositoryRoot:   cli.options.RepositoryRoot,
 		OperatorHome:     operatorHome,
@@ -3795,7 +3810,7 @@ func (cli *CLI) resolveContextAllowPending(yard string) (config.Loaded, error) {
 	if operatorHome == "" {
 		operatorHome = cli.env["HOME"]
 	}
-	return config.Load(config.LoadOptions{
+	return config.Load(config.LoadOptions{Resources: cli.operationResourceRegistry,
 		Catalog:                 &cli.catalog,
 		RepositoryRoot:          cli.options.RepositoryRoot,
 		OperatorHome:            operatorHome,
@@ -4517,7 +4532,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
-		inventory, err := handler.cli.ownerInventoryReadOnly(ctx, handler.loaded)
+		inventory, err := handler.cli.rpcOperation(call.OperationID).ownerInventoryReadOnly(ctx, handler.loaded)
 		if err != nil {
 			return nil, &rpc.Error{Code: "owner_inventory_failed", Message: err.Error()}
 		}

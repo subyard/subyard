@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -115,26 +114,22 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 		return 1
 	}
 	path := filepath.Join(dataHome, "logs", testvmsruntime.HostEventLogName)
-	seen := map[string]bool{}
-	printCurrent := func(limit int) error {
-		events, err := testvmsruntime.ReadHostBrokerEvents(path, limit, slotID)
+	reader := testvmsruntime.HostBrokerEventReader{Path: path, SlotID: slotID}
+	printCurrent := func() error {
+		events, err := reader.Read(lines)
 		if err != nil {
 			return err
 		}
 		encoder := json.NewEncoder(cli.options.Stdout)
 		encoder.SetEscapeHTML(false)
 		for _, event := range events {
-			if seen[event.EventID] {
-				continue
-			}
 			if err := encoder.Encode(event); err != nil {
 				return err
 			}
-			seen[event.EventID] = true
 		}
 		return nil
 	}
-	if err := printCurrent(lines); err != nil {
+	if err := printCurrent(); err != nil {
 		cli.errorf("test-vms logs: %v", err)
 		return 1
 	}
@@ -148,11 +143,7 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 		case <-ctx.Done():
 			return 0
 		case <-ticker.C:
-			if _, err := os.Stat(path); err != nil && !os.IsNotExist(err) {
-				cli.errorf("test-vms logs: %v", err)
-				return 1
-			}
-			if err := printCurrent(100000); err != nil {
+			if err := printCurrent(); err != nil {
 				cli.errorf("test-vms logs: %v", err)
 				return 1
 			}

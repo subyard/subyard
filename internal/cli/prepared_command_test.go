@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/state"
@@ -408,5 +410,42 @@ func TestRepositoryPreparedCommandManifestIsComplete(t *testing.T) {
 		if _, err := resolveCoreCommand(definition); err != nil {
 			t.Fatalf("command %q: %v", definition.Name, err)
 		}
+	}
+}
+
+func TestPreparedPlanUsesOneStepsSnapshot(t *testing.T) {
+	for _, assessed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(assessed), func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			prepared := preparedCommand{CLI: program, Loaded: loaded, Definition: command.Definition{Name: "stop", Confirmation: command.ConfirmationNever}, policy: domain.CommandPolicy{Name: "stop", Effect: domain.CommandRead, RemotePolicy: domain.RemoteOnOwner}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+				return domain.AdapterResult{}, nil
+			}, steps: func() []domain.OperationStep {
+				calls++
+				return []domain.OperationStep{{ID: "one", Target: "fixture", Observed: "before", Desired: "after", Decision: domain.StepApply, Verify: "read result", Consequence: strconv.Itoa(calls)}}
+			}}
+			if assessed {
+				prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
+					return "test-vms.logs", domain.ActionDelta{}, nil
+				}
+			}
+			if err := prepared.preparePlan(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || len(prepared.Plan.Steps) != 1 || prepared.Plan.Steps[0].Consequence != "1" {
+				t.Fatalf("steps snapshot: calls=%d plan=%+v", calls, prepared.Plan)
+			}
+			if assessed && !slices.Equal(prepared.Plan.Assessment.Consequences, []string{"1"}) {
+				t.Fatalf("consequences differ from steps: %+v", prepared.Plan)
+			}
+		})
 	}
 }

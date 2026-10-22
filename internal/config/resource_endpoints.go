@@ -30,10 +30,15 @@ func applySavedResourceEndpoints(
 	if len(selected) == 0 {
 		return nil
 	}
-	registry, err := resource.Load(root)
+	loadResources := options.Resources
+	if loadResources == nil {
+		loadResources = resource.Load
+	}
+	registry, err := loadResources(root)
 	if err != nil {
 		return fmt.Errorf("load resource endpoint metadata: %w", err)
 	}
+
 	for _, definition := range registry.Definitions() {
 		if definition.Endpoint == nil || definition.Proxy == nil {
 			continue

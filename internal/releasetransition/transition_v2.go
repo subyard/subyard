@@ -3565,15 +3565,6 @@ func (transition *V2Transition) readLedgerSemanticSnapshot() (ProtectedSnapshot,
 	return protectedSnapshotFromPayload(payload), actual.Ledger, nil
 }
 
-func (transition *V2Transition) activationFixedPoint(
-	ctx context.Context,
-	releases ReleasePair,
-	links ReleaseLinks,
-) bool {
-	_, fixed, _ := transition.activationFixedPointStatus(ctx, releases, links)
-	return fixed
-}
-
 func (transition *V2Transition) activationFixedPointStatus(
 	ctx context.Context,
 	releases ReleasePair,

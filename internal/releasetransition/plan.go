@@ -331,11 +331,3 @@ func (blocker Blocker) Validate() error {
 	}
 	return validateSafeAction(blocker.Retry)
 }
-
-func cloneTransactionID(value *TransactionID) *TransactionID {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
-}

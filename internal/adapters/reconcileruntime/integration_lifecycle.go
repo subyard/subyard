@@ -33,9 +33,6 @@ func (runtime Runtime) integrationDefinitions() ([]profile.IntegrationDefinition
 	}
 	return profile.LoadIntegrations(runtime.RepositoryRoot)
 }
-func (runtime Runtime) integrationPackageBinding(definition profile.IntegrationDefinition) (string, error) {
-	return runtime.integrationPackageBindingWithSourceReader(definition, runtime.SourceReader)
-}
 
 func (runtime Runtime) integrationPackageBindingWithSourceReader(definition profile.IntegrationDefinition, reader func(config.MaterializedAsset) ([]byte, error)) (string, error) {
 	source, err := definition.SourceBinding()

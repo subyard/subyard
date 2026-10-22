@@ -8,11 +8,16 @@ Go remains the production owner. The adapter now re-exports the single history
 implementation from the [production foundation](../../release-owner/README.md);
 it does not maintain another Rust history model.
 
-Run `make verify-migrationhistory-rust` with the root stable Rust toolchain and Go
-from `go.mod`. It checks formatting, compiler contracts, Clippy, the existing owning
-Go race tests and the opt-in Rust comparison. Build artifacts stay under
-`.build/migrationhistory-pilot/target`. Plain Go package tests still check the
-independent oracle against Go without requiring Rust.
+Build the comparison executable with the root stable Rust toolchain using the
+[shared Cargo cache workflow](../../docs/development.md#toolchain), keeping final
+artifacts under `.build`. Then run the opt-in comparison with Go from `go.mod`:
+
+```sh
+SUBYARD_MIGRATIONHISTORY_RUST=/absolute/path/to/artifact TMPDIR=/tmp \
+  go test -race -count=1 ./internal/migrationhistory -run '^TestRustPilotCorpus$'
+```
+
+Plain Go package tests check the independent oracle against Go without Rust.
 
 The Go test generates all completed subsets of five ordered three-migration
 registries, with and without cross-domain dependency, and every ID sequence of
@@ -65,8 +70,7 @@ necessary. No fake activation `Ready` or process authority is introduced.
 
 The test reports repeated pure evaluation time for the identical generated batch,
 including registry validation, history/trace evaluation and result construction,
-excluding admission preflight, JSON encoding/decoding and process startup. The opt-in target runs timing separately without Go race instrumentation;
-the race run establishes correctness only. These small allocations/workloads do not measure release latency, RSS,
+excluding admission preflight, JSON encoding/decoding and process startup. Timing from a race-instrumented run establishes no performance comparison. These small allocations/workloads do not measure release latency, RSS,
 IPC, Incus, recovery or production speed. No production improvement is claimed.
 
 These API choices follow Rust's [type safety guidance](https://rust-lang.github.io/api-guidelines/type-safety.html)

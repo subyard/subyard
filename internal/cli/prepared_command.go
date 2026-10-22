@@ -399,35 +399,36 @@ func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
 	if prepared.execute == nil {
 		return errors.New("prepared command has no execution")
 	}
-	orchestrator := prepared.CLI.operationOrchestrator(prepared.CLI.ensureOperationID(), prepared.Loaded, nil, nil)
+	orchestrator := prepared.CLI.operationPlanner(prepared.CLI.ensureOperationID())
+	var action domain.ActionID
+	var delta domain.ActionDelta
 	var err error
 	if prepared.assess != nil {
-		action, delta, assessErr := prepared.assess(ctx)
-		if assessErr != nil {
-			return &commandPreparationError{phase: "assessment", err: assessErr}
+		action, delta, err = prepared.assess(ctx)
+		if err != nil {
+			return &commandPreparationError{phase: "assessment", err: err}
 		}
+	}
+	var steps []domain.OperationStep
+	if prepared.steps != nil {
+		steps = domain.CloneOperationSteps(prepared.steps())
+		if err := domain.ValidateOperationSteps(steps); err != nil {
+			return &commandPreparationError{phase: "plan", err: err}
+		}
+	}
+	if prepared.assess != nil {
 		if prepared.steps != nil {
-			steps := domain.CloneOperationSteps(prepared.steps())
-			if err := domain.ValidateOperationSteps(steps); err != nil {
-				return &commandPreparationError{phase: "plan", err: err}
-			}
 			delta.Consequences = domain.OperationStepConsequences(steps)
 		}
-		prepared.Plan, err = orchestrator.PrepareAction(prepared.Loaded.Context,
-			prepared.policy.Name, prepared.policy.RemotePolicy, action, delta)
+		prepared.Plan, err = orchestrator.PrepareAction(prepared.Loaded.Context, prepared.policy.Name, prepared.policy.RemotePolicy, action, delta)
 	} else {
-		prepared.Plan, err = orchestrator.Prepare(prepared.Loaded.Context,
-			resolveCommandConfirmation(prepared.Definition, prepared.policy))
+		prepared.Plan, err = orchestrator.Prepare(prepared.Loaded.Context, resolveCommandConfirmation(prepared.Definition, prepared.policy))
 	}
 	if err != nil {
 		return &commandPreparationError{phase: "plan", err: err}
 	}
-	if prepared.steps != nil {
-		prepared.Plan.Steps = domain.CloneOperationSteps(prepared.steps())
-		if err := domain.ValidateOperationSteps(prepared.Plan.Steps); err != nil {
-			return &commandPreparationError{phase: "plan", err: err}
-		}
-	}
+	prepared.Plan.Steps = steps
+
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
 		prepared.ownerAdmission, err = prepared.CLI.originalOwnerWrite(prepared.Loaded)
 		if err != nil {

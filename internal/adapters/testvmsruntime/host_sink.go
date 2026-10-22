@@ -277,9 +277,6 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 				return err
 			}
 			for _, event := range batch.Events {
-				if err := validateBrokerEvent(event); err != nil {
-					return err
-				}
 				payload, err := json.Marshal(event)
 				if err != nil {
 					return err
@@ -294,9 +291,6 @@ func (sink *HostSink) Ingest(batch SpoolBatch) error {
 				}
 			}
 			for _, incident := range batch.Incidents {
-				if err := validateIncidentArtifact(incident); err != nil {
-					return err
-				}
 				payload, err := json.MarshalIndent(incident, "", "  ")
 				if err != nil {
 					return err
@@ -627,24 +621,44 @@ func readEventDirectory(directory string) ([]BrokerEvent, error) {
 	return events, nil
 }
 
-func ReadHostBrokerEvents(
-	path string,
-	lines int,
-	slotID string,
-) ([]BrokerEvent, error) {
+// HostBrokerEventReader follows the sink's atomically replaced snapshots. Deduplication
+// retains only IDs from the last observed matching history. Events removed before
+// observation cannot be delivered; an ID removed and later restored is new again.
+type HostBrokerEventReader struct {
+	Path     string
+	SlotID   string
+	snapshot os.FileInfo
+	seen     map[string]struct{}
+}
+
+// Read returns the last lines matching the initial snapshot, then new retained IDs
+// on subsequent calls. A temporarily missing file preserves the last baseline.
+func (reader *HostBrokerEventReader) Read(lines int) ([]BrokerEvent, error) {
 	if lines < 1 {
 		return nil, errors.New("line count must be positive")
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(reader.Path)
 	if os.IsNotExist(err) {
+		if reader.seen == nil {
+			reader.seen = make(map[string]struct{})
+		}
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	// Compare the opened file, never a pathname stat that may precede replacement.
+	if reader.snapshot != nil && os.SameFile(reader.snapshot, info) && reader.snapshot.Size() == info.Size() && reader.snapshot.ModTime() == info.ModTime() {
+		return nil, nil
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), maxBrokerEventBytes)
+	current := make(map[string]struct{})
 	var events []BrokerEvent
 	for scanner.Scan() {
 		var event BrokerEvent
@@ -654,18 +668,30 @@ func ReadHostBrokerEvents(
 		if err := validateBrokerEvent(event); err != nil {
 			return nil, err
 		}
-		if slotID != "" && event.SlotID != slotID {
+		if reader.SlotID != "" && event.SlotID != reader.SlotID {
 			continue
 		}
-		events = append(events, event)
-		if len(events) > lines {
-			events = events[len(events)-lines:]
+		if _, duplicate := current[event.EventID]; duplicate {
+			continue
+		}
+		current[event.EventID] = struct{}{}
+		if _, seen := reader.seen[event.EventID]; !seen {
+			events = append(events, event)
+			if reader.seen == nil && len(events) > lines {
+				events = events[len(events)-lines:]
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	reader.snapshot, reader.seen = info, current
 	return events, nil
+}
+
+func ReadHostBrokerEvents(path string, lines int, slotID string) ([]BrokerEvent, error) {
+	reader := HostBrokerEventReader{Path: path, SlotID: slotID}
+	return reader.Read(lines)
 }
 
 func ParseOperatorGID(value string) (int, error) {

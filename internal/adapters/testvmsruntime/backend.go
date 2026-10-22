@@ -841,13 +841,3 @@ func (backend *Backend) incus(ctx context.Context, arguments ...string) (string,
 	stdout, _, err := backend.Runner.Run(ctx, "incus", arguments, environment, nil)
 	return string(stdout), err
 }
-
-func bytesCount(value []byte, needle byte) int {
-	count := 0
-	for _, current := range value {
-		if current == needle {
-			count++
-		}
-	}
-	return count
-}

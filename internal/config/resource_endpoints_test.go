@@ -158,10 +158,19 @@ func TestLoadSavedEndpointIsScopedToSelectedLocalYard(t *testing.T) {
 			values := environment{"ENVIRONMENT_PROFILES": test.profiles}
 			ctx := resourceEndpointTestContext(root, operatorHome, configHome, dataHome, test.yard, test.yard != "remote")
 			tracker := newSettingTracker()
+			calls := 0
 			if err := applySavedResourceEndpoints(root, LoadOptions{
+				Resources:  func(root string) (resource.Registry, error) { calls++; return resource.Load(root) },
 				SyncSource: test.syncSource, LayerPaths: test.layerPaths,
 			}, ctx, values, tracker); err != nil {
 				t.Fatal(err)
+			}
+			wantCalls := 0
+			if test.wantHost != "" {
+				wantCalls = 1
+			}
+			if calls != wantCalls {
+				t.Fatalf("resource package reads=%d, want %d", calls, wantCalls)
 			}
 			if values["FIXTURE_ADVERTISE_HOST"] != test.wantHost || values["FIXTURE_HOST_PORT"] != test.wantPort {
 				t.Fatalf("endpoint scope mismatch: %#v", values)
@@ -217,5 +226,33 @@ func resourceEndpointTestContext(root, operatorHome, configHome, dataHome, yard 
 			RepositoryRoot: root, OperatorHome: operatorHome,
 			ConfigHome: configHome, DataHome: dataHome,
 		},
+	}
+}
+
+func TestCapturedResourceDeclarationsKeepSavedEndpointsFresh(t *testing.T) {
+	root := syntheticResourceRoot(t)
+	registry, err := resource.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorHome := testkit.TempDir(t)
+	dataHome := filepath.Join(operatorHome, ".subyard")
+	options := LoadOptions{RepositoryRoot: root, Catalog: &catalog, Resources: func(string) (resource.Registry, error) { return registry, nil }, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture"}}
+	for _, port := range []string{"17678", "27678"} {
+		writeSavedEndpointFixture(t, dataHome, `{"schema":1,"allocations":[{"yard":"default","resource":"fixture.fixture","host":"owner.example.ts.net","port":`+port+`}]}`)
+		loaded, err := Load(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Environment["FIXTURE_HOST_PORT"] != port {
+			t.Fatalf("saved endpoint stale: %s", loaded.Environment["FIXTURE_HOST_PORT"])
+		}
+		if !strings.Contains(effectiveSettingDetail(loaded.Settings["FIXTURE_HOST_PORT"]), "saved endpoint allocation") {
+			t.Fatal("saved endpoint provenance lost")
+		}
 	}
 }

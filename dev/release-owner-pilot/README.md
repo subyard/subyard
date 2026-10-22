@@ -16,7 +16,7 @@ Effects require a private direct `/tmp/subyard-owner-*` root with the exact
 `owner.marker` fixture marker. Source/cache and unrelated local records are retained.
 This scope does not fence production or arbitrary same-UID writers.
 
-`make verify-release-owner-pilot` runs the owning Go race packages, Rust unit and
+`bash dev/release-owner-pilot/check.sh --local` runs the owning Go race packages, Rust unit and
 compiler contracts, strict codec golden, Clippy and independent-process fault cuts.
 Logs belong in `.build/release-owner-pilot`; default final Cargo artifacts and the
 native Go helper share one invocation-owned `target/run-*` directory beneath it.

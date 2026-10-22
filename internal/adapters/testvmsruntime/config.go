@@ -228,12 +228,6 @@ func sizeMiB(value string) (int, error) {
 	return int(number), nil
 }
 
-func doubleSize(value string) string {
-	match := sizeValue.FindStringSubmatch(value)
-	number, _ := strconv.Atoi(match[1])
-	return strconv.Itoa(number*2) + match[2]
-}
-
 func within(path, root string) bool {
 	clean := filepath.Clean(path)
 	root = filepath.Clean(root)

@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -1221,4 +1222,112 @@ func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	if err != nil || string(arguments) != "retire-legacy-slot-1\n--expect-resource-generation\n7\n--expect-lease-epoch\n0\n--yes\n" {
 		t.Fatalf("retirement arguments: %q, error: %v", arguments, err)
 	}
+}
+
+func TestTestVMLogsRoutesSelectedRemoteOwner(t *testing.T) {
+	for _, selection := range []string{"explicit", "inherited", "canonical", "follow"} {
+		t.Run(selection, func(t *testing.T) {
+			root, environment, stateDirectory := nativeFixture(t)
+			if err := os.MkdirAll(filepath.Join(filepath.Dir(stateDirectory), "yards", "remote"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(filepath.Dir(stateDirectory), "yards", "remote", "config.env"), "ACCESS_KIND=remote\nREMOTE_DEST=owner.example\nREMOTE_YARD=inner\nSSH_PORT=4444\n", 0o600)
+			fakeBin := filepath.Join(root, "fake-bin")
+			if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"printf 'selected-owner-log\\n'\n", 0o700)
+			t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+			environment = append(environment, "PATH="+os.Getenv("PATH"))
+			arguments := []string{"-Y", "remote", "test-vms", "logs"}
+			if selection == "inherited" {
+				arguments = []string{"test-vms", "logs"}
+				environment = append(environment, "SUBYARD_YARD=remote")
+			}
+			if selection == "canonical" {
+				environment = append(environment, "SUBYARD_HOST_ID=local-owner")
+				ownerRoot := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "owner-inventory")
+				if err := (ownerinventory.Connections{Root: ownerRoot}).Write(ownerinventory.Connection{HostID: "remote-owner", Destination: "owner.example", Yards: map[string]ownerinventory.YardRoute{"inner": {SSHHost: "yard-remote"}}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := (ownerinventory.Cache{Root: ownerRoot}).Write(ownerinventory.Snapshot{FetchedAt: time.Now().UTC(), Inventory: inventoryResult("remote-owner", "inner", "").inventory}); err != nil {
+					t.Fatal(err)
+				}
+				arguments = []string{"-Y", "remote-owner/inner", "test-vms", "logs"}
+			}
+			runtimeRoot := filepath.Join(root, "runtime")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+			journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+			before, err := os.ReadFile(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var output io.Writer = &stdout
+			if selection == "follow" {
+				arguments = append(arguments, "-f")
+				writeCLIFile(t, filepath.Join(fakeBin, "ssh"), "#!/bin/sh\n"+trustedSSHMock(t)+"printf 'selected-owner-log\\n'\nexec sleep 30\n", 0o700)
+				output = &cancelLogWriter{output: &stdout, cancel: cancel}
+			}
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: output, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(ctx); (code != 0 && selection != "follow") || !strings.Contains(stdout.String(), "selected-owner-log") {
+				t.Fatalf("selected remote log: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			after, err := os.ReadFile(journal)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("remote logs changed local recovery journal")
+			}
+		})
+	}
+}
+
+func TestTestVMLogsReadOnlyDuringRecovery(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "runtime")
+	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "V2_GATE_CAPTURE="+filepath.Join(root, "capture"))
+	journal, _ := installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
+	before, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"test-vms", "logs"}, 0},
+		{[]string{"-Y", "default", "test-vms", "logs"}, 0},
+		{[]string{"test-vms", "logs", "--help"}, 0},
+		{[]string{"test-vms", "logs", "-n", "0"}, 2},
+	} {
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: test.args, Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if code := program.Run(ctx); code != test.code {
+			t.Fatalf("%v: code=%d stderr=%s", test.args, code, stderr.String())
+		}
+	}
+	after, err := os.ReadFile(journal)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read-only logs changed recovery journal")
+	}
+}
+
+type cancelLogWriter struct {
+	output io.Writer
+	cancel context.CancelFunc
+}
+
+func (writer *cancelLogWriter) Write(payload []byte) (int, error) {
+	n, err := writer.output.Write(payload)
+	writer.cancel()
+	return n, err
 }

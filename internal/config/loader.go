@@ -13,10 +13,14 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/resource"
 )
 
 type LoadOptions struct {
-	Catalog                 *Catalog
+	Catalog *Catalog
+	// Resources supplies operation-scoped declarations on demand.
+	// Saved endpoint state is always read fresh. Standalone callers may omit it.
+	Resources               func(string) (resource.Registry, error)
 	RepositoryRoot          string
 	OperatorHome            string
 	YardName                string

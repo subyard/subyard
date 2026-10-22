@@ -967,20 +967,6 @@ func (c *releaseOwnerComponents) bindOwnerChildrenForApply(ctx context.Context, 
 	return nil
 }
 
-func (c *releaseOwnerComponents) ownerChildLoaded(before releaseowner.OwnerBefore, yard string) (config.Loaded, error) {
-	if yard == testyardmigration.LegacyYard {
-		return c.load(yard)
-	}
-	if yard != testyardmigration.CurrentYard {
-		return config.Loaded{}, domain.ErrPlanStale
-	}
-	original := releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationState(before.State), Registration: releasetransition.Fingerprint(before.Registration), Overrides: releasetransition.Fingerprint(before.Overrides), Controller: releasetransition.Fingerprint(before.Controller), SharedImages: before.SharedImages}
-	draft, err := c.ownerChildOperation().prepareSourceActivationDraft(c.context.ConfigHome, releasetransition.V2SourceActivationView{Settings: c, OwnerRegistration: &original})
-	if err != nil {
-		return config.Loaded{}, err
-	}
-	return draft.load(yard)
-}
 func (c *releaseOwnerComponents) ownerLabeledLoaded(loaded config.Loaded) config.Loaded {
 	loaded.Context = c.ownerCheckLabel(ownerChildCheck{Yard: loaded.Context}).Yard
 	return loaded

@@ -192,13 +192,13 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		return nil
 	}
 	for _, name := range names {
-		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: plan.cli.options.RepositoryRoot,
+		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
 		if err != nil {
 			return "", "", fmt.Errorf("yard %s: %w", name, err)
 		}
 		if draft && plan.request.action == "selection-repair" {
-			before, err := config.Load(config.LoadOptions{RepositoryRoot: plan.cli.options.RepositoryRoot,
+			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
 			if err != nil {
 				return "", "", err
