@@ -484,6 +484,12 @@ Activation plans explain each affected yard's optional selection from that yard'
 snapshot, including inherited host Git selection and local empty overrides. Read-only component
 inventory uses the same snapshot; yard convergence and component health have separate scopes.
 
+When an update plan includes host-power repair, the CLI prepares root authorization after
+consent and before repeating candidate verification and native inspection. The host-power
+installer always needs root. Read-only checks, declined plans and plans without that repair
+do not request this early authorization; other activation owners retain their own privilege
+assessment. Authentication does not replace native revalidation or durable recovery guards.
+
 The compiled `local-ssh-port-settings-v2-to-v3` migration advances the settings epoch to 3 and
 pins persistent Git-derived SSH ports into local yard settings. It does not modify source Git or
 managed cache. Local publication binds exact bytes, ownership, modes and parent directories;

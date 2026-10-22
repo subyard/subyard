@@ -20,7 +20,10 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
-type releaseAdapter struct{ prepared releaseruntime.Prepared }
+type releaseAdapter struct {
+	prepared  releaseruntime.Prepared
+	authorize func(context.Context) error
+}
 
 type releaseExecution struct {
 	prepared     releaseruntime.Prepared
@@ -54,6 +57,18 @@ func (execution *releaseExecution) Close() error {
 func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterRequest, _ io.Reader) (domain.AdapterResult, string, error) {
 	if request.Adapter != "release" || request.Action != "execute" {
 		return domain.AdapterResult{}, "", errors.New("unsupported release adapter request")
+	}
+	if adapter.authorize != nil {
+		// Use the original native steps, before draft revalidation can delay
+		// the prompt. A host-power apply always installs root-owned files.
+		for _, step := range adapter.prepared.Steps {
+			if step.Decision == domain.StepApply && step.Target == "activation.host-power activation" {
+				if err := adapter.authorize(ctx); err != nil {
+					return domain.AdapterResult{}, "", err
+				}
+				break
+			}
+		}
 	}
 	if err := adapter.prepared.Execute(ctx); err != nil {
 		return domain.AdapterResult{}, "", fmt.Errorf("execute prepared release: %w", err)
@@ -151,7 +166,7 @@ func (cli *CLI) printUpdatePreview(execution *releaseExecution) {
 
 func (cli *CLI) executeRelease(ctx context.Context, orchestrator *application.Orchestrator,
 	plan domain.OperationPlan, execution *releaseExecution) (domain.AdapterResult, error) {
-	orchestrator.Runner = releaseAdapter{prepared: execution.prepared}
+	orchestrator.Runner = releaseAdapter{prepared: execution.prepared, authorize: cli.releaseTransitionPrivilegeAuthorization}
 	result, _, runErr := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
 		Schema: shelladapter.ProtocolSchema, OperationID: plan.OperationID, Adapter: "release", Action: "execute",
 	}, nil)
