@@ -1069,6 +1069,32 @@ func newSyncFixture(t *testing.T, hostID string) *syncFixture {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
+		if entry.Name() == "profiles" {
+			// Package resolution rejects symlinks below the selected config root.
+			sourceProfiles := filepath.Join(root, "config", "profiles")
+			fixtureProfiles := filepath.Join(fixtureConfig, "profiles")
+			if err := os.CopyFS(fixtureProfiles, os.DirFS(sourceProfiles)); err != nil {
+				t.Fatal(err)
+			}
+			// CopyFS applies the umask; restore exact source modes for preset checks.
+			if err := filepath.WalkDir(sourceProfiles, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				relative, err := filepath.Rel(sourceProfiles, path)
+				if err != nil {
+					return err
+				}
+				return os.Chmod(filepath.Join(fixtureProfiles, relative), info.Mode().Perm())
+			}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if entry.Name() != "yards" {
 			if err := os.Symlink(filepath.Join(root, "config", entry.Name()), filepath.Join(fixtureConfig, entry.Name())); err != nil {
 				t.Fatal(err)
