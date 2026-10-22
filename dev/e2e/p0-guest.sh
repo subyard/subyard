@@ -34,9 +34,7 @@ OWNER_TEST_VMS_SINK_SERVICE="/etc/systemd/system/$OWNER_TEST_VMS_SINK_SERVICE_NA
 OWNER_TEST_VMS_SINK_TIMER_NAME="subyard-p0-$TOKEN-test-vms-host-sink.timer"
 OWNER_TEST_VMS_SINK_TIMER="/etc/systemd/system/$OWNER_TEST_VMS_SINK_TIMER_NAME"
 OWNER_TEST_VMS_SINK_TIMER_TEMPLATE="$ROOT/config/systemd/subyard-test-vms-host-sink.timer.in"
-RENAME_BASE_REVISION="7c67ee3f423cf9f1596c2f5191f462d2b70adcdc"
-RENAME_BASE_ROOT="$OWNER_ROOT/rename-base"
-P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+P0_CURRENT_BASE_VERSION=0.11.1-p0.current-base
 P0_OWNER_VERSION=0.11.1-p0.owner
 PEER_SSH_DIR="$PEER_ROOT/ssh"
 PEER_YARD_ENTRY="$HOME/.local/bin/yard"
@@ -50,6 +48,7 @@ PEER_REAL_YARD_MARKER="$PEER_ROOT/.subyard-p0-real-yard"
 OWNER_BASELINE_IMAGES=''
 OWNER_BASELINE_CAPTURED=0
 OWNER_BASE_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
+OWNER_BASE_IMAGE_REFERENCE=''
 OWNER_BASE_IMAGE_CREATED=0
 OWNER_RELEASE_PREPARED=0
 OWNER_DIAGNOSTIC_VM_MEMORY="${P0_E2E_DIAGNOSTIC_VM_MEMORY:-700MiB}"
@@ -201,6 +200,7 @@ require_broker_fixture_capacity() {
 
 write_owner_registration() { # <yard> <template> <ssh-port> [slot-count] [vm-cpu]
   local yard="$1" template="$2" port="$3" slots="${4:-2}" cpu="${5:-1}" registration
+  local base_image="${OWNER_BASE_IMAGE_REFERENCE:-$OWNER_BASE_IMAGE}"
   local selection='AGENTS=none'
   [[ "$cpu" =~ ^[1-9][0-9]{0,2}$ ]] || die "invalid diagnostic CPU count"
   [[ "$slots" =~ ^[1-9][0-9]{0,2}$ ]] \
@@ -220,43 +220,9 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count] [vm-cpu
   printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=%s\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
     "$MARKER" "$template" "$port" "$selection" "$OWNER_DIAGNOSTIC_DEV_UID" "$cpu" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
     "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
-    "$OWNER_BASE_IMAGE" "$OWNER_BASE_IMAGE" \
+    "$base_image" "$base_image" \
     > "$registration"
   chmod 0600 "$registration"
-}
-
-install_rename_base_runtime() {
-  local arch release bundle timeout_file
-  [ ! -e "$RENAME_BASE_ROOT" ] \
-    || { p0_capacity_assert_root_marker; sudo -n find "$RENAME_BASE_ROOT" -depth -delete; }
-  install -d -m 0700 "$RENAME_BASE_ROOT"
-  git -C "$RENAME_BASE_ROOT" init -q
-  git -C "$RENAME_BASE_ROOT" remote add origin https://github.com/Subyard/Subyard.git
-  git -C "$RENAME_BASE_ROOT" fetch -q --depth 1 origin "$RENAME_BASE_REVISION"
-  git -C "$RENAME_BASE_ROOT" checkout -q --detach FETCH_HEAD
-  [ "$(git -C "$RENAME_BASE_ROOT" rev-parse HEAD)" = "$RENAME_BASE_REVISION" ] \
-    || die 'rename-base checkout resolved to the wrong revision'
-  # Clean network provisioning can exceed the retired runtime's fixed adapter
-  # deadline. Relax only that synthetic build; HEAD still identifies the exact
-  # pre-rename source under migration test.
-  timeout_file="$RENAME_BASE_ROOT/internal/cli/cli.go"
-  [ "$(grep -Fc 'Timeout:        10 * time.Minute,' "$timeout_file")" -eq 1 ] \
-    || die 'rename-base adapter timeout fixture no longer matches its source'
-  sed -i 's/Timeout:        10 \* time.Minute,/Timeout:        60 * time.Minute,/' \
-    "$timeout_file"
-  grep -Fqx $'\t\t\tTimeout:        60 * time.Minute,' "$timeout_file" \
-    || die 'rename-base adapter timeout fixture was not applied'
-  git -C "$RENAME_BASE_ROOT" diff --check
-  arch="$(go env GOARCH)"
-  release="$RENAME_BASE_ROOT/.build/p0-rename-base-release"
-  bundle="$release/subyard-p0-rename-base-linux-$arch.tar.gz"
-  "$RENAME_BASE_ROOT/scripts/package-engine.sh" \
-    --output-dir "$release" --version p0-rename-base --arch "$arch" >/dev/null
-  "$RENAME_BASE_ROOT/scripts/install-runtime-release.sh" \
-    --bundle "$bundle" \
-    --checksum "$bundle.sha256" \
-    --manifest "$bundle.manifest.json" \
-    --provenance "$bundle.provenance.json" >/dev/null
 }
 
 install_current_base_runtime() {
@@ -267,9 +233,7 @@ install_current_base_runtime() {
   dev/package-engine.sh \
     --output-dir "$release" \
     --version "$P0_CURRENT_BASE_VERSION" \
-    --arch "$arch" \
-    --migration-registry \
-      "$ROOT/tests/fixtures/migrations/layout-2-production.json" >/dev/null
+    --arch "$arch" >/dev/null
   scripts/install-runtime-release.sh \
     --bundle "$artifact.tar.gz" \
     --checksum "$artifact.tar.gz.sha256" \
@@ -347,12 +311,13 @@ canonical_broker_release_migration_contract() {
   local current_registration registration_archive old_yard state
 
   [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
-    || die 'broker migration fixture requires the canonical layout-2 runtime'
+    || die 'broker update fixture requires its supported synthetic base runtime'
   old_yard="$runtime_root/current/bin/yard"
 
-  # Exercise the dedicated layout 2 -> 3 broker operation independently from
-  # the owner rename, once stopped and once active.
+  # Exercise a supported V2 broker update independently from the fresh current
+  # owner bootstrap, once stopped and once active.
   write_owner_registration test-yard test-vms 2224
+  p0_apply_release_update "$old_yard" "$P0_CURRENT_BASE_VERSION"
   p0_retry_init_after_plan_stale "$old_yard" -Y test-yard init --yes
   "$old_yard" -Y test-yard stop --yes
   state="$(incus list yard-test-yard --project subyard-test-yard -f csv -c s)"
@@ -400,7 +365,7 @@ canonical_broker_release_migration_contract() {
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
   [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
-    || die 'canonical fixture did not restore its layout-2 runtime'
+    || die 'canonical fixture did not restore its synthetic base runtime'
   rolled_back_hash="$(incus exec yard-test-yard --project subyard-test-yard -- \
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
   [ "$rolled_back_hash" = "$active_old_hash" ] \
@@ -426,68 +391,44 @@ canonical_broker_release_migration_contract() {
   printf 'ok: active broker auto-upgraded and inactive broker stayed inactive\n'
 }
 
-owner_profile_migration_contract() {
-	local old_yard runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard_info project_marker
-	local transition_fixture_root="$OWNER_CONFIG_HOME/release-transition/v2"
+owner_release_contract() {
+  local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard yard_info project_marker
   install_current_base_runtime
-  old_yard="$runtime_root/current/bin/yard"
-  [ "$("$old_yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
-    || die 'canonical layout-2 runtime was not installed'
-
+  yard="$runtime_root/current/bin/yard"
+  [ "$("$yard" --version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+    || die 'supported synthetic base runtime was not installed'
   canonical_broker_release_migration_contract
-	# The canonical broker and pre-rename owner cases are independent
-	# predecessor histories. Do not manufacture post-completion drift in the
-	# second case: reset only this disposable lane's v2 metadata before seeding
-	# the older owner topology.
-	[ "$SUBYARD_CONFIG_HOME" = "$OWNER_CONFIG_HOME" ] \
-		|| die 'owner transition fixture is outside the disposable P0 config root'
-	[ ! -L "$transition_fixture_root" ] \
-		|| die 'owner transition fixture root is a symbolic link'
-	if [ -e "$transition_fixture_root" ]; then
-		find "$transition_fixture_root" -depth -delete
-	fi
-  install_rename_base_runtime
-  old_yard="$runtime_root/current/bin/yard"
-  [ "$("$old_yard" --version)" = 'yard p0-rename-base' ] \
-    || die 'pre-rename runtime was not installed'
-  prepare_owner_image_cache_project subyard-e2e-yard
-  write_owner_registration e2e-yard e2e-vms 2224 1
-  p0_retry_init_after_plan_stale "$old_yard" -Y e2e-yard init --yes
-  "$old_yard" -Y e2e-yard check
-  "$old_yard" -Y e2e-yard start --yes
-  "$old_yard" -Y e2e-yard status >/dev/null
 
-  # Source migration normalizes the retired profile before runtime activation.
-  write_owner_registration e2e-yard test-vms 2224 1
+  # Start a fresh current owner after the independent broker update contract.
+  # The supported transition sees its intended registration and retains history.
+  prepare_owner_image_cache_project subyard-test-yard
+  write_owner_registration test-yard test-vms 2224 1
   install_owner_runtime
-  [ "$("$runtime_root/current/bin/yard" --version)" = "yard $P0_OWNER_VERSION" ] \
-    || die 'current runtime was not installed over the pre-rename runtime'
-  [ ! -e "$OWNER_YARD_DIR/e2e-yard.env" ] \
-    || die 'runtime activation retained the old e2e-yard registration'
-  [ -f "$OWNER_YARD_DIR/test-yard.env" ] \
-    || die 'runtime activation did not create the test-yard registration'
-  yard_info="$(./bin/yard -Y test-yard _info)"
+  yard="$runtime_root/current/bin/yard"
+  [ "$("$yard" --version)" = "yard $P0_OWNER_VERSION" ] \
+    || die 'current owner runtime was not installed'
+  p0_retry_init_after_plan_stale "$yard" -Y test-yard init --yes
+  "$yard" -Y test-yard check
+  "$yard" -Y test-yard start --yes
+  "$yard" -Y test-yard status >/dev/null
+  yard_info="$("$yard" -Y test-yard _info)"
   jq -e '.yardName == "test-yard" and .accessKind == "local" and
     .yardInstanceName == "yard-test-yard" and .incusProject == "subyard-test-yard" and
-    .sshHost == "yard-test-yard"' \
-    <<<"$yard_info" >/dev/null \
-    || die "migrated test-yard context is wrong: $yard_info"
-  project_marker="$(incus project get subyard-test-yard \
-    user.subyard.p0-image-cache 2>/dev/null)"
+    .sshHost == "yard-test-yard"' <<<"$yard_info" >/dev/null \
+    || die 'fresh current owner context is wrong'
+  [ "$(incus project get subyard-test-yard user.subyard.installation)" = 1 ] \
+    && [ "$(incus project get subyard-test-yard user.subyard.operator_uid)" = "$(id -u)" ] \
+    && [ "$(incus project get subyard-test-yard user.subyard.data_home)" = "$SUBYARD_HOME" ] \
+    && [ "$(incus project get subyard-test-yard user.subyard.config_home)" = "$OWNER_CONFIG_HOME" ] \
+    || die 'fresh owner project does not belong to this installation'
+  project_marker="$(incus project get subyard-test-yard user.subyard.p0-image-cache)" \
+    || die 'cannot inspect current owner fixture marker'
   [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ] \
-    || die 'migrated test-yard project has a foreign P0 marker'
+    || die 'fresh owner project has a foreign P0 marker'
   incus project set subyard-test-yard user.subyard.p0-image-cache="$MARKER"
   [ "$(incus project get subyard-test-yard user.subyard.p0-image-cache)" = "$MARKER" ] \
-    || die 'migrated test-yard project lost its P0 marker'
-  ! incus project show subyard-e2e-yard >/dev/null 2>&1 \
-    || die 'old e2e-yard project remains after migrated teardown'
-  [ ! -e "${SUBYARD_CONFIG_HOME:-$HOME/.config/subyard}/yards/e2e-yard/projects" ] \
-    || die 'old e2e-yard state remains after teardown'
-  [ ! -e "$HOME/.ssh/subyard-e2e-yard.config" ] \
-    || die 'old e2e-yard route remains after teardown'
-  ./bin/yard -Y test-yard check
-  ./bin/yard -Y test-yard status >/dev/null
-  printf 'ok: runtime upgrade recreated e2e-yard as test-yard automatically\n'
+    || die 'fresh owner project lost its P0 marker'
+  printf 'ok: supported broker update and rollback retained history and prepared a fresh current owner\n'
 }
 
 is_markerless_migrated_owner_project() {
@@ -564,8 +505,14 @@ reclaim_owner_project_residue() {
 }
 
 reclaim_owner_project_if_present() {
-  local project="$1"
-  incus project show "$project" >/dev/null 2>&1 || return 0
+  local project="$1" projects marker
+  projects="$(incus project list --format=json)" || die 'cannot inspect owner projects'
+  jq -e 'type=="array" and all(.[]; type=="object" and (.name|type=="string"))' \
+    <<<"$projects" >/dev/null || die 'owner project inventory is invalid'
+  jq -e --arg name "$project" 'any(.[]; .name==$name)' <<<"$projects" >/dev/null || return 0
+  marker="$(incus project get "$project" user.subyard.p0-image-cache)" \
+    || die 'cannot inspect owner project marker'
+  [[ "$marker" =~ ^subyard-p0-[0-9]+$ ]] || die "refusing non-P0 owner project $project"
   if incus project delete "$project" >/dev/null 2>&1; then
     printf '  [ ok ] removed empty owner project residue %s\n' "$project"
     return
@@ -574,18 +521,37 @@ reclaim_owner_project_if_present() {
 }
 
 prepare_owner_image_cache_project() {
-  local project="${1:?owner image-cache project is required}" sibling
+  local project="${1:?owner image-cache project is required}" sibling remote fingerprint info
+  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13/cloud}" remotes
   case "$project" in
     subyard-e2e-yard) sibling=subyard-test-yard ;;
     subyard-test-yard) sibling=subyard-e2e-yard ;;
     *) die "unsafe owner image-cache project $project" ;;
   esac
+  [[ "$source" =~ ^([[:alnum:]_.-]+):[^[:space:]]+$ ]] \
+    || die 'owner fixture requires a public image remote'
+  remote="${BASH_REMATCH[1]}"
+  [ "$remote" != local ] || die 'owner fixture requires a public image remote'
+  remotes="$(incus remote list --format=json)" || die 'cannot inspect owner image remote'
+  jq -e --arg remote "$remote" 'type=="object" and
+    (.[$remote].Public==true) and
+    (.[$remote].Protocol=="simplestreams" or .[$remote].Protocol=="incus")' \
+    <<<"$remotes" >/dev/null || die 'owner fixture requires a public Incus or simplestreams image remote'
+  info="$(incus image info "$OWNER_BASE_IMAGE" --project default)" \
+    || die "test-owned base image alias $OWNER_BASE_IMAGE is unavailable"
+  fingerprint="$(awk '/^Fingerprint: / {print $2}' <<<"$info")"
+  [[ "$fingerprint" =~ ^[a-f0-9]{64}$ ]] && grep -Fqx 'Type: container' <<<"$info" \
+    || die 'owner cached image identity is invalid'
+  info="$(timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incus image info "$remote:$fingerprint")" \
+    || die 'exact cached owner image is unavailable from its public remote'
+  [ "$(awk '/^Fingerprint: / {print $2}' <<<"$info")" = "$fingerprint" ] \
+    && grep -Fqx 'Type: container' <<<"$info" \
+    || die 'public owner image differs from the cached image'
+  OWNER_BASE_IMAGE_REFERENCE="$remote:$fingerprint"
   reclaim_owner_project_if_present "$sibling"
   reclaim_owner_project_if_present "$project"
-  incus image info "$OWNER_BASE_IMAGE" --project default >/dev/null 2>&1 \
-    || die "test-owned base image alias $OWNER_BASE_IMAGE is unavailable"
-  incus project create "$project" \
-    -c features.images=false -c user.subyard.p0-image-cache="$MARKER" >/dev/null
+  # Public init owns project creation. Its isolated image cache cannot resolve
+  # the default-project alias, so select the same immutable remote image.
 }
 
 ensure_owner_base_image() {
@@ -636,7 +602,7 @@ owner() (
 	P0_V0111_BASE_IMAGE="$OWNER_BASE_IMAGE" \
 	  bash dev/e2e/release-transition-v0111-recovery.sh "$TOKEN"
   prepare_owner_image_cache_project subyard-test-yard
-  owner_profile_migration_contract
+  owner_release_contract
   write_owner_registration test-yard test-vms 2224 1
   ./bin/yard -Y test-yard start --yes
   SUBYARD_E2E_LEGACY_FIXTURE=1 \
@@ -656,6 +622,10 @@ owner() (
   # shellcheck source=tests/helpers/test-context.sh
   . "$ROOT/tests/helpers/test-context.sh"
   setup_test_repository "$OWNER_ROOT/project-runtime" "$ROOT"
+  local descriptor="$OWNER_ROOT/project-runtime/runtime/config/profiles/synthetic/profile.json"
+  jq '.default_yards = ["test-yard"]' "$descriptor" > "$descriptor.next"
+  chmod 0644 "$descriptor.next"
+  mv "$descriptor.next" "$descriptor"
   PROJECT_CONTRACT_BIN="$OWNER_ROOT/project-runtime/runtime/bin/yard" owner_project_contract synthetic
   unset YARD_ENGINE_PATH
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin ./bin/yard --version >/dev/null
@@ -668,7 +638,7 @@ owner() (
   env PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     "$SUBYARD_HOME/runtime/current/bin/yard" --version >/dev/null \
     || die 'installed candidate runtime is unusable after last-yard teardown'
-  printf 'ok: VM1 owner, legacy upgrade, lifecycle, Incus and rollback\n'
+  printf 'ok: VM1 owner, broker reconciliation, lifecycle, Incus and rollback\n'
 )
 
 owner_migration() (
@@ -683,8 +653,8 @@ owner_migration() (
   incus image info "$OWNER_BASE_IMAGE" --project default >/dev/null 2>&1 \
     || die "cached owner base image $OWNER_BASE_IMAGE is required"
   prepare_owner_image_cache_project subyard-test-yard
-  owner_profile_migration_contract
-  printf 'ok: VM1 e2e-yard release upgrade migrated to test-yard\n'
+  owner_release_contract
+  printf 'ok: VM1 supported broker update, rollback and fresh current owner\n'
 )
 
 broker_recovery_owner() (

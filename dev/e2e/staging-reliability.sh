@@ -798,7 +798,8 @@ owner_adapter() {
     SUBYARD_CONFIG_DIR="$OWNER_CONFIG_HOME" SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME" SUBYARD_HOME="$SUBYARD_HOME" \
     STORAGE_PATH="$SUBYARD_HOME/incus/storage" HOST_BASE=/srv/subyard-test-yard RESTRICTED_DISK_PATHS=/srv/subyard-test-yard \
     ACCESS_KIND=local YARD_KIND=container YARD_INSTANCE_NAME="$INSTANCE" YARD_NAME="$YARD" \
-    INCUS_PROJECT="$PROJECT" INCUS_BRIDGE=incusbr0 SSH_HOST='' \
+    INCUS_PROJECT="$PROJECT" INCUS_BRIDGE=incusbr0 SSH_HOST='' SSH_PORT=2224 SHIFT_MODE=shift \
+    SUBYARD_STATE_DIR="$SUBYARD_HOME/state" \
     DEV_USER=dev DEV_UID="$OWNER_DIAGNOSTIC_DEV_UID" DEV_SUDO=0 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=1 \
     SUBYARD_POWER_DESIRED=running STORAGE_POOL=default ROOT_POOL=default INCUS_NETWORK=incusbr0 \
     SRV_POOL=default SRV_VOLUME=yard-srv-test-yard SRV_VOLUME_TYPE=filesystem ROOT_DISK_SIZE='' \
@@ -807,11 +808,16 @@ owner_adapter() {
     SUBYARD_SUDO_PREAUTHORIZED=1 \
     SUBYARD_PROFILE_GUEST_ENVIRONMENT_HOOKS='' \
     SUBYARD_TEST_VMS_SINK_ENGINE_SOURCE="$SUBYARD_HOME/runtime/current/bin/yard-engine" \
-    bash "$SUBYARD_HOME/runtime/current/scripts/$1" --yes
+    bash -eu -c '
+      . "$1/tests/helpers/test-context.sh"
+      SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context "$YARD_NAME")"
+      export SUBYARD_INSTALLATION_CONTEXT
+      exec bash "$2/scripts/$3" --yes
+    ' _ "$ROOT" "$SUBYARD_HOME/runtime/current" "$1"
 }
 
 prepare_minimal_owner() {
-  local bootstrap="$ROOT/.build/p0-staging-owner" userdata bootstrap_rc=0 recipes="$SUBYARD_HOME/runtime/current"
+  local bootstrap="$ROOT/.build/p0-staging-owner" userdata bootstrap_rc=0 recipes="$SUBYARD_HOME/runtime/current" inventory instances
   [ ! -L "$ROOT/.build" ] || die 'owner driver parent is a symlink'
   [ ! -e "$bootstrap" ] && [ ! -L "$bootstrap" ] || die 'owner driver staging already exists'
   install -d -m 0700 "$bootstrap"
@@ -861,9 +867,19 @@ func main() {
 }
 GOSTAGINGOWNER
   go build -o "$bootstrap/owner" "$bootstrap/main.go"
+  inventory="$(incus project list --format csv -c n)" || die 'cannot inspect owner project inventory'
+  ! grep -Fxq "$PROJECT" <<<"$inventory" || die 'owner bootstrap requires an absent project'
   owner_adapter 02-create-project.sh
+  # The authenticated public adapter creates the project before this fixture
+  # selects shared images or adds its own cleanup marker, while it is empty.
+  inventory="$(incus project list --format csv -c n)" || die 'cannot verify owner project creation'
+  grep -Fxq "$PROJECT" <<<"$inventory" || die 'owner bootstrap did not create its project'
+  instances="$(incus list --project "$PROJECT" --format csv -c n)" || die 'cannot inspect owner project instances'
+  [ -z "$instances" ] || die 'owner project was not empty'
+  incus project set "$PROJECT" features.images=false "user.subyard.p0-image-cache=$MARKER"
   [ "$(incus project get "$PROJECT" user.subyard.p0-image-cache)" = "$MARKER" ] || die 'owner project ownership changed'
-  [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] || die 'owner project was not empty'
+  instances="$(incus list --project "$PROJECT" --format csv -c n)" || die 'cannot verify empty owner project'
+  [ -z "$instances" ] || die 'owner project was not empty'
   MINIMAL_OWNER=1
   # Cloud-init supplies only SSH/user and updater Git prerequisites.
   # Incus, QEMU and broker installation remain in the product Backend.Apply.

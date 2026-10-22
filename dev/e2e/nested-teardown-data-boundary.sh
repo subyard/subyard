@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+YARD_BIN="$ROOT/.build/yard"
 # shellcheck source=scripts/lib-power.sh
 . "$ROOT/scripts/lib-power.sh"
 STATE=''
@@ -20,6 +21,8 @@ FIXTURE_STARTED="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 die() { printf 'nested-teardown-boundary: %s\n' "$*" >&2; exit 2; }
 
 [ -n "${SUBYARD_E2E_VM:-}" ] || die 'run through dev/agent-e2e.sh'
+[ -f "$ROOT/.subyard-acceptance/candidate.json" ] \
+  || die 'freeze and pass the current packaged candidate before allocation'
 for command in go incus jq sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
@@ -59,7 +62,7 @@ bounded_command() {
 }
 
 yard() {
-  bounded_command yard "$ROOT/.build/yard" -Y "$OUTER_YARD" "$@"
+  bounded_command yard "$YARD_BIN" -Y "$OUTER_YARD" "$@"
 }
 
 setting() {
@@ -141,8 +144,149 @@ nested_memory_available_bytes() {
   awk '/MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
 }
 
+capture_outer_docker_failure() {
+  local errors="$1" snapshot owner rc deadline now remaining export_rc=0
+  now="$(nested_monotonic_seconds)" || return
+  deadline=$((now + 45))
+  python3 - "$errors" <<'PY' || export_rc=$?
+import base64, decimal, hashlib, json, os, re, stat, sys
+
+def emit(probe, **fields):
+    print('NESTED_DOCKER_DIAGNOSTIC ' + json.dumps(dict(probe=probe, **fields)), flush=True)
+
+def artifact(name, data, size):
+    data = data[:4096]
+    encoded = base64.b64encode(data).decode('ascii')
+    print('NESTED_DOCKER_ARTIFACT ' + json.dumps(dict(name=name, source_bytes=size,
+        retained_bytes=len(data), truncated=len(data) < size, sha256=hashlib.sha256(data).hexdigest(),
+        chunks=(len(encoded) + 2047) // 2048)), flush=True)
+    for index, offset in enumerate(range(0, len(encoded), 2048)):
+        print('NESTED_DOCKER_DATA ' + json.dumps(dict(name=name, index=index,
+            base64=encoded[offset:offset + 2048])), flush=True)
+
+with open(sys.argv[1], 'rb') as stream:
+    info = os.fstat(stream.fileno())
+    assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_uid == os.getuid() and info.st_nlink == 1
+    data = stream.read(8192)
+    tail_offset = max(0, info.st_size - 8192)
+    stream.seek(tail_offset)
+    tail = stream.read(8192)
+    artifact('readiness-exec-stderr', data, info.st_size)
+    begin = b'NESTED_DOCKER_PROBE_BEGIN\n'
+    matches = list(re.finditer(rb'\nNESTED_DOCKER_TIMING start=([0-9]+\.[0-9]+) end=([0-9]+\.[0-9]+) native_exit=([0-9]+)\n', tail))
+    if data.count(begin) == 1 and len(matches) == 1:
+        match = matches[0]
+        start = data.index(begin) + len(begin)
+        size = tail_offset + match.start() - start
+        assert size >= 0
+        stream.seek(start)
+        error = stream.read(min(size, 4096))
+        elapsed = int((decimal.Decimal(match[2].decode()) - decimal.Decimal(match[1].decode())) * 1000)
+        emit('container-enumeration', native_exit=int(match[3]), elapsed_ms=elapsed,
+             clock='realtime', budget_ms=10000, scope='single-native-probe', timing_available=True)
+        artifact('enumeration-stderr', error, size)
+    else:
+        emit('container-enumeration', timing_available=False, scope='single-native-probe')
+PY
+  printf 'NESTED_DOCKER_DIAGNOSTIC {"probe":"stderr-export","scope":"failure-only","native_exit":%s}\n' "$export_rc"
+  # A failure-only followup has its own budget and cannot authorize an unsafe target.
+  now="$(nested_monotonic_seconds)" || return
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] || return 124
+  [ "$remaining" -le 3 ] || remaining=3
+  snapshot="$(timeout --signal=TERM --kill-after=1 "$remaining" incus query \
+    "/1.0/instances/$OUTER_INSTANCE?project=$OUTER_PROJECT" 2>/dev/null)" || return
+  jq -e --arg instance "$OUTER_INSTANCE" --arg pool "$OUTER_POOL" '
+    .name == $instance and .type == "virtual-machine" and .status == "Running"
+    and .expanded_config["user.subyard.managed"] == "true"
+    and .expanded_devices.root.pool == $pool
+  ' >/dev/null 2>&1 <<<"$snapshot" || return 2
+  now="$(nested_monotonic_seconds)" || return
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] || return 124
+  [ "$remaining" -le 3 ] || remaining=3
+  owner="$(timeout --signal=TERM --kill-after=1 "$remaining" incus storage get "$OUTER_POOL" \
+    user.subyard.owner --project default 2>/dev/null)" || return
+  [ "$owner" = nested-teardown-e2e-v1 ] || return 2
+  now="$(nested_monotonic_seconds)" || return
+  remaining=$((deadline - now))
+  [ "$remaining" -gt 0 ] || return 124
+  if timeout --signal=TERM --kill-after=1 "$remaining" incus exec "$OUTER_INSTANCE" \
+    --project "$OUTER_PROJECT" -- python3 - 2>/dev/null <<'PY'
+import base64, hashlib, json, os, re, subprocess, time
+
+def emit(probe, **fields):
+    print('NESTED_DOCKER_DIAGNOSTIC ' + json.dumps(dict(probe=probe, scope='failure-only', **fields)), flush=True)
+
+def artifact(name, data, limit):
+    retained = data[:limit]
+    encoded = base64.b64encode(retained).decode('ascii')
+    print('NESTED_DOCKER_ARTIFACT ' + json.dumps(dict(name=name, source_bytes=len(data),
+        retained_bytes=len(retained), truncated=len(retained) < len(data),
+        sha256=hashlib.sha256(retained).hexdigest(), chunks=(len(encoded) + 2047) // 2048)), flush=True)
+    for index, offset in enumerate(range(0, len(encoded), 2048)):
+        print('NESTED_DOCKER_DATA ' + json.dumps(dict(name=name, index=index,
+            base64=encoded[offset:offset + 2048])), flush=True)
+
+def run(probe, arguments, budget):
+    started = time.monotonic()
+    try:
+        result = subprocess.run(['timeout', '--signal=TERM', '--kill-after=1', str(budget), *arguments],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError:
+        result = subprocess.CompletedProcess(arguments, None, stdout=b'', stderr=b'')
+    emit(probe, native_exit=result.returncode, elapsed_ms=int((time.monotonic() - started) * 1000),
+         budget_ms=budget * 1000)
+    if result.returncode != 0:
+        artifact(probe + '-stderr', result.stderr, 4096)
+    return result
+
+# Passive diagnostics cannot socket-activate a daemon that has stopped since the probe.
+# Context metadata is local; never add another server API request here.
+context = run('context', ['docker', 'context', 'show'], 3)
+value = (context.stdout or b'').strip()
+emit('context-class', value=('default' if value == b'default' else 'custom') if context.returncode == 0 else 'unavailable',
+     docker_host_set=bool(os.environ.get('DOCKER_HOST')), docker_context_set=bool(os.environ.get('DOCKER_CONTEXT')))
+endpoint = run('endpoint', ['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], 3)
+value = (endpoint.stdout or b'').strip()
+emit('context-endpoint-class', value=('unix' if value.startswith(b'unix://') else 'tcp' if value.startswith(b'tcp://') else 'other')
+     if endpoint.returncode == 0 else 'unavailable')
+enums = {
+    'Type': {'simple', 'exec', 'forking', 'oneshot', 'dbus', 'notify', 'notify-reload', 'idle'},
+    'LoadState': {'loaded', 'not-found', 'error', 'masked', 'bad-setting', 'merged', 'stub'},
+    'ActiveState': {'active', 'reloading', 'inactive', 'failed', 'activating', 'deactivating', 'maintenance', 'refreshing'},
+    'SubState': {'dead', 'start-pre', 'start', 'start-post', 'running', 'listening', 'exited', 'reload', 'stop',
+                 'stop-sigterm', 'stop-sigkill', 'stop-post', 'failed', 'auto-restart', 'auto-restart-queued', 'cleaning'},
+    'Result': {'success', 'resources', 'timeout', 'exit-code', 'signal', 'core-dump', 'watchdog',
+               'start-limit-hit', 'oom-kill', 'protocol', 'exec-condition', 'assert'},
+}  # Native property allowlist.
+numbers = {'MainPID', 'ControlPID', 'ExecMainStatus', 'NRestarts', 'ExecMainStartTimestampMonotonic',
+           'InactiveExitTimestampMonotonic', 'ActiveEnterTimestampMonotonic'}
+properties = ','.join([*enums, *sorted(numbers)])
+for unit in ('docker.service', 'containerd.service', 'docker.socket'):
+    result = run(unit, ['systemctl', 'show', unit, '--property=' + properties], 3)
+    state = {}
+    if result.returncode == 0 and len(result.stdout) <= 8192:
+        for line in result.stdout.decode('utf-8', errors='replace').splitlines():
+            key, separator, value = line.partition('=')
+            if separator and key in enums:
+                state[key] = value if value in enums[key] else 'unknown'
+            elif separator and key in numbers:
+                state[key] = value if value.isascii() and value.isdigit() and len(value) <= 20 else 'unknown'
+    emit('unit-state', unit=unit, state=state, projection_complete=len(state) == len(enums) + len(numbers))
+journal = run('journal', ['journalctl', '-u', 'docker.service', '-u', 'containerd.service',
+    '--no-pager', '-n', '80', '--output=short-iso'], 5)
+artifact('unit-journal', journal.stdout or b'', 32768)
+PY
+  then rc=0; else rc=$?; fi
+  printf 'NESTED_DOCKER_DIAGNOSTIC {"probe":"followup","scope":"failure-only","native_exit":%s,"budget_ms":45000}\n' "$rc"
+  [ "$export_rc" = 0 ] || return "$export_rc"
+  return "$rc"
+}
+
 require_outer_docker_ready() {
-  local deadline remaining snapshot owner rc now observations
+  local deadline remaining snapshot owner rc now observations errors capture_rc
   docker_ready_report() {
     printf '{"phase":"%s","reason":"%s","native_exit":%d}\n' "$1" "$2" "$3" >&2
   }
@@ -186,6 +330,8 @@ require_outer_docker_ready() {
     || { docker_ready_report clock deadline 0; die 'Docker prerequisite exceeded its 60s deadline'; }
   # start guarantees the Incus agent, not boot completion of Docker. Observe only;
   # never start/restart the daemon or retry init to satisfy this fixture prerequisite.
+  errors="$(mktemp "$STATE/docker-ready.stderr.XXXXXX")"
+  chmod 0600 "$errors"
   if observations="$(timeout --signal=TERM --kill-after=1 "$remaining" \
     incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
     timeout --signal=TERM --kill-after=1 "$remaining" bash -eu -c '
@@ -226,7 +372,11 @@ require_outer_docker_ready() {
         fi
         case "$load:$active:$sub" in
           loaded:active:running)
-            if timeout 10 docker container ls -a --format "{{.Names}}" >/dev/null 2>&1; then rc=0; else rc=$?; fi
+            started=$EPOCHREALTIME
+            printf "NESTED_DOCKER_PROBE_BEGIN\n" >&2
+            if timeout 10 docker container ls -a --format "{{.Names}}" >/dev/null; then rc=0; else rc=$?; fi
+            ended=$EPOCHREALTIME
+            printf "\nNESTED_DOCKER_TIMING start=%s end=%s native_exit=%s\n" "$started" "$ended" "$rc" >&2
             report enumeration completed "$rc"; exit "$rc"
             ;;
           loaded:activating:start|loaded:activating:start-pre|loaded:activating:start-post)
@@ -236,7 +386,7 @@ require_outer_docker_ready() {
           *) report service-state rejected 0; exit 2 ;;
         esac
       done
-    ' 2>/dev/null)"; then rc=0; else rc=$?; fi
+    ' 2>"$errors")"; then rc=0; else rc=$?; fi
   # Only this closed schema reaches the operation boundary; native output stays private.
   if [ "$(
     LC_ALL=C
@@ -264,6 +414,8 @@ require_outer_docker_ready() {
     [ "$rc" != 0 ] || rc=2
   fi
   [ "$rc" != 0 ] || return 0
+  if capture_outer_docker_failure "$errors" >&2; then capture_rc=0; else capture_rc=$?; fi
+  printf 'NESTED_DOCKER_DIAGNOSTIC {"probe":"capture","scope":"failure-only","native_exit":%s}\n' "$capture_rc" >&2
   printf 'nested-teardown-boundary: Docker prerequisite failed within its 60s budget\n' >&2
   return "$rc"
 }
@@ -443,6 +595,7 @@ incus storage create "$OUTER_POOL" dir user.subyard.owner=nested-teardown-e2e-v1
 export SUBYARD_OPERATOR_HOME="$STATE/operator"
 export SUBYARD_CONFIG_HOME="$STATE/config"
 export SUBYARD_HOME="$STATE/data"
+export YARD_RUNTIME_ROOT="$STATE/runtime"
 export STORAGE_PATH="$STATE/storage"
 export SUBYARD_NO_AUDIT=1
 export SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
@@ -451,6 +604,11 @@ export HOST_CLAUDE_MD=
 export HOST_CODEX_AGENTS_MD=
 export HOST_OPENCODE_AGENTS_MD=
 install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD"
+
+# Commit the current release's protected reader boundary before any yard effects.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
 
 ssh_port=$((32000 + ($$ % 10000)))
 while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do
@@ -576,27 +734,34 @@ outer_dev() {
     --user 1000 --group 1000 --env HOME=/home/dev --env USER=dev --env LOGNAME=dev -- "$@"
 }
 
-printf '  [ .. ] creating and tearing down a source inner yard\n'
-outer_dev sh -euc '
+printf '  [ .. ] creating and tearing down a current-candidate inner yard\n'
+outer_dev bash -euc '
   source=$1
+  candidate_state="$HOME/.cache/subyard-nested-teardown-candidate"
+  export YARD_RUNTIME_ROOT="$candidate_state/runtime"
+  export HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0
+  export NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1
+  export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1
+  export HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD=
+  # The synced source carries the same authenticated prebuilt candidate archive.
+  jq -e --arg sha "$2" ".runtime_sha256 == \$sha" \
+    "$source/.subyard-acceptance/candidate.json" >/dev/null
+  . "$source/tests/helpers/release-candidate.sh"
+  launcher=$(release_candidate_install "$source" "$candidate_state")
+  printf -v teardown_command "%q " "$launcher" teardown --yes
   install -d "$HOME/.subyard/workspaces"
   install -d -m 0700 "$HOME/.config/subyard/yards/default"
-  printf "CODING_TOOL_INTEGRATIONS=\n" > "$HOME/.config/subyard/yards/default/config.env"
+  printf "CODING_TOOL_INTEGRATIONS=\nSSH_PORT=23222\n" > "$HOME/.config/subyard/yards/default/config.env"
   printf "outer sentinel\n" > "$HOME/.subyard/workspaces/active.code-workspace"
   cd "$source"
-  env \
-    HOST_MOUNTS= HOST_LINKS= FORWARD_SSH_AGENT=0 DEV_SUDO=0 \
-    NESTED_E2E_VMS=0 SSH_PORT=23222 MIN_DISK_GIB=1 \
-    SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
-    HOST_CLAUDE_MD= HOST_CODEX_AGENTS_MD= HOST_OPENCODE_AGENTS_MD= \
-    ./bin/yard init --yes
+  "$launcher" init --yes
   sudo -n incus project show subyard >/dev/null
-  sg incus-admin -c "env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes"
+  sg incus-admin -c "exec $teardown_command"
   ! sudo -n incus project show subyard >/dev/null 2>&1
   [ -f "$HOME/.subyard/workspaces/active.code-workspace" ]
   [ ! -e "$HOME/.config/subyard/projects" ]
-  sg incus-admin -c "env SUBYARD_NO_AUDIT=1 ./bin/yard teardown --yes" >/dev/null
-' _ "$outer_source"
+  sg incus-admin -c "exec $teardown_command" >/dev/null
+' _ "$outer_source" "$(jq -er .runtime_sha256 "$ROOT/.subyard-acceptance/candidate.json")"
 
 incus info "$OUTER_INSTANCE" --project "$OUTER_PROJECT" >/dev/null \
   || die 'inner teardown removed the outer instance'

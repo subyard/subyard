@@ -23,6 +23,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
 )
 
@@ -344,6 +345,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "yard: %v\n", err)
 		os.Exit(2)
 	}
+	uninstall.UseArtifactGuard(root)
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "yard: resolve working directory: %v\n", err)

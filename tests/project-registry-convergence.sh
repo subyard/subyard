@@ -109,6 +109,72 @@ chmod 0600 "$REGISTRY_TEST_STATE/owner-config/yards/inner.env"
 printf 'owner-a\n' > "$REGISTRY_TEST_STATE/owner-config/host-id"
 chmod 0600 "$REGISTRY_TEST_STATE/owner-config/host-id"
 
+# The physical P0 project contract uses its private catalog with the actual
+# test-vms owner registration. Exercise that preparation through the real loader
+# and project admission, without changing the installed owner's profile selection.
+# Globals below are consumed by the extracted owner registration/preparation.
+# shellcheck disable=SC2034
+(
+  OWNER_ROOT="$TMP/p0-owner"
+  OWNER_YARD_DIR="$OWNER_ROOT/config/yards"
+  MARKER=subyard-p0-profile-selection
+  OWNER_BASE_IMAGE_REFERENCE=images:fixture
+  OWNER_DIAGNOSTIC_DEV_UID=1001
+  OWNER_DIAGNOSTIC_VM_MEMORY=700MiB
+  OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT=600
+  install -d -m 0700 "$OWNER_YARD_DIR/test-yard" "$OWNER_ROOT/source/P0Selection" \
+    "$OWNER_ROOT/state/guest/workspaces" "$OWNER_ROOT/home" "$OWNER_ROOT/data"
+  printf '# %s\n' "$MARKER" > "$OWNER_YARD_DIR/test-yard/config.env"
+  chmod 0600 "$OWNER_YARD_DIR/test-yard/config.env"
+  eval "$(sed -n '/^write_owner_registration() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  write_owner_registration test-yard test-vms 2224 1
+  ! grep -q '^ENVIRONMENT_PROFILES=' "$OWNER_YARD_DIR/test-yard/config.env" \
+    || fail 'owner registration unexpectedly forces the synthetic profile'
+  export HOME="$OWNER_ROOT/home" SUBYARD_OPERATOR_HOME="$OWNER_ROOT/home"
+  export SUBYARD_CONFIG_HOME="$OWNER_ROOT/config" SUBYARD_HOME="$OWNER_ROOT/data"
+  export REGISTRY_TEST_STATE="$OWNER_ROOT/state"
+  export PROJECT_OWNER_REPOSITORY="$OWNER_ROOT/project-runtime/runtime"
+  unset SUBYARD_CONFIG_DIR SUBYARD_STATE_DIR SUBYARD_CONFIG_LOADED SUBYARD_ENGINE_CONTEXT \
+    ENVIRONMENT_PROFILES YARD_PROFILES
+  printf 'selection fixture\n' > "$OWNER_ROOT/source/P0Selection/file.txt"
+  git init -q --initial-branch=main "$OWNER_ROOT/source/P0Selection"
+  git -C "$OWNER_ROOT/source/P0Selection" add file.txt
+  git -C "$OWNER_ROOT/source/P0Selection" -c user.name=Fixture \
+    -c user.email=fixture@example.invalid commit -qm fixture
+  owner_project_contract() {
+    [ "$1" = synthetic ] || fail 'P0 project target changed'
+    YARD_ENGINE_PATH="$TMP/bin/project-owner-fixture" "$PROJECT_CONTRACT_BIN" \
+      -Y test-yard clone "$OWNER_ROOT/source/P0Selection" P0Selection --target synthetic --yes >/dev/null
+    selection="$(YARD_ENGINE_PATH="$TMP/bin/project-owner-fixture" "$PROJECT_CONTRACT_BIN" \
+      -Y test-yard config show ENVIRONMENT_PROFILES)"
+    grep -Fxq 'effective: synthetic' <<<"$selection" || fail 'P0 private default was not resolved'
+    assert_json "$SUBYARD_CONFIG_HOME/yards/test-yard/projects/P0Selection.json" \
+      '.target == "synthetic" and .profile == "synthetic"'
+    descriptor="$PROJECT_OWNER_REPOSITORY/config/profiles/synthetic/profile.json"
+    [ "$(jq -c 'del(.default_yards)' "$descriptor")" = \
+      "$(jq -c . "$TMP/runtime/config/profiles/synthetic/profile.json")" ] \
+      || fail 'P0 selection changed the shared synthetic descriptor data'
+    grep -Fxq 'PROJECT_ENV_BASE_IMAGE=debian:13' \
+      "$PROJECT_OWNER_REPOSITORY/config/profiles/synthetic/profile.conf" \
+      || fail 'synthetic project environment lost its base image'
+    printf 'ENVIRONMENT_PROFILES=\n' >> "$OWNER_YARD_DIR/test-yard/config.env"
+    before="$(find "$REGISTRY_TEST_STATE" "$SUBYARD_CONFIG_HOME" -type f -exec sha256sum {} + | sort | sha256sum)"
+    if output="$(YARD_ENGINE_PATH="$TMP/bin/project-owner-fixture" "$PROJECT_CONTRACT_BIN" \
+      -Y test-yard sync "$OWNER_ROOT/source/P0Selection" --target synthetic --yes 2>&1)"; then
+      fail 'explicitly empty owner selection admitted the P0 target'
+    fi
+    assert_contains "$output" 'not active'
+    after="$(find "$REGISTRY_TEST_STATE" "$SUBYARD_CONFIG_HOME" -type f -exec sha256sum {} + | sort | sha256sum)"
+    [ "$before" = "$after" ] || fail 'inactive P0 target changed registry or guest files'
+  }
+  prepare_p0_contract() {
+    eval "$(sed -n '/^  # Exercise L2 ownership/,/  PROJECT_CONTRACT_BIN=.* owner_project_contract synthetic/p' \
+      "$ROOT/dev/e2e/p0-guest.sh")"
+  }
+  prepare_p0_contract
+  printf 'ok: P0 private profile defaults admit owner projects and respect explicit deselection\n'
+)
+
 
 # Registry convergence, source-key and named-yard matrices live in
 # TestOwnerProjectStateConvergesWithoutLosingLocalSource. Keep actual RPC and bytes here.

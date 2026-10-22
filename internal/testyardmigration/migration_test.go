@@ -599,7 +599,7 @@ func TestCommitResumesAfterRegistrationMoveAndFinishesCurrentYard(t *testing.T) 
 		t.Fatal(err)
 	}
 	before.SharedImages = true
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	if err := Verify(options, before); err != nil {
@@ -641,7 +641,7 @@ func TestCommitRejectsRegistrationBytesChangedAfterPrepareBeforeCopy(t *testing.
 	}
 	write(t, oldRegistration, "YARD_TEMPLATE=test-vms\nSSH_PORT=2299\n")
 
-	err = Commit(context.Background(), options, before)
+	err = commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("registration drift was copied under the old preparation: %v", err)
 	}
@@ -663,7 +663,7 @@ func TestCommitRejectsOverrideBytesChangedAfterPrepareBeforeMutation(t *testing.
 	)
 	write(t, legacyOverride, "NESTED_E2E_VMS=1\n")
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("override drift reached the authorized mutation: %v", err)
 	}
@@ -695,7 +695,7 @@ func TestCommitRechecksOverrideAfterPreflightBeforeFirstMutation(t *testing.T) {
 		return run(ctx, baseOptions, yard, output, arguments...)
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("preflight override drift reached the authorized mutation: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestCommitRejectsSameContentOverrideRootSwapAtMoveCAS(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !replaced {
 		t.Fatal("override move did not expose its identity CAS boundary")
 	}
@@ -793,7 +793,7 @@ func TestCommitRejectsOverrideDestinationCreatedAtMoveCAS(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !created {
 		t.Fatal("override move did not expose its destination CAS boundary")
 	}
@@ -813,7 +813,7 @@ func TestCommitRejectsControllerFactsAddedAfterPrepareBeforeMutation(t *testing.
 	)
 	write(t, controllerRoute, "default\teth0\n")
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "controller state changed") {
 		t.Fatalf("controller drift reached the authorized mutation: %v", err)
 	}
@@ -825,7 +825,7 @@ func TestCommitRejectsControllerFactsAddedAfterPrepareBeforeMutation(t *testing.
 
 func TestDesiredObservationRejectsLegacyAuxiliaryLeftovers(t *testing.T) {
 	options, before := ownerFaultFixture(t, true, true)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	legacyOverrides := filepath.Join(options.ConfigHome, "yards", LegacyYard, "overrides")
@@ -848,7 +848,7 @@ func TestDesiredObservationRejectsLegacyAuxiliaryLeftovers(t *testing.T) {
 
 func TestDesiredObservationRejectsFlatLegacyDirectoryLeftover(t *testing.T) {
 	options, before := flatOwnerFaultFixture(t)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	legacyOverrides := filepath.Join(
@@ -867,7 +867,7 @@ func TestDesiredObservationRejectsFlatLegacyDirectoryLeftover(t *testing.T) {
 
 func TestDesiredVerificationRejectsManagedControllerLeftover(t *testing.T) {
 	options, before := ownerFaultFixture(t, true, false)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(
@@ -948,7 +948,7 @@ func TestCommitBoundsScratchAcrossRepeatedOrdinaryFailures(t *testing.T) {
 		return errors.New("registration file sync unavailable")
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := Commit(context.Background(), options, before); err == nil {
+		if err := commitForTest(context.Background(), options, before); err == nil {
 			t.Fatalf("attempt %d unexpectedly succeeded", attempt+1)
 		}
 	}
@@ -967,10 +967,10 @@ func TestCommitRepairsDestinationParentSyncAfterUncertainMkdir(t *testing.T) {
 		}
 		return unix.Fsync(directoryFD)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("uncertain mkdir sync was accepted")
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after uncertain mkdir sync: %v", err)
 	}
 	if calls < 2 {
@@ -990,10 +990,10 @@ func TestCommitRepairsCanonicalDirectorySyncAfterUncertainRename(t *testing.T) {
 		}
 		return unix.Fsync(directoryFD)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("uncertain canonical link sync was accepted")
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after uncertain canonical link sync: %v", err)
 	}
 	if calls < 2 {
@@ -1013,10 +1013,10 @@ func TestCommitRepairsStagingParentSyncAfterUncertainRename(t *testing.T) {
 		}
 		return unix.Fsync(directoryFD)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("uncertain staging parent sync was accepted")
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after uncertain staging parent sync: %v", err)
 	}
 	if calls < 2 {
@@ -1033,7 +1033,7 @@ func TestCommitRepairsOverrideParentSyncsAfterInterruptedRename(t *testing.T) {
 		}
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); !errors.Is(err, stop) {
+	if err := commitForTest(context.Background(), options, before); !errors.Is(err, stop) {
 		t.Fatalf("prepare interrupted override move: %v", err)
 	}
 	legacy := filepath.Join(options.ConfigHome, "yards", LegacyYard, "overrides")
@@ -1054,7 +1054,7 @@ func TestCommitRepairsOverrideParentSyncsAfterInterruptedRename(t *testing.T) {
 		}
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); !errors.Is(err, stop) {
+	if err := commitForTest(context.Background(), options, before); !errors.Is(err, stop) {
 		t.Fatalf("resume interrupted override move: %v", err)
 	}
 	for _, role := range []string{"override-move-destination", "override-move-source"} {
@@ -1102,10 +1102,10 @@ func TestCommitRepairsControllerParentSyncAfterUncertainMutation(t *testing.T) {
 		}
 		return unix.Fsync(directoryFD)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("uncertain controller mutation sync was accepted")
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after uncertain controller mutation sync: %v", err)
 	}
 	if calls < 2 {
@@ -1115,7 +1115,7 @@ func TestCommitRepairsControllerParentSyncAfterUncertainMutation(t *testing.T) {
 
 func TestObserveRejectsUnsafeCanonicalRegistrationMode(t *testing.T) {
 	options, before := ownerFaultFixture(t, true, true)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	current := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
@@ -1174,7 +1174,7 @@ func TestCommitAcceptsCompatiblePublishedRegistrationModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Commit(context.Background(), options, prepared); err != nil {
+		if err := commitForTest(context.Background(), options, prepared); err != nil {
 			t.Fatal(err)
 		}
 		current := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
@@ -1189,7 +1189,7 @@ func TestCommitAcceptsCompatiblePublishedRegistrationModes(t *testing.T) {
 
 	t.Run("current publication remains valid", func(t *testing.T) {
 		options, prepared := ownerFaultFixture(t, true, true)
-		if err := Commit(context.Background(), options, prepared); err != nil {
+		if err := commitForTest(context.Background(), options, prepared); err != nil {
 			t.Fatal(err)
 		}
 		current := filepath.Join(options.ConfigHome, "yards", CurrentYard, "config.env")
@@ -1200,7 +1200,7 @@ func TestCommitAcceptsCompatiblePublishedRegistrationModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Commit(context.Background(), options, prepared); err != nil {
+		if err := commitForTest(context.Background(), options, prepared); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1219,7 +1219,7 @@ func TestCommitRejectsUnsafeRetainedStagingParentMode(t *testing.T) {
 			0o600,
 		)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("shared-writable retained staging parent was accepted")
 	}
 }
@@ -1232,7 +1232,7 @@ func TestCommitRejectsUnsafeRetainedDestinationDirectoryMode(t *testing.T) {
 		}
 		return os.Chmod(filepath.Join(options.ConfigHome, "yards", CurrentYard), 0o777)
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("shared-writable retained destination directory was accepted")
 	}
 }
@@ -1253,7 +1253,7 @@ func TestCommitPostvalidatesOverrideRenameAgainstRetainedSource(t *testing.T) {
 		write(t, filepath.Join(source, "replacement.env"), "REPLACED=1\n")
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("wrong override source rename was accepted")
 	}
 	if !seen {
@@ -1279,7 +1279,7 @@ func TestCommitPostvalidatesRegistrationArchiveAgainstRetainedSource(t *testing.
 		write(t, source, "YARD_TEMPLATE=test-vms\nREPLACED=1\n")
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("wrong registration source archive was accepted")
 	}
 	if !seen {
@@ -1305,7 +1305,7 @@ func TestCommitPostvalidatesControllerArchiveAgainstRetainedSource(t *testing.T)
 		write(t, filepath.Join(source, ".operator-enrollment-v1"), "managed\n")
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); err == nil {
+	if err := commitForTest(context.Background(), options, before); err == nil {
 		t.Fatal("wrong controller source archive was accepted")
 	}
 	if !seen {
@@ -1380,7 +1380,7 @@ func TestPrepareIgnoresAndPreservesForeignFlatStaging(t *testing.T) {
 
 func TestCommitTerminalCleanupRemovesBoundOwnerArchives(t *testing.T) {
 	options, before := controllerFaultFixture(t)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	registrationState, err := preparedRegistrationArchive(options, before)
@@ -1398,7 +1398,7 @@ func TestCommitTerminalCleanupRemovesBoundOwnerArchives(t *testing.T) {
 	assertTestPathPresent(t, controllerArchive)
 
 	options.TerminalCleanup = true
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	assertTestPathAbsent(t, registrationArchive)
@@ -1420,12 +1420,12 @@ func TestCommitTerminalCleanupAllowsAbsentControllerArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 
 	options.TerminalCleanup = true
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1437,7 +1437,7 @@ func TestCommitResumesTerminalOwnerArchiveCleanup(t *testing.T) {
 	} {
 		t.Run(point, func(t *testing.T) {
 			options, before := controllerFaultFixture(t)
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatal(err)
 			}
 			injected := errors.New("terminal owner cleanup interrupted")
@@ -1450,7 +1450,7 @@ func TestCommitResumesTerminalOwnerArchiveCleanup(t *testing.T) {
 				}
 				return nil
 			}
-			if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+			if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 				t.Fatalf("terminal cleanup fault %q: %v", point, err)
 			}
 			if !reached {
@@ -1461,7 +1461,7 @@ func TestCommitResumesTerminalOwnerArchiveCleanup(t *testing.T) {
 			if err != nil || progress != ProgressDesired {
 				t.Fatalf("terminal cleanup progress = %q, err=%v", progress, err)
 			}
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatalf("resume terminal cleanup at %q: %v", point, err)
 			}
 		})
@@ -1485,7 +1485,7 @@ func TestCommitCleansPartiallyRemovedOwnerArchives(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			options, before := controllerFaultFixture(t)
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatal(err)
 			}
 			registration, err := preparedRegistrationArchive(options, before)
@@ -1500,7 +1500,7 @@ func TestCommitCleansPartiallyRemovedOwnerArchives(t *testing.T) {
 			}
 			partial(t, registration.archive, controller)
 			options.TerminalCleanup = true
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatal(err)
 			}
 			assertTestPathAbsent(t, registration.archive)
@@ -1531,7 +1531,7 @@ func TestCommitIgnoresAndPreservesUnsafeForeignFlatStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("foreign staging blocked publication: %v", err)
 	}
 	if payload := read(t, pending); payload != registration {
@@ -1556,7 +1556,7 @@ func TestCommitDoesNotPublishWhenRegistrationFileSyncFails(t *testing.T) {
 	syncErr := errors.New("registration fsync failed")
 	options.syncRegistrationFile = func(*os.File) error { return syncErr }
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("registration sync error = %v, want %v", err, syncErr)
 	}
@@ -1573,7 +1573,7 @@ func TestCommitPortableStagingFailureDoesNotCreateCanonicalDirectory(t *testing.
 		return -1, syscall.EOPNOTSUPP
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "stage owner registration") {
 		t.Fatalf("portable staging failure = %v", err)
 	}
@@ -1583,7 +1583,7 @@ func TestCommitPortableStagingFailureDoesNotCreateCanonicalDirectory(t *testing.
 	assertTestPathAbsent(t, filepath.Join(yards, CurrentYard, "config.env"))
 
 	options.openRegistrationStaging = nil
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after zero-state staging failure: %v", err)
 	}
 	assertDesiredOwnerFacts(t, options, before)
@@ -1608,7 +1608,7 @@ func TestDestinationParentSyncPrecedesDirectoryCreationHook(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("destination parent sync error = %v, want %v", err, syncErr)
 	}
@@ -1621,7 +1621,7 @@ func TestDestinationParentSyncPrecedesDirectoryCreationHook(t *testing.T) {
 
 	options.syncOwnerDirectory = nil
 	options.fault = nil
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after parent sync failure: %v", err)
 	}
 	assertDesiredOwnerFacts(t, options, before)
@@ -1646,7 +1646,7 @@ func TestRegistrationPublicationSyncPrecedesPublicationHook(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("registration publication sync error = %v, want %v", err, syncErr)
 	}
@@ -1661,7 +1661,7 @@ func TestRegistrationPublicationSyncPrecedesPublicationHook(t *testing.T) {
 
 	options.syncOwnerDirectory = nil
 	options.fault = nil
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("retry after publication sync failure: %v", err)
 	}
 	assertDesiredFlatOwnerFacts(t, options)
@@ -1698,7 +1698,7 @@ func TestCommitRejectsStagingPathSwapBeforePublication(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if err == nil || !strings.Contains(err.Error(), "no longer names") {
 		t.Fatalf("replacement staging path was accepted: %v", err)
 	}
@@ -1738,7 +1738,7 @@ func TestCommitRejectsHardlinkedStagingAtPublicationCAS(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if staging == "" {
 		t.Fatal("publication did not expose its staging link-count CAS boundary")
 	}
@@ -1769,7 +1769,7 @@ func TestCommitRejectsDestinationDirectorySwapAtPublicationCAS(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !swapped {
 		t.Fatal("publication did not expose its destination directory CAS boundary")
 	}
@@ -1782,7 +1782,7 @@ func TestCommitRejectsDestinationDirectorySwapAtPublicationCAS(t *testing.T) {
 
 func TestObserveProgressRejectsChangedCurrentRegistrationAfterLegacyRemoval(t *testing.T) {
 	options, before := ownerFaultFixture(t, true, false)
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatal(err)
 	}
 	currentRegistration := filepath.Join(
@@ -1811,7 +1811,7 @@ func TestObserveProgressRejectsProjectImageNamespaceChangedAfterPrepare(t *testi
 		!strings.Contains(err.Error(), "image namespace changed") {
 		t.Fatalf("changed image namespace was accepted: %v", err)
 	}
-	if err := Commit(context.Background(), options, before); err == nil ||
+	if err := commitForTest(context.Background(), options, before); err == nil ||
 		!strings.Contains(err.Error(), "image namespace changed") {
 		t.Fatalf("changed image namespace reached mutation: %v", err)
 	}
@@ -1846,7 +1846,7 @@ func TestCommitResumesAfterDestinationDirectoryCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("resume after destination directory creation: %v", err)
 	}
 	if err := Verify(options, before); err != nil {
@@ -1877,7 +1877,7 @@ func TestCommitResumesCompensationWithNoOwnerProjectForPrivateImages(t *testing.
 	}
 	setFakeProjects(t, root, "none")
 
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("resume from compensation without an owner project: %v", err)
 	}
 	if err := Verify(options, before); err != nil {
@@ -1962,7 +1962,7 @@ func TestObserveProgressAndCommitResumeAuthorizedIntermediateStates(t *testing.T
 			if err != nil || progress != ProgressInProgress {
 				t.Fatalf("intermediate progress = %q, err=%v", progress, err)
 			}
-			if err := Commit(context.Background(), options, prepared); err != nil {
+			if err := commitForTest(context.Background(), options, prepared); err != nil {
 				t.Fatal(err)
 			}
 			progress, err = ObserveProgress(context.Background(), options, prepared)
@@ -2034,7 +2034,7 @@ func TestCommitResumesAfterEveryInjectedForwardMutation(t *testing.T) {
 				}
 				return nil
 			}
-			if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+			if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 				t.Fatalf("fault %q error = %v", test.point, err)
 			}
 			if !observed {
@@ -2048,7 +2048,7 @@ func TestCommitResumesAfterEveryInjectedForwardMutation(t *testing.T) {
 				t.Fatalf("fault %q progress = %q, want %q, err=%v",
 					test.point, progress, test.progress, err)
 			}
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatalf("fault %q resume: %v", test.point, err)
 			}
 			assertDesiredOwnerFacts(t, options, before)
@@ -2109,7 +2109,7 @@ func TestCommitResumesAfterEveryInjectedCompensationMutation(t *testing.T) {
 				}
 				return nil
 			}
-			if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+			if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 				t.Fatalf("compensation fault %q error = %v", test.point, err)
 			}
 			if !observed {
@@ -2124,7 +2124,7 @@ func TestCommitResumesAfterEveryInjectedCompensationMutation(t *testing.T) {
 				t.Fatalf("compensation fault %q progress = %q, want %q, err=%v",
 					test.point, progress, test.progress, err)
 			}
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatalf("compensation fault %q resume: %v", test.point, err)
 			}
 			assertDesiredOwnerFacts(t, options, before)
@@ -2152,7 +2152,7 @@ func TestCompensationRejectsSameContentOverrideSwapAtRestoreCAS(t *testing.T) {
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !swapped {
 		t.Fatal("compensation override restore did not expose its identity CAS boundary")
 	}
@@ -2187,7 +2187,7 @@ func TestCompensationRejectsSameContentRegistrationSwapAtRemovalCAS(t *testing.T
 		return nil
 	}
 
-	err := Commit(context.Background(), options, before)
+	err := commitForTest(context.Background(), options, before)
 	if !swapped {
 		t.Fatal("compensation registration removal did not expose its identity CAS boundary")
 	}
@@ -2216,7 +2216,7 @@ func TestCommitResumesFlatRegistrationPublicationWithExactFacts(t *testing.T) {
 				}
 				return nil
 			}
-			if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+			if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 				t.Fatalf("flat fault %q error = %v", test.point, err)
 			}
 			assertFlatPublicationBoundaryFacts(t, options, before, test.point)
@@ -2226,7 +2226,7 @@ func TestCommitResumesFlatRegistrationPublicationWithExactFacts(t *testing.T) {
 				t.Fatalf("flat fault %q progress = %q, want %q, err=%v",
 					test.point, progress, test.progress, err)
 			}
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatalf("flat fault %q resume: %v", test.point, err)
 			}
 			assertDesiredFlatOwnerFacts(t, options)
@@ -2244,7 +2244,7 @@ func TestCommitMigratesFlatRegistrationWithGeneratedProjectState(t *testing.T) {
 	if err != nil || progress != ProgressExpected {
 		t.Fatalf("generated flat owner progress = %q, err=%v", progress, err)
 	}
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("migrate generated flat owner state: %v", err)
 	}
 	progress, err = ObserveProgress(context.Background(), options, before)
@@ -2266,7 +2266,7 @@ func TestCommitResumesFlatGeneratedProjectStateAfterLegacyTeardown(t *testing.T)
 		}
 		return nil
 	}
-	if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+	if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 		t.Fatalf("legacy teardown fault = %v, want %v", err, injected)
 	}
 	progress, err := ObserveProgress(context.Background(), options, before)
@@ -2274,7 +2274,7 @@ func TestCommitResumesFlatGeneratedProjectStateAfterLegacyTeardown(t *testing.T)
 		t.Fatalf("flat teardown progress = %q, err=%v", progress, err)
 	}
 	options.fault = nil
-	if err := Commit(context.Background(), options, before); err != nil {
+	if err := commitForTest(context.Background(), options, before); err != nil {
 		t.Fatalf("resume flat teardown: %v", err)
 	}
 	assertDesiredFlatOwnerFacts(t, options)
@@ -2303,7 +2303,7 @@ func TestCommitResumesAdoptCurrentBoundariesWithExactFacts(t *testing.T) {
 				}
 				return nil
 			}
-			if err := Commit(context.Background(), options, before); !errors.Is(err, injected) {
+			if err := commitForTest(context.Background(), options, before); !errors.Is(err, injected) {
 				t.Fatalf("adopt-current fault %q error = %v", test.point, err)
 			}
 			assertAdoptCurrentBoundaryFacts(t, options, before, test.point)
@@ -2313,7 +2313,7 @@ func TestCommitResumesAdoptCurrentBoundariesWithExactFacts(t *testing.T) {
 				t.Fatalf("adopt-current fault %q progress = %q, want %q, err=%v",
 					test.point, progress, test.progress, err)
 			}
-			if err := Commit(context.Background(), options, before); err != nil {
+			if err := commitForTest(context.Background(), options, before); err != nil {
 				t.Fatalf("adopt-current fault %q resume: %v", test.point, err)
 			}
 			assertDesiredAdoptCurrentFacts(t, options)
@@ -2789,16 +2789,7 @@ func ownerFaultFixture(t *testing.T, sharedImages, overrides bool) (Options, Pre
 	} else {
 		t.Setenv("MIGRATION_SHARED_IMAGES", "0")
 	}
-	options := Options{
-		Executable: fakeExecutable(t, root), Incus: fakeIncus(t, root),
-		ConfigHome: configHome, DataHome: dataHome,
-		RecoveryToken: round3RecoveryToken,
-		Environment: append(
-			os.Environ(),
-			"MIGRATION_CALLS="+filepath.Join(root, "calls"),
-			"MIGRATION_CONFIG_HOME="+configHome,
-		),
-	}
+	options := ownerOptions(t, root, configHome)
 	before, err := Prepare(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -3043,6 +3034,131 @@ func setFakeProjects(t *testing.T, root, state string) {
 	write(t, filepath.Join(root, "incus-state"), state+"\n")
 }
 
+// The state-machine fixture supplies its authorized creation port. Actual
+// canonical metadata, SDK creation and init admission are checked together by
+// the CLI migration project regression.
+func commitForTest(ctx context.Context, options Options, before Prepared) error {
+	if options.EnsureImageProject == nil {
+		options.EnsureImageProject = func(ctx context.Context, yard string, shared bool) error {
+			projects, err := inspectProjects(ctx, options)
+			if err != nil {
+				return err
+			}
+			if yard == LegacyYard && projects.legacy || yard == CurrentYard && projects.current || !shared {
+				return nil
+			}
+			_, err = runIncus(ctx, options, "project", "create", "subyard-"+yard, "-c", "features.images=false")
+			return err
+		}
+	}
+	return Commit(ctx, options, before)
+}
+
+func TestSharedImageProjectWithoutAuthenticatedCreatorRefusesBeforeCreate(t *testing.T) {
+	root := testkit.TempDir(t)
+	incus := fakeIncus(t, root)
+	setFakeProjects(t, root, "none")
+	options := Options{Incus: incus, Environment: os.Environ()}
+	if err := ensureProject(context.Background(), options, CurrentYard, true); err == nil {
+		t.Fatal("unmarked shared project creation admitted")
+	}
+	if strings.Contains(read(t, filepath.Join(root, "incus-calls")), "project create") {
+		t.Fatal("project created without owner configuration")
+	}
+	if err := ensureProject(context.Background(), options, CurrentYard, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommitWithoutProjectCreatorRefusesBeforePublicationOrYardMutation(t *testing.T) {
+	for _, topology := range []string{"legacy", "legacy-no-instance", "none"} {
+		t.Run(topology, func(t *testing.T) {
+
+			options, before := ownerFaultFixture(t, true, false)
+			if topology == "none" {
+				setFakeProjects(t, filepath.Dir(options.Incus), "none")
+			}
+			if topology == "legacy-no-instance" {
+				write(t, filepath.Join(filepath.Dir(options.Incus), "legacy-instance-present"), "0\n")
+			}
+			source := filepath.Join(options.ConfigHome, "yards", LegacyYard, "config.env")
+			original := read(t, source)
+			base := options
+			mutations := 0
+			options.RunYard = func(ctx context.Context, yard string, output io.Writer, arguments ...string) error {
+				if len(arguments) != 0 && (arguments[0] == "init" || arguments[0] == "teardown") {
+					mutations++
+					return errors.New("unexpected yard mutation")
+				}
+				return run(ctx, base, yard, output, arguments...)
+			}
+			if err := Commit(context.Background(), options, before); err == nil {
+				t.Fatal("missing authenticated creator was admitted")
+			}
+			if mutations != 0 || read(t, source) != original {
+				t.Fatal("missing creator changed the original owner")
+			}
+			if _, err := os.Lstat(filepath.Join(options.ConfigHome, "yards", CurrentYard)); !os.IsNotExist(err) {
+				t.Fatal("missing creator published a current registration", err)
+			}
+
+		})
+	}
+}
+
+func TestCommitAdoptCurrentDoesNotRequireImageProjectCreator(t *testing.T) {
+	options, before := adoptCurrentOwnerFaultFixture(t)
+	if options.EnsureImageProject != nil || !before.SharedImages {
+		t.Fatal("fixture must exercise shared-image adoption without a creator")
+	}
+	if err := Commit(context.Background(), options, before); err != nil {
+		t.Fatal(err)
+	}
+	assertDesiredAdoptCurrentFacts(t, options)
+}
+
+func TestCommitResumedSharedProjectsWithoutCreatorRefusesBeforeYardCalls(t *testing.T) {
+	options, before := ownerFaultFixture(t, true, false)
+	interrupted := errors.New("fixture interrupted after current project preparation")
+	options.fault = func(point string) error {
+		if point == "after-current-project-prepare" {
+			return interrupted
+		}
+		return nil
+	}
+	if err := commitForTest(context.Background(), options, before); !errors.Is(err, interrupted) {
+		t.Fatal("fixture did not reach the resumed-both checkpoint", err)
+	}
+	projects, err := inspectProjects(context.Background(), options)
+	if err != nil || !projects.current || !projects.legacy {
+		t.Fatal("fixture did not retain both prepared projects", err)
+	}
+	legacy, current := registrationPaths(options, StateLegacyDirectory)
+	legacyBefore, currentBefore := read(t, legacy), read(t, current)
+	projectState := filepath.Join(filepath.Dir(options.Incus), "incus-state")
+	projectsBefore := read(t, projectState)
+	options.fault = nil
+	options.EnsureImageProject = nil
+	base := options
+	var calls []string
+	options.RunYard = func(ctx context.Context, yard string, output io.Writer, arguments ...string) error {
+		calls = append(calls, yard+" "+strings.Join(arguments, " "))
+		if yard == CurrentYard && len(arguments) != 0 && arguments[0] == "init" {
+			return errors.New("fixture current init failure")
+		}
+		return run(ctx, base, yard, output, arguments...)
+	}
+	if err := Commit(context.Background(), options, before); err == nil {
+		t.Fatal("resumed shared migration without a creator was admitted")
+	}
+	if len(calls) != 0 {
+		t.Fatal("missing creator reached yard calls before refusal", calls)
+	}
+	if read(t, legacy) != legacyBefore || read(t, current) != currentBefore || read(t, projectState) != projectsBefore {
+		t.Fatal("missing creator changed resumed registration/project state")
+	}
+}
+
 func applyForTest(ctx context.Context, options Options) error {
 	before, err := Prepare(ctx, options)
 	if err != nil {
@@ -3051,7 +3167,7 @@ func applyForTest(ctx context.Context, options Options) error {
 	if options.RecoveryToken == "" {
 		options.RecoveryToken = round3RecoveryToken
 	}
-	return Commit(ctx, options, before)
+	return commitForTest(ctx, options, before)
 }
 
 func write(t *testing.T, path, payload string) {

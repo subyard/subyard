@@ -444,7 +444,7 @@ print('numeric disk footprint privacy, missing, symlink and timeout checks passe
 prepare_owner = 'prepare_minimal_owner() {' + fixture.split('prepare_minimal_owner() {', 1)[1].split('\n\nprepare_owner_go_cache', 1)[0]
 with tempfile.TemporaryDirectory(prefix='subyard-minimal-owner-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for failed, expected in [('prerequisites', 42), ('backend', 7), ('evidence-baseline', 2), ('audit', 2), ('', 0)]:
+    for failed, expected in [('foreign-project', 2), ('inventory', 2), ('post-inventory', 2), ('missing-project', 2), ('instances', 2), ('nonempty', 2), ('legacy', 0), ('prerequisites', 42), ('backend', 7), ('evidence-baseline', 2), ('audit', 2), ('', 0)]:
         checkout = root/(failed or 'passed'); (checkout/'.build').mkdir(parents=True)
         (checkout/'native-state').mkdir(mode=0o700)
         native_config = checkout/'native-config'
@@ -452,8 +452,12 @@ with tempfile.TemporaryDirectory(prefix='subyard-minimal-owner-', dir='/tmp') as
         native_config.chmod(0o644)
         native_shim = checkout/'native-python.py'; native_shim.write_text(native_python)
         log = checkout/'calls'
+        project_state = checkout/'project-state'
+        metadata = checkout/'product-metadata'
+        if failed == 'foreign-project': project_state.write_text('foreign')
         script = f'''set -euo pipefail
 ROOT={str(checkout)!r}; SUBYARD_HOME=/installed; PROJECT=subyard-test-yard; INSTANCE=yard-test-yard
+OWNER_CONFIG_HOME={str(checkout/'config')!r}; PROJECT_STATE={str(project_state)!r}; METADATA={str(metadata)!r}
 YARD=test-yard; OWNER_BASE_IMAGE=marked-image; MARKER=subyard-p0-123; OWNER_DIAGNOSTIC_DEV_UID=1001
 diagnostic_cpu=4; MINIMAL_OWNER=0; BROKER_INSTALLED=0; LOG={str(log)!r}; FAILED={failed!r}
 die() {{ exit 2; }}
@@ -462,12 +466,45 @@ go() {{
   printf '#!/bin/sh\\n[ "$5" = "$1" ] || exit 42\\nprintf "backend\\n" >> "$LOG"\\n[ "$FAILED" != backend ] || exit 7\\n' > "$ROOT/.build/p0-staging-owner/owner"
   chmod 0700 "$ROOT/.build/p0-staging-owner/owner"
 }}
-owner_adapter() {{ printf '%s\\n' "$1" >> "$LOG"; }}
+owner_adapter() {{
+  printf '%s\\n' "$1" >> "$LOG"
+  if [ "$1" = 02-create-project.sh ]; then
+    [ ! -e "$PROJECT_STATE" ] || return 42
+    [ "$FAILED" = missing-project ] || printf 'owned' > "$PROJECT_STATE"
+    if [ "$FAILED" != legacy ]; then
+      printf 'installation=1\\noperator_uid=%s\\ndata_home=/installed\\nconfig_home=%s\\n' "$(id -u)" "$OWNER_CONFIG_HOME" > "$METADATA"
+    fi
+  fi
+}}
 incus() {{
   case "$1" in
-    project) printf '%s\\n' "$MARKER";;
-    list) :;;
+    project)
+      case "$2" in
+        list)
+          [ "$FAILED" != inventory ] || return 42
+          if [ -e "$PROJECT_STATE" ]; then
+            [ "$FAILED" != post-inventory ] || return 42
+            echo "$PROJECT"
+          fi;;
+        show) test -f "$PROJECT_STATE";;
+        get)
+          case "$4" in
+            user.subyard.p0-image-cache) [ "$(cat "$PROJECT_STATE")" = cache ] && echo "$MARKER";;
+            *) return 42;;
+          esac;;
+        set)
+          [ "$(cat "$PROJECT_STATE")" = owned ] || return 42
+          [ "$4" = features.images=false ] && [ "$5" = "user.subyard.p0-image-cache=$MARKER" ] || return 42
+          printf 'cache-after-create\\n' >> "$LOG"
+          printf 'cache' > "$PROJECT_STATE";;
+        *) return 42;;
+      esac;;
+    list)
+      [ "$FAILED" != instances ] || return 42
+      if [ "$FAILED" = nonempty ]; then echo foreign-instance; fi;;
     init)
+      [ "$(cat "$PROJECT_STATE")" = cache ] || return 42
+      printf 'instance' > "$PROJECT_STATE"
       [[ " $* " = *" -c user.subyard.initialized=false "* ]] || return 42
       printf 'init\\n' >> "$LOG";;
     exec) printf 'cloud-init\\n' >> "$LOG";;
@@ -488,11 +525,20 @@ prepare_owner_audit() {{ printf 'audit\\n' >> "$LOG"; [ "$FAILED" != audit ]; }}
 export LOG FAILED
 ''' + builder_receipt + '\n' + prepare_owner + '\nprepare_minimal_owner\nprintf "cold\\n" >> "$LOG"\n'
         result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
-        assert result.returncode == expected, result
+        assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
         calls = log.read_text().splitlines()
-        assert calls[:6] == ['compile','02-create-project.sh','init','03-create-subyard.sh','cloud-init','prerequisites'], calls
-        assert calls[6:] == ({'prerequisites': [], 'backend': ['backend','verify'], 'evidence-baseline': ['backend','verify','evidence-baseline'], 'audit': ['backend','verify','evidence-baseline','audit'], '': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold']}[failed]), calls
-        assert (checkout/'.build/p0-staging-owner').exists() == bool(failed), calls
+        if failed in ('foreign-project', 'inventory', 'post-inventory', 'missing-project', 'instances', 'nonempty'):
+            assert calls == (['compile'] if failed in ('foreign-project', 'inventory') else ['compile','02-create-project.sh']), calls
+            assert project_state.exists() == (failed not in ('inventory', 'missing-project'))
+            if project_state.exists():
+                assert project_state.read_text() == ('foreign' if failed == 'foreign-project' else 'owned')
+            continue
+        assert metadata.exists() == (failed != 'legacy')
+        if metadata.exists():
+            assert metadata.read_text() == f'installation=1\noperator_uid={os.getuid()}\ndata_home=/installed\nconfig_home={checkout / "config"}\n'
+        assert calls[:7] == ['compile','02-create-project.sh','cache-after-create','init','03-create-subyard.sh','cloud-init','prerequisites'], calls
+        assert calls[7:] == ({'prerequisites': [], 'backend': ['backend','verify'], 'evidence-baseline': ['backend','verify','evidence-baseline'], 'audit': ['backend','verify','evidence-baseline','audit'], 'legacy': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold'], '': ['backend','verify','evidence-baseline','audit','install-test-vms-host-sink.sh','cold']}[failed]), calls
+        assert (checkout/'.build/p0-staging-owner').exists() == (failed not in ('', 'legacy')), calls
 print('minimal owner prerequisites precede product backend and host sink')
 
 audit_prepare = re.search(r'^prepare_owner_audit\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
@@ -598,19 +644,33 @@ with tempfile.TemporaryDirectory(prefix='subyard-owner-context-', dir='/tmp') as
     root = pathlib.Path(directory)
     leaf = root/'runtime/current/scripts/context-check.sh'; leaf.parent.mkdir(parents=True)
     context = pathlib.Path(__file__).resolve().parents[2]/'scripts/lib/engine-context.sh'
-    leaf.write_text(f'. {str(context)!r}\nsubyard_require_engine_context\n' + '''
+    leaf.write_text(f'set -euo pipefail\n. {str(context)!r}\nsubyard_require_engine_context\n' + '''
 test "$YARD_KIND:$NESTED_E2E_VMS:$DEV_UID:$DEV_SUDO" = container:1:1001:0
 test "$INCUS_PROJECT:$YARD_INSTANCE_NAME" = subyard-test-yard:yard-test-yard
 test "$SRV_VOLUME_TYPE:$VM_FREE_PAGE_REPORTING:$VM_PIN_IPV4" = filesystem:0:0
 test "$SUBYARD_POWER_DESIRED:$SUBYARD_SUDO_PREAUTHORIZED" = running:1
+python3 - <<'PYCONTEXT'
+import json, os
+v = os.environ
+c = json.loads(v['SUBYARD_INSTALLATION_CONTEXT'])
+assert (c['yardName'], c['incusProject'], c['yardInstanceName']) == ('test-yard', 'subyard-test-yard', 'yard-test-yard')
+assert (c['accessKind'], c['yardKind'], c['sshHost'], c['sshPort'], c['devUid'], c['shiftMode']) == ('local', 'container', '', 2224, 1001, 'shift')
+assert c['paths'] == dict(repositoryRoot=v['SUBYARD_CONFIG_DIR'], configDir=v['SUBYARD_CONFIG_DIR'],
+    operatorHome=v['SUBYARD_OPERATOR_HOME'], dataHome=v['SUBYARD_HOME'], configHome=v['SUBYARD_CONFIG_HOME'],
+    hostBase=v['HOST_BASE'], storagePath=v['STORAGE_PATH'], stateDir=v['SUBYARD_STATE_DIR'])
+assert c['paths']['stateDir'] == v['SUBYARD_HOME'] + '/state'
+PYCONTEXT
+touch "$SUBYARD_HOME/project-created"
 printf 'complete typed owner context verified\\n'
 ''')
     script = f'''set -euo pipefail
+ROOT={str(pathlib.Path(__file__).resolve().parents[2])!r}
 SUBYARD_HOME={directory!r}; OWNER_CONFIG_HOME={directory!r}; OWNER_DIAGNOSTIC_DEV_UID=1001
 PROJECT=subyard-test-yard; INSTANCE=yard-test-yard; YARD=test-yard; OWNER_BASE_IMAGE=marked-base
 ''' + adapter + '\nowner_adapter context-check.sh\n'
     result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
-    assert result.returncode == 0 and result.stdout == 'complete typed owner context verified\n', result
+    assert result.returncode == 0 and result.stdout == 'complete typed owner context verified\n', (result.returncode, result.stdout, result.stderr)
+    assert (root/'project-created').is_file()
 print('minimal owner adapters receive the complete product context contract')
 
 apt_indexes = fixture.split("<<'PYAPTINDEX'\n", 1)[1].split('\nPYAPTINDEX', 1)[0]

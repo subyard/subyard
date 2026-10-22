@@ -93,7 +93,7 @@ func (tree Tree) Check() error {
 
 var artifactGuard atomic.Value
 
-// UseArtifactGuard selects the retained, shipped guard before removing runtime.
+// UseArtifactGuard selects the verified assets or retained guard before removing runtime.
 func UseArtifactGuard(root string) {
 	artifactGuard.Store(filepath.Join(root, "scripts/lib/teardown-plan.py"))
 }
@@ -124,7 +124,6 @@ func nativeArtifact(mode string, input, result any) error {
 	if err != nil {
 		return err
 	}
-	command := exec.Command("python3", "-B", script, mode)
 	barriers, err := borrowOwnerBarriers()
 	if err != nil {
 		return err
@@ -134,7 +133,15 @@ func nativeArtifact(mode string, input, result any) error {
 			file.Close()
 		}
 	}()
-	command.ExtraFiles = barriers
+	guard, err := os.Open(script)
+	if err != nil {
+		return fmt.Errorf("open native teardown artifact guard: %w", err)
+	}
+	defer guard.Close()
+	// Asset roots can be process-local FDs, independent of the engine memfd.
+	// Keep owner barriers at their existing indices and pass the opened guard last.
+	command := exec.Command("python3", "-B", fmt.Sprintf("/proc/self/fd/%d", 3+len(barriers)), mode)
+	command.ExtraFiles = append(barriers, guard)
 	command.Stdin = bytes.NewReader(body)
 	output, err := command.Output()
 	if err != nil {

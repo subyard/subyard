@@ -275,17 +275,115 @@ launch_real_vm() {
 launch_with_retry p0-vm "launching real Incus VM (a clean allocation may download an image)" \
   launch_real_vm
 
+qemu_process_identity() {
+  local name="$1" marker instance state pid comm stat start
+  local -a fields
+  marker="$(real_incus_observe project get "$PROJECT" user.subyard.p0)" || return
+  [ "$marker" = "$MARKER" ] || return 2
+  instance="$(real_incus_observe query "/1.0/instances/$name?project=$PROJECT")" || return
+  jq -e --arg name "$name" --arg marker "$MARKER" '
+    .name == $name and .type == "virtual-machine" and .config["user.subyard.p0"] == $marker
+  ' <<<"$instance" >/dev/null || return 2
+  state="$(real_incus_observe query "/1.0/instances/$name/state?project=$PROJECT")" || return
+  pid="$(jq -er 'select(.status == "Running") | .pid
+    | select(type == "number" and . > 0 and floor == .)' <<<"$state")" || return 2
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+  comm="$(timeout --foreground 5 sudo -n cat "/proc/$pid/comm")" || return
+  [ "$comm" = qemu-system-x86 ] || return 2
+  stat="$(timeout --foreground 5 sudo -n cat "/proc/$pid/stat")" || return
+  read -r -a fields <<<"${stat##*) }"
+  start="${fields[19]:-}"
+  [[ "$start" =~ ^[1-9][0-9]*$ ]] || return 2
+  printf '%s %s\n' "$pid" "$start"
+}
+
+capture_qemu_facts() {
+  local name="$1" before after pid start targets dev_kvm kvm_vm kvm_vcpu
+  before="$(qemu_process_identity "$name")" || return
+  read -r pid start <<<"$before"
+  # Read only this API-selected process. Never expose other descriptor targets or argv.
+  targets="$(timeout --foreground 5 sudo -n find "/proc/$pid/fd" \
+    -maxdepth 1 -type l -printf '%l\n')" || return
+  after="$(qemu_process_identity "$name")" || return
+  [ "$before" = "$after" ] || return 2
+  dev_kvm="$(grep -Fxc /dev/kvm <<<"$targets" || true)"
+  kvm_vm="$(grep -Exc 'anon_inode:(kvm-vm|\[kvm-vm\])' <<<"$targets" || true)"
+  kvm_vcpu="$(grep -Exc 'anon_inode:(kvm-vcpu|\[kvm-vcpu\])' <<<"$targets" || true)"
+  jq -nc --argjson pid "$pid" --argjson start "$start" \
+    --argjson device "$dev_kvm" --argjson vm "$kvm_vm" --argjson vcpu "$kvm_vcpu" '
+    {pid: $pid, start_ticks: $start, comm: "qemu-system-x86",
+     kvm_fd_counts: {dev_kvm: $device, kvm_vm: $vm, kvm_vcpu: $vcpu},
+     acceleration: (if $vm > 0 or $vcpu > 0 then "kvm-fds-present" else "unknown" end)}
+  '
+}
+
+emit_vga_screenshot() {
+  python3 - "$1" "$2" <<'PY'
+import base64
+import hashlib
+import json
+import os
+import stat
+import struct
+import sys
+
+with open(sys.argv[1], 'rb') as stream:
+    info = os.fstat(stream.fileno())
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+    assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+    data = stream.read(2 * 1024 * 1024 + 1)
+assert 45 <= len(data) <= 2 * 1024 * 1024
+assert data[:16] == b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+assert data[-12:] == b'\x00\x00\x00\x00IEND\xaeB`\x82'
+width, height = struct.unpack('>II', data[16:24])
+assert 0 < width <= 4096 and 0 < height <= 4096
+encoded = base64.b64encode(data).decode('ascii')
+print('P0_INCUS_VGA ' + json.dumps({
+    'name': sys.argv[2], 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+    'width': width, 'height': height, 'chunks': (len(encoded) + 2047) // 2048,
+}, separators=(',', ':')))
+for index, offset in enumerate(range(0, len(encoded), 2048)):
+    print('P0_INCUS_VGA_DATA ' + json.dumps({
+        'name': sys.argv[2], 'index': index, 'base64': encoded[offset:offset + 2048],
+    }, separators=(',', ':')))
+PY
+}
+
+capture_vga_screenshot() {
+  local name="$1" before after status
+  local image="$TMP/$name-vga.png" error="$TMP/$name-vga.stderr"
+  before="$(qemu_process_identity "$name")" || return
+  : > "$image"
+  : > "$error"
+  chmod 0600 "$image" "$error"
+  if real_incus_observe query "/1.0/instances/$name/console?project=$PROJECT&type=vga" \
+    >"$image" 2>"$error"; then status=0; else status=$?; fi
+  printf 'P0_INCUS_DIAGNOSTIC instance=%s query=vga exit_status=%s\n' \
+    "$name" "$status" >&2
+  [ "$status" = 0 ] || return "$status"
+  after="$(qemu_process_identity "$name")" || return
+  [ "$before" = "$after" ] || return 2
+  emit_vga_screenshot "$image" "$name"
+}
+
 wait_ready() {
   local name="$1" kind="$2" state='' replaced=0
   local wait_timeout=240 deadline
+  local probe_status=0 probe_error="$TMP/$name-agent.stderr" detail status bytes limit
+  local query_output="$TMP/$name-instance.json" query_error="$TMP/$name-instance.stderr"
   local restart_grace="${P0_REAL_INCUS_RESTART_GRACE_ATTEMPTS:-30}"
+  : > "$probe_error"
+  chmod 0600 "$probe_error"
   # A cloud VM's first boot may reboot before its agent starts, including under nested KVM.
   [ "$kind" != virtual-machine ] || wait_timeout=600
   deadline=$((SECONDS + wait_timeout))
   printf '  [ .. ] waiting for %s\n' "$name"
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+    if real_incus_observe exec "$name" --project "$PROJECT" -- true \
+      >/dev/null 2>"$probe_error"; then
       return 0
+    else
+      probe_status=$?
     fi
     state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
     if [ "$state" = STOPPED ]; then
@@ -293,8 +391,11 @@ wait_ready() {
       for _ in $(seq 1 "$restart_grace"); do
         [ "$SECONDS" -lt "$deadline" ] || break
         sleep 1
-        if real_incus_observe exec "$name" --project "$PROJECT" -- true >/dev/null 2>&1; then
+        if real_incus_observe exec "$name" --project "$PROJECT" -- true \
+          >/dev/null 2>"$probe_error"; then
           return 0
+        else
+          probe_status=$?
         fi
         state="$(real_incus_observe list "$name" --project "$PROJECT" --format csv -c s)"
         [ "$state" = STOPPED ] || break
@@ -312,14 +413,73 @@ wait_ready() {
     fi
     sleep 2
   done
-  real_incus_observe info "$name" --project "$PROJECT" --show-log >&2 || true
-  real_incus_observe console "$name" --project "$PROJECT" --show-log >&2 || true
+  # Keep the last actual probe, without retrying beyond the readiness deadline. Diagnostics
+  # must finish before EXIT deletes the marked instance and must preserve the timeout outcome.
+  bytes="$(wc -c < "$probe_error")"
+  printf 'P0_INCUS_DIAGNOSTIC instance=%s query=agent exit_status=%s bytes=%s limit=4096\n' \
+    "$name" "$probe_status" "$bytes" >&2
+  head -c 4096 "$probe_error" >&2 || true
+  printf '\n' >&2
+  : > "$query_output"
+  : > "$query_error"
+  chmod 0600 "$query_output" "$query_error"
+  if real_incus_observe query "/1.0/instances/$name?project=$PROJECT" \
+    >"$query_output" 2>"$query_error"; then status=0; else status=$?; fi
+  printf 'P0_INCUS_DIAGNOSTIC instance=%s query=instance exit_status=%s\n' \
+    "$name" "$status" >&2
+  if [ "$status" = 0 ]; then
+    if jq -ce --arg name "$name" --arg marker "$MARKER" '
+      def field($pattern):
+        if . == null then null
+        elif type == "string" and test($pattern) then .
+        else error("invalid diagnostic field") end;
+      if .name != $name or .config["user.subyard.p0"] != $marker then
+        error("unexpected diagnostic instance identity")
+      else {
+        name: $name,
+        image: (.config["volatile.base_image"] | field("^[0-9a-f]{64}$")),
+        cpu: (.expanded_config["limits.cpu"] | field("^[0-9,-]{1,64}$")),
+        memory: (.expanded_config["limits.memory"] | field("^[0-9]+([KMGTPE]i?B|%)?$")),
+        root_size: (.expanded_devices.root.size | field("^[0-9]+([KMGTPE]i?B)?$")),
+        secureboot: (.expanded_config["security.secureboot"] | field("^(true|false)$"))
+      } end
+    ' "$query_output" >&2; then status=0; else status=$?; fi
+    printf 'P0_INCUS_DIAGNOSTIC instance=%s query=instance-projection exit_status=%s\n' \
+      "$name" "$status" >&2
+  else
+    head -c 4096 "$query_error" >&2 || true
+    printf '\n' >&2
+  fi
+  for detail in info console; do
+    limit=65536
+    : > "$query_output"
+    if real_incus_observe "$detail" "$name" --project "$PROJECT" --show-log \
+      >"$query_output" 2>&1; then status=0; else status=$?; fi
+    bytes="$(wc -c < "$query_output")"
+    printf 'P0_INCUS_DIAGNOSTIC instance=%s query=%s exit_status=%s bytes=%s limit=%s\n' \
+      "$name" "$detail" "$status" "$bytes" "$limit" >&2
+    head -c "$limit" "$query_output" >&2 || true
+    printf '\n' >&2
+  done
+  if [ "$kind" = virtual-machine ]; then
+    if capture_qemu_facts "$name" >"$query_output" 2>"$query_error"; then
+      status=0
+      printf 'P0_INCUS_QEMU %s\n' "$(cat "$query_output")" >&2
+    else
+      status=$?
+    fi
+    printf 'P0_INCUS_DIAGNOSTIC instance=%s query=qemu-binding exit_status=%s\n' \
+      "$name" "$status" >&2
+    if capture_vga_screenshot "$name" >&2; then status=0; else status=$?; fi
+    printf 'P0_INCUS_DIAGNOSTIC instance=%s query=vga-capture exit_status=%s\n' \
+      "$name" "$status" >&2
+  fi
   die "$name did not become ready (last state: ${state:-unknown})"
 }
+TMP="$(mktemp -d /tmp/subyard-p0-incus.XXXXXX)"
 wait_ready p0-container container
 wait_ready p0-vm virtual-machine
 
-TMP="$(mktemp -d /tmp/subyard-p0-incus.XXXXXX)"
 go test -c -tags realincus -o "$TMP/incusclient-real.test" ./internal/adapters/incusclient
 sudo -n env \
   SUBYARD_REAL_INCUS_SOCKET=/var/lib/incus/unix.socket \

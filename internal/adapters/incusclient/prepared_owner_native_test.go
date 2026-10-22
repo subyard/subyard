@@ -3,6 +3,7 @@ package incusclient
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,63 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/lxc/incus/v6/shared/api"
 )
+
+func TestOrdinarySharedProjectRequiresCanonicalInitialConfig(t *testing.T) {
+	for _, change := range []string{"valid", "nil", "empty", "malformed", "duplicate", "foreign-context", "appeared", "conflict"} {
+		t.Run(change, func(t *testing.T) {
+			mode := "ordinary"
+			if change == "conflict" {
+				mode = "ordinary-conflict"
+			}
+			client, fixture := ownerCreateClientFixture(t, &ownerCreateObserverFixture{}, mode)
+			p := ports.PreparedImageProject{Project: "subyard-test-yard", Absent: true, SharedImages: true}
+			p.InitialConfig, _ = renderOwnerProjectConfig(t, domain.Context{YardName: "test-yard", IncusProject: p.Project, YardInstanceName: "yard-test-yard"}, []string{"SUBYARD_HOME=/fixture/data", "SUBYARD_CONFIG_HOME=/fixture/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/fixture/host", "SRV_POOL=default", "SRV_VOLUME=yard-test-yard", "STORAGE_PATH=/fixture/storage"})
+			switch change {
+			case "nil":
+				p.InitialConfig = nil
+			case "empty":
+				p.InitialConfig = []byte{}
+			case "malformed":
+				p.InitialConfig = []byte("user.subyard.installation=1")
+			case "duplicate":
+				p.InitialConfig = append(p.InitialConfig, []byte("user.subyard.installation=1\x00")...)
+			case "foreign-context":
+				p.InitialConfig = []byte(strings.Replace(string(p.InitialConfig), `"incusProject":"subyard-test-yard"`, `"incusProject":"foreign"`, 1))
+			case "appeared":
+				fixture.mu.Lock()
+				fixture.project = &api.Project{Name: p.Project, ProjectPut: api.ProjectPut{Config: map[string]string{"foreign": "keep"}}}
+				fixture.mu.Unlock()
+			}
+			err := client.ApplyPreparedImageProject(context.Background(), p)
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if change == "valid" {
+				if err != nil || fixture.posts != 1 || fixture.project.Config["user.subyard.installation"] != "1" || fixture.project.Config["features.images"] != "false" {
+					t.Fatal("canonical atomic create failed", err)
+				}
+				if _, exists := fixture.project.Config[ownerCreateTokenKey]; exists {
+					t.Fatal("ordinary project acquired native token")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("invalid or raced creation admitted")
+				}
+				wantPosts := 0
+				if change == "conflict" {
+					wantPosts = 1
+				}
+				if fixture.posts != wantPosts {
+					t.Fatal("invalid configuration submitted")
+				}
+				if change == "appeared" || change == "conflict" {
+					if len(fixture.project.Config) != 1 || fixture.project.Config["foreign"] != "keep" {
+						t.Fatal("foreign project changed")
+					}
+				}
+			}
+		})
+	}
+}
 
 type cancelOwnerObserver struct {
 	*custodyObserver

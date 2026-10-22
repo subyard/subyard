@@ -301,8 +301,15 @@ func (f *ownerCreateServerFixture) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	if r.Method == http.MethodPost && r.URL.Path == "/1.0/projects" {
 		f.posts++
 		var request api.ProjectsPost
-		if json.NewDecoder(r.Body).Decode(&request) != nil || f.before == nil || !f.before() || len(request.Config[ownerCreateTokenKey]) != 32 || request.Config["features.images"] != "false" && f.mode != "yard-project" {
+		ordinary := strings.HasPrefix(f.mode, "ordinary")
+		if json.NewDecoder(r.Body).Decode(&request) != nil || !ordinary && (f.before == nil || !f.before() || len(request.Config[ownerCreateTokenKey]) != 32) || request.Config["features.images"] != "false" && f.mode != "yard-project" {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if f.mode == "ordinary-conflict" {
+			f.project = &api.Project{Name: request.Name, ProjectPut: api.ProjectPut{Config: map[string]string{"foreign": "keep"}}}
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error_code": 409, "error": "project already exists"})
 			return
 		}
 		f.project = &api.Project{Name: request.Name, ProjectPut: request.ProjectPut}
@@ -428,27 +435,34 @@ func TestOwnerImageProjectCreateRequiresNativeOriginalScope(t *testing.T) {
 	}
 }
 
+func renderOwnerProjectConfig(t *testing.T, value domain.Context, environment []string) ([]byte, string) {
+	t.Helper()
+	contextValue, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.ReadFile("../../../scripts/lib/project-config.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-peu", "-s")
+	command.Stdin = strings.NewReader(string(helper) + "\nsubyard_project_config_render\n")
+	command.Env = append([]string{"PATH=/usr/bin:/bin", "SUBYARD_INSTALLATION_CONTEXT=" + string(contextValue)}, environment...)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal("actual project renderer failed", err)
+	}
+	return output, string(contextValue)
+}
+
 func TestOwnerImageProjectInitialPOSTUsesActualOriginalRenderer(t *testing.T) {
 	for _, reporting := range []string{"0", "1"} {
 		t.Run(reporting, func(t *testing.T) {
 			observer := &ownerCreateObserverFixture{}
 			client, fixture := ownerCreateClientFixture(t, observer, "success")
 			original := ports.PreparedImageProject{Project: "subyard-test-yard", Absent: true, SharedImages: true, Server: ownerCreateServerSHA(t, client)}
-			contextValue, err := json.Marshal(domain.Context{YardName: "test-yard", IncusProject: original.Project, YardInstanceName: "yard-test-yard"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			helper, err := os.ReadFile("../../../scripts/lib/project-config.sh")
-			if err != nil {
-				t.Fatal(err)
-			}
-			command := exec.Command("bash", "-peu", "-s")
-			command.Stdin = strings.NewReader(string(helper) + "\nsubyard_project_config_render\n")
-			command.Env = []string{"PATH=/usr/bin:/bin", "SUBYARD_INSTALLATION_CONTEXT=" + string(contextValue), "SUBYARD_HOME=/original/data", "SUBYARD_CONFIG_HOME=/original/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/original/host-\xff", "SRV_POOL=original-pool", "SRV_VOLUME=original-srv", "STORAGE_PATH=/original/storage", "YARD_KIND=vm", "VM_FREE_PAGE_REPORTING=" + reporting, "NESTED_E2E_VMS=1"}
-			original.InitialConfig, err = command.Output()
-			if err != nil {
-				t.Fatal("actual original renderer failed", err)
-			}
+			initialConfig, contextValue := renderOwnerProjectConfig(t, domain.Context{YardName: "test-yard", IncusProject: original.Project, YardInstanceName: "yard-test-yard"}, []string{"SUBYARD_HOME=/original/data", "SUBYARD_CONFIG_HOME=/original/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/original/host-\xff", "SRV_POOL=original-pool", "SRV_VOLUME=original-srv", "STORAGE_PATH=/original/storage", "YARD_KIND=vm", "VM_FREE_PAGE_REPORTING=" + reporting, "NESTED_E2E_VMS=1"})
+			original.InitialConfig = initialConfig
 			ctx := ports.WithNativeOperationObserver(context.Background(), observer)
 			created, err := client.ApplyPreparedOwnerImageProject(ctx, original, "current")
 			if err != nil || created == nil {
@@ -456,7 +470,7 @@ func TestOwnerImageProjectInitialPOSTUsesActualOriginalRenderer(t *testing.T) {
 			}
 			fixture.mu.Lock()
 			config := fixture.project.Config
-			valid := config["user.subyard.installation"] == "1" && config["user.subyard.data_home"] == "/original/data" && config["user.subyard.context"] == string(contextValue) && config["restricted.containers.interception"] == "allow" && (config["restricted.virtual-machines.lowlevel"] == "allow") == (reporting == "1") && config["features.images"] == "false" && len(config[ownerCreateTokenKey]) == 32
+			valid := config["user.subyard.installation"] == "1" && config["user.subyard.data_home"] == "/original/data" && config["user.subyard.context"] == contextValue && config["restricted.containers.interception"] == "allow" && (config["restricted.virtual-machines.lowlevel"] == "allow") == (reporting == "1") && config["features.images"] == "false" && len(config[ownerCreateTokenKey]) == 32
 			fixture.mu.Unlock()
 			if !valid {
 				t.Fatal("initial actual POST omitted original ownership or policy")
@@ -472,21 +486,8 @@ func TestOwnerYardProjectCreatePreservesOriginal02AndDefaultImages(t *testing.T)
 	observer := &ownerCreateObserverFixture{}
 	client, fixture := ownerCreateClientFixture(t, observer, "yard-project")
 	original := ports.PreparedImageProject{Project: "subyard-test-yard", Absent: true, Server: ownerCreateServerSHA(t, client)}
-	contextValue, err := json.Marshal(domain.Context{YardName: "test-yard", IncusProject: original.Project, YardInstanceName: "yard-test-yard"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	helper, err := os.ReadFile("../../../scripts/lib/project-config.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command("bash", "-peu", "-s")
-	command.Stdin = strings.NewReader(string(helper) + "\nsubyard_project_config_render\n")
-	command.Env = []string{"PATH=/usr/bin:/bin", "SUBYARD_INSTALLATION_CONTEXT=" + string(contextValue), "SUBYARD_HOME=/original/data", "SUBYARD_CONFIG_HOME=/original/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/original/host", "SRV_POOL=original-pool", "SRV_VOLUME=original-srv", "STORAGE_PATH=/original/storage", "YARD_KIND=container"}
-	original.InitialConfig, err = command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
+	initialConfig, contextValue := renderOwnerProjectConfig(t, domain.Context{YardName: "test-yard", IncusProject: original.Project, YardInstanceName: "yard-test-yard"}, []string{"SUBYARD_HOME=/original/data", "SUBYARD_CONFIG_HOME=/original/config", "YARD_NAME=test-yard", "YARD_INSTANCE_NAME=yard-test-yard", "HOST_BASE=/original/host", "SRV_POOL=original-pool", "SRV_VOLUME=original-srv", "STORAGE_PATH=/original/storage", "YARD_KIND=container"})
+	original.InitialConfig = initialConfig
 	ctx := ports.WithNativeOperationObserver(context.Background(), observer)
 	if created, err := client.ApplyPreparedOwnerImageProject(ctx, original, "recreate"); err != nil || created != nil || fixture.posts != 0 {
 		t.Fatal("image-project false branch changed its original no-op", err)
@@ -509,7 +510,7 @@ func TestOwnerYardProjectCreatePreservesOriginal02AndDefaultImages(t *testing.T)
 	if err != nil || created == nil || fixture.posts != 1 || observer.before != 1 || observer.completed != 1 {
 		t.Fatal("original 02 project request lost", err)
 	}
-	if fixture.project.Config["features.images"] != "true" || fixture.project.Config["user.subyard.context"] != string(contextValue) || fixture.project.Config["restricted.devices.proxy"] != "allow" {
+	if fixture.project.Config["features.images"] != "true" || fixture.project.Config["user.subyard.context"] != contextValue || fixture.project.Config["restricted.devices.proxy"] != "allow" {
 		t.Fatal("original config or daemon default images changed")
 	}
 	fixture.project.UsedBy = []string{"/1.0/instances/yard?project=" + original.Project}

@@ -606,6 +606,9 @@ func Commit(ctx context.Context, options Options, before Prepared) error {
 	if err != nil {
 		return err
 	}
+	if before.SharedImages && !adoptCurrent && options.EnsureImageProject == nil {
+		return errors.New("shared image namespace creation requires the authenticated yard project creator")
+	}
 	if adoptCurrent {
 		if projects.legacy || !projects.current {
 			return errors.New("prepared canonical test-yard adoption topology changed before commit")
@@ -1668,19 +1671,7 @@ func ensureProject(ctx context.Context, options Options, yard string, sharedImag
 	if !sharedImages {
 		return nil
 	}
-	project := "subyard-" + yard
-	if _, err := runIncus(
-		ctx,
-		options,
-		"project",
-		"create",
-		project,
-		"-c",
-		"features.images=false",
-	); err != nil {
-		return fmt.Errorf("preserve shared image namespace for %s: %w", yard, err)
-	}
-	return nil
+	return errors.New("shared image namespace creation requires the authenticated yard project creator")
 }
 
 func ensureNoActiveLease(payload []byte) error {

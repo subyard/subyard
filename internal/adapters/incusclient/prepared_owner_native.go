@@ -69,6 +69,16 @@ func (client *Client) ApplyPreparedImageProject(ctx context.Context, p ports.Pre
 	if !p.SharedImages {
 		return nil
 	}
+	// A new image namespace is also the future yard project. Publish the
+	// canonical installation boundary in its original atomic create, never
+	// claim an already existing project by adding ownership afterward.
+	if len(p.InitialConfig) == 0 {
+		return domain.ErrPlanStale
+	}
+	request, err := ownerImageProjectRequest(p, "")
+	if err != nil {
+		return err
+	}
 	observer := ports.NativeOperationObserverFrom(ctx)
 	var ordinal uint64
 	if observer != nil {
@@ -78,14 +88,14 @@ func (client *Client) ApplyPreparedImageProject(ctx context.Context, p ports.Pre
 		}
 		raw, _ := json.Marshal(struct {
 			Kind, Server, Project string
-			Shared                bool
-		}{"project-create", serverFact.Server, p.Project, true})
+			Request               api.ProjectsPost
+		}{"project-create", serverFact.Server, p.Project, request})
 		ordinal, err = observer.CommandStarted("incus-project-create", fmt.Sprintf("%x", sha256.Sum256(raw)))
 		if err != nil {
 			return err
 		}
 	}
-	err = server.CreateProject(api.ProjectsPost{Name: p.Project, ProjectPut: api.ProjectPut{Config: map[string]string{"features.images": "false"}}})
+	err = server.CreateProject(request)
 	if err != nil {
 		if observer != nil {
 			observer.Uncertain()

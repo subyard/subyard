@@ -710,7 +710,8 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 			}
 			nativeApply := execution.platform.(reconcileruntime.Runtime)
 			nativeErr := nativeApply.ApplyStage(context.Background(), ports.ReconcileStageProject)
-			if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp" {
+			accepted := change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp"
+			if accepted {
 				if nativeErr != nil {
 					t.Fatal("runtime guard rejected unchanged policy", nativeErr)
 				}
@@ -731,7 +732,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 				native.Yard = loaded.Context
 				request := &initExecution{loaded: loaded, platform: native, hostID: execution.hostID}
 				err = fresh.prepareLegacyContinuation(context.Background(), request, initArguments{continueLegacy: optIn})
-				if change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp" {
+				if accepted {
 					if err != nil {
 						t.Fatal("ephemeral runtime state invalidated stable authority", err)
 					}

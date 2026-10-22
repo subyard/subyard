@@ -660,6 +660,22 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
   bash dev/e2e/broker-memory-boundary.sh
 ```
 
+Owner and broker fixtures resolve the default-project container cache alias to its exact
+fingerprint, then use that fingerprint on the public remote selected by
+`P0_REAL_INCUS_CONTAINER_IMAGE` (default `images:debian/13/cloud`). The remote must be public
+Incus or simplestreams and still serve that exact image; unavailable images and local-only
+or OCI sources fail before owner setup. Public init creates the owner project with its own
+installation records. The independent `real-incus` lane keeps its image override contract.
+
+The owner fixture uses explicitly synthetic, supported-version bundles built from the
+current frozen source and its ordinary V2 registry. It checks inactive broker preservation,
+active helper replacement and rollback, then creates a fresh current-owned `test-yard`
+through public update and init while retaining protected history. These bundles do not
+represent authentic historical releases. Actual retired-source refusal, staged full uninstall
+and separate clean installation belong to `dev/verify-release-upgrades.py --only-legacy-retirement`
+and the ordinary release compatibility check; native deletion belongs to `full-uninstall`.
+The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent historical contract.
+
 | Lane | Prerequisites and timeout | Mutable scope | Classification |
 | --- | --- | --- | --- |
 | `./tests/run.sh` | Go toolchain; bounded by CI | temporary host-free roots and `.build/yard` | full host-free suite |
@@ -667,7 +683,7 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `smoke` (default) | both allocated VMs; capacity/dependency preflight and one reboot | marked Incus, release and peer fixtures described below | publication smoke; see skill policy |
 | `boundary` | one broker lease; SSH connect deadlines | read-only facade, routes and negative probes | required in smoke and full |
 | `transport` | both allocated VMs; bounded SSH disconnect probe | one marker-owned remote sleep and temporary controller log | required in smoke and full |
-| `nested-teardown` | VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM, nested yard and data-boundary fixtures | targeted diagnostic; required in full |
+| `nested-teardown` | frozen current candidate, VM2, KVM and nested Incus; bounded install, boot and cleanup waits | marker-owned outer VM and nested yard, each bootstrapped through the public installer; data-boundary fixtures | targeted diagnostic; required in full |
 | `full-uninstall` | one allocated VM and installed current candidate; bounded phase/reboot deadlines and a sink delay longer than 60 seconds | marker-owned yards, producers, credentials and installation roots; preserve foreign resources and selected-yard neighbors | singleton held-lease uninstall, interruption/retry and reboot acceptance |
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
@@ -680,6 +696,30 @@ dev/agent-e2e.sh --slot "$slot" --type android-test --purpose broker-memory-boun
 | `peer` | both VMs and synthetic keys | marked cross-owner RPC, project and credential fixtures | smoke covers fresh init/projects/RPC; full adds offline and credential scenarios |
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
+
+The owner chain recovers two authentic v0.11.1 histories through the checksum-pinned official
+v0.11.2 bridge. This preserves the closed recovery policy and its historical metadata writers.
+Each completed or interrupted/resumed bridge then
+upgrades through the public installer to the unmodified frozen current candidate. The fixture
+records the bridge and current runtime hashes separately and verifies current readiness,
+materialized configuration and retained migration history. The historical updater requires the
+default power boundary: before each history, the fixture refuses any existing default helper,
+unit, enablement or custody metadata. After current assertions, supported selected-yard teardown
+removes the exact historical yard; full uninstall then removes the remaining installation and
+must remove installed resources and enablement before reuse. Default power install locks and
+generation records remain as coordination fences. The first history refuses preexisting fences;
+the second accepts only the exact validated state captured around its own successful first
+cleanup. Busy, unsafe or changed coordination state refuses reuse without deleting barriers.
+Producer cleanup prepares the same operator's systemd user manager on the disposable VM when
+absent, without enabling lingering or restarting an existing manager.
+Failed histories retain their marked fixture state while a default power artifact or producer
+remains; fixture fallback cleanup never stops or deletes global default power resources.
+The fixture declares a stable plain Codex config artifact before historical recovery, while
+retaining the authentic shipped rules through the bridge. Only after the bridge completes,
+it selects rules copied from the authenticated active bridge, verifying the guest rules match
+before initial adoption. The default TOML path must remain absent before and after the current
+upgrade. This lane covers instruction composition and native integration readiness, not
+structured TOML migration.
 
 For P0 host-sink isolation and cleanup, the existing cleanup fixture has a focused physical mode:
 

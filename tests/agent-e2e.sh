@@ -6,6 +6,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fixture_functions() { # source file, then function names
+  local source="$1" name
+  shift
+  for name; do sed -n "/^$name() {/,/^}$/p" "$source"; done
+}
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
 bash "$ROOT/tests/proxy-address-boot-controller.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"
@@ -86,9 +91,8 @@ done
 # Globals below are consumed by the extracted P0 functions.
 # shellcheck disable=SC2034
 (
-  for function_name in lane_vm_count preflight_lane dependency_lane clean_peers cleanup_lane; do
-    eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-acceptance.sh")"
-  done
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
+    lane_vm_count preflight_lane dependency_lane clean_peers cleanup_lane)"
   BROKER_RECOVERY_ONLY=0
   P0_NESTED_VM=1
   for P0_LANE in smoke full peer; do
@@ -514,12 +518,9 @@ assert_phase_markers "$(cat "$TMP/command-transfer.log")" \
 assert_phase_markers "$(cat "$TMP/cleanup-retry.log")" \
   $'guest-cleanup:start:0:2\nguest-cleanup:end:255:2\nguest-cleanup:start:0:2\nguest-cleanup:end:0:2'
 
-p0_cleanup_function_source="$(
-  for function_name in run_source_vm clean_source_host armed_fixture_vm \
-    cleanup_full_source_arm cleanup_armed_full_fixtures cleanup; do
-    sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-acceptance.sh"
-  done
-)"
+p0_cleanup_function_source="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
+  run_source_vm clean_source_host armed_fixture_vm \
+  cleanup_full_source_arm cleanup_armed_full_fixtures cleanup)"
 p0_cleanup_events="$TMP/p0-cleanup-events"
 p0_source_arm="$TMP/p0-source-arm"
 printf '2\n' > "$p0_source_arm"
@@ -966,11 +967,7 @@ host_network_assert_line="$(grep -nF \
   && [ -n "$host_network_assert_line" ] \
   && [ "$owned_backend_cleanup_line" -lt "$host_network_assert_line" ] \
   || fail "nested teardown checks host networking before removing its marker-owned backend"
-remove_owned_outer_backend_source="$(awk '
-  /^remove_owned_outer_backend\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$nested_teardown_script")"
+remove_owned_outer_backend_source="$(fixture_functions "$nested_teardown_script" remove_owned_outer_backend)"
 network_cleanup_function="$TMP/remove-owned-outer-backend.sh"
 printf '%s\n' "$remove_owned_outer_backend_source" > "$network_cleanup_function"
 network_cleanup_bin="$TMP/nested-network-cleanup-bin"
@@ -1081,7 +1078,8 @@ nested_yard_init_line="$(grep -nF 'yard init --yes' "$nested_teardown_script" \
   || fail 'nested teardown does not publish marker-owned pool and bridge before yard init'
 # Execute the nested fixture's passive Docker prerequisite with stateful native stubs.
 docker_ready_function="$TMP/nested-docker-ready.sh"
-sed -n '/^require_outer_docker_ready()/,/^}$/p' "$nested_teardown_script" > "$docker_ready_function"
+fixture_functions "$nested_teardown_script" capture_outer_docker_failure require_outer_docker_ready \
+  > "$docker_ready_function"
 docker_ready_bin="$TMP/nested-docker-ready-bin"
 mkdir -p "$docker_ready_bin"
 cat > "$docker_ready_bin/incus" <<'EOF_DOCKER_READY_INCUS'
@@ -1093,6 +1091,10 @@ case "$1" in
     [ "$DOCKER_READY_CASE" != query-failure ] || exit 17
     managed=true
     [ "$DOCKER_READY_CASE" != foreign-vm ] || managed=false
+    if [ "$(grep -Fxc query "$DOCKER_READY_LOG")" -gt 1 ]; then
+      [ "$DOCKER_READY_CASE" != capture-foreign-vm ] || managed=false
+      [ "$DOCKER_READY_CASE" != capture-query-failure ] || exit 17
+    fi
     printf '{"name":"yard-nested-e2e-abcdef","type":"virtual-machine","status":"Running","expanded_config":{"user.subyard.managed":"%s"},"expanded_devices":{"root":{"pool":"nested-e2e-abcdef"}}}\n' "$managed"
     ;;
   storage)
@@ -1101,6 +1103,9 @@ case "$1" in
     ;;
   exec)
     printf 'exec\n' >> "$DOCKER_READY_LOG"
+    if [ "$DOCKER_READY_CASE" = capture-followup-failure ] \
+      && [ "$(grep -Fxc exec "$DOCKER_READY_LOG")" -gt 1 ]; then exit 19; fi
+    if [ "$(grep -Fxc exec "$DOCKER_READY_LOG")" = 1 ]; then
     case "$DOCKER_READY_CASE" in
       diagnostic-utf8-overflow)
         [ "$(locale charmap)" = UTF-8 ] || exit 91
@@ -1116,6 +1121,7 @@ case "$1" in
       diagnostic-injection) printf '{"unexpected_text":"PRIVATE_SYNTHETIC_PAYLOAD"}\n'; exit 0 ;;
       diagnostic-overflow) printf '%03000d\n' 0; exit 0 ;;
     esac
+    fi
     shift 5
     exec "$@"
     ;;
@@ -1125,6 +1131,18 @@ EOF_DOCKER_READY_INCUS
 cat > "$docker_ready_bin/systemctl" <<'EOF_DOCKER_READY_SYSTEMCTL'
 #!/usr/bin/env bash
 set -eu
+case "$*" in
+  'show '*--property=Type,*)
+    active=active sub=running
+    if ! grep -Fxq socket-activation "$DOCKER_READY_LOG"; then
+      case "$DOCKER_READY_CASE" in
+        capture-inactive) active=inactive; sub=dead ;;
+        capture-failed) active=failed; sub=failed ;;
+      esac
+    fi
+    printf 'Type=notify\nLoadState=loaded\nActiveState=%s\nSubState=%s\nResult=success\nMainPID=123\nNRestarts=0\n' "$active" "$sub"
+    exit 0 ;;
+esac
 [ "$*" = 'show docker.service --property=LoadState --property=ActiveState --property=SubState' ] || exit 91
 count=$(cat "$DOCKER_READY_COUNT")
 printf '%s\n' "$((count + 1))" > "$DOCKER_READY_COUNT"
@@ -1149,15 +1167,34 @@ EOF_DOCKER_READY_SYSTEMCTL
 cat > "$docker_ready_bin/docker" <<'EOF_DOCKER_READY_DOCKER'
 #!/usr/bin/env bash
 set -eu
+case "$*" in
+  info|'version --format {{.Server.Version}}')
+    # Such a server request can activate a stopped daemon through docker.socket.
+    printf 'socket-activation\n' >> "$DOCKER_READY_LOG"
+    exit 0 ;;
+  'context show') printf 'default\n'; exit 0 ;;
+  'context inspect --format {{.Endpoints.docker.Host}}') printf 'unix:///PRIVATE_SYNTHETIC_PAYLOAD\n'; exit 0 ;;
+esac
 [ "$*" = 'container ls -a --format {{.Names}}' ] || exit 91
 printf 'enumeration\n' >> "$DOCKER_READY_LOG"
 printf 'PRIVATE_SYNTHETIC_PAYLOAD\n' >&2
-[ "$DOCKER_READY_CASE" != enumeration-failure ] || exit 23
+case "$DOCKER_READY_CASE" in
+  enumeration-failure|capture-foreign-vm|capture-query-failure|capture-followup-failure|capture-inactive) exit 23 ;;
+  enumeration-timeout|capture-failed) exit 124 ;;
+  capture-bounds) printf '%070000d\n' 0 >&2; exit 23 ;;
+esac
 EOF_DOCKER_READY_DOCKER
-chmod 0700 "$docker_ready_bin/incus" "$docker_ready_bin/systemctl" "$docker_ready_bin/docker"
+cat > "$docker_ready_bin/journalctl" <<'EOF_DOCKER_READY_JOURNAL'
+#!/usr/bin/env bash
+set -eu
+printf 'PRIVATE_SYNTHETIC_PAYLOAD\n'
+[ "$DOCKER_READY_CASE" != capture-bounds ] || printf '%070000d\n' 0
+EOF_DOCKER_READY_JOURNAL
+chmod 0700 "$docker_ready_bin/incus" "$docker_ready_bin/systemctl" "$docker_ready_bin/docker" "$docker_ready_bin/journalctl"
 for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnostic-overflow diagnostic-empty diagnostic-duplicate query-timeout invalid-enum unexpected-field \
   active activating failed inactive load-unknown malformed duplicate active-exited unavailable expiry \
-  enumeration-failure query-failure foreign-vm foreign-pool clock-failure; do
+  enumeration-failure enumeration-timeout capture-foreign-vm capture-query-failure capture-followup-failure capture-bounds capture-inactive capture-failed \
+  query-failure foreign-vm foreign-pool clock-failure; do
   docker_ready_log="$TMP/nested-docker-ready-$docker_ready_case.log"
   docker_ready_count="$TMP/nested-docker-ready-$docker_ready_case.count"
   : > "$docker_ready_log"
@@ -1166,7 +1203,7 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
   docker_ready_output="$(
     LC_ALL=C.utf8 PATH="$docker_ready_bin:$PATH" DOCKER_READY_CASE="$docker_ready_case" \
       DOCKER_READY_LOG="$docker_ready_log" DOCKER_READY_COUNT="$docker_ready_count" \
-      DOCKER_READY_FUNCTION="$docker_ready_function" bash -c '
+      DOCKER_READY_FUNCTION="$docker_ready_function" DOCKER_READY_STATE="$TMP" bash -c '
         set -eu
         . "$DOCKER_READY_FUNCTION"
         die() { printf "fixture failure: %s\n" "$*" >&2; exit 2; }
@@ -1182,6 +1219,7 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
         OUTER_PROJECT=subyard-nested-e2e-abcdef
         OUTER_POOL=nested-e2e-abcdef
         OUTER_INSTANCE=yard-nested-e2e-abcdef
+        STATE="$DOCKER_READY_STATE"
         require_outer_docker_ready
       ' 2>&1
   )"
@@ -1230,8 +1268,10 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
         and .[0].active == "inactive" and .[0].sub == "dead"' >/dev/null <<<"$docker_ready_records" \
         || fail 'Docker prerequisite lost rejected service-state cause'
       ;;
-    enumeration-failure)
-      jq -e -s '.[0].phase == "enumeration" and .[0].native_exit == 23' \
+    enumeration-failure|enumeration-timeout|capture-foreign-vm|capture-query-failure|capture-followup-failure|capture-bounds|capture-inactive|capture-failed)
+      expected_exit=23
+      case "$docker_ready_case" in enumeration-timeout|capture-failed) expected_exit=124 ;; esac
+      jq -e -s --argjson expected "$expected_exit" '.[0].phase == "enumeration" and .[0].native_exit == $expected' \
         >/dev/null <<<"$docker_ready_records" || fail 'Docker prerequisite lost native enumeration cause'
       ;;
     expiry)
@@ -1246,9 +1286,72 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
         && [ "$(cat "$docker_ready_count")" = "$([ "$docker_ready_case" = activating ] && printf 2 || printf 1)" ] \
         || fail "Docker prerequisite did not observe $docker_ready_case before one enumeration"
       ;;
-    enumeration-failure)
-      [ "$docker_ready_rc" = 23 ] && [ "$(grep -Fxc enumeration "$docker_ready_log")" = 1 ] \
+    enumeration-failure|enumeration-timeout|capture-foreign-vm|capture-query-failure|capture-followup-failure|capture-bounds|capture-inactive|capture-failed)
+      [ "$docker_ready_rc" = "$expected_exit" ] && [ "$(grep -Fxc enumeration "$docker_ready_log")" = 1 ] \
         || fail 'Docker prerequisite retried or masked enumeration failure'
+      ! grep -Fxq socket-activation "$docker_ready_log" \
+        || fail 'Docker failure diagnostics socket-activated a daemon through a server request'
+      case "$docker_ready_case" in
+        capture-foreign-vm|capture-query-failure)
+          [ "$(grep -Fxc exec "$docker_ready_log")" = 1 ] \
+            || fail 'Docker failure diagnostics entered a changed or unverified target' ;;
+      esac
+      docker_capture_output="$TMP/nested-docker-capture-$docker_ready_case.output"
+      printf '%s\n' "$docker_ready_output" > "$docker_capture_output"
+      chmod 0600 "$docker_capture_output"
+      python3 - "$docker_capture_output" "$docker_ready_case" "$expected_exit" <<'PY'
+import base64, hashlib, json, pathlib, stat, sys
+
+path = pathlib.Path(sys.argv[1])
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+case, expected = sys.argv[2], int(sys.argv[3])
+artifacts, frames, diagnostics = {}, {}, []
+for line in path.read_text().splitlines():
+    if line.startswith('NESTED_DOCKER_ARTIFACT '):
+        item = json.loads(line.split(' ', 1)[1])
+        assert item['name'] not in artifacts
+        artifacts[item['name']] = item
+    elif line.startswith('NESTED_DOCKER_DATA '):
+        item = json.loads(line.split(' ', 1)[1])
+        frames.setdefault(item['name'], []).append(item)
+    elif line.startswith('NESTED_DOCKER_DIAGNOSTIC '):
+        diagnostics.append(json.loads(line.split(' ', 1)[1]))
+decoded = {}
+for name, item in artifacts.items():
+    records = frames.get(name, [])
+    assert [record['index'] for record in records] == list(range(item['chunks']))
+    assert all(len(record['base64']) <= 2048 for record in records)
+    data = base64.b64decode(''.join(record['base64'] for record in records), validate=True)
+    assert len(data) == item['retained_bytes'] <= (32768 if name == 'unit-journal' else 4096)
+    assert hashlib.sha256(data).hexdigest() == item['sha256']
+    assert item['truncated'] == (len(data) < item['source_bytes'])
+    decoded[name] = data
+assert 'readiness-exec-stderr' in artifacts
+assert decoded['enumeration-stderr'].startswith(b'PRIVATE_SYNTHETIC_PAYLOAD\n')
+timing = [item for item in diagnostics if item['probe'] == 'container-enumeration']
+assert len(timing) == 1 and timing[0]['native_exit'] == expected
+assert timing[0]['budget_ms'] == 10000 and timing[0]['scope'] == 'single-native-probe'
+assert timing[0]['timing_available'] and timing[0]['elapsed_ms'] >= 0
+capture = [item for item in diagnostics if item['probe'] == 'capture']
+assert len(capture) == 1
+if case in ('capture-foreign-vm', 'capture-query-failure', 'capture-followup-failure'):
+    assert capture[0]['native_exit'] == {'capture-foreign-vm': 2, 'capture-query-failure': 17,
+        'capture-followup-failure': 19}[case]
+    assert 'unit-journal' not in artifacts
+else:
+    assert capture[0]['native_exit'] == 0
+    assert decoded['unit-journal'].startswith(b'PRIVATE_SYNTHETIC_PAYLOAD\n')
+    assert any(item['probe'] == 'context-endpoint-class' and item['value'] == 'unix' for item in diagnostics)
+if case == 'capture-bounds':
+    assert artifacts['enumeration-stderr']['truncated'] and artifacts['unit-journal']['truncated']
+    assert artifacts['enumeration-stderr']['retained_bytes'] == 4096
+    assert artifacts['unit-journal']['retained_bytes'] == 32768
+if case in ('capture-inactive', 'capture-failed'):
+    state = [item['state'] for item in diagnostics if item['probe'] == 'unit-state' and item['unit'] == 'docker.service']
+    assert len(state) == 1
+    assert state[0]['ActiveState'] == ('inactive' if case == 'capture-inactive' else 'failed')
+    assert state[0]['SubState'] == ('dead' if case == 'capture-inactive' else 'failed')
+PY
       ;;
     expiry)
       [ "$docker_ready_rc" = 124 ] && ! grep -Fxq enumeration "$docker_ready_log" \
@@ -1261,13 +1364,8 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
   esac
 done
 printf 'ok: nested Docker prerequisite state transitions and failures\n'
-memory_reserve_source="$(awk '
-  /^(nested_decimal_at_most|nested_monotonic_seconds|nested_memory_available_bytes|require_nested_memory_reserve)\(\)/ {
-    copying=1
-  }
-  copying { print }
-  copying && /^}$/ { copying=0 }
-' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh")"
+memory_reserve_source="$(fixture_functions "$nested_teardown_script" \
+  nested_decimal_at_most nested_monotonic_seconds nested_memory_available_bytes require_nested_memory_reserve)"
 memory_sample_count="$TMP/nested-memory-sample-count"
 memory_clock="$TMP/nested-memory-clock"
 memory_sleep_log="$TMP/nested-memory-sleep-log"
@@ -1355,11 +1453,7 @@ set -e
   && grep -Fq 'nested memory requirement exceeds the supported range' \
     <<<"$memory_overflow_output" \
   || fail "nested teardown memory arithmetic overflowed fail-open: rc=$memory_overflow_rc output=$memory_overflow_output"
-bounded_command_source="$(awk '
-  /^bounded_command\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh")"
+bounded_command_source="$(fixture_functions "$ROOT/dev/e2e/nested-teardown-data-boundary.sh" bounded_command)"
 set +e
 bounded_failure="$(
   COMMAND_TIMEOUT=5 COMMAND_KILL_AFTER_SECONDS=1 bash -c \
@@ -1406,9 +1500,8 @@ grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power
   trap '
     [ -z "$runner_pid" ] || kill -KILL -- "-$runner_pid" >/dev/null 2>&1 || true
   ' EXIT
-  eval "$(sed -n '/^start_runner_child() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
-  eval "$(sed -n '/^stop_runner_children() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
-  eval "$(sed -n '/^p0_monotonic_seconds() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
+    start_runner_child stop_runner_children p0_monotonic_seconds)"
   # shellcheck disable=SC2034
   RUNNER_STOP_GRACE_SECONDS=1
   # shellcheck disable=SC2034
@@ -1532,11 +1625,104 @@ done
     || fail 'peer startup did not preserve fresh init, repeated init, check and start'
 )
 # End fresh peer init contract.
-release_update_source="$(awk '
-  /^p0_apply_release_update\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-guest.sh")"
+# Fresh owner init must also create its own project, using the exact cached image.
+# Globals below are consumed by the extracted fixture helpers.
+# shellcheck disable=SC2034
+(
+  die() { printf '%s\n' "$*" >&2; exit 2; }
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" \
+    prepare_owner_image_cache_project reclaim_owner_project_if_present reclaim_owner_project_residue write_owner_registration)"
+  fingerprint="$(printf 'a%.0s' {1..64})"
+  MARKER=subyard-p0-24
+  OWNER_BASE_IMAGE='fixture-cache'
+  OWNER_DIAGNOSTIC_DEV_UID=1001
+  OWNER_DIAGNOSTIC_VM_MEMORY=700MiB
+  OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT=600
+  P0_REAL_INCUS_CONTAINER_IMAGE=images:original-alias
+  timeout() { [ "$1" = --foreground ] && [ "$2" = 900 ] || return 42; shift 2; "$@"; }
+  incus() {
+    printf '%s\n' "$*" >> "$calls"
+    case "$*" in
+      'remote list --format=json')
+        printf '{"images":{"Public":%s,"Protocol":"simplestreams"}}\n' "$public" ;;
+      'image info fixture-cache --project default')
+        printf 'Fingerprint: %s\nType: container\n' "$cached" ;;
+      "image info images:$fingerprint")
+        [ "$scenario" != unavailable ] || return 1
+        printf 'Fingerprint: %s\nType: container\n' "$fingerprint" ;;
+      'project list --format=json')
+        [ "$scenario" != query-failure ] || return 1
+        if [ "$(cat "$state")" = absent ]; then printf '[]\n'; else printf '[{"name":"subyard-test-yard"}]\n'; fi ;;
+      'project show subyard-test-yard') [ "$(cat "$state")" != absent ] ;;
+      'project show subyard-e2e-yard') return 1 ;;
+      'project get subyard-test-yard user.subyard.p0-image-cache')
+        [ "$scenario" != marker-query-failure ] || return 1
+        case "$(cat "$state")" in owned-*) printf '%s\n' "$MARKER";; *) printf '\n';; esac ;;
+      'project delete subyard-test-yard')
+        [ "$(cat "$state")" != owned-nonempty ] || return 1
+        printf 'absent\n' > "$state" ;;
+      'list --project subyard-test-yard --format csv -c n') printf 'yard-test-yard\n' ;;
+      'storage volume list default --project subyard-test-yard --format csv -c t,n') printf 'container,yard-test-yard\ncustom,yard-srv-test-yard\n' ;;
+      'config show yard-test-yard --project subyard-test-yard'|'storage volume show default yard-srv-test-yard --project subyard-test-yard') return 0 ;;
+      'delete yard-test-yard --project subyard-test-yard --force') printf 'owned-empty\n' > "$state" ;;
+      'storage volume delete default yard-srv-test-yard --project subyard-test-yard') return 0 ;;
+      'project create subyard-test-yard -c features.images=false -c user.subyard.p0-image-cache=subyard-p0-24') printf 'unmarked\n' > "$state" ;;
+      *) fail "unexpected owner fixture Incus command: $*" ;;
+    esac
+  }
+  public_owner_init() {
+    [ "$(cat "$state")" = absent ] || fail 'owner public init received a fixture-created unmarked project'
+    grep -Fqx "BASE_IMAGE=images:$fingerprint" "$OWNER_YARD_DIR/test-yard.env" \
+      && grep -Fqx "BASE_IMAGE_FALLBACK=images:$fingerprint" "$OWNER_YARD_DIR/test-yard.env" \
+      || fail 'owner registration changed the cached image identity'
+    printf 'owned-empty\n' > "$state"
+  }
+  for scenario in ready unavailable invalid-image nonpublic source-local source-oci foreign-empty query-failure marker-query-failure owned-empty owned-nonempty; do
+    case_root="$TMP/owner-project-$scenario"
+    install -d -m 0700 "$case_root"
+    state="$case_root/project"; calls="$case_root/calls"
+    : > "$calls"
+    OWNER_YARD_DIR="$case_root/yards"; OWNER_BASE_IMAGE_REFERENCE=''
+    public=true; cached="$fingerprint"
+    P0_REAL_INCUS_CONTAINER_IMAGE=images:original-alias
+    printf 'absent\n' > "$state"
+    case "$scenario" in
+      invalid-image) cached=invalid ;;
+      nonpublic) public=false ;;
+      source-local) P0_REAL_INCUS_CONTAINER_IMAGE=local:fixture-cache ;;
+      source-oci) P0_REAL_INCUS_CONTAINER_IMAGE=docker:fixture ;;
+      foreign-empty|marker-query-failure) printf 'foreign\n' > "$state" ;;
+      owned-*) printf '%s\n' "$scenario" > "$state" ;;
+    esac
+    set +e
+    (
+      set -e
+      if [[ "$scenario" == owned-* ]] || [ "$scenario" = marker-query-failure ]; then
+        reclaim_owner_project_if_present subyard-test-yard
+      else
+        prepare_owner_image_cache_project subyard-test-yard
+        write_owner_registration test-yard test-vms 2224
+        public_owner_init
+      fi
+    ) > "$case_root/output" 2>&1
+    result=$?
+    set -e
+    case "$scenario" in
+      ready)
+        [ "$result" = 0 ] && [ "$(cat "$state")" = owned-empty ] \
+          || { cat "$case_root/output" >&2; fail 'owner setup did not leave project creation to public init'; }
+        ! grep -q '^project create\|^project delete' "$calls" || fail 'owner preparation mutated a future product project' ;;
+      owned-*)
+        [ "$result" = 0 ] && [ "$(cat "$state")" = absent ] || fail 'owned owner residue was not reclaimed' ;;
+      *)
+        [ "$result" = 2 ] || fail "owner setup accepted unsafe $scenario state"
+        ! grep -q '^project create\|^project delete\|^delete ' "$calls" || fail "owner setup mutated refused $scenario state"
+        case "$scenario" in foreign-empty|marker-query-failure) [ "$(cat "$state")" = foreign ] || fail 'foreign owner project was changed';; esac ;;
+    esac
+  done
+)
+# End fresh owner init contract.
+release_update_source="$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" p0_apply_release_update)"
 release_update_mock="$TMP/release-update-yard"
 release_update_log="$TMP/release-update.log"
 {
@@ -1546,7 +1732,7 @@ release_update_log="$TMP/release-update.log"
 chmod +x "$release_update_mock"
 (
   eval "$release_update_source"
-  P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+  P0_CURRENT_BASE_VERSION=0.11.1-p0.current-base
   P0_OWNER_VERSION=0.11.1-p0.owner
   export ROOT SUBYARD_HOME="$TMP/release-update-home"
   export P0_RELEASE_UPDATE_LOG="$release_update_log"
@@ -1556,7 +1742,7 @@ chmod +x "$release_update_mock"
 set +e
 (
   eval "$release_update_source"
-  P0_CURRENT_BASE_VERSION=0.8.1-p0.current-base
+  P0_CURRENT_BASE_VERSION=0.11.1-p0.current-base
   P0_OWNER_VERSION=0.11.1-p0.owner
   export ROOT SUBYARD_HOME="$TMP/release-update-home"
   export P0_RELEASE_UPDATE_LOG="$release_update_log"
@@ -1573,10 +1759,150 @@ set -e
   "file://$ROOT/.build/p0-owner-release" \
   "update --runtime-root $TMP/release-update-home/runtime --version 0.11.1-p0.owner --yes" \
   "file://$ROOT/.build/p0-current-base-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --check" \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.11.1-p0.current-base --check" \
   "file://$ROOT/.build/p0-current-base-release" \
-  "update --runtime-root $TMP/release-update-home/runtime --version 0.8.1-p0.current-base --yes")" ] \
+  "update --runtime-root $TMP/release-update-home/runtime --version 0.11.1-p0.current-base --yes")" ] \
   || fail 'P0 release-impact update does not use its exact local synthetic release'
+
+
+# Begin canonical reader prerequisite ordering contract.
+(
+  # Execute the actual orchestration/helper and stop at its first public stop.
+  # Effects are mocked here; native protected-reader/transition tests own epochs.
+  canonical_source="$(sed -n '/^canonical_broker_release_migration_contract() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  canonical_update_source="$(sed -n '/^p0_apply_release_update() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+  runtime="$TMP/canonical-reader/runtime"
+  install -d -m 0700 "$runtime/current/bin"
+  cat > "$runtime/current/bin/yard" <<'P0ORDER'
+#!/bin/sh
+set -eu
+case "$*" in
+  --version) printf 'yard %s\n' "$P0_ORDER_VERSION";;
+  update\ *)
+    [ "$YARD_RELEASE_BASE_URL" = "$P0_ORDER_RELEASE_URL" ] || exit 42
+    case " $* " in
+      *' --check '*)
+        printf 'inspect\n' >> "$P0_ORDER_LOG"
+        [ "$P0_ORDER_CASE" != inspect-failure ] || exit 31;;
+      *' --yes '*)
+        [ "$(tail -n 1 "$P0_ORDER_LOG")" = inspect ] || exit 42
+        printf 'apply\n' >> "$P0_ORDER_LOG"
+        [ "$P0_ORDER_CASE" != apply-failure ] || exit 32;;
+      *) exit 42;;
+    esac;;
+  '-Y test-yard init --yes')
+    [ "$(tail -n 1 "$P0_ORDER_LOG")" = apply ] || exit 23
+    printf 'init\n' >> "$P0_ORDER_LOG";;
+  '-Y test-yard stop --yes') printf 'stop\n' >> "$P0_ORDER_LOG"; exit 97;;
+  *) exit 42;;
+esac
+P0ORDER
+  chmod 0700 "$runtime/current/bin/yard"
+  for scenario in ready inspect-failure apply-failure; do
+    export P0_ORDER_LOG="$TMP/canonical-reader/$scenario.calls" P0_ORDER_CASE="$scenario"
+    export P0_ORDER_VERSION=0.11.1-p0.current-base P0_ORDER_RELEASE_URL="file://$ROOT/.build/p0-current-base-release"
+    : > "$P0_ORDER_LOG"
+    set +e
+    (
+      set -e
+      # shellcheck disable=SC2034
+      P0_CURRENT_BASE_VERSION="$P0_ORDER_VERSION" P0_OWNER_VERSION=0.11.1-p0.owner
+      export SUBYARD_HOME="$TMP/canonical-reader"
+      eval "$canonical_update_source"
+      eval "$canonical_source"
+      write_owner_registration() { printf 'registration\n' >> "$P0_ORDER_LOG"; }
+      p0_retry_init_after_plan_stale() { "$@"; }
+      die() { exit 2; }
+      canonical_broker_release_migration_contract
+    ) > "$TMP/canonical-reader/$scenario.log" 2>&1
+    actual=$?
+    set -e
+    case "$scenario" in
+      ready) expected=97; calls=$'registration\ninspect\napply\ninit\nstop';;
+      inspect-failure) expected=31; calls=$'registration\ninspect';;
+      apply-failure) expected=32; calls=$'registration\ninspect\napply';;
+    esac
+    [ "$actual" = "$expected" ] && [ "$(cat "$P0_ORDER_LOG")" = "$calls" ] \
+      || fail 'canonical broker init bypassed or ignored its supported reader preparation'
+  done
+)
+# End canonical reader prerequisite ordering contract.
+
+# Begin current owner return-state contract.
+(
+  SOURCE_FILE="$ROOT/dev/e2e/p0-guest.sh"
+  ENTRY=owner_release_contract
+  TMP="$TMP/current-owner-return-state"
+  install -d -m 0700 "$TMP"
+for scenario in ready init-failure foreign-identity; do
+  CASE_ROOT="$TMP/$scenario"
+  mkdir -m 0700 "$CASE_ROOT"
+  export SUBYARD_HOME="$CASE_ROOT/data" OWNER_CONFIG_HOME="$CASE_ROOT/config" CASE_ROOT SCENARIO="$scenario"
+  export SUBYARD_CONFIG_HOME="$OWNER_CONFIG_HOME"
+  export P0_CURRENT_BASE_VERSION=0.11.1-p0.current-base P0_OWNER_VERSION=0.11.1-p0.owner MARKER=subyard-p0-123
+  mkdir -p "$SUBYARD_HOME/runtime/current/bin" "$OWNER_CONFIG_HOME/release-transition/v2"
+  printf 'protected sentinel\n' > "$OWNER_CONFIG_HOME/release-transition/v2/keep"
+  : > "$CASE_ROOT/marker"
+  cat > "$SUBYARD_HOME/runtime/current/bin/yard" <<'YARD'
+#!/bin/sh
+set -eu
+case "$*" in
+  --version) printf 'yard %s\n' "$(cat "$CASE_ROOT/version")";;
+  '-Y test-yard init --yes')
+    [ "$(tail -n 1 "$CASE_ROOT/calls")" = public-owner-install ] || exit 42
+    printf 'init\n' >> "$CASE_ROOT/calls"
+    [ "$SCENARIO" != init-failure ] || exit 23;;
+  '-Y test-yard check') printf 'check\n' >> "$CASE_ROOT/calls";;
+  '-Y test-yard start --yes') printf 'start\n' >> "$CASE_ROOT/calls"; touch "$CASE_ROOT/running";;
+  '-Y test-yard status') printf 'status\n' >> "$CASE_ROOT/calls";;
+  '-Y test-yard _info')
+    printf 'info\n' >> "$CASE_ROOT/calls"
+    printf '%s\n' '{"yardName":"test-yard","accessKind":"local","yardInstanceName":"yard-test-yard","incusProject":"subyard-test-yard","sshHost":"yard-test-yard"}';;
+  *) exit 42;;
+esac
+YARD
+  chmod 0700 "$SUBYARD_HOME/runtime/current/bin/yard"
+  set +e
+  bash -eu -c '
+    eval "$(sed -n "/^$2() {/,/^}/p" "$1")"
+    install_current_base_runtime() { printf "%s\n" "$P0_CURRENT_BASE_VERSION" > "$CASE_ROOT/version"; printf "base\n" >> "$CASE_ROOT/calls"; }
+    canonical_broker_release_migration_contract() { printf "canonical\n" >> "$CASE_ROOT/calls"; }
+    prepare_owner_image_cache_project() { [ "$1" = subyard-test-yard ]; printf "cache\n" >> "$CASE_ROOT/calls"; }
+    write_owner_registration() { [ "$*" = "test-yard test-vms 2224 1" ]; printf "registration\n" >> "$CASE_ROOT/calls"; }
+    install_owner_runtime() { [ "$(tail -n 1 "$CASE_ROOT/calls")" = registration ]; printf "%s\n" "$P0_OWNER_VERSION" > "$CASE_ROOT/version"; printf "public-owner-install\n" >> "$CASE_ROOT/calls"; }
+    p0_retry_init_after_plan_stale() { "$@"; }
+    p0_capacity_assert_root_marker() { :; }
+    die() { exit 2; }
+    incus() {
+      case "$*" in
+        "project get subyard-test-yard user.subyard.installation") echo 1;;
+        "project get subyard-test-yard user.subyard.operator_uid") id -u;;
+        "project get subyard-test-yard user.subyard.data_home") if [ "$SCENARIO" = foreign-identity ]; then echo /foreign; else echo "$SUBYARD_HOME"; fi;;
+        "project get subyard-test-yard user.subyard.config_home") echo "$OWNER_CONFIG_HOME";;
+        "project get subyard-test-yard user.subyard.p0-image-cache") cat "$CASE_ROOT/marker";;
+        "project set subyard-test-yard user.subyard.p0-image-cache=$MARKER") printf "%s\n" "$MARKER" > "$CASE_ROOT/marker"; printf "marker\n" >> "$CASE_ROOT/calls";;
+        *) return 42;;
+      esac
+    }
+    "$2"
+  ' _ "$SOURCE_FILE" "$ENTRY" > "$CASE_ROOT/output" 2>&1
+  actual=$?
+  set -e
+  case "$scenario" in ready) expected=0;; init-failure) expected=23;; foreign-identity) expected=2;; esac
+  [ "$actual" = "$expected" ] || { printf 'unexpected actual function exit=%s scenario=%s\n' "$actual" "$scenario" >&2; exit 1; }
+  [ -f "$OWNER_CONFIG_HOME/release-transition/v2/keep" ] || exit 1
+  [ "$(cat "$CASE_ROOT/version")" = "$P0_OWNER_VERSION" ] || exit 1
+  if [ "$scenario" = ready ]; then
+    [ -f "$CASE_ROOT/running" ] && [ "$(cat "$CASE_ROOT/marker")" = "$MARKER" ] || exit 1
+    [ "$(cat "$CASE_ROOT/calls")" = $'base\ncanonical\ncache\nregistration\npublic-owner-install\ninit\ncheck\nstart\nstatus\ninfo\nmarker' ] || exit 1
+  else
+    [ ! -s "$CASE_ROOT/marker" ] || exit 1
+  fi
+  printf 'return-state scenario=%s native_exit=%s protected_sentinel=retained marker_authority=guarded\n' "$scenario" "$actual"
+done
+
+)
+# End current owner return-state contract.
 
 p0_incus_root="$TMP/p0-incus-bootstrap/platform"
 p0_incus_storage="$p0_incus_root/incus/incus/storage"
@@ -1682,11 +2008,7 @@ set -e
   && [ "$(cat "$owner_image_state")" = $'base-original\nshared-prepared' ] \
   && [ "$(cat "$owner_image_deletes")" = owner-ephemeral ] \
   || fail 'P0 owner cleanup removed a prepared shared image or retained an owner image'
-source_recovery_function="$(awk '
-  /^recover_stale_source_upgrade_fixture\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-guest.sh")"
+source_recovery_function="$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" recover_stale_source_upgrade_fixture)"
 run_source_recovery_case() {
   local inventory="$1" e2e_marker="$2" test_marker="$3" default_marker="$4"
   local fixture_active="${5:-0}" shared_root_tokens="${6:-}"
@@ -1743,61 +2065,26 @@ source_recovery_result="$(run_source_recovery_case $'subyard-test-yard\nsubyard'
   || fail 'P0 source fixture recovery missed a markerless migrated project'
 [ -z "$(run_source_recovery_case subyard-test-yard '' '' '')" ] \
   || fail 'P0 source fixture recovery mutated an unmarked project'
-: > "$SOURCE_RECOVERY_CLEANUP_LOG"
-set +e
-source_recovery_failure="$(run_source_recovery_case \
-  subyard-test-yard '' subyard-p0-source-441 '' 1 2>&1)"
-source_recovery_rc=$?
-set -e
-[ "$source_recovery_rc" = 2 ] \
-  && grep -Fq 'active process' <<<"$source_recovery_failure" \
-  && [ ! -s "$SOURCE_RECOVERY_CLEANUP_LOG" ] \
-  || fail 'P0 source fixture recovery cleaned an active fixture'
-: > "$SOURCE_RECOVERY_CLEANUP_LOG"
-set +e
-source_recovery_failure="$(run_source_recovery_case \
-  subyard-test-yard '' subyard-p0-source-441 '' error 2>&1)"
-source_recovery_rc=$?
-set -e
-[ "$source_recovery_rc" = 2 ] \
-  && grep -Fq 'cannot determine whether' <<<"$source_recovery_failure" \
-  && [ ! -s "$SOURCE_RECOVERY_CLEANUP_LOG" ] \
-  || fail 'P0 source fixture recovery treated a liveness query error as stale'
-for unsafe_source_markers in foreign-marker conflicting-markers malformed-marker; do
-  set +e
-  case "$unsafe_source_markers" in
-    foreign-marker)
-      source_recovery_failure="$(run_source_recovery_case subyard-test-yard '' foreign '' 2>&1)"
-      ;;
-    conflicting-markers)
-      source_recovery_failure="$(run_source_recovery_case \
-        $'subyard-test-yard\nsubyard' '' subyard-p0-source-441 \
-        subyard-p0-source-442 2>&1)"
-      ;;
-    malformed-marker)
-      source_recovery_failure="$(run_source_recovery_case \
-        subyard-test-yard '' subyard-p0-source-44x '' 2>&1)"
-      ;;
-  esac
-  source_recovery_rc=$?
-  set -e
-  [ "$source_recovery_rc" = 2 ] \
-    && grep -Fq 'refusing' <<<"$source_recovery_failure" \
-    || fail "P0 source fixture recovery accepted $unsafe_source_markers"
-done
-set +e
-source_recovery_failure="$(run_source_recovery_case \
-  subyard-test-yard '' subyard-p0-source-441 '' 0 442 2>&1)"
-source_recovery_rc=$?
-set -e
-[ "$source_recovery_rc" = 2 ] \
-  && grep -Fq 'conflicting fixture markers' <<<"$source_recovery_failure" \
-  || fail 'P0 source fixture recovery combined conflicting project and durable markers'
-real_incus_recovery_function="$(awk '
-  /^recover_stale_real_incus_fixture\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-guest.sh")"
+assert_source_recovery_refused() {
+  local expected="$1" output rc=0
+  shift
+  : > "$SOURCE_RECOVERY_CLEANUP_LOG"
+  output="$(run_source_recovery_case "$@" 2>&1)" || rc=$?
+  [ "$rc" = 2 ] && grep -Fq "$expected" <<<"$output" \
+    && [ ! -s "$SOURCE_RECOVERY_CLEANUP_LOG" ] \
+    || fail "source recovery failed to refuse before cleanup: $expected/$rc/$output"
+}
+assert_source_recovery_refused 'active process' \
+  subyard-test-yard '' subyard-p0-source-441 '' 1
+assert_source_recovery_refused 'cannot determine whether' \
+  subyard-test-yard '' subyard-p0-source-441 '' error
+assert_source_recovery_refused refusing subyard-test-yard '' foreign ''
+assert_source_recovery_refused refusing \
+  $'subyard-test-yard\nsubyard' '' subyard-p0-source-441 subyard-p0-source-442
+assert_source_recovery_refused refusing subyard-test-yard '' subyard-p0-source-44x ''
+assert_source_recovery_refused 'conflicting fixture markers' \
+  subyard-test-yard '' subyard-p0-source-441 '' 0 442
+real_incus_recovery_function="$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" recover_stale_real_incus_fixture)"
 run_real_incus_recovery_case() {
   ROOT="$ROOT" REAL_INCUS_RECOVERY_CASE="$1" \
   REAL_INCUS_RECOVERY_FUNCTION="$real_incus_recovery_function" bash -c '
@@ -1870,11 +2157,7 @@ done
   p0_capacity_preflight() { printf 'capacity\n'; }
   [ "$(capacity_preflight)" = $'source\nincus\npool\ncapacity' ]
 ) || fail 'P0 capacity checks ran before fixture recovery'
-markerless_source_function="$(awk '
-  /^is_markerless_migrated_fixture_project\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+markerless_source_function="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" is_markerless_migrated_fixture_project)"
 run_markerless_source_case() {
   local initialized="$1" revision="$2" name="$3"
   SOURCE_MARKERLESS_INITIALIZED="$initialized" \
@@ -2159,11 +2442,7 @@ grep -Fq '"$runtime_root/current/bin/yard" update \' \
   && ! grep -Fq 'scripts/install-runtime-release.sh' \
     "$ROOT/dev/e2e/p0-broker-recovery.sh" \
   || fail 'P0 broker recovery bypasses the release-transition owner'
-recovery_wait_source="$(awk '
-  /^wait_for_slot_state\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-broker-recovery.sh")"
+recovery_wait_source="$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" wait_for_slot_state)"
 recovery_clock="$TMP/recovery-clock"
 recovery_status_budgets="$TMP/recovery-status-budgets"
 recovery_sleep_log="$TMP/recovery-sleep-log"
@@ -2210,12 +2489,8 @@ set -e
   trap '
     [ -z "$holder_pid" ] || kill -KILL -- "-$holder_pid" >/dev/null 2>&1 || true
   ' EXIT
-  eval "$(sed -n '/^recovery_monotonic_seconds() {/,/^}/p' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-  eval "$(sed -n '/^start_holder_child() {/,/^}/p' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh")"
-  eval "$(sed -n '/^stop_holder_child() {/,/^}/p' \
-    "$ROOT/dev/e2e/p0-broker-recovery.sh")"
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-broker-recovery.sh" \
+    recovery_monotonic_seconds start_holder_child stop_holder_child)"
   # Consumed by the dynamically extracted helper.
   # shellcheck disable=SC2034
   HOLDER_STOP_GRACE_SECONDS=1
@@ -2253,6 +2528,190 @@ grep -Fq 'export SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler"' 
   || fail "host-free engine release can observe the physical host power reconciler"
 v0111_recovery="$ROOT/dev/e2e/release-transition-v0111-recovery.sh"
 v0111_observer="$ROOT/dev/e2e/release-transition-post-cas-observer.py"
+assert_v0111_resume_capture_contract() {
+  local scenario output result probe
+  for scenario in failure capture-failure success foreign stdout-symlink \
+    stderr-symlink stderr-hardlink stderr-foreign oversized-inspection; do
+    probe="$TMP/v0111-resume-capture-$scenario"
+    install -d -m 0700 "$probe"
+    output="$probe/controller.log"
+    install -m 0600 /dev/null "$output"
+    if bash -c '
+      set -euo pipefail
+      umask 0022
+      source "$1"
+      STATE_ROOT="$2/state"
+      MARKER=subyard-p0-v0111-123
+      SUCCESS_ROOT="$STATE_ROOT/success"
+      POST_CAS_ROOT="$STATE_ROOT/post-cas"
+      POST_CAS_OBSERVER="$2/observer.py"
+      CANDIDATE_RELEASE=0.11.2-candidate
+      CANDIDATE_VERSION=0.11.2
+      scenario="$3"
+      install -d -m 0700 "$STATE_ROOT" "$POST_CAS_ROOT"
+      printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
+      printf "%s\n" "$MARKER:post-cas" > "$POST_CAS_ROOT/.subyard-p0-marker"
+      chmod 0600 "$STATE_ROOT/.subyard-p0-marker" "$POST_CAS_ROOT/.subyard-p0-marker"
+      select_fixture post-cas
+      install -d -m 0700 "$CONFIG_HOME/release-transition/v2" "$RUNTIME_ROOT"
+      printf "%s\n" "{\"transaction\":\"source\",\"checkpoint\":\"reconciling\"}" > "$JOURNAL"
+      chmod 0600 "$JOURNAL"
+      touch "$POST_CAS_OBSERVER"
+      ln -s releases/0.11.2-candidate "$RUNTIME_ROOT/current"
+      python3 - "$2" "$scenario" <<"PY"
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for name, data in (("stdout", bytes(range(256)) * 300), ("stderr", b"native-error\x00original\n")):
+    if name == "stdout" and sys.argv[2] == "oversized-inspection":
+        data = json.dumps({"outcome": {"status": "ready", "code": "ready"},
+                           "assessment": {"changed": False}, "padding": "x" * 70000}).encode()
+    path = root / name
+    path.write_bytes(data)
+    path.chmod(0o600)
+for name in ("foreign", "foreign.expected"):
+    path = root / name
+    path.write_bytes(b"FOREIGN-RESUME-SENTINEL\n")
+    path.chmod(0o600)
+PY
+      probe_foreign="$2/foreign"
+      eval "$(declare -f prepare_recovery_logs | sed "1s/prepare_recovery_logs/actual_prepare_recovery_logs/")"
+      prepare_recovery_logs() {
+        actual_prepare_recovery_logs "$@" || return
+        if [ "$scenario:${*: -1}" = stdout-symlink:resume.stderr ]; then
+          mv "$FIXTURE_ROOT/resume.log" "$FIXTURE_ROOT/held-resume.log"
+          ln -s "$probe_foreign" "$FIXTURE_ROOT/resume.log"
+        fi
+      }
+      capture_recovery_plan() { :; }
+      setsid() {
+        printf "%s\n" "{\"transaction\":\"candidate\",\"checkpoint\":\"target-active\",\"active\":\"releases/$CANDIDATE_RELEASE\"}" > "$POST_CAS_OBSERVATION_MARKER"
+        chmod 0600 "$POST_CAS_OBSERVATION_MARKER"
+        printf "%s\n" "{\"transaction\":\"candidate\",\"checkpoint\":\"target-active\"}" > "$JOURNAL"
+        printf "first-process-original\n"
+        return 137
+      }
+      fence_reaped_post_cas_transition() { [ "$1" = 137 ]; POST_CAS_TRANSITION_PID=; }
+      fixture_env() {
+        if [ "$2" = update ] && [ "$3" = --offline ]; then
+          [ "$*" = "$RUNTIME_ROOT/current/bin/yard update --offline --version 0.11.2 --runtime-root $RUNTIME_ROOT" ] || return 98
+          [ -z "$(cat)" ] || return 99
+          cat "$probe_stdout"
+          cat "$probe_stderr" >&2
+          case "$scenario" in
+            stderr-symlink|stderr-hardlink|stderr-foreign)
+              mv "$FIXTURE_ROOT/resume.stderr" "$FIXTURE_ROOT/held-resume.stderr"
+              case "$scenario" in
+                stderr-symlink) ln -s "$probe_foreign" "$FIXTURE_ROOT/resume.stderr" ;;
+                stderr-hardlink) ln "$probe_foreign" "$FIXTURE_ROOT/resume.stderr" ;;
+                stderr-foreign) cp "$probe_foreign" "$FIXTURE_ROOT/resume.stderr"; chmod 0600 "$FIXTURE_ROOT/resume.stderr" ;;
+              esac
+              ;;
+          esac
+          [ "$scenario" != foreign ] || printf "foreign\n" > "$FIXTURE_ROOT/.subyard-p0-marker"
+          [ "$scenario" = success ] && return 0
+          return 17
+        fi
+        printf "{}\n"
+      }
+      probe_stdout="$2/stdout"
+      probe_stderr="$2/stderr"
+      if [ "$scenario" = oversized-inspection ]; then
+        probe_jq_slurp="$2/jq-slurp"
+        jq() {
+          [ "$1" != -cs ] || touch "$probe_jq_slurp"
+          command jq "$@"
+        }
+      else
+        recovery_inspection_diagnostics() { printf "inspection-attempted\n"; return 23; }
+      fi
+      cleanup_failure_diagnostics() { printf "error-capture-attempted\n"; return 23; }
+      if [ "$scenario" = capture-failure ]; then
+        capture_post_cas_resume_failure() { return 23; }
+      fi
+      assert_terminal() { :; }
+      assert_ready_check() { :; }
+      assert_materialized_fixed_point() { :; }
+      yard() { :; }
+      upgrade_to_current_candidate() { :; }
+      run_post_cas_resume post-cas
+    ' _ "$v0111_recovery" "$probe" "$scenario" >"$output" 2>&1; then result=0; else result=$?; fi
+    if [ "$scenario" = success ]; then
+      [ "$result" = 0 ] && ! grep -q 'RELEASE_RECOVERY_\|inspection-attempted' "$output" \
+        || fail 'successful historical resume emitted failure capture'
+    else
+      [ "$result" = 17 ] || fail "historical resume capture replaced native17: $scenario/$result"
+      case "$scenario" in
+        failure|oversized-inspection)
+          grep -q 'native_status=17 capture_status=0' "$output" \
+            || fail 'failed historical resume lost its original artifact capture'
+          if [ "$scenario" = oversized-inspection ]; then
+            [ ! -e "$probe/jq-slurp" ] \
+              && grep -q 'inspection parse_valid=unavailable size_limit=65536' "$output" \
+              || fail 'oversized held resume output reached inspection jq slurp'
+          fi
+          python3 - "$probe" <<'PY'
+import base64, hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+fixture = root / 'state/post-cas'
+records, chunks = {}, {}
+for line in (root / 'controller.log').read_bytes().splitlines():
+    if line.startswith(b'RELEASE_RECOVERY_ARTIFACT '):
+        item = json.loads(line.split(b' ', 1)[1]); records[item['name']] = item
+    if line.startswith(b'RELEASE_RECOVERY_DATA '):
+        item = json.loads(line.split(b' ', 1)[1]); chunks.setdefault(item['name'], {})[item['index']] = item['base64']
+paths = {'resume-stdout': 'resume.log', 'resume-stderr': 'resume.stderr',
+         'journal': 'config/release-transition/v2/journal.json',
+         'cas-marker': 'post-cas-link-observed.json', 'first-process': 'first-process.log'}
+assert records.keys() == paths.keys()
+for name, relative in paths.items():
+    path = fixture / relative
+    assert path.stat().st_mode & 0o777 == 0o600
+    item = records[name]
+    assert item['state'] == 'retained'
+    data = base64.b64decode(''.join(chunks.get(name, {})[i] for i in range(item['chunks'])), validate=True)
+    original = path.read_bytes()
+    assert data == original[:item['retained_bytes']]
+    assert item['source_bytes'] == len(original) and item['truncated'] == (len(data) < len(original))
+    assert hashlib.sha256(data).hexdigest() == item['sha256']
+assert records['resume-stdout']['truncated'] and records['resume-stdout']['retained_bytes'] == 65536
+assert (fixture / 'resume.stderr').read_bytes() == (root / 'stderr').read_bytes()
+assert (root / 'stderr').read_bytes() in (root / 'controller.log').read_bytes()
+PY
+          ;;
+        capture-failure|foreign)
+          grep -q 'native_status=17 capture_status=23' "$output" \
+            || fail 'capture refusal replaced the native resume outcome'
+          ! grep -q '^RELEASE_RECOVERY_DATA ' "$output" \
+            || fail 'foreign/refused historical resume artifacts were exported'
+          ;;
+        stdout-symlink|stderr-symlink|stderr-hardlink|stderr-foreign)
+          cmp -s "$probe/foreign" "$probe/foreign.expected" \
+            || fail "historical resume wrote through a replaced log path: $scenario"
+          ! grep -aq 'FOREIGN-RESUME-SENTINEL' "$output" \
+            || fail "historical resume exposed foreign log bytes: $scenario"
+          grep -aq 'native_status=17 capture_status=23' "$output" \
+            || fail "log replacement lost original17/capture23: $scenario"
+          python3 - "$output" "$scenario" <<'PY'
+import json, pathlib, sys
+name = 'resume-stdout' if sys.argv[2] == 'stdout-symlink' else 'resume-stderr'
+records, data = [], []
+for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines():
+    if line.startswith(b'RELEASE_RECOVERY_ARTIFACT '):
+        item = json.loads(line.split(b' ', 1)[1])
+        if item['name'] == name:
+            records.append(item)
+    if line.startswith(b'RELEASE_RECOVERY_DATA '):
+        item = json.loads(line.split(b' ', 1)[1])
+        if item['name'] == name:
+            data.append(item)
+assert len(records) == 1 and records[0]['state'] == 'refused' and not data
+PY
+          ;;
+      esac
+    fi
+  done
+}
+assert_v0111_resume_capture_contract
 assert_v0111_materialized_oracle_contract() {
   local scenario output expected_error
   for scenario in composed raw-only missing wrong-source body-drift extra host-mutated \
@@ -2369,18 +2828,30 @@ bash -c '
   ! grep -Eq "^(YARD_TEMPLATE|NESTED_E2E_VMS|E2E_VM_)" "$registration"
 ' _ "$v0111_recovery" "$TMP/v0111-config" \
   || fail 'v0.11.1 config-drift fixture must allow the selected Codex integration'
+prepare_v0111_observer_probe() {
+  local probe="$1"
+  mkdir -p "$probe/runtime/releases/source" "$probe/runtime/releases/0.11.2-candidate"
+  ln -s releases/source "$probe/runtime/current"
+  printf '{"transaction":"source","checkpoint":"reconciling"}\n' > "$probe/journal.json"
+}
+run_v0111_observer() {
+  local probe="$1"
+  shift
+  exec setsid python3 "$v0111_observer" \
+    --runtime-root "$probe/runtime" --journal "$probe/journal.json" \
+    --source-transaction source --candidate-target 0.11.2-candidate \
+    --marker "$probe/observed.json" --timeout 5 "$@"
+}
+assert_no_later_mutations() {
+  local before
+  before="$(sha256sum "$@")"
+  sleep 0.2
+  [ "$(sha256sum "$@")" = "$before" ] || fail "post-CAS process kept mutating: $*"
+}
 v0111_observer_probe="$TMP/v0111-post-cas-observer"
-mkdir -p "$v0111_observer_probe/runtime/releases/source" \
-  "$v0111_observer_probe/runtime/releases/0.11.2-candidate"
-ln -s releases/source "$v0111_observer_probe/runtime/current"
-printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
-  > "$v0111_observer_probe/journal.json"
+prepare_v0111_observer_probe "$v0111_observer_probe"
 v0111_observer_rc=0
-setsid python3 "$v0111_observer" \
-  --runtime-root "$v0111_observer_probe/runtime" \
-  --journal "$v0111_observer_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
-  --marker "$v0111_observer_probe/observed.json" --timeout 5 -- \
+run_v0111_observer "$v0111_observer_probe" -- \
   sh -c '
     sleep 0.05
     printf "{\"transaction\":\"candidate\",\"checkpoint\":\"activation-intent\",\"goal\":{\"target\":\"0.11.2-candidate\",\"direction\":\"activate-target\"},\"releases\":{\"from\":\"source\",\"target\":\"0.11.2-candidate\"}}\\n" \
@@ -2405,12 +2876,9 @@ fi
     "$v0111_observer_probe/observed.json" >/dev/null \
   || fail 'v0.11.1 post-CAS observer did not interrupt its synthetic link activation'
 checkpoint_observer_rc=0
-setsid python3 "$v0111_observer" \
-  --runtime-root "$v0111_observer_probe/runtime" \
-  --journal "$v0111_observer_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
+run_v0111_observer "$v0111_observer_probe" \
   --checkpoint "$v0111_observer_probe/history-checkpoint.json" \
-  --marker "$v0111_observer_probe/checkpoint-observed.json" --timeout 5 -- \
+  --marker "$v0111_observer_probe/checkpoint-observed.json" -- \
   sh -c '
     flock "$1/checkpoint-child.lock" sh -c '\''touch "$1/checkpoint-child.ready"; sleep 10'\'' _ "$1" &
     while [ ! -f "$1/checkpoint-child.ready" ]; do sleep 0.01; done
@@ -2442,16 +2910,9 @@ python3 "$v0111_observer" \
     "$v0111_observer_probe/unisolated.stderr" \
   || fail 'v0.11.1 post-CAS observer accepts an unisolated process group'
 v0111_timeout_probe="$TMP/v0111-post-cas-timeout"
-mkdir -p "$v0111_timeout_probe/runtime/releases/source"
-ln -s releases/source "$v0111_timeout_probe/runtime/current"
-printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
-  > "$v0111_timeout_probe/journal.json"
+prepare_v0111_observer_probe "$v0111_timeout_probe"
 v0111_timeout_rc=0
-setsid python3 "$v0111_observer" \
-  --runtime-root "$v0111_timeout_probe/runtime" \
-  --journal "$v0111_timeout_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
-  --marker "$v0111_timeout_probe/observed.json" --timeout 0.2 -- \
+run_v0111_observer "$v0111_timeout_probe" --timeout 0.2 -- \
   sh -c '
     while :; do
       printf "mutation\n" >> "$1/mutations"
@@ -2474,23 +2935,11 @@ done
   && [ ! -e "$v0111_timeout_probe/observed.json" ] \
   && [ ! -L "$v0111_timeout_probe/observed.json" ] \
   || fail 'v0.11.1 post-CAS observer timeout did not fence its process group'
-v0111_timeout_before="$(sha256sum "$v0111_timeout_probe/mutations")"
-sleep 0.2
-v0111_timeout_after="$(sha256sum "$v0111_timeout_probe/mutations")"
-[ "$v0111_timeout_after" = "$v0111_timeout_before" ] \
-  || fail 'v0.11.1 post-CAS observer timeout left a mutating descendant alive'
+assert_no_later_mutations "$v0111_timeout_probe/mutations"
 v0111_exception_probe="$TMP/v0111-post-cas-exception"
-mkdir -p "$v0111_exception_probe/runtime/releases/source" \
-  "$v0111_exception_probe/runtime/releases/0.11.2-candidate"
-ln -s releases/source "$v0111_exception_probe/runtime/current"
-printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
-  > "$v0111_exception_probe/journal.json"
+prepare_v0111_observer_probe "$v0111_exception_probe"
 v0111_exception_rc=0
-setsid python3 "$v0111_observer" \
-  --runtime-root "$v0111_exception_probe/runtime" \
-  --journal "$v0111_exception_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
-  --marker "$v0111_exception_probe/observed.json" --timeout 5 -- \
+run_v0111_observer "$v0111_exception_probe" -- \
   sh -c '
     : > "$1/mutations"
     sleep 0.05
@@ -2522,23 +2971,11 @@ if [ "$v0111_exception_rc" != 137 ] \
   kill -KILL -- "-$v0111_exception_pid" 2>/dev/null || true
   fail 'v0.11.1 post-CAS observer exception did not fence its process group'
 fi
-v0111_exception_before="$(sha256sum "$v0111_exception_probe/mutations")"
-sleep 0.2
-v0111_exception_after="$(sha256sum "$v0111_exception_probe/mutations")"
-[ "$v0111_exception_after" = "$v0111_exception_before" ] \
-  || fail 'v0.11.1 post-CAS observer exception left a mutating descendant alive'
+assert_no_later_mutations "$v0111_exception_probe/mutations"
 v0111_queued_probe="$TMP/v0111-post-cas-queued-exit"
-mkdir -p "$v0111_queued_probe/runtime/releases/source" \
-  "$v0111_queued_probe/runtime/releases/0.11.2-candidate"
-ln -s releases/source "$v0111_queued_probe/runtime/current"
-printf '{"transaction":"source","checkpoint":"reconciling"}\n' \
-  > "$v0111_queued_probe/journal.json"
+prepare_v0111_observer_probe "$v0111_queued_probe"
 v0111_queued_rc=0
-setsid python3 "$v0111_observer" \
-  --runtime-root "$v0111_queued_probe/runtime" \
-  --journal "$v0111_queued_probe/journal.json" \
-  --source-transaction source --candidate-target 0.11.2-candidate \
-  --marker "$v0111_queued_probe/observed.json" --timeout 5 -- \
+run_v0111_observer "$v0111_queued_probe" -- \
   sh -c 'printf "ready\n" > "$1/ready"; sleep 0.5; exit 23' \
   _ "$v0111_queued_probe" \
   >/dev/null 2>"$v0111_queued_probe/stderr" &
@@ -2569,122 +3006,257 @@ fi
   && grep -Fq 'transition exited with status 23 before exact activation' \
     "$v0111_queued_probe/stderr" \
   || fail 'v0.11.1 observer accepted a queued activation after transition exit'
-v0111_cleanup_probe="$TMP/v0111-cleanup-probe"
-mkdir -p "$v0111_cleanup_probe"
-v0111_cleanup_rc=0
-bash -c '
-  set -euo pipefail
-  source "$1"
-  probe=$2
-  CLEANUP_ARMED=0
-  trap cleanup EXIT
-  trap "handle_signal 130" INT
-  trap "handle_signal 143" TERM
-  setsid sh -c '\''
-    while :; do
-      for resource in project unit reconciler fixture; do
-        printf "mutation\n" >> "$1/$resource"
-      done
-      sleep 0.02
+for v0111_stop_case in cancel normal reaped; do
+  v0111_stop_probe="$TMP/v0111-stop-$v0111_stop_case"
+  mkdir -p "$v0111_stop_probe"
+  v0111_stop_rc=0
+  bash -c '
+    set -euo pipefail
+    source "$1"
+    probe=$2
+    scenario=$3
+    CLEANUP_ARMED=0
+    trap cleanup EXIT
+    trap "handle_signal 130" INT
+    trap "handle_signal 143" TERM
+    setsid sh -c '\''
+      mutate() {
+        while :; do
+          for resource in $2; do printf "mutation\n" >> "$1/$resource"; done
+          sleep 0.02
+        done
+      }
+      case "$3" in
+        normal) trap "" TERM; mutate "$1" "$2" ;;
+        cancel) mutate "$1" "$2" ;;
+        reaped) mutate "$1" "$2" & sleep 0.05; exit 23 ;;
+      esac
+    '\'' _ "$probe" "$4" "$scenario" &
+    POST_CAS_TRANSITION_PID=$!
+    printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
+    for _ in $(seq 1 100); do
+      [ -s "$probe/fixture" ] && break
+      sleep 0.01
     done
-  '\'' _ "$probe" &
-  POST_CAS_TRANSITION_PID=$!
-  printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
-  for _ in $(seq 1 100); do
-    [ -s "$probe/fixture" ] && break
-    sleep 0.01
-  done
-  [ -s "$probe/fixture" ]
-  kill -TERM "$$"
-' _ "$v0111_recovery" "$v0111_cleanup_probe" || v0111_cleanup_rc=$?
-[ "$v0111_cleanup_rc" = 143 ] \
-  || fail 'v0.11.1 cleanup swallowed TERM instead of reporting cancellation'
-v0111_cleanup_pid="$(cat "$v0111_cleanup_probe/pid")"
-! kill -0 -- "-$v0111_cleanup_pid" 2>/dev/null \
-  || fail 'v0.11.1 cleanup left its post-CAS process group alive'
-v0111_cleanup_before="$(sha256sum \
-  "$v0111_cleanup_probe/project" "$v0111_cleanup_probe/unit" \
-  "$v0111_cleanup_probe/reconciler" "$v0111_cleanup_probe/fixture")"
-sleep 0.2
-v0111_cleanup_after="$(sha256sum \
-  "$v0111_cleanup_probe/project" "$v0111_cleanup_probe/unit" \
-  "$v0111_cleanup_probe/reconciler" "$v0111_cleanup_probe/fixture")"
-[ "$v0111_cleanup_after" = "$v0111_cleanup_before" ] \
-  || fail 'v0.11.1 post-CAS process mutated resources after cleanup'
-v0111_normal_probe="$TMP/v0111-normal-stop-probe"
-mkdir -p "$v0111_normal_probe"
-bash -c '
-  set -euo pipefail
-  source "$1"
-  probe=$2
-  CLEANUP_ARMED=0
-  trap cleanup EXIT
-  setsid sh -c '\''
-    trap "" TERM
-    while :; do
-      printf "mutation\n" >> "$1/fixture"
-      sleep 0.02
-    done
-  '\'' _ "$probe" &
-  POST_CAS_TRANSITION_PID=$!
-  printf "%s\n" "$POST_CAS_TRANSITION_PID" > "$probe/pid"
-  for _ in $(seq 1 100); do
-    [ -s "$probe/fixture" ] && break
-    sleep 0.01
-  done
-  [ -s "$probe/fixture" ]
-  stop_post_cas_transition KILL
-  [ -z "$POST_CAS_TRANSITION_PID" ]
-' _ "$v0111_recovery" "$v0111_normal_probe"
-v0111_normal_pid="$(cat "$v0111_normal_probe/pid")"
-! kill -0 -- "-$v0111_normal_pid" 2>/dev/null \
-  || fail 'normal post-CAS interruption left its process group alive'
-v0111_normal_before="$(sha256sum "$v0111_normal_probe/fixture")"
-sleep 0.2
-v0111_normal_after="$(sha256sum "$v0111_normal_probe/fixture")"
-[ "$v0111_normal_after" = "$v0111_normal_before" ] \
-  || fail 'normal post-CAS process mutated fixture state after being cleared'
-v0111_reaped_probe="$TMP/v0111-reaped-leader-probe"
-mkdir -p "$v0111_reaped_probe"
-bash -c '
-  set -euo pipefail
-  source "$1"
-  probe=$2
-  CLEANUP_ARMED=0
-  trap cleanup EXIT
-  setsid sh -c '\''
-    while :; do
-      printf "mutation\n" >> "$1/fixture"
-      sleep 0.02
-    done &
-    sleep 0.05
-    exit 23
-  '\'' _ "$probe" &
-  POST_CAS_TRANSITION_PID=$!
-  observed_rc=0
-  wait "$POST_CAS_TRANSITION_PID" || observed_rc=$?
-  fence_reaped_post_cas_transition "$observed_rc"
-  [ "$POST_CAS_TRANSITION_STATUS" = 23 ]
-  [ -z "$POST_CAS_TRANSITION_PID" ]
-' _ "$v0111_recovery" "$v0111_reaped_probe"
-v0111_reaped_before="$(sha256sum "$v0111_reaped_probe/fixture")"
-sleep 0.2
-v0111_reaped_after="$(sha256sum "$v0111_reaped_probe/fixture")"
-[ "$v0111_reaped_after" = "$v0111_reaped_before" ] \
-  || fail 'reaped post-CAS observer left its mutating process group alive'
+    [ -s "$probe/fixture" ]
+    case "$scenario" in
+      cancel) kill -TERM "$$" ;;
+      normal) stop_post_cas_transition KILL ;;
+      reaped)
+        observed_rc=0
+        wait "$POST_CAS_TRANSITION_PID" || observed_rc=$?
+        fence_reaped_post_cas_transition "$observed_rc"
+        [ "$POST_CAS_TRANSITION_STATUS" = 23 ]
+        ;;
+    esac
+    [ -z "$POST_CAS_TRANSITION_PID" ]
+  ' _ "$v0111_recovery" "$v0111_stop_probe" "$v0111_stop_case" \
+    "$([ "$v0111_stop_case" = cancel ] && printf 'project unit reconciler fixture' || printf fixture)" \
+    || v0111_stop_rc=$?
+  expected=0
+  [ "$v0111_stop_case" != cancel ] || expected=143
+  [ "$v0111_stop_rc" = "$expected" ] || fail "post-CAS $v0111_stop_case lost native exit: $v0111_stop_rc"
+  ! kill -0 -- "-$(cat "$v0111_stop_probe/pid")" 2>/dev/null \
+    || fail "post-CAS $v0111_stop_case left its process group alive"
+  assert_no_later_mutations "$v0111_stop_probe"/fixture
+  if [ "$v0111_stop_case" = cancel ]; then
+    assert_no_later_mutations "$v0111_stop_probe"/{project,unit,reconciler}
+  fi
+done
 grep -Fq 'STATE_ROOT="/var/tmp/subyard-p0-v0111-$TOKEN"' "$v0111_recovery" \
   && grep -Fq -- '-c features.images=false -c user.subyard.p0="$FIXTURE_MARKER"' "$v0111_recovery" \
   && grep -Fq 'assert_state_root' "$v0111_recovery" \
   && grep -Fq 'assert_fixture_root' "$v0111_recovery" \
   && grep -Fq 'assert_project_marker' "$v0111_recovery" \
   || fail 'v0.11.1 recovery fixture mutations are not marker-bounded'
-grep -Fq 'POWER_UNIT="/etc/systemd/system/subyard-p0-v0111-$FIXTURE-$TOKEN.service"' \
-    "$v0111_recovery" \
-  && grep -Fq 'cleanup_power_runtime' "$v0111_recovery" \
-  && grep -Fq 'systemctl disable --now "$POWER_UNIT_NAME"' "$v0111_recovery" \
-  && ! grep -Fq 'SUBYARD_POWER_UNIT_PATH=/etc/systemd/system/subyard-power-reconcile.service' \
-  "$v0111_recovery" \
-  || fail 'v0.11.1 fixture power runtime is not unique, systemd-visible, and cleanup-owned'
+bash -c '
+  set -euo pipefail
+  source "$1" 123
+  select_fixture success
+  [ "$POWER_RECONCILER" = /usr/local/libexec/subyard/yard-boot-reconcile ]
+  [ "$POWER_UNIT_NAME" = subyard-power-reconcile.service ]
+  [ "$POWER_UNIT" = /etc/systemd/system/subyard-power-reconcile.service ]
+  install -d -m 0700 "$2"
+  POWER_RECONCILER="$2/helper"
+  POWER_UNIT="$2/unit"
+  POWER_UNIT_ENABLEMENT="$2/enablement"
+  systemctl() { printf "not-found\n"; return 4; }
+  require_absent_legacy_power
+  for path in "$POWER_RECONCILER" "$POWER_UNIT" "$POWER_UNIT_ENABLEMENT" \
+    "$2/.helper.native-install.lock" "$2/.helper.native-custody.json" \
+    "$2/.unit.native-install.lock" "$2/.unit.native-custody.json"; do
+    printf "foreign fixture resource\n" > "$path"
+    before=$(sha256sum "$path")
+    if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+    [ "$(sha256sum "$path")" = "$before" ]
+    rm "$path"
+  done
+  ln -s missing "$POWER_UNIT_ENABLEMENT"
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  [ "$(readlink "$POWER_UNIT_ENABLEMENT")" = missing ]
+  rm "$POWER_UNIT_ENABLEMENT"
+  systemctl() { printf "enabled-runtime\n"; }
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  systemctl() { printf "not-found\n"; return 4; }
+  # Run the real read-only native validation on fixture-owned local files.
+  sudo() { [ "$1" = -n ] && shift; "$@"; }
+  for resource in helper unit; do
+    install -m 0600 /dev/null "$2/.$resource.native-install.lock"
+    printf "{\"generation\":\"%064d\",\"owner\":\"host-power\",\"version\":1}\n" 0 > "$2/.$resource.native-custody.json"
+    chmod 0644 "$2/.$resource.native-custody.json"
+  done
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  POWER_COORDINATION_BINDING="$(power_coordination_binding)"
+  require_absent_legacy_power
+  [ "$(power_coordination_binding)" = "$POWER_COORDINATION_BINDING" ]
+  printf "{\"generation\":\"%064d\",\"owner\":\"host-power\",\"version\":1}\n" 1 > "$2/.helper.native-custody.json"
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  POWER_COORDINATION_BINDING="$(power_coordination_binding)"
+  chmod 0664 "$2/.helper.native-custody.json"
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  chmod 0644 "$2/.helper.native-custody.json"
+  POWER_COORDINATION_BINDING="$(power_coordination_binding)"
+  exec {coordination_fd}<"$2/.helper.native-install.lock"
+  flock -n "$coordination_fd"
+  if (require_absent_legacy_power) >/dev/null 2>&1; then exit 1; fi
+  exec {coordination_fd}<&-
+  require_absent_legacy_power
+  TEST_VMS_SINK="$2/sink"
+  TEST_VMS_SINK_SERVICE="$2/sink.service"
+  TEST_VMS_SINK_TIMER="$2/sink.timer"
+  assert_native_resources_absent
+  printf "foreign survivor\n" > "$POWER_RECONCILER"
+  if (assert_native_resources_absent) > "$2/survivor.log" 2>&1; then exit 1; fi
+  grep -Fq "resource_kind=power-helper artifact_kind=installed-resource" "$2/survivor.log"
+  [ "$(cat "$POWER_RECONCILER")" = "foreign survivor" ]
+  rm "$POWER_RECONCILER"
+' _ "$v0111_recovery" "$TMP/v0111-default-power" \
+  || fail 'historical recovery power boundary did not preserve exact coordination custody'
+# Exercise the actual EXIT cleanup and yard alias with shared default power paths.
+for v0111_cleanup_case in post-cas-refusal second-entry-drift helper unit enablement loaded active main-pid control-pid late-unit absent; do
+  bash -c '
+    set -euo pipefail
+    source "$1" 123
+    probe=$2
+    scenario=$3
+    STATE_ROOT="$probe/state"
+    SUCCESS_ROOT="$STATE_ROOT/success"
+    POST_CAS_ROOT="$STATE_ROOT/post-cas"
+    install -d -m 0700 "$STATE_ROOT" "$probe/defaults"
+    printf "%s\n" "$MARKER" > "$STATE_ROOT/.subyard-p0-marker"
+    eval "$(declare -f select_fixture | sed "1s/select_fixture/select_fixture_native/")"
+    select_fixture() {
+      select_fixture_native "$1"
+      POWER_RECONCILER="$probe/defaults/helper"
+      POWER_UNIT="$probe/defaults/unit"
+      POWER_UNIT_ENABLEMENT="$probe/defaults/enablement"
+      TEST_VMS_SINK="$probe/defaults/sink"
+      TEST_VMS_SINK_SERVICE="$probe/defaults/sink.service"
+      TEST_VMS_SINK_TIMER="$probe/defaults/sink.timer"
+    }
+    select_fixture success
+    install -d -m 0700 "$FIXTURE_ROOT" "$BIN_ROOT"
+    printf "%s\n" "$FIXTURE_MARKER" > "$FIXTURE_ROOT/.subyard-p0-marker"
+    printf "#!/bin/sh\nprintf yard-teardown >> %s/commands\nexit 97\n" "$probe" > "$BIN_ROOT/yard"
+    chmod 0755 "$BIN_ROOT/yard"
+    if [ "$scenario" = late-unit ]; then
+      printf "#!/bin/sh\nprintf late-unit > %s\nchmod 0640 %s\ntouch %s/project-removed\n" \
+        "$POWER_UNIT" "$POWER_UNIT" "$probe" > "$BIN_ROOT/yard"
+    fi
+    SUCCESS_ARMED=1
+    CLEANUP_ARMED=1
+    case "$scenario" in
+      post-cas-refusal)
+        select_fixture post-cas
+        install -d -m 0700 "$FIXTURE_ROOT"
+        printf "%s\n" "$FIXTURE_MARKER" > "$FIXTURE_ROOT/.subyard-p0-marker"
+        POST_CAS_ARMED=1
+        CURRENT_UNINSTALL_REFUSED=post-cas
+        ;;
+    esac
+    case "$scenario" in
+      post-cas-refusal|second-entry-drift|helper)
+        printf "foreign helper\n" > "$POWER_RECONCILER"
+        chmod 0751 "$POWER_RECONCILER" ;;
+    esac
+    case "$scenario" in
+      post-cas-refusal|second-entry-drift|unit)
+        printf "ExecStart=%s _power-reconcile\n" "$POWER_RECONCILER" > "$POWER_UNIT"
+        chmod 0640 "$POWER_UNIT" ;;
+    esac
+    case "$scenario" in
+      post-cas-refusal|second-entry-drift|enablement) ln -s unit "$POWER_UNIT_ENABLEMENT" ;;
+    esac
+    snapshot() {
+      local path
+      for path in "$POWER_RECONCILER" "$POWER_UNIT" "$POWER_UNIT_ENABLEMENT"; do
+        if [ -L "$path" ]; then stat -c "%a" "$path"; readlink "$path"
+        elif [ -e "$path" ]; then stat -c "%a" "$path"; sha256sum "$path"; fi
+      done
+    }
+    before=$(snapshot)
+    systemctl() {
+      [ "$1" = show ] || { printf "systemctl\n" >> "$probe/commands"; return 97; }
+      case "$3" in
+        --property=LoadState) [ "$scenario" != loaded ] || { printf "loaded\n"; return; }; printf "not-found\n" ;;
+        --property=ActiveState) [ "$scenario" != active ] || { printf "active\n"; return; }; printf "inactive\n" ;;
+        --property=MainPID) [ "$scenario" != main-pid ] || { printf "123\n"; return; }; printf "0\n" ;;
+        --property=ControlPID) [ "$scenario" != control-pid ] || { printf "123\n"; return; }; printf "0\n" ;;
+        *) return 97 ;;
+      esac
+    }
+    incus() {
+      case "$1:$2" in
+        project:show) [ "$scenario" != absent ] && [ ! -e "$probe/project-removed" ] ;;
+        project:get) printf "%s\n" "$FIXTURE_MARKER" ;;
+        list:--project) printf "owned-instance\n" ;;
+        config:get) printf "true\n" ;;
+        *) printf "incus\n" >> "$probe/commands"; return 97 ;;
+      esac
+    }
+    sudo() {
+      if [ "$scenario" = absent ] && [ "$1:$2:$4:$5" = "-n:find:-depth:-delete" ] \
+        && { [ "$3" = "$SUCCESS_ROOT" ] || [ "$3" = "$POST_CAS_ROOT" ]; }; then
+        command find "$3" -depth -delete
+      else
+        printf "sudo\n" >> "$probe/commands"
+        return 97
+      fi
+    }
+    observed=0
+    (
+      trap cleanup EXIT
+      case "$scenario" in
+        second-entry-drift) prepare_fixture post-cas ;;
+        absent)
+          select_fixture success
+          cleanup_power_runtime
+          cleanup_power_runtime
+          cleanup_fixture success
+          cleanup_fixture success
+          ;;
+      esac
+    ) || observed=$?
+    [ ! -e "$probe/commands" ]
+    if [ "$scenario" = late-unit ]; then
+      [ "$(cat "$POWER_UNIT")" = late-unit ]
+      [ "$(stat -c "%a" "$POWER_UNIT")" = 640 ]
+      [ -e "$probe/project-removed" ]
+    else
+      [ "$(snapshot)" = "$before" ]
+    fi
+    if [ "$scenario" = absent ]; then
+      [ "$observed" = 0 ] && [ ! -e "$STATE_ROOT" ]
+    else
+      [ "$observed" = 3 ]
+      [ "$(cat "$SUCCESS_ROOT/.subyard-p0-marker")" = "$MARKER:success" ]
+      if [ "$scenario" = post-cas-refusal ]; then
+        [ "$(cat "$POST_CAS_ROOT/.subyard-p0-marker")" = "$MARKER:post-cas" ]
+      fi
+    fi
+  ' _ "$v0111_recovery" "$TMP/v0111-cleanup-$v0111_cleanup_case" "$v0111_cleanup_case" \
+    || fail "historical recovery cleanup changed shared power state: $v0111_cleanup_case"
+done
 grep -Fq 'cleanup_test_vms_sink' "$v0111_recovery" \
   && grep -Fq 'systemctl disable --now "$TEST_VMS_SINK_TIMER_NAME"' "$v0111_recovery" \
   && grep -Fq 'sudo -n find "$FIXTURE_ROOT" -depth -delete' "$v0111_recovery" \
@@ -3438,7 +4010,25 @@ done < "$TMP/public-callers"
 [ -z "$slotless_public_callers" ] \
   || fail "public lease-taking caller lacks exact --slot:\n$slotless_public_callers"
 
-P0_REAL_INCUS_WAIT_FUNCTION="$(sed -n '/^wait_ready() {/,/^}/p' "$ROOT/dev/e2e/p0-real-incus.sh")" \
+python3 - "$TMP/real-incus-vga.png" <<'PY'
+import os
+import pathlib
+import struct
+import sys
+import zlib
+
+def chunk(kind, body):
+    return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+
+image = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+image += chunk(b'IDAT', zlib.compress(b'\0\xff\xff\xff')) + chunk(b'IEND', b'')
+pathlib.Path(sys.argv[1]).write_bytes(image)
+os.chmod(sys.argv[1], 0o600)
+PY
+P0_REAL_INCUS_WAIT_FUNCTION="$(fixture_functions "$ROOT/dev/e2e/p0-real-incus.sh" \
+  qemu_process_identity capture_qemu_facts emit_vga_screenshot capture_vga_screenshot wait_ready)" \
+P0_REAL_INCUS_WAIT_TMP="$TMP/real-incus-wait" \
+P0_REAL_INCUS_WAIT_PNG="$TMP/real-incus-vga.png" \
   bash -c '
     set -euo pipefail
     # Mock sleep owns elapsed time, without the special wall-clock counter.
@@ -3446,37 +4036,176 @@ P0_REAL_INCUS_WAIT_FUNCTION="$(sed -n '/^wait_ready() {/,/^}/p' "$ROOT/dev/e2e/p
     SECONDS=0
     eval "$P0_REAL_INCUS_WAIT_FUNCTION"
     PROJECT=test-project
+    MARKER=test-marker
+    TMP="$P0_REAL_INCUS_WAIT_TMP"
+    mkdir -m 0700 "$TMP"
     die() { return 2; }
-    sleep() { SECONDS=$((SECONDS + 180)); }
+    sleep() { SECONDS=$((SECONDS + 180)); fake_sleep_elapsed=$((fake_sleep_elapsed + 180)); }
+    timeout() { shift 2; "$@"; }
+    sudo() {
+      [ "$1" = -n ]; shift
+      case "$*" in
+        "cat /proc/123/comm"|"cat /proc/124/comm")
+          if [ "$case_name" = unsafe-comm ]; then printf "foreign-process\n"
+          else printf "qemu-system-x86\n"; fi ;;
+        "cat /proc/123/stat"|"cat /proc/124/stat")
+          count=$(cat "$TMP/stat-count"); count=$((count + 1))
+          printf "%s\n" "$count" > "$TMP/stat-count"
+          start=500
+          [ "$case_name" != start-drift ] || start=$((start + count))
+          printf "123 (qemu-system-x86) S"
+          for _ in $(seq 1 18); do printf " 0"; done
+          printf " %s\n" "$start" ;;
+        "find /proc/123/fd "*|"find /proc/124/fd "*)
+          if [ "$case_name" != no-kvm-fds ]; then
+            printf "/dev/kvm\nanon_inode:kvm-vm\nanon_inode:[kvm-vcpu]\n"
+          fi
+          printf "unprinted-private-target\n" ;;
+        *) return 90 ;;
+      esac
+    }
     real_incus_observe() {
       case "$1" in
-        exec) [ "$case_name" != stuck-vm ] && [ "$((SECONDS - started))" -ge 300 ] ;;
+        exec)
+          exec_calls=$((exec_calls + 1))
+          if [ "$case_name" = slow-vm ] && [ "$((SECONDS - started))" -ge 300 ]; then
+            return 0
+          fi
+          printf "native-agent-error-%s\n" "$exec_calls" >&2
+          if [ "$case_name" = bounded-output ]; then
+            printf "%05000d\nomitted-agent-tail\n" 0 >&2
+          fi
+          return 71
+          ;;
         list) printf "RUNNING\n" ;;
-        info|console) diagnostics="$diagnostics $1" ;;
+        project)
+          if [ "$case_name" = foreign-marker ]; then printf "foreign-marker\n"
+          else printf "test-marker\n"; fi ;;
+        query)
+          case "$2" in
+            *"/state?"*)
+              count=$(cat "$TMP/state-count"); count=$((count + 1))
+              printf "%s\n" "$count" > "$TMP/state-count"
+              pid=123
+              if [ "$case_name" = identity-drift ] && [ "$((count % 2))" = 0 ]; then pid=124; fi
+              printf "{\"status\":\"Running\",\"pid\":%s}\n" "$pid"
+              return 0 ;;
+            *"/console?"*)
+              case "$case_name" in
+                vga-failure) return 77 ;;
+                malformed-png) printf "not a PNG\n" ;;
+                oversized-png) head -c 2097153 /dev/zero ;;
+                *) cat "$P0_REAL_INCUS_WAIT_PNG" ;;
+              esac
+              return 0 ;;
+          esac
+          diagnostics="$diagnostics query"
+          if [ "$case_name" = failed-queries ]; then
+            printf "native-instance-query-error\n" >&2
+            return 73
+          fi
+          printf "{\"name\":\"test-instance\",\"type\":\"virtual-machine\",\"config\":{\"user.subyard.p0\":\"test-marker\",\"volatile.base_image\":\"%064d\"},\"expanded_config\":{\"limits.cpu\":\"1\",\"limits.memory\":\"1GiB\",\"security.secureboot\":\"false\",\"private\":\"must-not-print\"},\"expanded_devices\":{\"root\":{\"size\":\"5GiB\"}}}\n" 0
+          ;;
+        info|console)
+          diagnostics="$diagnostics $1"
+          if [ "$case_name" = failed-queries ]; then
+            printf "native-%s-query-error\n" "$1" >&2
+            [ "$1" != info ] || return 74
+            return 75
+          fi
+          printf "native-%s-output\n" "$1"
+          if [ "$case_name" = bounded-output ]; then
+            printf "%070000d\nomitted-query-tail\n" 0
+          fi
+          ;;
         *) return 3 ;;
       esac
     }
-    for case_name in slow-vm slow-container stuck-vm; do
+    for case_name in slow-vm slow-container stuck-vm failed-queries bounded-output \
+      identity-drift start-drift unsafe-comm foreign-marker no-kvm-fds \
+      vga-failure malformed-png oversized-png; do
       started=$SECONDS
       diagnostics=""
+      exec_calls=0
+      fake_sleep_elapsed=0
+      printf "0\n" > "$TMP/state-count"
+      printf "0\n" > "$TMP/stat-count"
       kind=virtual-machine
       [ "$case_name" != slow-container ] || kind=container
-      if wait_ready test-instance "$kind"; then
+      output="$TMP/$case_name.log"
+      if wait_ready test-instance "$kind" >"$output" 2>&1; then
         [ "$case_name" = slow-vm ]
         [ -z "$diagnostics" ]
       else
+        rc=$?
+        [ "$rc" = 2 ]
         [ "$case_name" != slow-vm ]
-        [ "$diagnostics" = " info console" ]
-        [ "$((SECONDS - started))" -le 720 ]
+        [ "$diagnostics" = " query info console" ]
+        [ "$fake_sleep_elapsed" -le 720 ]
+        grep -Fq "query=agent exit_status=71" "$output"
+        grep -Fxq "native-agent-error-$exec_calls" "$output"
+        # Two container probes or four VM probes, with no extra diagnostic probe after expiry.
+        expected_calls=4
+        [ "$kind" != container ] || expected_calls=2
+        [ "$exec_calls" = "$expected_calls" ]
+        if [ "$case_name" = failed-queries ]; then
+          grep -Fq "query=instance exit_status=73" "$output"
+          grep -Fxq "native-instance-query-error" "$output"
+          grep -Fq "query=info exit_status=74" "$output"
+          grep -Fq "query=console exit_status=75" "$output"
+        else
+          grep -Fq "query=instance-projection exit_status=0" "$output"
+          grep -Fq "\"cpu\":\"1\",\"memory\":\"1GiB\",\"root_size\":\"5GiB\",\"secureboot\":\"false\"" "$output"
+          grep -Fq "query=info exit_status=0" "$output"
+          grep -Fq "query=console exit_status=0" "$output"
+        fi
+        ! grep -Fq omitted-agent-tail "$output"
+        ! grep -Fq omitted-query-tail "$output"
+        ! grep -Fq must-not-print "$output"
+        ! grep -Fq unprinted-private-target "$output"
+        [ "$(stat -c %a "$TMP/test-instance-agent.stderr")" = 600 ]
+        if [ "$kind" = virtual-machine ]; then
+          case "$case_name" in
+            identity-drift|start-drift|unsafe-comm|foreign-marker|failed-queries)
+              ! grep -q "^P0_INCUS_QEMU " "$output"
+              ! grep -q "^P0_INCUS_VGA " "$output" ;;
+            *)
+              if [ "$case_name" = no-kvm-fds ]; then
+                grep -Fq "\"kvm_fd_counts\":{\"dev_kvm\":0,\"kvm_vm\":0,\"kvm_vcpu\":0}" "$output"
+                grep -Fq "\"acceleration\":\"unknown\"" "$output"
+              else
+                grep -Fq "\"kvm_fd_counts\":{\"dev_kvm\":1,\"kvm_vm\":1,\"kvm_vcpu\":1}" "$output"
+              fi
+              case "$case_name" in
+                vga-failure) grep -Fq "query=vga exit_status=77" "$output" ;;
+                malformed-png|oversized-png)
+                  ! grep -q "^P0_INCUS_VGA " "$output"
+                  grep -Fq "query=vga-capture exit_status=1" "$output" ;;
+                *)
+                  grep -Fq "query=vga-capture exit_status=0" "$output"
+                  python3 - "$output" "$P0_REAL_INCUS_WAIT_PNG" <<"PY"
+import base64, hashlib, json, pathlib, sys
+rows = [json.loads(line[len("P0_INCUS_VGA "):]) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.startswith("P0_INCUS_VGA ")]
+assert len(rows) == 1
+row = rows[0]
+chunks = [json.loads(line[len("P0_INCUS_VGA_DATA "):]) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.startswith("P0_INCUS_VGA_DATA ")]
+assert len(chunks) == row["chunks"] and [item["index"] for item in chunks] == list(range(row["chunks"]))
+assert all(item["name"] == row["name"] and len(item["base64"]) <= 2048 for item in chunks)
+data = base64.b64decode("".join(item["base64"] for item in chunks), validate=True)
+assert data == pathlib.Path(sys.argv[2]).read_bytes()
+assert len(data) == row["bytes"] and hashlib.sha256(data).hexdigest() == row["sha256"]
+assert row["width"] == row["height"] == 1
+PY
+                  ;;
+              esac ;;
+          esac
+        fi
       fi
     done
   ' || fail "P0 readiness does not allow slow VM boot or diagnose bounded failures"
-real_incus_project_cleanup_functions="$(
-  for function_name in real_incus_observe p0_monotonic_seconds cleanup_real_incus \
-    cleanup_sleep active_instance_operation_ids delete_marked_instance cleanup; do
-    sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-real-incus.sh"
-  done
-)"
+real_incus_project_cleanup_functions="$(fixture_functions "$ROOT/dev/e2e/p0-real-incus.sh" \
+  real_incus_observe p0_monotonic_seconds cleanup_real_incus cleanup_sleep \
+  active_instance_operation_ids delete_marked_instance cleanup)"
 run_real_incus_project_cleanup_case() {
   REAL_INCUS_PROJECT_CLEANUP_CASE="$1" \
   REAL_INCUS_PROJECT_CLEANUP_LOG="$2" \
@@ -3547,12 +4276,9 @@ for real_incus_project_cleanup_case in foreign-project foreign-instance foreign-
     && ! grep -Fq 'image ' "$real_incus_project_cleanup_log" \
     || fail "P0 cleanup changed an $real_incus_project_cleanup_case fixture or its cache"
 done
-real_incus_cleanup_functions="$(
-  for function_name in real_incus_observe p0_monotonic_seconds cleanup_real_incus \
-    cleanup_sleep active_instance_operation_ids delete_marked_instance; do
-    sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-real-incus.sh"
-  done
-)"
+real_incus_cleanup_functions="$(fixture_functions "$ROOT/dev/e2e/p0-real-incus.sh" \
+  real_incus_observe p0_monotonic_seconds cleanup_real_incus \
+  cleanup_sleep active_instance_operation_ids delete_marked_instance)"
 run_absent_instance_cleanup() {
   P0_REAL_INCUS_CLEANUP_FUNCTIONS="$real_incus_cleanup_functions" \
     P0_REAL_INCUS_CLEANUP_CASE="$1" bash -c '
@@ -4111,7 +4837,7 @@ smoke_rollback_fixture_contract() {
     for function_name in verify_smoke_state establish_smoke_continuation verify_predecessor_rollback_refusal finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
-    for function_name in assert_project_owned assert_legacy_continuation establish_legacy_continuation verify_legacy_full_removal_refusal; do
+    for function_name in assert_project_owned assert_legacy_continuation legacy_continuation_identity init_legacy_continuation repair_legacy_activation_after_restart establish_legacy_continuation verify_legacy_full_removal_refusal; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
     done
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
@@ -4138,14 +4864,14 @@ smoke_rollback_fixture_contract() {
       printf 'retained %s\n' "$record" > "$V2_STATE_ROOT/$record"
       chmod 0600 "$V2_STATE_ROOT/$record"
     done
-    if [[ "$scenario" = disk-tmp-reboot* ]]; then
+    if [[ "$scenario" = disk-tmp-reboot* || "$scenario" = tmp-* ]]; then
       printf '{"schemaVersion":2,"checkpoint":"complete","transaction":"old-transaction","goal":{"target":"candidate-aaaaaaaaaaaa","direction":"activate-target"},"releases":{"from":"predecessor","target":"candidate-aaaaaaaaaaaa"},"steps":[]}\n' > "$V2_JOURNAL"
     fi
     install -d -m 0700 "$V2_STATE_ROOT/evidence/retained"
     printf 'retained evidence\n' > "$V2_STATE_ROOT/evidence/retained/verified.json"
     chmod 0600 "$V2_STATE_ROOT/evidence/retained/verified.json"
     printf '# Release smoke retained operator setting\n' > "$OPERATOR_HOME/.config/subyard/config.env"
-    : > "$STATE_ROOT/installation"
+    printf '\n' > "$STATE_ROOT/installation"
     die() { printf '%s\n' "$*" >&2; exit 2; }
     info() { :; }
     ok() { case "$*" in *'and teardown passed') printf '%s\n' "$*" > "$STATE_ROOT/passed" ;; esac; }
@@ -4162,9 +4888,21 @@ smoke_rollback_fixture_contract() {
     sudo() { [ "$1" = -n ] || die 'unexpected sudo arguments'; shift; "$@"; }
     ip() { printf 'retained-route\n'; }
     incus() {
+      if [ "$1" = exec ]; then
+        [ "$*" = "exec $INSTANCE --project $PROJECT -- sh -c $(cat "$ROOT/scripts/guest-disk-tmp.sh") sh check" ] \
+          || die 'disk policy check did not use the production guest script'
+        printf 'probe\n' >> "$STATE_ROOT/probes"
+        [ "$scenario" != tmp-probe-fail ] || return 73
+        [ ! -e "$STATE_ROOT/pending" ] || return 10
+        return 0
+      fi
       case "$*" in
-        "project get $PROJECT user.subyard.installation") cat "$STATE_ROOT/installation" ;;
-        "project get $PROJECT user.subyard.p0-power-systemd") printf '%s\n' "$MARKER" ;;
+        "project get $PROJECT user.subyard.installation")
+          if [ "$scenario" = tmp-owner ] && [ -e "$STATE_ROOT/pending" ]; then printf '1\n'; else cat "$STATE_ROOT/installation"; fi ;;
+        "project get $PROJECT user.subyard.p0-power-systemd")
+          if [ "$scenario" = tmp-marker ]; then printf 'foreign-marker\n'; else printf '%s\n' "$MARKER"; fi ;;
+        "config get $INSTANCE volatile.uuid --project $PROJECT")
+          if [ "$scenario" = tmp-uuid ] || { [ "$scenario" = tmp-after-uuid ] && [ -e "$STATE_ROOT/restarted" ]; }; then printf 'foreign-uuid\n'; else printf 'fixture-uuid\n'; fi ;;
         "info $INSTANCE --project $PROJECT") return 0 ;;
         "list $INSTANCE --project $PROJECT --format csv -c s") printf 'RUNNING\n' ;;
         "project show $PROJECT") return 1 ;;
@@ -4174,7 +4912,9 @@ smoke_rollback_fixture_contract() {
     operator_env() {
       case "$1" in
         readlink) cat "$STATE_ROOT/current" ;;
-        grep|jq|stat|sha256sum) "$@" ;;
+        stat)
+          if [ "$3" = '%a:%u' ]; then printf '%s:2000\n' "$(stat -c '%a' "$4")"; else "$@"; fi ;;
+        grep|jq|sha256sum|test) "$@" ;;
         env)
           [ "$2" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] \
             || [ "$2" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] \
@@ -4230,6 +4970,7 @@ smoke_rollback_fixture_contract() {
               disk-tmp-near-match) sed 's/yard default:/yard foreign:/' "$STATE_ROOT/expected-init.log" >&2; return 1 ;;
               disk-tmp-wrong-exit) cat "$STATE_ROOT/expected-init.log" >&2; return 23 ;;
             esac
+            : > "$STATE_ROOT/pending"
             cat "$STATE_ROOT/expected-init.log" >&2
             return 1
           fi
@@ -4237,8 +4978,12 @@ smoke_rollback_fixture_contract() {
         'stop --yes'|'start --yes')
           assert_project_owned
           assert_legacy_continuation
-          [[ "$scenario" = disk-tmp-reboot* ]] || die 'unexpected fixture restart'
+          [[ "$scenario" = disk-tmp-reboot* || "$scenario" = tmp-* ]] || die 'unexpected fixture restart'
           printf '%s\n' "$*" >> "$STATE_ROOT/restart"
+          [ "$scenario:$1" != tmp-stop-fail:stop ] || return 45
+          [ "$scenario:$1" != tmp-start-fail:start ] || return 46
+          [ "$1" != start ] || rm "$STATE_ROOT/pending"
+          [ "$1" != start ] || : > "$STATE_ROOT/restarted"
           ;;
         'migrate --check --json')
           [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] || die 'assessment preceded restart'
@@ -4289,7 +5034,7 @@ smoke_rollback_fixture_contract() {
           printf 'authorized\n' > "$STATE_ROOT/migration-authorized"
           ;;
         'init --yes')
-          assert_legacy_continuation
+          [ ! -f "$STATE_ROOT/legacy-continuation.sha256" ] || assert_legacy_continuation
           if [[ "$scenario" = disk-tmp-reboot* ]]; then
             [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] \
               || die 'repeat init preceded explicit owner restart'
@@ -4349,6 +5094,23 @@ smoke_rollback_fixture_contract() {
         'teardown --yes') [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] || die 'teardown did not retain candidate' ;;
         *) die 'unexpected yard operation' ;;
       esac
+      case "$*" in
+        'init --continue-legacy --yes'|'init --yes')
+          printf 'init\n' >> "$STATE_ROOT/init-calls"
+          local calls
+          calls="$(wc -l < "$STATE_ROOT/init-calls")"
+          if { [[ "$scenario" = tmp-* ]] && [ "$scenario" != tmp-repeat ] && [ "$calls" = 1 ]; } \
+            || { [ "$scenario" = tmp-repeat ] && [ "$calls" = 2 ]; } \
+            || { [ "$scenario" = tmp-twice ] && [ "$calls" = 3 ]; }; then
+            : > "$STATE_ROOT/pending"
+            [ "$scenario" != tmp-grant ] || chmod 0644 "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+            printf '%s\n' 'yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start' >&2
+            [ "$scenario" != tmp-other-error ] || printf 'another terminal error\n' >&2
+            return 1
+          fi
+          [ "$scenario:$calls" != tmp-resume-fail:2 ] || return 47
+          ;;
+      esac
       if [ -n "${next:-}" ]; then
         if [ "$scenario" = grant-change ]; then
           printf 'changed\n' >> "$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
@@ -4370,9 +5132,18 @@ smoke_rollback_fixture_contract() {
       operator_yard init --yes
     fi
     finish_smoke
+    local expected_plain=2
+    case "$scenario" in tmp-repeat|disk-tmp-reboot*) expected_plain=3 ;; esac
     [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
       && [ "$(wc -l < "$STATE_ROOT/consents")" = 1 ] \
-      && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = 2 ] || die 'smoke lost explicit consent or repeated plain init'
+      && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = "$expected_plain" ] || die 'smoke lost explicit consent or repeated plain init'
+    if [[ "$scenario" = tmp-* || "$scenario" = disk-tmp-reboot* ]]; then
+      [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] \
+        && [ "$(wc -l < "$STATE_ROOT/probes")" = 2 ] || die 'disk policy transition was not bounded to one verified restart'
+    else
+      [ ! -e "$STATE_ROOT/restart" ] && [ ! -e "$STATE_ROOT/probes" ] \
+        || die 'successful init added an unnecessary restart or probe'
+    fi
     assert_runtime_links "$CANDIDATE_RELEASE_TARGET" releases/compatible-bbbbbbbbbbbb
     [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] || die 'compatible smoke cycle lost a transition'
     [ -f "$STATE_ROOT/passed" ] || die 'smoke did not complete teardown'
@@ -4396,24 +5167,25 @@ for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata 
   enrollment-checkpoint-change enrollment-ledger-change enrollment-journal-change \
   enrollment-evidence-change enrollment-mode-change enrollment-project-change \
   grant-change installation-change wrong-reason unexpected-accept links-change \
-  checkpoint-change ledger-change journal-change rollback-fail rollforward-fail; do
+  checkpoint-change ledger-change journal-change rollback-fail rollforward-fail \
+  tmp-repeat tmp-other-error tmp-probe-fail tmp-stop-fail tmp-start-fail \
+  tmp-resume-fail tmp-uuid tmp-after-uuid tmp-grant tmp-owner tmp-marker tmp-twice; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success || "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata || "$smoke_rollback_scenario" = disk-tmp-reboot-ready || "$smoke_rollback_scenario" = disk-tmp-reboot-ready-preserve ]]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success || "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata || "$smoke_rollback_scenario" = disk-tmp-reboot-ready || "$smoke_rollback_scenario" = disk-tmp-reboot-ready-preserve || "$smoke_rollback_scenario" = tmp-repeat ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
     fi
     if [[ "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata ]]; then
       smoke_restart_state="$TMP/smoke-rollback-$smoke_rollback_scenario/state"
-      cmp "$smoke_restart_state/expected-init.log" "$smoke_restart_state/legacy-continuation-init.log" \
-        && [ "$(cat "$smoke_restart_state/legacy-continuation-init.exit")" = 1 ] \
-        && [ "$(stat -c '%a' "$smoke_restart_state/legacy-continuation-init.log")" = 600 ] \
+      grep -Flx -- "$(cat "$smoke_restart_state/expected-init.log")" "$smoke_restart_state"/continuation-init.* >/dev/null \
+        && [ "$(stat -c '%a' "$smoke_restart_state"/continuation-init.* | sort -u)" = 600 ] \
         && grep -Fxq 'legacy_continuation_init_exit=1' "$smoke_rollback_log" \
-        || fail 'fixture lost the original reboot-required init result'
+        || fail 'fixture lost the original bounded reboot-required init result'
       [ "$(stat -c '%a' "$smoke_restart_state/post-restart-migrate.json")" = 600 ] \
         && ! grep -Fq private-sentinel "$smoke_rollback_log" \
         && sed -n 's/^power_activation_repair_inspection=//p' "$smoke_rollback_log" | jq -e '
@@ -4436,6 +5208,11 @@ for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata 
     case "$smoke_rollback_scenario" in
       disk-tmp-unrelated|disk-tmp-near-match) smoke_rollback_expected=1 ;;
       disk-tmp-wrong-exit) smoke_rollback_expected=23 ;;
+      tmp-probe-fail) smoke_rollback_expected=73 ;;
+      tmp-stop-fail) smoke_rollback_expected=45 ;;
+      tmp-start-fail) smoke_rollback_expected=46 ;;
+      tmp-resume-fail) smoke_rollback_expected=47 ;;
+      tmp-*) smoke_rollback_expected=1 ;;
     esac
     [ "$smoke_rollback_rc" = "$smoke_rollback_expected" ] \
       || fail "release smoke concealed $smoke_rollback_scenario failure"
@@ -4465,6 +5242,14 @@ for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata 
           || fail 'fixture restarted after an unexpected init failure'
       fi
     fi
+    case "$smoke_rollback_scenario" in
+      tmp-other-error|tmp-probe-fail|tmp-uuid|tmp-grant|tmp-owner|tmp-marker)
+        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/restart" ] \
+          || fail 'unproved pending policy restarted the yard' ;;
+      tmp-twice)
+        [ "$(wc -l < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/restart")" = 2 ] \
+          || fail 'establishment repeated its single allowed transition' ;;
+    esac
     if [[ "$smoke_rollback_scenario" = enrollment-* ]]; then
       [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/consents" ] \
         || fail 'release smoke granted continuation after failed inventory enrollment'
@@ -5345,11 +6130,200 @@ retryable_failure_snapshot="$(
 )"
 [ "$retryable_failure_snapshot" = 0 ] \
   || fail 'P0 reboot treats an auto-restarting exit-75 attempt as terminal'
-source_deadline_function="$(awk '
-  /^relax_fixture_init_deadline\(\)/ { copying=1 }
-  copying { print }
-  copying && /^}$/ { exit }
-' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+# Source default setup must let ordinary init create its own project first.
+run_source_default_fixture() {
+  local fixture_case="$1" fixture_root="$TMP/source-default-$1"
+  install -d -m 0700 "$fixture_root"
+  SOURCE_DEFAULT_CASE="$fixture_case" SOURCE_DEFAULT_ROOT="$fixture_root" \
+    SOURCE_DEFAULT_SCRIPT="$ROOT/dev/e2e/p0-source-upgrade.sh" bash -s <<'SOURCE_DEFAULT'
+set -euo pipefail
+F="$SOURCE_DEFAULT_ROOT"
+DEFAULT_PROJECT=subyard DEFAULT_INSTANCE=yard PROJECT=subyard-e2e-yard
+BASE_IMAGE=fixture-cached-cloud MARKER=subyard-p0-source-441
+OPERATOR_HOME="$F/operator"
+install -m 0600 /dev/null "$F/calls"
+printf 'retain-default-cache\n' > "$F/default-cache"
+chmod 0600 "$F/default-cache"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+operator_uid() { printf '1005\n'; }
+p0_retry_init_after_plan_stale() { "$@"; }
+is_markerless_migrated_fixture_project() { return 1; }
+sudo() { printf 'sudo %s\n' "$*" >> "$F/calls"; }
+base64() {
+  case "$SOURCE_DEFAULT_CASE" in encoder-error|partial-encoder-error|getter-encoder74) return 74 ;; esac
+  command base64 "$@"
+}
+incus() {
+  printf 'incus %s\n' "$*" >> "$F/calls"
+  case "$1 $2" in
+    'project list')
+      [ "$SOURCE_DEFAULT_CASE" != inventory-error ] || return 7
+      [ ! -e "$F/present" ] || printf '%s\n' "$DEFAULT_PROJECT"
+      ;;
+    'project show') [ -e "$F/present" ] ;;
+    'project create')
+      # Only the unchanged historical setup is allowed to make this call.
+      install -m 0600 /dev/null "$F/present"
+      printf 'false\n' > "$F/shared-images"
+      ;;
+    'project get')
+      [ -e "$F/present" ] || return 1
+      case "$4" in
+        user.subyard.operator_uid)
+          case "$SOURCE_DEFAULT_CASE" in owner-query-error|partial-query-error) return 7 ;; esac
+          if [ "$SOURCE_DEFAULT_CASE" = getter-status73 ]; then printf '1005\n'; return 73; fi
+          ;;
+        user.subyard.config_home)
+          case "$SOURCE_DEFAULT_CASE" in
+            owner-extra-lf|partial-owner-extra-lf) printf '%s\n\n' "$OPERATOR_HOME/.config/subyard"; return 0 ;;
+            unframed) printf '%s' "$OPERATOR_HOME/.config/subyard"; return 0 ;;
+          esac
+          ;;
+        user.subyard.p0-source)
+          [ "$SOURCE_DEFAULT_CASE" != marker-query-error ] || return 7
+          [ ! -e "$F/marker" ] || cat "$F/marker"
+          if [ "$SOURCE_DEFAULT_CASE" = readback-extra-lf ] && [ -e "$F/marker" ]; then printf '\n'; fi
+          printf '\n'
+          return 0
+          ;;
+        features.images) printf 'true\n'; return 0 ;;
+      esac
+      [ -f "$F/owner" ] || return 0
+      awk -F= -v key="$4" '$1==key {sub(/^[^=]*=/, ""); print}' "$F/owner"
+      ;;
+    'project set')
+      [ "$*" = "project set $DEFAULT_PROJECT user.subyard.p0-source=$MARKER" ] || return 91
+      case "$SOURCE_DEFAULT_CASE" in marker-write-error|partial-marker-write-error) return 7 ;; esac
+      printf '%s' "$MARKER" > "$F/marker"
+      chmod 0600 "$F/marker"
+      ;;
+    'image info') [ "$*" = "image info $BASE_IMAGE --project default" ] ;;
+    'config get')
+      case "$4" in user.subyard.desired_power) printf 'running\n' ;; user.subyard.managed) printf 'true\n' ;; *) return 91 ;; esac
+      ;;
+    'config show') [ -e "$F/instance" ] ;;
+    'storage volume')
+      case "$3" in list) printf 'custom,yard-srv\n' ;; delete) : ;; *) return 91 ;; esac
+      ;;
+    'image list')
+      [ "$*" = "image list --project $DEFAULT_PROJECT --format csv -c f" ] || return 91
+      printf '%064d\n' 1
+      ;;
+    'image delete') [ "$*" = "image delete $(printf '%064d' 1) --project $DEFAULT_PROJECT" ] ;;
+    'project delete') rm "$F/present" ;;
+    'delete '*) rm "$F/instance" ;;
+    *) return 91 ;;
+  esac
+}
+operator_yard() {
+  printf 'yard %s\n' "$*" >> "$F/calls"
+  case "$*" in
+    'init --yes')
+      if [ -e "$F/present" ]; then
+        # Same refusal as the native init guard: a fixture marker is not ownership.
+        [ -f "$F/owner" ] || return 1
+        return 91
+      fi
+      [ "$SOURCE_DEFAULT_CASE" != partial-missing ] || return 23
+      install -m 0600 /dev/null "$F/present"
+      cat > "$F/owner" <<OWNER
+user.subyard.installation=1
+user.subyard.operator_uid=1005
+user.subyard.data_home=$OPERATOR_HOME/.subyard
+user.subyard.config_home=$OPERATOR_HOME/.config/subyard
+user.subyard.yard_name=default
+user.subyard.instance_name=$DEFAULT_INSTANCE
+OWNER
+      chmod 0600 "$F/owner"
+      case "$SOURCE_DEFAULT_CASE" in
+        owner-mismatch) sed -i 's|config_home=.*|config_home=/foreign|' "$F/owner" ;;
+        marker-foreign|partial-marker-foreign) printf 'foreign-marker' > "$F/marker"; chmod 0600 "$F/marker" ;;
+        marker-lf|partial-marker-lf) printf '\n' > "$F/marker"; chmod 0600 "$F/marker" ;;
+        marker-nul) printf '\0' > "$F/marker"; chmod 0600 "$F/marker" ;;
+      esac
+      case "$SOURCE_DEFAULT_CASE" in partial-*) return 23 ;; esac
+      install -m 0600 /dev/null "$F/instance"
+      ;;
+    'start --yes'|check) [ "$(cat "$F/marker")" = "$MARKER" ] ;;
+    *) return 91 ;;
+  esac
+}
+for name in prepare_project read_default_project_property mark_created_default_project prepare_default_yard \
+  assert_fixture_project cleanup_owned_project; do
+  eval "$(sed -n "/^$name() {/,/^}/p" "$SOURCE_DEFAULT_SCRIPT")"
+done
+case "$SOURCE_DEFAULT_CASE" in
+  foreign) install -m 0600 /dev/null "$F/present" ;;
+  legacy) prepare_project; exit ;;
+  getter-status73) operator_yard init --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
+  getter-encoder74) operator_yard init --yes; read_default_project_property actual user.subyard.operator_uid; exit ;;
+esac
+prepare_default_yard
+if [ "$SOURCE_DEFAULT_CASE" = private-cleanup ]; then
+  cleanup_owned_project "$DEFAULT_PROJECT" "$DEFAULT_INSTANCE"
+fi
+SOURCE_DEFAULT
+}
+run_source_default_fixture ordinary > "$TMP/source-default-ordinary.log" 2>&1 \
+  || fail 'default source fixture precreated an unmarked project before ordinary init'
+source_default_root="$TMP/source-default-ordinary"
+[ "$(cat "$source_default_root/marker")" = subyard-p0-source-441 ] \
+  && grep -Fxq 'yard init --yes' "$source_default_root/calls" \
+  && grep -Fxq 'yard start --yes' "$source_default_root/calls" \
+  && grep -Fxq 'yard check' "$source_default_root/calls" \
+  && ! grep -Eq '^incus project create|features.images=' "$source_default_root/calls" \
+  || fail 'default source fixture changed creation or image namespace policy'
+for source_default_case in foreign inventory-error owner-mismatch owner-query-error \
+  marker-foreign marker-query-error marker-write-error partial-owned partial-missing \
+  partial-marker-foreign partial-query-error partial-marker-write-error owner-extra-lf \
+  marker-lf marker-nul readback-extra-lf unframed getter-status73 getter-encoder74 encoder-error \
+  partial-owner-extra-lf partial-marker-lf partial-encoder-error; do
+  source_default_rc=0
+  run_source_default_fixture "$source_default_case" \
+    > "$TMP/source-default-$source_default_case.log" 2>&1 || source_default_rc=$?
+  case "$source_default_case" in partial-*) want=23 ;; getter-status73) want=73 ;; getter-encoder74) want=74 ;; *) want=2 ;; esac
+  [ "$source_default_rc" = "$want" ] \
+    || fail "default source fixture lost $source_default_case native status"
+  source_default_root="$TMP/source-default-$source_default_case"
+  case "$source_default_case" in
+    foreign|inventory-error)
+      ! grep -Eq '^yard |^incus project set|^incus project create' "$source_default_root/calls" \
+        || fail 'default source fixture mutated a preexisting or unreadable inventory'
+      ;;
+  esac
+  case "$source_default_case" in
+    partial-owned) [ "$(cat "$source_default_root/marker")" = subyard-p0-source-441 ] ;;
+    marker-foreign|partial-marker-foreign)
+      [ "$(cat "$source_default_root/marker")" = foreign-marker ] \
+        && ! grep -q '^incus project set' "$source_default_root/calls"
+      ;;
+    marker-lf|partial-marker-lf)
+      [ "$(wc -c < "$source_default_root/marker")" = 1 ] \
+        && ! grep -q '^incus project set' "$source_default_root/calls"
+      ;;
+    marker-nul)
+      printf '\0' | cmp -s - "$source_default_root/marker" \
+        && ! grep -q '^incus project set' "$source_default_root/calls"
+      ;;
+    readback-extra-lf) [ "$(cat "$source_default_root/marker")" = subyard-p0-source-441 ] ;;
+    *) [ ! -e "$source_default_root/marker" ] ;;
+  esac || fail 'default source fixture marked unproved ownership or overwrote provenance'
+  ! grep -Eq '^yard (start|check)' "$source_default_root/calls" \
+    || fail 'default source fixture continued after failed init or ownership assessment'
+done
+run_source_default_fixture legacy > "$TMP/source-default-legacy.log" 2>&1 \
+  && grep -Fxq 'incus image info fixture-cached-cloud --project default' "$TMP/source-default-legacy/calls" \
+  && grep -Fxq 'incus project create subyard-e2e-yard -c features.images=false -c user.subyard.p0-source=subyard-p0-source-441' \
+    "$TMP/source-default-legacy/calls" \
+  || fail 'historical source setup lost its shared cached-image contract'
+run_source_default_fixture private-cleanup > "$TMP/source-default-private-cleanup.log" 2>&1 \
+  && [ ! -e "$TMP/source-default-private-cleanup/present" ] \
+  && grep -Fxq 'retain-default-cache' "$TMP/source-default-private-cleanup/default-cache" \
+  && ! grep -q 'image delete .*--project default' "$TMP/source-default-private-cleanup/calls" \
+  || fail 'default source cleanup changed the shared default image cache'
+# End source default setup regression.
+
+source_deadline_function="$(fixture_functions "$ROOT/dev/e2e/p0-source-upgrade.sh" relax_fixture_init_deadline)"
 run_source_deadline_fixture() {
   local source_root="$1"
   SOURCE_ROOT="$source_root" bash -c '
@@ -5396,6 +6370,63 @@ for invalid_deadline_count in missing duplicate mixed; do
       <<<"$source_deadline_failure" \
     || fail "P0 source-upgrade accepted a $invalid_deadline_count deadline fixture"
 done
+# Exercise the actual bootstrap diagnostic against the current public report shape.
+(
+  eval "$(sed -n '/^bootstrap_failure_diagnostics() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+  eval "$(sed -n '/^bootstrap_candidate() {/,/^}/p' "$ROOT/dev/e2e/p0-source-upgrade.sh")"
+  OPERATOR_HOME="$TMP/source-bootstrap/operator"
+  SHARED_ROOT="$TMP/source-bootstrap/shared"
+  export CANDIDATE_A_REPOSITORY="$TMP/source-bootstrap/candidate"
+  mkdir -p "$OPERATOR_HOME/.subyard/runtime/current/bin" "$SHARED_ROOT"
+  launcher="$OPERATOR_HOME/.subyard/runtime/current/bin/yard"
+  printf '#!/bin/sh\nexit 0\n' > "$launcher"
+  chmod 0700 "$launcher"
+  operator_env() { "$@"; }
+  check_rc=0
+  operator_no_go() {
+    if [ "$1" = env ]; then return 23; fi
+    [ "$*" = "timeout --signal=TERM --kill-after=5s 30s $launcher migrate --check --json" ] \
+      || return 64
+    printf '%s\n' "$public_report"
+    return "$check_rc"
+  }
+  public_report='{"schemaVersion":1,"current":"release-a","outcome":{"status":"operator-action-required","reachedGoal":false,"active":"release-a","target":"release-a","code":"migration-stale","message":"blocked"},"decisions":[{"resource":"test-yard-owner","decision":"canonicalize"},{"resource":"power-metadata","decision":"transform"},{"resource":"activation.private-resource-marker","decision":"preserve"}],"blockers":[{"code":"migration-stale","resource":"test-yard-owner","message":"private-message-marker"},{"code":"precondition-blocked","resource":"private-resource-marker"}]}'
+  diagnostic="$(bootstrap_failure_diagnostics 2>&1)"
+  projection="$(tail -n 1 <<<"$diagnostic")"
+  jq -e '.status == "operator-action-required" and .code == "migration-stale" and
+    .projection_complete == false and .redacted_resources > 0 and
+    .decisions[0] == {resource_class:"owner-registration",decision:"canonicalize"} and
+    .blockers[0] == {code:"migration-stale",resource_class:"owner-registration"} and
+    .blockers[1].resource_class == "redacted"' <<<"$projection" >/dev/null \
+    || fail 'bootstrap diagnostic discarded a valid current report or its blockers'
+  [[ "$diagnostic" != *private-* ]] || fail 'bootstrap diagnostic leaked unrecognized report fields'
+  public_report='{"schemaVersion":1,"current":"release-a","outcome":{"status":"ready","reachedGoal":true,"active":"release-a","target":"release-a","code":"ready","message":"verified"}}'
+  diagnostic="$(bootstrap_failure_diagnostics 2>&1)"
+  jq -e '.status == "ready" and .projection_complete and .redacted_resources == 0 and
+    .decisions == [] and .blockers == []' <<<"$(tail -n 1 <<<"$diagnostic")" >/dev/null \
+    || fail 'bootstrap diagnostic rejected omitted empty report arrays'
+  valid="$public_report"
+  for public_report in not-json "$valid$valid" \
+    "$(jq '.schemaVersion = 2' <<<"$valid")" \
+    "$(jq '.decisions = [{}]' <<<"$valid")" \
+    "$(jq '.blockers = [{code:7}]' <<<"$valid")"; do
+    diagnostic="$(bootstrap_failure_diagnostics 2>&1)"
+    grep -Fq 'unavailable: invalid public report' <<<"$diagnostic" \
+      || fail 'bootstrap diagnostic accepted malformed or multiple public reports'
+    [[ "$diagnostic" != *not-json* ]] || fail 'bootstrap diagnostic exposed invalid parser input'
+  done
+  public_report="$valid" check_rc=7
+  diagnostic="$(bootstrap_failure_diagnostics 2>&1)"
+  [ "$diagnostic" = '  [ .. ] bootstrap failure readiness inspection exit=7' ] \
+    || fail 'bootstrap diagnostic replaced the native inspection failure'
+  bootstrap_rc=0
+  bootstrap_candidate /fixture/release release-a > "$TMP/source-bootstrap-native.log" 2>&1 \
+    || bootstrap_rc=$?
+  [ "$bootstrap_rc" = 23 ] \
+    && grep -Fq 'inspection exit=7' "$TMP/source-bootstrap-native.log" \
+    || fail 'bootstrap diagnostic replaced the original bootstrap exit'
+) || fail 'source-upgrade bootstrap diagnostics regression'
+
 source_broker_wait="$(sed -n '/^wait_for_test_vm_broker() {/,/^}/p' \
   "$ROOT/dev/e2e/p0-source-upgrade.sh")"
 (

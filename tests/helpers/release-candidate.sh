@@ -104,6 +104,7 @@ version = str(version)
 verifier = runpy.run_path(str(source / "dev/verify-release-upgrades.py"))
 pins = {"0.9.1":verifier["LEGACY_BASELINE_SHA256"],
         "0.11.0":verifier["MINIMUM_BASELINE_SHA256"],
+        "0.11.2":verifier["BASELINE_SHA256"],
         "0.11.1":{"amd64":"900a64625eef382f855e4d126ff9f868bdffeac008da2c9df195476dcad86c2f"}}
 if version not in pins:
     raise SystemExit("unsupported historical fixture version")

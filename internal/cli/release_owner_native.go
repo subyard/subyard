@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releaseowner"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
+	"github.com/Subyard/Subyard/internal/uninstall"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,6 +36,7 @@ func newReleaseOwnerComponents(ctx context.Context, c releaseowner.Context, root
 	if err != nil {
 		return nil, err
 	}
+	uninstall.UseArtifactGuard(c.PhysicalRepositoryRoot)
 	return &releaseOwnerComponents{cli: program, context: c, root: root, inputs: map[string]config.PersistentFileSnapshot{}, overlays: map[string]config.PersistentFileSnapshot{}, loaded: map[string]config.Loaded{}, prepared: map[string]releaseSettingsPrepared{}, activation: map[string]releaseActivationPrepared{}}, nil
 }
 

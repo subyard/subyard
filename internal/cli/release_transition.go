@@ -656,7 +656,52 @@ func (cli *CLI) releaseTransitionTestYardOptions(
 		Environment: environmentList(environment, nil),
 		Stdout:      cli.options.Stderr, Stderr: cli.options.Stderr,
 		RunYard: cli.runReleaseTransitionYardCommand,
+		EnsureImageProject: func(ctx context.Context, yard string, shared bool) error {
+			return cli.ensureReleaseTransitionImageProject(ctx, request.ConfigHome, yard, shared)
+		},
 	}, nil
+}
+
+func (cli *CLI) ensureReleaseTransitionImageProject(ctx context.Context, configHome, yard string, shared bool) error {
+	if yard != testyardmigration.CurrentYard && yard != testyardmigration.LegacyYard {
+		return domain.ErrPlanStale
+	}
+	incus, _ := cli.statusPorts()
+	native, ok := incus.(interface {
+		PrepareImageProject(context.Context, string, bool) (ports.PreparedImageProject, error)
+		ApplyPreparedImageProject(context.Context, ports.PreparedImageProject) error
+	})
+	if !ok {
+		return domain.ErrPlanStale
+	}
+	prepared, err := native.PrepareImageProject(ctx, "subyard-"+yard, shared)
+	if err != nil {
+		return err
+	}
+	if !prepared.Absent || !shared {
+		return native.ApplyPreparedImageProject(ctx, prepared)
+	}
+	loaded, err := cli.resolveReleaseTransitionContext(yard, configHome)
+	if err != nil {
+		return err
+	}
+	if loaded.Context.YardName != yard || loaded.Context.IncusProject != prepared.Project || loaded.Context.AccessKind != domain.AccessLocal || loaded.Context.Paths.ConfigHome != configHome {
+		return domain.ErrPlanStale
+	}
+	runtime, ok := cli.initPlatform(loaded, []domain.Context{loaded.Context}).(reconcileruntime.Runtime)
+	if !ok {
+		return domain.ErrPlanStale
+	}
+	sources, err := runtime.PrepareOwnerRuntimeSources(ctx)
+	if err != nil {
+		return err
+	}
+	defer sources.Close()
+	prepared.InitialConfig, err = runtime.RenderOwnerProjectConfig(ctx, sources)
+	if err != nil {
+		return err
+	}
+	return native.ApplyPreparedImageProject(ctx, prepared)
 }
 
 func (cli *CLI) releaseTransitionIngressFactory(

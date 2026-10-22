@@ -40,7 +40,10 @@ func ownerPrivateCreateError(err error) error {
 }
 
 func ownerImageProjectRequest(p ports.PreparedImageProject, token string) (api.ProjectsPost, error) {
-	request := api.ProjectsPost{Name: p.Project, ProjectPut: api.ProjectPut{Config: map[string]string{ownerCreateTokenKey: token}}}
+	request := api.ProjectsPost{Name: p.Project, ProjectPut: api.ProjectPut{Config: map[string]string{}}}
+	if token != "" {
+		request.Config[ownerCreateTokenKey] = token
+	}
 	if p.SharedImages {
 		request.Config["features.images"] = "false"
 	}

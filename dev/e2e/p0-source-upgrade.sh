@@ -430,6 +430,7 @@ bootstrap_failure_diagnostics() {
     return 0
   fi
   report="$(mktemp "$SHARED_ROOT/bootstrap-readiness.XXXXXX")" || return 0
+  chmod 0600 "$report"
   # Inspect once without extending the failed operation's authorization or
   # printing raw command output, configuration, or probe stderr.
   operator_no_go timeout --signal=TERM --kill-after=5s 30s \
@@ -438,6 +439,12 @@ bootstrap_failure_diagnostics() {
   if [ "$status" = 0 ]; then
     jq -ces '
       def member($values): . as $value | type == "string" and ($values | index($value)) != null;
+      def optional_string: . == null or (type == "string" and length <= 4096);
+      ["ready", "transition-required", "recovery-pending", "registry-invalid",
+       "unsupported-epoch", "unsupported-kind", "confirmation-required", "operation-declined", "plan-stale",
+       "migration-stale", "resource-conflict", "precondition-blocked", "dependency-unavailable",
+       "verification-failed", "activation-ambiguous", "recovery-ambiguous", "journal-invalid",
+       "rollback-incompatible", "rollback-expired"] as $codes |
       {"activation.materialized-config":"materialized-config", "activation.host-power":"host-power",
        "activation.test-vm-broker":"test-vm-broker", "activation.test-yard-route-consumers":"route-consumers",
        "activation.orca-runtime":"orca-runtime", "activation.openlit-runtime":"openlit-runtime",
@@ -445,19 +452,27 @@ bootstrap_failure_diagnostics() {
        "test-yard-owner":"owner-registration", "migration-history.checkpoint":"migration-history",
        "transition.source-metadata":"source-metadata"} as $resources |
       select(length == 1) | .[0] |
+      select(type == "object" and .schemaVersion == 1 and
+        (.current | type == "string" and length > 0 and length <= 512)) |
       select(.outcome.status | member(["ready", "migration-required", "recovering", "operator-action-required"])) |
-      select(.outcome.code | member(["ready", "transition-required", "recovery-pending", "registry-invalid",
-        "unsupported-epoch", "unsupported-kind", "confirmation-required", "operation-declined", "plan-stale",
-        "migration-stale", "resource-conflict", "precondition-blocked", "dependency-unavailable",
-        "verification-failed", "activation-ambiguous", "recovery-ambiguous", "journal-invalid",
-        "rollback-incompatible", "rollback-expired"])) |
+      select(.outcome.code | member($codes)) |
       select(.decisions == null or (.decisions | type) == "array") |
       (.decisions // []) as $decisions | select($decisions | length <= 64) |
       select(all($decisions[]; type == "object" and
-        (.resource | member($resources | keys)) and
-        (.decision | member(["preserve", "transform", "canonicalize", "reset", "quarantine", "block"])))) |
+        (.resource | type == "string" and length > 0 and length <= 256) and
+        (.decision | member(["preserve", "transform", "canonicalize", "reset", "quarantine", "block"])) and
+        (.scope | optional_string) and (.result | optional_string))) |
+      select(.blockers == null or (.blockers | type) == "array") |
+      (.blockers // []) as $blockers | select($blockers | length <= 64) |
+      select(all($blockers[]; type == "object" and (.code | member($codes)) and
+        (.resource | optional_string) and (.message | optional_string) and (.retry | optional_string))) |
+      ([$decisions[], $blockers[] | .resource // "" |
+        select(. != "" and $resources[.] == null)] | length) as $redacted |
       {status: .outcome.status, code: .outcome.code,
-       decisions: [$decisions[] | {resource_class: $resources[.resource], decision}]}' \
+       projection_complete: ($redacted == 0), redacted_resources: $redacted,
+       decisions: [$decisions[] | {resource_class: ($resources[.resource] // "redacted"), decision}],
+       blockers: [$blockers[] | {code, resource_class:
+         (if (.resource // "") == "" then "unspecified" else $resources[.resource] // "redacted" end)}]}' \
       "$report" >&2 2>/dev/null \
       || printf '  [ .. ] bootstrap failure readiness inspection unavailable: invalid public report\n' >&2
   fi
@@ -682,6 +697,7 @@ verify_power_retry_probe() {
   sudo -n systemctl daemon-reload
 }
 
+# shellcheck disable=SC2120 # Retain the historical fixture's optional project argument.
 prepare_project() {
   local project="${1:-$PROJECT}"
   incus project show "$project" >/dev/null 2>&1 \
@@ -692,9 +708,51 @@ prepare_project() {
     -c features.images=false -c user.subyard.p0-source="$MARKER" >/dev/null
 }
 
+read_default_project_property() { # <output-variable> <property>
+  local encoded
+  # Compare opaque CLI bytes, including its one framing LF; pipefail retains query errors.
+  encoded="$(incus project get "$DEFAULT_PROJECT" "$2" | base64 -w0)" || return
+  printf -v "$1" '%s' "$encoded"
+}
+
+mark_created_default_project() {
+  local uid key expected actual marker empty own
+  uid="$(operator_uid)" || return
+  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+  while IFS='=' read -r key expected; do
+    expected="$(printf '%s\n' "$expected" | base64 -w0)" || return
+    read_default_project_property actual "$key" || return
+    [ "$actual" = "$expected" ] || return 1
+  done <<OWNER
+user.subyard.installation=1
+user.subyard.operator_uid=$uid
+user.subyard.data_home=$OPERATOR_HOME/.subyard
+user.subyard.config_home=$OPERATOR_HOME/.config/subyard
+user.subyard.yard_name=default
+user.subyard.instance_name=$DEFAULT_INSTANCE
+OWNER
+  empty="$(printf '\n' | base64 -w0)" || return
+  own="$(printf '%s\n' "$MARKER" | base64 -w0)" || return
+  read_default_project_property marker user.subyard.p0-source || return
+  [ "$marker" != "$own" ] || return 0
+  [ "$marker" = "$empty" ] || return 1
+  incus project set "$DEFAULT_PROJECT" user.subyard.p0-source="$MARKER" >/dev/null || return
+  read_default_project_property marker user.subyard.p0-source || return
+  [ "$marker" = "$own" ]
+}
+
 prepare_default_yard() {
-  prepare_project "$DEFAULT_PROJECT"
-  p0_retry_init_after_plan_stale operator_yard init --yes
+  local inventory init_rc=0 marker_rc=0
+  inventory="$(incus project list --format csv -c n)" \
+    || die 'cannot inspect default fixture project inventory'
+  ! grep -Fxq "$DEFAULT_PROJECT" <<<"$inventory" \
+    || die 'default fixture requires an absent project'
+  # Ordinary init creates authentic ownership and its normal private image namespace.
+  # The historical named yard retains its separate shared-image migration fixture.
+  p0_retry_init_after_plan_stale operator_yard init --yes || init_rc=$?
+  mark_created_default_project || marker_rc=$?
+  [ "$init_rc" = 0 ] || return "$init_rc"
+  [ "$marker_rc" = 0 ] || die 'default fixture project ownership could not be proved'
   operator_yard start --yes
   operator_yard check
   [ "$(incus config get "$DEFAULT_INSTANCE" user.subyard.desired_power \

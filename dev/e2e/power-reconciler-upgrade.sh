@@ -499,99 +499,148 @@ assert_legacy_continuation() {
     || die 'protected continuation grant changed across init, reboot or release links'
 }
 
+legacy_continuation_identity() {
+  local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+  local uuid
+  incus project get "$PROJECT" user.subyard.p0-power-systemd | cmp - <(printf '%s\n' "$MARKER") || return "$?"
+  incus project get "$PROJECT" user.subyard.installation | cmp - <(printf '\n') || return "$?"
+  operator_env test -f "$grant" && operator_env test ! -L "$grant" \
+    && [ "$(operator_env stat -c '%a:%u' "$grant")" = "600:$(operator_uid)" ] || return 1
+  uuid="$(operator_env jq -er --argjson uid "$(operator_uid)" \
+    'select(.schema == 1 and .scope == "normal-reconcile" and .operatorUid == $uid) | .instanceUuid | select(type == "string" and length > 0)' \
+    "$grant")" || return "$?"
+  incus config get "$INSTANCE" volatile.uuid --project "$PROJECT" | cmp - <(printf '%s\n' "$uuid") || return "$?"
+  printf '%s ' "$uuid"
+  operator_env sha256sum "$grant" | awk '{print $1}'
+}
+
+init_legacy_continuation() {
+  local output output_fd output_path capture_pid rc=0 capture_rc=0 pending=0 identity after_identity script probe=0
+  output="$(mktemp "$STATE_ROOT/continuation-init.XXXXXX")" || return "$?"
+  chmod 0600 "$output" || return "$?"
+  exec {output_fd}<>"$output" || return "$?"
+  output_path="/proc/$BASHPID/fd/$output_fd"
+  # Retain only a bounded terminal diagnostic while preserving ordinary stderr.
+  operator_yard "$@" 2> >(
+    status=0
+    tee >(tail -c 16384 >&"$output_fd") >&2 || status=$?
+    wait "$!" || exit "$?"
+    exit "$status"
+  ) || rc=$?
+  capture_pid=$!
+  wait "$capture_pid" || capture_rc=$?
+  if [ "$rc" = 1 ] && [ "$capture_rc" = 0 ] && [ "$disk_tmp_transition" = 0 ] \
+    && printf '%s\n' 'yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start' \
+      | cmp - <(tail -n 1 "$output_path"); then
+    pending=1
+  fi
+  exec {output_fd}>&-
+  [ "$rc" != 0 ] || return 0
+  printf 'legacy_continuation_init_exit=%s\n' "$rc"
+  [ "$pending" = 1 ] || return "$rc"
+  script="$(cat "$ROOT/scripts/guest-disk-tmp.sh")" || return "$?"
+  # incus() deliberately has no stdin; pass the unchanged production leaf as argv.
+  incus exec "$INSTANCE" --project "$PROJECT" -- sh -c "$script" sh check || probe=$?
+  [ "$probe" = 10 ] || { [ "$probe" != 0 ] && return "$probe"; return "$rc"; }
+  identity="$(legacy_continuation_identity)" || return "$rc"
+  if [ ! -e "$STATE_ROOT/legacy-continuation.sha256" ]; then
+    write_fixture_value "$STATE_ROOT/legacy-continuation.sha256" "${identity##* }" || return "$rc"
+  fi
+  assert_legacy_continuation
+  verify_legacy_full_removal_refusal
+  disk_tmp_transition=1
+  operator_yard stop --yes || return "$?"
+  operator_yard start --yes || return "$?"
+  repair_legacy_activation_after_restart || return "$?"
+  operator_yard init --yes || return "$?"
+  incus exec "$INSTANCE" --project "$PROJECT" -- sh -c "$script" sh check || return "$?"
+  after_identity="$(legacy_continuation_identity)" || return "$rc"
+  [ "$after_identity" = "$identity" ] || return "$rc"
+}
+
+repair_legacy_activation_after_restart() {
+  # Completed release history grants no authority for the new activation drift.
+  local report="$STATE_ROOT/post-restart-migrate.json" migration_output="$STATE_ROOT/post-restart-migrate.log"
+  local ledger_before journal_before links_before transaction_before migration_rc=0
+  local target="${CANDIDATE_RELEASE_TARGET#releases/}" runtime="$OPERATOR_HOME/.subyard/runtime"
+  local resources='["activation.materialized-config","activation.host-power","activation.core-guest-runtime","activation.key-tools-runtime","activation.test-vm-broker","activation.test-yard-route-consumers","activation.git-fetch-runtime","activation.github-runtime","activation.openlit-runtime","activation.orca-runtime"]'
+  ledger_before="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" || return "$?"
+  journal_before="$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')" || return "$?"
+  links_before="$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" || return "$?"
+  transaction_before="$(operator_env jq -er 'select(.checkpoint == "complete") | .transaction | select(type == "string" and length > 0)' "$V2_JOURNAL")" || return "$?"
+  install -m 0600 /dev/null "$report" || return "$?"
+  install -m 0600 /dev/null "$migration_output" || return "$?"
+  operator_yard migrate --check --json > "$report" 2> "$migration_output" || migration_rc=$?
+  write_fixture_value "$report.exit" "$migration_rc" || return "$?"
+  printf 'power_activation_repair_check_exit=%s\n' "$migration_rc"
+  jq -c --argjson resources "$resources" '
+    {status:(if .outcome.status == "migration-required" or .outcome.status == "ready" then .outcome.status else "unknown" end),
+     code:(if .outcome.code == "transition-required" or .outcome.code == "ready" then .outcome.code else "unknown" end),
+     activation_count:([(.decisions // [])[] | select(.scope == "activation")] | length),
+     activation:[(.decisions // [])[0:256][] | select(.scope == "activation") |
+       {resource:(.resource as $r | if ($r | type) != "string" then "unknown" elif $resources | index($r) then $r else "unknown" end),
+        decision:(if .decision == "canonicalize" then .decision else "unknown" end)}]}
+  ' "$report" 2>/dev/null | sed 's/^/power_activation_repair_inspection=/' \
+    || printf 'power_activation_repair_inspection=unknown\n'
+  [ "$migration_rc" = 0 ] || return "$migration_rc"
+  [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$ledger_before" ] \
+    && [ "$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')" = "$journal_before" ] \
+    && [ "$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" = "$links_before" ] \
+    || die 'post-restart migration inspection changed protected history or runtime links'
+  assert_legacy_continuation
+  # A ready fixed point preserves completed history and requires no new consent.
+  if ! jq -e --arg current "$target" '
+    .schemaVersion == 1 and .current == $current and .owner == $current and
+    .outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and
+    .outcome.active == $current and .outcome.target == $current and
+    (if has("next") then (.next | type == "string" and . == "") else true end) and
+    (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
+    (if has("blockers") then (.blockers | type == "array" and length == 0) else true end) and
+    (if has("decisions") then (.decisions | type == "array" and length <= 256 and all(.[]; .decision == "preserve")) else true end)
+  ' "$report" >/dev/null 2>&1; then
+    jq -e --arg current "$target" --argjson resources "$resources" '
+      .schemaVersion == 1 and .current == $current and .owner == $current and .next == "yard migrate" and
+      .outcome.status == "migration-required" and .outcome.code == "transition-required" and
+      (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
+      ((.blockers // []) | length == 0) and (.decisions | type == "array" and length > 0 and length <= 256) and
+      any(.decisions[]; .scope == "activation") and
+      all(.decisions[];
+        (has("scope") | not) and .resource == "transition.source-metadata" and .decision == "preserve" or
+        (.scope == "activation" and .decision == "canonicalize" and
+          (.resource as $r | if ($r | type) == "string" then $resources | index($r) != null else false end)))
+    ' "$report" >/dev/null 2>&1 || die 'post-restart migration inspection is not an activation-only plan'
+    migration_rc=0
+    operator_yard migrate --yes > "$migration_output" 2>&1 || migration_rc=$?
+    write_fixture_value "$migration_output.exit" "$migration_rc" || return "$?"
+    printf 'power_activation_repair_apply_exit=%s\n' "$migration_rc"
+    [ "$migration_rc" = 0 ] || return "$migration_rc"
+    [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$ledger_before" ] \
+      && [ "$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" = "$links_before" ] \
+      || die 'post-restart activation repair changed the migration ledger or runtime links'
+    operator_env jq -e --arg transaction "$transaction_before" --arg target "$target" '
+      .schemaVersion == 2 and .checkpoint == "complete" and .transaction != $transaction and
+      (.transaction | type == "string" and length > 0) and .steps == [] and
+      .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and .releases.from == $target
+    ' "$V2_JOURNAL" >/dev/null || die 'post-restart activation repair reused history or replayed migrations'
+  fi
+  assert_legacy_continuation
+  verify_legacy_full_removal_refusal
+}
+
 establish_legacy_continuation() {
   local grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
-  local output="$STATE_ROOT/legacy-continuation-init.log" rc=0
-  local reboot_required='yard: init: verify init stage "provision": yard default: disk-backed /tmp policy is installed; the active /tmp is memory-backed; reboot required; close active yard sessions, then run yard -Y default stop and yard -Y default start'
-  install -m 0600 /dev/null "$output"
-  operator_yard init --continue-legacy --yes > "$output" 2>&1 || rc=$?
-  write_fixture_value "$STATE_ROOT/legacy-continuation-init.exit" "$rc"
-  cat "$output"
-  if [ "$rc" != 0 ]; then
-    printf 'legacy_continuation_init_exit=%s\n' "$rc"
-    [ "$rc" = 1 ] && [ "$(tail -n 1 "$output")" = "$reboot_required" ] || return "$rc"
-  fi
+  local disk_tmp_transition=0
+  init_legacy_continuation init --continue-legacy --yes || return "$?"
   operator_env jq -e --argjson uid "$(operator_uid)" \
     '.schema == 1 and .scope == "normal-reconcile" and .operatorUid == $uid and (.instanceUuid | length > 0)' \
     "$grant" >/dev/null || die 'public legacy continuation did not publish its limited grant'
-  write_fixture_value "$STATE_ROOT/legacy-continuation.sha256" \
-    "$(operator_env sha256sum "$grant" | awk '{print $1}')"
+  if [ ! -e "$STATE_ROOT/legacy-continuation.sha256" ]; then
+    write_fixture_value "$STATE_ROOT/legacy-continuation.sha256" \
+      "$(operator_env sha256sum "$grant" | awk '{print $1}')" || return "$?"
+  fi
   assert_legacy_continuation
   verify_legacy_full_removal_refusal
-  if [ "$rc" != 0 ]; then
-    # The historical running yard keeps its live tmpfs until its owner restarts it.
-    assert_project_owned
-    operator_yard stop --yes
-    operator_yard start --yes
-    assert_legacy_continuation
-    # Completed release history grants no authority for the new activation drift.
-    local report="$STATE_ROOT/post-restart-migrate.json" migration_output="$STATE_ROOT/post-restart-migrate.log"
-    local ledger_before journal_before links_before transaction_before migration_rc=0
-    local target="${CANDIDATE_RELEASE_TARGET#releases/}" runtime="$OPERATOR_HOME/.subyard/runtime"
-    local resources='["activation.materialized-config","activation.host-power","activation.core-guest-runtime","activation.key-tools-runtime","activation.test-vm-broker","activation.test-yard-route-consumers","activation.git-fetch-runtime","activation.github-runtime","activation.openlit-runtime","activation.orca-runtime"]'
-    ledger_before="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
-    journal_before="$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')"
-    links_before="$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")"
-    transaction_before="$(operator_env jq -er 'select(.checkpoint == "complete") | .transaction | select(type == "string" and length > 0)' "$V2_JOURNAL")"
-    install -m 0600 /dev/null "$report"
-    install -m 0600 /dev/null "$migration_output"
-    operator_yard migrate --check --json > "$report" 2> "$migration_output" || migration_rc=$?
-    write_fixture_value "$report.exit" "$migration_rc"
-    printf 'power_activation_repair_check_exit=%s\n' "$migration_rc"
-    jq -c --argjson resources "$resources" '
-      {status:(if .outcome.status == "migration-required" or .outcome.status == "ready" then .outcome.status else "unknown" end),
-       code:(if .outcome.code == "transition-required" or .outcome.code == "ready" then .outcome.code else "unknown" end),
-       activation_count:([(.decisions // [])[] | select(.scope == "activation")] | length),
-       activation:[(.decisions // [])[0:256][] | select(.scope == "activation") |
-         {resource:(.resource as $r | if ($r | type) != "string" then "unknown" elif $resources | index($r) then $r else "unknown" end),
-          decision:(if .decision == "canonicalize" then .decision else "unknown" end)}]}
-    ' "$report" 2>/dev/null | sed 's/^/power_activation_repair_inspection=/' \
-      || printf 'power_activation_repair_inspection=unknown\n'
-    [ "$migration_rc" = 0 ] || return "$migration_rc"
-    [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$ledger_before" ] \
-      && [ "$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')" = "$journal_before" ] \
-      && [ "$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" = "$links_before" ] \
-      || die 'post-restart migration inspection changed protected history or runtime links'
-    assert_legacy_continuation
-    # A ready fixed point preserves completed history and requires no new consent.
-    if ! jq -e --arg current "$target" '
-      .schemaVersion == 1 and .current == $current and .owner == $current and
-      .outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and
-      .outcome.active == $current and .outcome.target == $current and
-      (if has("next") then (.next | type == "string" and . == "") else true end) and
-      (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
-      (if has("blockers") then (.blockers | type == "array" and length == 0) else true end) and
-      (if has("decisions") then (.decisions | type == "array" and length <= 256 and all(.[]; .decision == "preserve")) else true end)
-    ' "$report" >/dev/null 2>&1; then
-      jq -e --arg current "$target" --argjson resources "$resources" '
-        .schemaVersion == 1 and .current == $current and .owner == $current and .next == "yard migrate" and
-        .outcome.status == "migration-required" and .outcome.code == "transition-required" and
-        (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
-        ((.blockers // []) | length == 0) and (.decisions | type == "array" and length > 0 and length <= 256) and
-        any(.decisions[]; .scope == "activation") and
-        all(.decisions[];
-          (has("scope") | not) and .resource == "transition.source-metadata" and .decision == "preserve" or
-          (.scope == "activation" and .decision == "canonicalize" and
-            (.resource as $r | if ($r | type) == "string" then $resources | index($r) != null else false end)))
-      ' "$report" >/dev/null 2>&1 || die 'post-restart migration inspection is not an activation-only plan'
-      migration_rc=0
-      operator_yard migrate --yes > "$migration_output" 2>&1 || migration_rc=$?
-      write_fixture_value "$migration_output.exit" "$migration_rc"
-      printf 'power_activation_repair_apply_exit=%s\n' "$migration_rc"
-      [ "$migration_rc" = 0 ] || return "$migration_rc"
-      [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$ledger_before" ] \
-        && [ "$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" = "$links_before" ] \
-        || die 'post-restart activation repair changed the migration ledger or runtime links'
-      operator_env jq -e --arg transaction "$transaction_before" --arg target "$target" '
-        .schemaVersion == 2 and .checkpoint == "complete" and .transaction != $transaction and
-        (.transaction | type == "string" and length > 0) and .steps == [] and
-        .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and .releases.from == $target
-      ' "$V2_JOURNAL" >/dev/null || die 'post-restart activation repair reused history or replayed migrations'
-    fi
-    assert_legacy_continuation
-    verify_legacy_full_removal_refusal
-  fi
-  operator_yard init --yes
+  init_legacy_continuation init --yes || return "$?"
   assert_legacy_continuation
 }
 
