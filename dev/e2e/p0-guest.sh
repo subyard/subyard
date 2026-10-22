@@ -997,7 +997,7 @@ peer_ssh() {
 }
 
 peer_prepare_finish() {
-  local release="$PEER_STATE_ROOT/releases" version="p0-peer-vm-$SUBYARD_E2E_VM"
+  local release="$PEER_STATE_ROOT/releases" version="1.0.0-p0.peer.vm.$SUBYARD_E2E_VM"
   p0_capacity_use_build_cache
 	[ -r "$PEER_ROOT/src/tests/helpers/source-control-plane.sh" ] \
 		|| die 'stable peer source is incomplete after incus-admin resume'
@@ -1176,7 +1176,7 @@ decode_frames() { # framed-input json-lines-output
 
 peer_rpc() {
   local request response body expected_version
-  expected_version="p0-peer-vm-$((3 - SUBYARD_E2E_VM))"
+  expected_version="1.0.0-p0.peer.vm.$((3 - SUBYARD_E2E_VM))"
   if [ -e "$PEER_ROOT/src/.subyard-acceptance/candidate.json" ]; then
     expected_version="$(jq -er '.version | select(type == "string" and length > 0)' \
       "$PEER_ROOT/src/.subyard-acceptance/candidate.json")"

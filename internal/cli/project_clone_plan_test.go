@@ -126,6 +126,62 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 	}
 }
 
+func TestProjectCloneUsesNativeGitGlobalConfiguration(t *testing.T) {
+	program, execution, source, data := emptyClonePlanFixture(t)
+	emptyCloneAddRef(t, source, "refs/heads/main")
+	data.workspaceRoot = testkit.TempDir(t)
+	// Map the guest's global Git configuration onto a private native fixture.
+	global := filepath.Join(testkit.TempDir(t), "gitconfig")
+	testkit.WriteFile(t, global, nil, 0o600)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	const remote = "subyard-fixture::repository"
+	emptyCloneGit(t, "config", "--global", "url."+source+".insteadOf", remote)
+	execution, err := program.prepareProjectClone(context.Background(), execution.Loaded, []string{remote, "--name", "Configured"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("clone")
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
+	if err := prepared.prepareProject(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.preparePlan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, nil)
+	confirmed, err := prepared.Confirm(context.Background(), orchestrator, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Plan = confirmed
+	result, err := prepared.Execute(context.Background(), orchestrator, io.Discard)
+	if err != nil || result.Status != "ok" {
+		t.Fatalf("clone through global Git configuration failed: %v", err)
+	}
+	checkout := filepath.Join(data.workspaceRoot, execution.Record.ProjectID, "src")
+	if got := emptyCloneGit(t, "-C", checkout, "rev-parse", "HEAD"); got != execution.cloneRevision {
+		t.Fatalf("cloned revision = %q, want prepared %q", got, execution.cloneRevision)
+	}
+	if got := emptyCloneGit(t, "-C", checkout, "config", "--get", "remote.origin.url"); got != remote {
+		t.Fatalf("clone changed original remote to %q", got)
+	}
+	var probed, cloned bool
+	for _, request := range data.requests {
+		if len(request.Command) < 2 || request.Command[0] != "git" || (request.Command[1] != "ls-remote" && request.Command[1] != "clone") {
+			continue
+		}
+		if request.Environment["HOME"] != "/home/"+data.yard.DevUser || request.User != uint32(data.yard.DevUID) || request.Group != uint32(data.yard.DevUID) {
+			t.Fatal("source probe or clone did not use the selected yard developer")
+		}
+		probed = probed || request.Command[1] == "ls-remote"
+		cloned = cloned || request.Command[1] == "clone"
+	}
+	if !probed || !cloned {
+		t.Fatal("native global configuration did not cover both source preparation and clone")
+	}
+}
+
 func (data *emptyClonePlanData) Stream(context.Context, domain.Context, ports.InstanceExecRequest, io.Reader) (ports.InstanceExecResult, error) {
 	panic("empty clone source check must not stream")
 }

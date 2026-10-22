@@ -37,6 +37,14 @@ Repeated `sync` and `clone` commands create independent copies, even when their 
 They do not update an earlier copy. An explicit name must be available instead of silently replacing
 an existing project.
 
+`yard clone` probes and clones the repository with ordinary Git as the selected yard's developer,
+using that user's Git configuration and authentication inside the yard. An active
+[managed SSH grant](ssh-agent.md#git-access) supplies SSH access; the opt-in
+[GitHub broker-first mode](github.md#ordinary-git-with-original-authentication-fallback) also applies
+through the yard's ordinary Git configuration. Clone does not enable that mode automatically.
+Credentials available only in an interactive shell or a controller's SSH session are not guaranteed
+to be available to clone; configure access for ordinary Git inside the selected yard.
+
 For a synced project, `yard export [project]` compares the original host directory with the current
 yard copy, excludes `.git`, and writes a portable patch under Subyard's protected data directory.
 It does not overwrite the host checkout. Bound and cloned projects cannot be exported through this
