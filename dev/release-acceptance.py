@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Freeze a release candidate and run its acceptance checks with local reports."""
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -25,6 +26,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 EVENT_LOCK = threading.Lock()
+MANIFEST_LOCK = threading.Lock()
 STOP = threading.Event()
 HEARTBEAT_SECONDS = 60
 TERM_GRACE_SECONDS = 30
@@ -125,24 +127,7 @@ def digest(path):
 
 
 def source_fingerprint(root):
-    result = hashlib.sha256()
-    paths = subprocess.check_output(["bash", "tests/helpers/source-files.sh"], cwd=root, stderr=subprocess.DEVNULL)
-    for raw in sorted(filter(None, paths.split(b"\0"))):
-        name = os.fsdecode(raw)
-        if name.startswith(".subyard-acceptance/"):
-            continue
-        path = root / name
-        if not path.exists() and not path.is_symlink():
-            continue
-        result.update(raw + b"\0")
-        # Git preserves the executable bit, not checkout umask permissions.
-        mode = 0o755 if path.lstat().st_mode & 0o111 else 0o644
-        result.update(f"{mode:o}\0".encode())
-        if path.is_symlink():
-            result.update(b"link\0" + os.fsencode(os.readlink(path)))
-        else:
-            result.update(bytes.fromhex(digest(path)))
-    return result.hexdigest()
+    return entries_fingerprint(source_entries(root))
 
 
 def clean_environment():
@@ -649,10 +634,11 @@ def prepare(output, version, prepared=None):
     print(f"PREPARED {output / 'receipt.json'}", flush=True)
 
 
-def load_bound(output):
+def load_bound(output, entries=None, context=None):
     receipt = json.loads((output / "receipt.json").read_text())
     root = output / "source"
-    if receipt.get("schema_version") != 1 or source_fingerprint(root) != receipt["source_fingerprint"]:
+    fingerprint = source_fingerprint(root) if entries is None else entries_fingerprint(entries)
+    if receipt.get("schema_version") != 1 or fingerprint != receipt["source_fingerprint"]:
         raise ValueError("frozen source fingerprint mismatch")
     if "preparation" in receipt:
         identity = receipt["preparation"]
@@ -678,7 +664,10 @@ def load_bound(output):
                 raise ValueError("optional external not-run result contains execution evidence")
         if "deferral" in result:
             validate_external_deferral(result, deferral_candidate_sha256(receipt))
-    if set(receipt["checks"]) != set(commands(root, receipt["version"], receipt["profiles"])) | {"package"}:
+    required_commands = commands(root, receipt["version"], receipt["profiles"])
+    if context is not None:
+        context.update(commands=required_commands, external=external, attempts={})
+    if set(receipt["checks"]) != set(required_commands) | {"package"}:
         raise ValueError("required check inventory is incomplete")
     if receipt["checks"]["process-coverage"]["status"] == "not-applicable" and receipt["checks"]["process-coverage"] != PROCESS_COVERAGE_DIAGNOSTIC:
         raise ValueError("invalid optional process coverage diagnostic")
@@ -692,8 +681,11 @@ def load_bound(output):
     release = root / ".subyard-acceptance/release"
     if {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()} != receipt["release_files"]:
         raise ValueError("candidate release assets changed")
-    required_commands = commands(root, receipt["version"], receipt["profiles"])
     for name, result in receipt["checks"].items():
+        if "original_attempt" in result:
+            attempt = original_attempt(output, receipt, name, result)
+            if context is not None:
+                context["attempts"][name] = attempt
         if result["status"] == "passed":
             log = result.get("log", "")
             if not log or Path(log).name != log or digest(output / log) != result.get("log_sha256"):
@@ -701,7 +693,7 @@ def load_bound(output):
             if name in required_commands and required_commands[name] is not None and "command" in result:
                 if result["command"] != command_identity(required_commands[name], root):
                     raise ValueError("passing command provenance changed")
-            if result.get("inherited") and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
+            if result.get("inherited") and result.get("evidence_transfer", {}).get("schema_version") != 2 and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
                                             or result.get("from_log_sha256") != result["log_sha256"]):
                 raise ValueError("inherited evidence provenance is incomplete")
             if "evidence_transfer" in result:
@@ -718,7 +710,7 @@ def load_bound(output):
                     if binding["source_fingerprint"] != receipt["source_fingerprint"]:
                         raise ValueError("inherited exact source differs")
                 elif binding.get("scope") == "other-profile-tests-only" and name.startswith("profile:"):
-                    closure = profile_closure(root, receipt["profiles"], name)
+                    closure = profile_closure(root, receipt["profiles"], name, entries)
                     if binding.get("closure_sha256") != closure:
                         raise ValueError("inherited profile closure changed")
                 else:
@@ -962,8 +954,12 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
                 with lock:
                     invocation.cancel_start(name)
                 return None
+            with lock:
+                receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
+                save(output, receipt)  # Invalidate a previous PASS before any child can start.
             result = execute(name, checks[name], root, output, env, slot) if slot else execute(name, checks[name], root, output, env)
             result["execution_environment"] = measured_environment
+            result["original_attempt"] = completed_attempt(output, root, receipt, name, result)
             return result
 
         for name in [item for item in pending if item not in live]:
@@ -1054,10 +1050,213 @@ def source_entries(root):
     return entries
 
 
-def profile_closure(root, profiles, name):
+# These exact-key wire objects are shared with the publication validator. Hashes bind
+# the exact canonical bytes, without a newline, including all measured nulls.
+ATTEMPT_FIELDS = ("status", "exit_code", "termination", "signal", "duration_seconds",
+    "log_sha256", "execution_environment", "environments", "environment_evidence",
+    "slot", "cleanup", "cleanup_status", "capture_status", "last_completed_phase",
+    "phase_budgets", "failure_class", "reason")
+
+
+def evidence_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def evidence_hash(value):
+    return hashlib.sha256(evidence_bytes(value)).hexdigest()
+
+
+def is_sha(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def public_text(value, limit):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= limit and not any(ord(c) < 32 for c in value)
+
+
+def validate_candidate_identity(candidate):
+    if (not isinstance(candidate, dict) or set(candidate) != {"version", "source_fingerprint", "runtime_file",
+        "runtime_sha256", "candidate_bundle_sha256", "release_files", "candidate_sha256"}
+        or not isinstance(candidate["version"], str) or not candidate["version"]
+        or not isinstance(candidate["runtime_file"], str) or Path(candidate["runtime_file"]).name != candidate["runtime_file"]
+        or any(not is_sha(candidate[key]) for key in ("source_fingerprint", "runtime_sha256", "candidate_bundle_sha256", "candidate_sha256"))
+        or not isinstance(candidate["release_files"], dict) or not candidate["release_files"]
+        or any(not isinstance(key, str) or not key or Path(key).name != key or not is_sha(value)
+               for key, value in candidate["release_files"].items())
+        or candidate["release_files"].get(candidate["runtime_file"]) != candidate["runtime_sha256"]):
+        raise ValueError("invalid immutable candidate identity")
+
+
+def entries_fingerprint(entries):
+    fingerprint = hashlib.sha256()
+    for name, item in sorted(entries.items(), key=lambda entry: os.fsencode(entry[0])):
+        fingerprint.update(os.fsencode(name) + b"\0" + (b"755\0" if item[0] == "executable" else b"644\0"))
+        fingerprint.update(b"link\0" + os.fsencode(item[1][5:]) if item[1].startswith("link:") else bytes.fromhex(item[1]))
+    return fingerprint.hexdigest()
+
+
+def validate_manifest(manifest):
+    if (not isinstance(manifest, dict) or set(manifest) != {"schema_version", "candidate", "source_entries", "environment"}
+        or type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1):
+        raise ValueError("invalid candidate manifest")
+    validate_candidate_identity(manifest["candidate"])
+    environment = manifest["environment"]
+    if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
+        or any(not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value)
+               for value in environment.values())):
+        raise ValueError("invalid manifest environment")
+    entries = manifest["source_entries"]
+    if not isinstance(entries, dict) or not entries:
+        raise ValueError("missing manifest source inventory")
+    for name, item in entries.items():
+        if (not isinstance(name, str) or not name or name.startswith("/") or ".." in Path(name).parts
+            or name.startswith(".subyard-acceptance/") or not isinstance(item, list) or len(item) != 2
+            or item[0] not in ("regular", "executable") or not isinstance(item[1], str)
+            or not (is_sha(item[1]) or item[1].startswith("link:"))):
+            raise ValueError("invalid manifest source entry")
+    if entries_fingerprint(entries) != manifest["candidate"]["source_fingerprint"]:
+        raise ValueError("manifest source inventory fingerprint mismatch")
+
+
+def validate_attempt(record, manifest, name, command, log_sha256=None):
+    validate_manifest(manifest)
+    if (not isinstance(record, dict) or set(record) != {"schema_version", "id", "manifest_sha256", "check", "command", "result"}
+        or type(record["schema_version"]) is not int or record["schema_version"] != 1
+        or not isinstance(record["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", record["id"])
+        or record["manifest_sha256"] != evidence_hash(manifest) or record["check"] != name or record["command"] != command
+        or not isinstance(command, list) or not command or any(not isinstance(value, str) or not value for value in command)):
+        raise ValueError("invalid original attempt binding")
+    facts = record["result"]
+    if (not isinstance(facts, dict) or set(facts) != set(ATTEMPT_FIELDS)
+        or facts["status"] not in ("passed", "failed", "interrupted", "blocked")
+        or facts["exit_code"] is not None and type(facts["exit_code"]) is not int
+        or facts["termination"] not in (None, "exit", "signal", "timeout", "unknown")
+        or facts["log_sha256"] is not None and not is_sha(facts["log_sha256"])
+        or log_sha256 is not None and facts["log_sha256"] != log_sha256
+        or facts["duration_seconds"] is not None and (type(facts["duration_seconds"]) not in (int, float)
+            or not math.isfinite(facts["duration_seconds"]) or facts["duration_seconds"] < 0)
+        or facts["slot"] is not None and (type(facts["slot"]) is not int or not 1 <= facts["slot"] <= 999)
+        or facts["signal"] is not None and (type(facts["signal"]) is not int or facts["signal"] <= 0)
+        or facts["execution_environment"] is not None and facts["execution_environment"] != manifest["environment"]
+        or not isinstance(facts["environments"], list)):
+        raise ValueError("invalid completed attempt result")
+    for item in facts["environments"]:
+        if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
+            or not isinstance(item["type"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item["type"])
+            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not is_sha(item["base_fingerprint"])):
+            raise ValueError("invalid attempt physical environment")
+    for key, allowed in (("capture_status", (None, "recorded", "failed")),
+                         ("environment_evidence", (None, "recorded", "unknown")),
+                         ("cleanup_status", (None, "recorded", "unknown", "drained", "unconfirmed")),
+                         ("failure_class", (None, "product", "fixture", "environment", "timeout", "unknown"))):
+        if facts[key] not in allowed:
+            raise ValueError("invalid attempt capture or cleanup state")
+    for key in ("reason", "last_completed_phase"):
+        if facts[key] is not None and (not isinstance(facts[key], str) or len(facts[key]) > 256
+            or any(ord(c) < 32 for c in facts[key])):
+            raise ValueError("invalid attempt diagnostic")
+    for key, fields in (("cleanup", {"exit_code", "duration_seconds"}), ("phase_budgets", {"budget_seconds", "grace_seconds"})):
+        values = facts[key]
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise ValueError("invalid attempt phase measurements")
+        for phase, item in values.items():
+            if (not isinstance(phase, str) or not re.fullmatch(r"[a-zA-Z0-9_./-]{1,100}", phase)
+                or not isinstance(item, dict) or set(item) != fields
+                or any(type(value) is not int or value < 0 for value in item.values())
+                or "exit_code" in item and item["exit_code"] > 255):
+                raise ValueError("invalid attempt phase measurement")
+    if facts["status"] == "passed" and (facts["exit_code"] != 0 or facts["capture_status"] != "recorded"
+        or facts["termination"] != "exit" or not is_sha(facts["log_sha256"])
+        or facts["execution_environment"] is None or facts["duration_seconds"] is None
+        or facts["cleanup"] and any(item["exit_code"] != 0 for item in facts["cleanup"].values())):
+        raise ValueError("invalid or incomplete original attempt PASS")
+
+
+def immutable_json(path, value):
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.parent.chmod(0o700)
+    sync_directory(path.parent.parent)
+    data = evidence_bytes(value)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    sync_directory(path.parent)
+    return hashlib.sha256(data).hexdigest()
+
+
+def persist_manifest(path, manifest):
+    # Concurrent physical completions share the same content-addressed manifest.
+    with MANIFEST_LOCK:
+        if path.exists():
+            if digest(path) != evidence_hash(manifest):
+                raise ValueError("candidate manifest changed")
+        else:
+            immutable_json(path, manifest)
+
+
+def completed_attempt(output, root, receipt, name, result):
+    manifest = candidate_manifest(root, receipt)
+    manifest_sha = evidence_hash(manifest)
+    manifest_path = output / "manifests" / (manifest_sha + ".json")
+    persist_manifest(manifest_path, manifest)
+    if result.get("log_sha256") is not None:
+        log = result.get("log")
+        if not isinstance(log, str) or Path(log).name != log or digest(output / log) != result["log_sha256"]:
+            raise ValueError("completed attempt log changed")
+        with (output / log).open("rb") as stream:
+            os.fsync(stream.fileno())
+    record = {"schema_version": 1, "id": uuid.uuid4().hex, "manifest_sha256": manifest_sha,
+              "check": name, "command": result["command"],
+              "result": {key: result.get(key, [] if key == "environments" else None) for key in ATTEMPT_FIELDS}}
+    validate_attempt(record, manifest, name, result["command"])
+    sha = immutable_json(output / "attempts" / (record["id"] + ".json"), record)
+    return {"id": record["id"], "sha256": sha}
+
+
+def original_attempt(output, receipt, name, result):
+    reference = result.get("original_attempt")
+    if (not isinstance(reference, dict) or set(reference) != {"id", "sha256"}
+        or not isinstance(reference["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", reference["id"])
+        or not is_sha(reference["sha256"])):
+        raise ValueError("invalid original attempt reference")
+    path = output / "attempts" / (reference["id"] + ".json")
+    if digest(path) != reference["sha256"]:
+        raise ValueError("original attempt record changed")
+    record = read_transfer_json(path)
+    if not isinstance(record, dict) or not is_sha(record.get("manifest_sha256")):
+        raise ValueError("invalid attempt manifest reference")
+    manifest_path = output / "manifests" / (record["manifest_sha256"] + ".json")
+    if digest(manifest_path) != record["manifest_sha256"]:
+        raise ValueError("original candidate manifest changed")
+    manifest = read_transfer_json(manifest_path)
+    validate_attempt(record, manifest, name, result.get("command"), result.get("log_sha256"))
+    if (record["id"] != reference["id"] or manifest["candidate"] != transfer_candidate(receipt)
+        or manifest["environment"] != receipt["environment"] or result.get("inherited")
+        or record["result"] != {key: result.get(key, [] if key == "environments" else None) for key in ATTEMPT_FIELDS}):
+        raise ValueError("current original attempt differs")
+    if result.get("log_sha256") is not None:
+        log = result.get("log")
+        if not isinstance(log, str) or Path(log).name != log or digest(output / log) != result["log_sha256"]:
+            raise ValueError("original attempt log changed")
+    return record, manifest
+
+
+def attempt_facts(record):
+    facts = record["result"]
+    return {"actual_command": record["command"] + (["--slot", str(facts["slot"])] if facts["slot"] is not None else []),
+            "duration_seconds": facts["duration_seconds"], "launched_at_utc": None,
+            "execution_environment": facts["execution_environment"], "environments": facts["environments"]}
+
+
+def profile_closure(root, profiles, name, entries=None):
     owner = name.split(":", 1)[1].split("/", 1)[0]
     other_prefixes = tuple("config/profiles/" + profile + "/tests/" for profile in profiles if profile != owner)
-    closure = {path: value for path, value in source_entries(root).items() if not path.startswith(other_prefixes)}
+    closure = {path: value for path, value in (source_entries(root) if entries is None else entries).items() if not path.startswith(other_prefixes)}
     return hashlib.sha256(json.dumps(closure, sort_keys=True).encode()).hexdigest()
 
 
@@ -1175,7 +1374,7 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
             os.fsync(copied.fileno())
         if digest(log) != result["log_sha256"]:
             raise ValueError("imported evidence changed during copy")
-        receipt["checks"][name] = {**result, "log": log.name, "inherited": True,
+        receipt["checks"][name] = {**{key: value for key, value in result.items() if key != "original_attempt"}, "log": log.name, "inherited": True,
                                    "from_receipt_sha256": source_hash,
                                    "from_log_sha256": result["log_sha256"],
                                    "inherited_from": binding}
@@ -1202,12 +1401,41 @@ def read_transfer_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique)
 
 
-def validate_evidence_transfer(document, name, command, target, log_sha256):
+def validate_evidence_transfer(document, name, command, target, log_sha256, manifests=None):
     """Validate the public provenance shared by local receipts and remote publication."""
-    def sha(value):
-        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
-    def text(value, limit):
-        return isinstance(value, str) and bool(value.strip()) and len(value) <= limit and not any(ord(c) < 32 for c in value)
+    if isinstance(document, dict) and document.get("schema_version") == 2:
+        keys = {"schema_version", "check", "tested_manifest_sha256", "target_manifest_sha256", "original_attempt",
+                "command", "actual_command", "origin", "artifacts", "review", "preparation_environment",
+                "execution_environment", "environments", "duration_seconds", "launched_at_utc"}
+        if set(document) != keys or type(document["schema_version"]) is not int or document["origin"] != "attempt":
+            raise ValueError("invalid original attempt transfer")
+        if (not isinstance(document["artifacts"], dict) or not isinstance(manifests, dict)
+            or any(not is_sha(document[key]) or document[key] not in manifests for key in ("tested_manifest_sha256", "target_manifest_sha256"))):
+            raise ValueError("dangling transfer manifest reference")
+        tested, destination = (manifests[document[key]] for key in ("tested_manifest_sha256", "target_manifest_sha256"))
+        for key, manifest in (("tested_manifest_sha256", tested), ("target_manifest_sha256", destination)):
+            validate_manifest(manifest)
+            if evidence_hash(manifest) != document[key]:
+                raise ValueError("transfer manifest hash mismatch")
+        record = document["original_attempt"]
+        validate_attempt(record, tested, name, command, log_sha256)
+        if (record["result"]["status"] != "passed" or record["result"]["exit_code"] != 0
+            or record["result"]["capture_status"] != "recorded"
+            or record["result"]["execution_environment"] is None
+            or record["result"]["duration_seconds"] is None
+            or is_live(name) and (record["result"]["cleanup_status"] != "recorded" or not record["result"]["cleanup"]
+                or record["result"]["environment_evidence"] != "recorded")
+            or document["preparation_environment"] != tested["environment"]
+            or any(document[key] != value for key, value in attempt_facts(record).items())
+            or document["artifacts"] != {"attempt": evidence_hash(record), "manifest": document["tested_manifest_sha256"],
+                "target_manifest": document["target_manifest_sha256"], "log": log_sha256, "review": document["artifacts"].get("review")}):
+            raise ValueError("transfer original attempt facts changed or incomplete")
+        legacy = {key: value for key, value in document.items() if key not in
+                  ("tested_manifest_sha256", "target_manifest_sha256", "original_attempt")}
+        legacy.update(schema_version=1, origin="receipt", tested=tested["candidate"], target=destination["candidate"],
+                      artifacts={"receipt": document["artifacts"]["attempt"], "review": document["artifacts"]["review"], "log": log_sha256})
+        validate_evidence_transfer(legacy, name, command, target, log_sha256)
+        return
     keys = {"schema_version", "check", "tested", "target", "command", "actual_command", "origin",
             "artifacts", "review", "preparation_environment", "execution_environment", "environments",
             "duration_seconds", "launched_at_utc"}
@@ -1216,27 +1444,21 @@ def validate_evidence_transfer(document, name, command, target, log_sha256):
         or document["origin"] not in ("receipt", "standalone")):
         raise ValueError("invalid reviewed evidence transfer")
     for candidate in (document["tested"], document["target"]):
-        if (not isinstance(candidate, dict) or set(candidate) != {"version", "source_fingerprint", "runtime_file",
-            "runtime_sha256", "candidate_bundle_sha256", "release_files", "candidate_sha256"}
-            or not text(candidate["version"], 64) or not text(candidate["runtime_file"], 128)
-            or Path(candidate["runtime_file"]).name != candidate["runtime_file"]
-            or any(not sha(candidate[key]) for key in ("source_fingerprint", "runtime_sha256", "candidate_bundle_sha256", "candidate_sha256"))
-            or not isinstance(candidate["release_files"], dict) or not candidate["release_files"]
-            or any(not text(filename, 128) or Path(filename).name != filename or not sha(value)
-                   for filename, value in candidate["release_files"].items())
-            or candidate["release_files"].get(candidate["runtime_file"]) != candidate["runtime_sha256"]):
+        validate_candidate_identity(candidate)
+        if (not public_text(candidate["version"], 64) or not public_text(candidate["runtime_file"], 128)
+            or any(not public_text(filename, 128) for filename in candidate["release_files"])):
             raise ValueError("invalid transferred candidate identity")
     if (any(document["target"].get(key) != value for key, value in target.items())
         or document["tested"]["version"] != document["target"]["version"]):
         raise ValueError("reviewed transfer target changed")
     review = document["review"]
     if (not isinstance(review, dict) or set(review) != {"unchanged_scope", "reason", "authorization_reference"}
-        or any(not text(review[key], limit) for key, limit in
+        or any(not public_text(review[key], limit) for key, limit in
                (("unchanged_scope", 2048), ("reason", 1024), ("authorization_reference", 256)))):
         raise ValueError("reviewed transfer requires scope, reason and authorization")
     roles = {"receipt", "review", "log"} | ({"native", "launch"} if document["origin"] == "standalone" else set())
     if (not isinstance(document["artifacts"], dict) or set(document["artifacts"]) != roles
-        or any(not sha(value) for value in document["artifacts"].values())
+        or any(not is_sha(value) for value in document["artifacts"].values())
         or document["artifacts"]["log"] != log_sha256):
         raise ValueError("reviewed transfer original evidence missing")
     for key in ("preparation_environment", "execution_environment"):
@@ -1244,10 +1466,10 @@ def validate_evidence_transfer(document, name, command, target, log_sha256):
         if environment is None and key == "execution_environment" and document["origin"] == "standalone":
             continue
         if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
-            or any(not text(value, 256) for value in environment.values())):
+            or any(not public_text(value, 256) for value in environment.values())):
             raise ValueError("transferred execution provenance missing")
     actual = document["actual_command"]
-    if not isinstance(actual, list) or not actual or any(not text(value, 4096) for value in actual):
+    if not isinstance(actual, list) or not actual or any(not public_text(value, 4096) for value in actual):
         raise ValueError("transferred actual command missing")
     actual_prefix = (["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
         "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}", "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
@@ -1265,7 +1487,7 @@ def validate_evidence_transfer(document, name, command, target, log_sha256):
     for item in environments:
         if (not isinstance(item, dict) or set(item) != {"type", "vm_count", "base_fingerprint"}
             or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", item.get("type", ""))
-            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
+            or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not is_sha(item["base_fingerprint"])):
             raise ValueError("invalid transferred physical environment")
     duration = document["duration_seconds"]
     if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
@@ -1273,20 +1495,20 @@ def validate_evidence_transfer(document, name, command, target, log_sha256):
     launched = document["launched_at_utc"]
     if launched is not None:
         try:
-            if not text(launched, 64) or datetime.fromisoformat(launched).utcoffset() is None:
+            if not public_text(launched, 64) or datetime.fromisoformat(launched).utcoffset() is None:
                 raise ValueError()
         except (TypeError, ValueError):
             raise ValueError("invalid transferred launch time") from None
 
 
-def validate_standalone_bundle(root, receipt):
+def validate_standalone_bundle(root, receipt, entries=None):
     """Bind an older raw launcher to the original frozen source and runtime bytes."""
-    bound_root, bound = load_bound(root.parent)
-    if bound_root != root or transfer_candidate(bound) != transfer_candidate(receipt):
-        raise ValueError("standalone original frozen candidate changed")
-    paths = sorted(filter(None, subprocess.check_output(["bash", "tests/helpers/source-files.sh"],
-        cwd=root, stderr=subprocess.DEVNULL).split(b"\0")))
-    paths = [raw for raw in paths if not os.fsdecode(raw).startswith(".subyard-acceptance/")]
+    if entries is None:
+        bound_root, bound = load_bound(root.parent)
+        if bound_root != root or transfer_candidate(bound) != transfer_candidate(receipt):
+            raise ValueError("standalone original frozen candidate changed")
+        entries = source_entries(root)
+    paths = sorted(map(os.fsencode, entries))
     extras = {".subyard-acceptance/candidate.json": digest(root / ".subyard-acceptance/candidate.json"),
               **{".subyard-acceptance/release/" + name: sha for name, sha in receipt["release_files"].items()}}
     expected = set(map(os.fsdecode, paths)) | set(extras)
@@ -1410,7 +1632,7 @@ def validate_historical_p0_log(path, bundle, slot):
         invalid()
 
 
-def standalone_result(root, receipt, name, command, files, verify_source=True):
+def standalone_result(root, receipt, name, command, files, verify_source=True, entries=None):
     """Verify existing bounded controller evidence, without inventing collector timing."""
     native = read_transfer_json(files["native"])
     if (type(native.get("exit_code")) is not int or native["exit_code"] != 0 or native.get("session_id") is not None
@@ -1468,7 +1690,7 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
         if raw:
             launched = parsed.astimezone(timezone.utc).isoformat()
     if raw and verify_source:
-        validate_standalone_bundle(root, receipt)
+        validate_standalone_bundle(root, receipt, entries)
     # Initial import checks the actual bound controller above. Copied, hash-bound
     # rich evidence retains this exact interpretation during portable revalidation.
     historical_p0 = (not raw and name == "p0-release-smoke" and command == ["bash", "dev/e2e/p0-acceptance.sh"]
@@ -1503,6 +1725,27 @@ def standalone_result(root, receipt, name, command, files, verify_source=True):
 
 def validate_transferred_result(output, receipt, name, result, command, root):
     transfer = result["evidence_transfer"]
+    if transfer.get("schema_version") == 2:
+        files = result.get("evidence_files")
+        if not isinstance(files, dict) or set(files) != set(transfer["artifacts"]):
+            raise ValueError("original attempt transfer artifacts missing")
+        for role, filename in files.items():
+            if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
+                raise ValueError("original attempt transfer artifact changed")
+        record = read_transfer_json(output / files["attempt"])
+        manifests = {transfer[key]: read_transfer_json(output / files[role]) for key, role in
+                     (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest"))}
+        validate_evidence_transfer(transfer, name, command_identity(command, root), transfer_candidate(receipt), result["log_sha256"], manifests)
+        review = read_transfer_json(output / files["review"])
+        expected_review = {"schema_version": 2, "check": name, "tested_manifest_sha256": transfer["tested_manifest_sha256"],
+            "target_manifest_sha256": transfer["target_manifest_sha256"],
+            "original_attempt": {"id": record["id"], "sha256": transfer["artifacts"]["attempt"]}, "review": transfer["review"], "standalone": None}
+        if (record != transfer["original_attempt"] or review != expected_review or result.get("execution") != "inherited"
+            or type(result.get("exit_code")) is not int or result["exit_code"] != 0
+            or result.get("from_attempt_sha256") != transfer["artifacts"]["attempt"]
+            or any(result.get(key, []) != transfer[key] for key in ("execution_environment", "environments", "duration_seconds"))):
+            raise ValueError("original attempt transfer provenance changed")
+        return
     validate_evidence_transfer(transfer, name, command_identity(command, root), transfer_candidate(receipt), result["log_sha256"])
     files = result.get("evidence_files")
     if (not isinstance(files, dict) or set(files) != set(transfer["artifacts"])
@@ -1543,20 +1786,63 @@ def validate_transferred_result(output, receipt, name, result, command, root):
         raise ValueError("reviewed transfer original execution provenance changed")
 
 
-def transfer_evidence(output, source_output, name, review_path):
-    root, receipt = load_bound(output)
-    source_root, source = load_bound(source_output)
-    if output == source_output or receipt.get("superseded") or source.get("superseded"):
+
+def candidate_manifest(root, receipt, entries=None):
+    manifest = {"schema_version": 1, "candidate": transfer_candidate(receipt),
+                "source_entries": source_entries(root) if entries is None else entries, "environment": receipt["environment"]}
+    validate_manifest(manifest)
+    return manifest
+
+
+class EvidenceCandidate:
+    def __init__(self, output):
+        self.output = output
+        self.entries = source_entries(output / "source")
+        self.context = {}
+        self.root, self.receipt = load_bound(output, entries=self.entries, context=self.context)
+        self.manifest = candidate_manifest(self.root, self.receipt, self.entries)
+
+
+def prepare_attempt_transfer(target, source, name, review_path, review):
+    receipt, original = target.receipt, source.receipt["checks"][name]
+    expected = command_identity(target.context["commands"][name], target.root)
+    if name not in source.context["attempts"]:
+        raise ValueError("invalid original attempt reference")
+    record, manifest = source.context["attempts"][name]
+    target_manifest, source_output = target.manifest, source.output
+    tested_sha, target_sha = evidence_hash(manifest), evidence_hash(target_manifest)
+    reference = {"id": record["id"], "sha256": evidence_hash(record)}
+    if (set(review) != {"schema_version", "check", "tested_manifest_sha256", "target_manifest_sha256", "original_attempt", "review", "standalone"}
+        or type(review["schema_version"]) is not int or review["check"] != name or review["standalone"] is not None
+        or review["tested_manifest_sha256"] != tested_sha or review["target_manifest_sha256"] != target_sha
+        or review["original_attempt"] != reference):
+        raise ValueError("review declaration original attempt binding differs")
+    files = {"attempt": source_output / "attempts" / (record["id"] + ".json"),
+             "manifest": source_output / "manifests" / (tested_sha + ".json"),
+             "target_manifest": evidence_bytes(target_manifest), "review": review_path, "log": source_output / original["log"]}
+    hashes = {role: hashlib.sha256(path).hexdigest() if isinstance(path, bytes) else digest(path) for role, path in files.items()}
+    transfer = {"schema_version": 2, "check": name, "tested_manifest_sha256": tested_sha, "target_manifest_sha256": target_sha,
+        "original_attempt": record, "command": expected, "origin": "attempt", "artifacts": hashes,
+        "review": review["review"], "preparation_environment": manifest["environment"], **attempt_facts(record)}
+    validate_evidence_transfer(transfer, name, expected, transfer_candidate(receipt), hashes["log"], {tested_sha: manifest, target_sha: target_manifest})
+    return transfer, files
+
+
+def prepare_transfer(target_candidate, source_candidate, name, review_path, review):
+    root, receipt = target_candidate.root, target_candidate.receipt
+    source_root, source = source_candidate.root, source_candidate.receipt
+    required, old_commands = target_candidate.context["commands"], source_candidate.context["commands"]
+    if target_candidate.output == source_candidate.output or receipt.get("superseded") or source.get("superseded"):
         raise ValueError("reviewed transfer requires distinct active candidates")
-    required = commands(root, receipt["version"], receipt["profiles"])
-    old_commands = commands(source_root, source["version"], source["profiles"])
     if name not in required or not required[name] or name not in old_commands or not old_commands[name]:
         raise ValueError("reviewed transfer requires an exact executable check")
     expected = command_identity(required[name], root)
     if expected != command_identity(old_commands[name], source_root) or receipt["checks"][name]["status"] != "pending":
         raise ValueError("reviewed transfer command differs or target is already attempted")
-    review = read_transfer_json(review_path)
+    source_output = source_candidate.output
     tested, target = transfer_candidate(source), transfer_candidate(receipt)
+    if isinstance(review, dict) and review.get("schema_version") == 2:
+        return prepare_attempt_transfer(target_candidate, source_candidate, name, review_path, review)
     if (not isinstance(review, dict) or set(review) != {"schema_version", "check", "tested", "target", "source_receipt_sha256", "review", "standalone"}
         or type(review["schema_version"]) is not int or review["schema_version"] != 1 or review["check"] != name or review["tested"] != tested
         or review["target"] != target or review["source_receipt_sha256"] != digest(source_output / "receipt.json")):
@@ -1581,31 +1867,305 @@ def transfer_evidence(output, source_output, name, review_path):
             files[role] = (review_path.parent / descriptor["path"]).resolve()
             if digest(files[role]) != descriptor["sha256"]:
                 raise ValueError("standalone original artifact changed")
-        facts = standalone_result(source_root, source, name, old_commands[name], files)
+        facts = standalone_result(source_root, source, name, old_commands[name], files, entries=source_candidate.entries)
         origin = "standalone"
-    hashes = {role: digest(path) for role, path in files.items()}
+    hashes = {role: hashlib.sha256(path).hexdigest() if isinstance(path, bytes) else digest(path) for role, path in files.items()}
     transfer = {"schema_version": 1, "check": name, "tested": tested, "target": target, "command": expected,
                 "origin": origin, "artifacts": hashes, "review": review["review"], "preparation_environment": source["environment"], **facts}
     validate_evidence_transfer(transfer, name, expected, target, hashes["log"])
-    copied = {}
-    for role, path in files.items():
-        destination = output / ("transfer-" + uuid.uuid4().hex + "-" + role)
-        with path.open("rb") as original_file, private_file(destination, "wb") as stream:
-            shutil.copyfileobj(original_file, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if digest(destination) != hashes[role]:
-            raise ValueError("reviewed transfer evidence changed during copy")
-        copied[role] = destination.name
-    result = {"status": "passed", "exit_code": 0, "command": expected, "log": copied["log"], "log_sha256": hashes["log"],
-              "inherited": True, "execution": "inherited", "from_receipt_sha256": hashes["receipt"], "from_log_sha256": hashes["log"],
-              "evidence_transfer": transfer, "evidence_files": copied, **{key: facts[key] for key in ("execution_environment", "environments", "duration_seconds")}}
-    validate_transferred_result(output, receipt, name, result, required[name], root)
-    receipt["checks"][name] = result
-    save(output, receipt)
-    event(output, "evidence-transfer", check=name, execution="inherited", evidence_transfer=transfer)
-    print(f"TRANSFERRED {name} execution=inherited receipt={output / 'receipt.json'}", flush=True)
-    return 0
+    return transfer, files
+
+
+def transfer_evidence(output, source_output, name, review_path):
+    target, source = EvidenceCandidate(output), EvidenceCandidate(source_output)
+    transfer, files = prepare_transfer(target, source, name, review_path, read_transfer_json(review_path))
+    return apply_transfers(target, [(name, target.context["commands"][name], transfer, files)])
+
+
+
+BATCH_BYTE_LIMIT = 1 << 20
+
+
+def bounded_batch(value):
+    if len(evidence_bytes(value)) > BATCH_BYTE_LIMIT:
+        raise ValueError("batch preparation exceeds 1 MiB byte limit")
+    return value
+
+
+def batch_request(path):
+    if path.stat().st_size > BATCH_BYTE_LIMIT:
+        raise ValueError("batch request exceeds 1 MiB byte limit")
+    document = read_transfer_json(path)
+    if (not isinstance(document, dict) or set(document) != {"schema_version", "target", "checks"}
+        or type(document["schema_version"]) is not int or document["schema_version"] != 1
+        or not isinstance(document["checks"], list) or not document["checks"] or len(document["checks"]) > 1000):
+        raise ValueError("invalid batch transfer request")
+    validate_candidate_identity(document["target"])
+    names, items = set(), []
+    for item in document["checks"]:
+        if (not isinstance(item, dict) or set(item) != {"check", "source", "attempt", "review"}
+            or not isinstance(item["check"], str) or item["check"] in names
+            or not isinstance(item["source"], str) or not item["source"]):
+            raise ValueError("invalid or duplicate batch check")
+        names.add(item["check"])
+        attempt = item["attempt"]
+        if attempt is not None and (not isinstance(attempt, dict) or set(attempt) != {"id", "sha256"}
+            or not isinstance(attempt["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", attempt["id"]) or not is_sha(attempt["sha256"])):
+            raise ValueError("invalid batch original attempt reference")
+        review = item["review"]
+        if review is not None and (not isinstance(review, dict) or set(review) != {"path", "sha256"}
+            or not isinstance(review["path"], str) or not review["path"] or not is_sha(review["sha256"])):
+            raise ValueError("invalid batch review reference")
+        items.append({**item, "source": (path.parent / item["source"]).resolve(),
+                      "review": None if review is None else {**review, "path": (path.parent / review["path"]).resolve()}})
+    return document, items
+
+
+def batch_guard(root, receipt, source_root, source, name, target_context, source_context):
+    required, previous = target_context["commands"], source_context["commands"]
+    if (receipt.get("superseded") or source.get("superseded") or receipt["version"] != source["version"]
+        or receipt["profiles"] != source["profiles"]
+        or {key: command_identity(value, root) if value else value for key, value in required.items()} !=
+           {key: command_identity(value, source_root) if value else value for key, value in previous.items()}
+        or target_context["external"] != source_context["external"]):
+        raise ValueError("batch requires active candidates with matching complete inventories")
+    if name not in required or not required[name] or name == "package" or receipt["checks"][name]["status"] != "pending":
+        raise ValueError("batch requires an exact pending executable target check")
+    original = source["checks"][name]
+    if original.get("inherited") or "evidence_transfer" in original:
+        raise ValueError("batch cannot chain inherited evidence")
+    if receipt["environment"] != source["environment"]:
+        raise ValueError("batch execution environment differs")
+    return required[name], original
+
+
+def batch_diff(source_manifest, target_manifest, source_root, source, root, receipt):
+    left, right = source_manifest["source_entries"], target_manifest["source_entries"]
+    paths = {name: {"tested": left.get(name), "target": right.get(name)}
+             for name in sorted(left.keys() | right.keys()) if left.get(name) != right.get(name)}
+    assets = {name: {"tested": source["release_files"].get(name), "target": receipt["release_files"].get(name)}
+              for name in sorted(source["release_files"].keys() | receipt["release_files"].keys())
+              if source["release_files"].get(name) != receipt["release_files"].get(name)}
+    try:
+        release_scope = "generated-at-only" if release_import_binding(root, receipt, source_root, source) else "identical"
+    except ValueError:
+        release_scope = "review-required"
+    return {"source_changes": paths, "asset_changes": assets, "release_scope": release_scope,
+            "runtime_equal": source["runtime_sha256"] == receipt["runtime_sha256"]}
+
+
+def batch_review_draft(name, original, source_output, source_manifest, target_manifest, standalone=None):
+    review = {"unchanged_scope": "", "reason": "", "authorization_reference": ""}
+    if "original_attempt" in original:
+        return {"schema_version": 2, "check": name, "tested_manifest_sha256": evidence_hash(source_manifest),
+            "target_manifest_sha256": evidence_hash(target_manifest), "original_attempt": original["original_attempt"],
+            "review": review, "standalone": None}
+    return {"schema_version": 1, "check": name, "tested": source_manifest["candidate"], "target": target_manifest["candidate"],
+            "source_receipt_sha256": digest(source_output / "receipt.json"), "review": review, "standalone": standalone}
+
+
+def transfer_result(transfer, copied, batch_id):
+    hashes = transfer["artifacts"]
+    return {"status": "passed", "exit_code": 0, "command": transfer["command"], "log": copied["log"],
+        "log_sha256": hashes["log"], "inherited": True, "execution": "inherited", "from_log_sha256": hashes["log"],
+        ("from_attempt_sha256" if transfer["schema_version"] == 2 else "from_receipt_sha256"):
+            hashes["attempt" if transfer["schema_version"] == 2 else "receipt"],
+        "evidence_transfer": transfer, "evidence_files": copied,
+        **({"transfer_batch_sha256": batch_id} if batch_id is not None else {}),
+        **{key: transfer[key] for key in ("execution_environment", "environments", "duration_seconds")}}
+
+
+def batch_committed(receipt, names, batch_id):
+    return all(receipt["checks"].get(name, {}).get("transfer_batch_sha256") == batch_id
+               and receipt["checks"][name].get("status") == "passed" for name in names)
+
+
+@contextmanager
+def batch_locks(output, sources, names, batch_id):
+    try:
+        with ExitStack() as stack:
+            for path in sorted(sources | {output}, key=str):
+                stack.enter_context(acceptance_lock(path, shared=path != output))
+            yield
+    except Exception as error:
+        # A retry may encounter a subsequently rerun/busy source. Its earlier commit is still a fact.
+        try:
+            committed = batch_committed(read_transfer_json(output / "receipt.json"), names, batch_id)
+        except (ValueError, OSError, KeyError):
+            committed = False
+        if committed and "committed" not in str(error):
+            print(f"BATCH state=committed retry_validation=failed batch={batch_id}", flush=True)
+            raise ValueError("batch already committed; retry validation could not complete") from error
+        raise
+
+
+def transfer_batch(output, request_path, plan=False):
+    """Validate once under ordered locks, then publish one receipt replacement."""
+    output, request_path = output.resolve(), request_path.resolve()
+    request_sha = digest(request_path)
+    document, items = batch_request(request_path)
+    sources = {item["source"] for item in items}
+    if output in sources:
+        raise ValueError("batch source and target must be distinct")
+    # Review bytes, rather than mutable carrier receipts, identify new-attempt retries.
+    identities, reviews = [], {}
+    for item in items:
+        descriptor = item["review"]
+        if descriptor is not None:
+            if digest(descriptor["path"]) != descriptor["sha256"]:
+                raise ValueError("batch review changed")
+            reviews[item["check"]] = read_transfer_json(descriptor["path"])
+        elif not plan:
+            raise ValueError("batch apply requires bound authorized reviews")
+        identities.append({"check": item["check"], "source": str(item["source"]), "attempt": item["attempt"],
+                           "review_sha256": None if descriptor is None else descriptor["sha256"]})
+    batch_id = evidence_hash({"target": document["target"], "checks": sorted(identities, key=lambda value: value["check"])})
+    names = [item["check"] for item in items]
+    with batch_locks(output, sources, names, batch_id):
+        snapshots = {}
+        for path in sorted(sources | {output}, key=str):
+            snapshots[path] = EvidenceCandidate(path)
+            bounded_batch(snapshots[path].manifest)
+        target = snapshots[output]
+        root, receipt, target_manifest, target_context = target.root, target.receipt, target.manifest, target.context
+        if document["target"] != transfer_candidate(receipt):
+            raise ValueError("batch target candidate binding changed")
+        if not plan and batch_committed(receipt, names, batch_id):
+            if digest(request_path) != request_sha:
+                raise ValueError("batch request changed during validation")
+            print(f"BATCH state=committed retry=true batch={batch_id} receipt={output / 'receipt.json'}", flush=True)
+            return 0
+        if any(receipt["checks"].get(name, {}).get("transfer_batch_sha256") for name in names):
+            raise ValueError("batch conflicts with committed transfer references")
+        table = {evidence_hash(target_manifest): target_manifest}
+        pairs, decisions, prepared = {}, [], []
+        for item in items:
+            name, source_output = item["check"], item["source"]
+            source_candidate = snapshots[source_output]
+            source_root, source = source_candidate.root, source_candidate.receipt
+            entries, manifest, source_context = source_candidate.entries, source_candidate.manifest, source_candidate.context
+            command, original = batch_guard(root, receipt, source_root, source, name, target_context, source_context)
+            if item["attempt"] != original.get("original_attempt"):
+                raise ValueError("batch current original attempt reference changed")
+            if "original_attempt" in original:
+                if is_live(name) and (original.get("cleanup_status") != "recorded" or not original.get("cleanup")
+                    or original.get("environment_evidence") != "recorded"):
+                    raise ValueError("batch physical attempt lacks recorded environment or cleanup")
+            source_sha = evidence_hash(manifest)
+            table[source_sha] = manifest
+            if source_output not in pairs:
+                pairs[source_output] = batch_diff(manifest, target_manifest, source_root, source, root, receipt)
+            review = reviews.get(name)
+            standalone = review.get("standalone") if isinstance(review, dict) else None
+            if plan:
+                if standalone is not None:
+                    if not isinstance(standalone, dict) or set(standalone) != {"native", "launch", "log"} or original["status"] != "pending":
+                        raise ValueError("invalid standalone batch planning evidence")
+                    files = {}
+                    for role, descriptor in standalone.items():
+                        if not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"} or not isinstance(descriptor["path"], str):
+                            raise ValueError("invalid standalone artifact declaration")
+                        files[role] = (item["review"]["path"].parent / descriptor["path"]).resolve()
+                        if digest(files[role]) != descriptor["sha256"]:
+                            raise ValueError("standalone original artifact changed")
+                    standalone_result(source_root, source, name, command, files, entries=entries)
+                elif (original["status"] != "passed" or type(original.get("exit_code")) is not int
+                      or original["exit_code"] != 0 or original.get("command") != command_identity(command, root)
+                      or original.get("execution_environment") != source["environment"]
+                      or is_live(name) and not original.get("environments")):
+                    raise ValueError("batch plan requires an original direct PASS")
+                draft = batch_review_draft(name, original, source_output, manifest, target_manifest, standalone)
+                decisions.append({"check": name, "source": str(source_output), "tested_manifest_sha256": source_sha,
+                                  "attempt": item["attempt"], "review_draft": draft})
+            else:
+                transfer, files = prepare_transfer(target, source_candidate, name, item["review"]["path"], review)
+                if transfer["artifacts"]["review"] != item["review"]["sha256"]:
+                    raise ValueError("batch review changed during validation")
+                prepared.append((name, command, transfer, files))
+        report = bounded_batch({"schema_version": 1, "target_manifest_sha256": evidence_hash(target_manifest),
+            "manifests": table, "pairs": [{"source": str(path), "tested_manifest_sha256": evidence_hash(snapshots[path].manifest),
+                "target_manifest_sha256": evidence_hash(target_manifest), **value} for path, value in pairs.items()], "checks": decisions})
+        if digest(request_path) != request_sha or any(item["review"] is not None and
+            digest(item["review"]["path"]) != item["review"]["sha256"] for item in items):
+            raise ValueError("batch request or review changed during validation")
+        if plan:
+            print(json.dumps(report, sort_keys=True), flush=True)
+            return report
+        def verify_inputs():
+            if digest(request_path) != request_sha or any(digest(item["review"]["path"]) != item["review"]["sha256"] for item in items):
+                raise ValueError("batch request or review changed during copy")
+        return apply_transfers(target, prepared, batch_id, verify_inputs)
+
+
+def apply_transfers(target, prepared, batch_id=None, verify_inputs=None):
+    """Stage, rehash and validate all evidence, then publish exactly one receipt."""
+    output, root, receipt = target.output, target.root, target.receipt
+    names = [name for name, _, _, _ in prepared]
+    staging = Path(tempfile.mkdtemp(prefix=".transfer-", dir=output))
+    staging.chmod(0o700)
+    promoted, committed = [], False
+    incoming, copied_cache = copy.deepcopy(receipt), {}
+    try:
+        for name, command, transfer, files in prepared:
+            copied = {}
+            for role, path in files.items():
+                sha = transfer["artifacts"][role]
+                key = (role, sha)
+                if key not in copied_cache:
+                    destination = staging / ("transfer-" + uuid.uuid4().hex + "-" + role)
+                    with private_file(destination, "wb") as stream:
+                        if isinstance(path, bytes):
+                            stream.write(path)
+                        else:
+                            with path.open("rb") as original_file:
+                                shutil.copyfileobj(original_file, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if digest(destination) != sha:
+                        raise ValueError("transfer evidence changed during copy")
+                    copied_cache[key] = destination.name
+                copied[role] = copied_cache[key]
+            result = transfer_result(transfer, copied, batch_id)
+            validate_transferred_result(staging, receipt, name, result, command, root)
+            incoming["checks"][name] = result
+        if verify_inputs is not None:
+            verify_inputs()
+        for path in staging.iterdir():
+            destination = output / path.name
+            os.link(path, destination)  # Exclusive publication; never overwrite another invocation's artifact.
+            promoted.append(destination)
+        sync_directory(output)
+        try:
+            save(output, incoming)
+            committed = True
+        except Exception:
+            # replace may have succeeded before directory fsync raised. Preserve all referenced bytes.
+            try:
+                saved = read_transfer_json(output / "receipt.json")
+                committed = all(saved["checks"].get(name) == incoming["checks"][name] for name in names)
+            except (OSError, ValueError, KeyError):
+                committed = None  # Unknown replacement outcome must preserve potentially referenced artifacts.
+            raise
+        if batch_id is not None:
+            event(output, "evidence-transfer-batch", batch_sha256=batch_id, checks=sorted(names), state="committed")
+            print(f"BATCH state=committed retry=false batch={batch_id} receipt={output / 'receipt.json'}", flush=True)
+        else:
+            name, _, transfer, _ = prepared[0]
+            event(output, "evidence-transfer", check=name, execution="inherited", evidence_transfer=transfer)
+            print(f"TRANSFERRED {name} execution=inherited receipt={output / 'receipt.json'}", flush=True)
+        return 0
+    except Exception as error:
+        if committed is not False:
+            state = "committed" if committed else "unknown"
+            kind = "BATCH" if batch_id is not None else "TRANSFER"
+            print(f"{kind} state={state} capture=failed receipt={output / 'receipt.json'}", flush=True)
+            raise ValueError(f"transfer commit state {state}; artifacts preserved after capture or durability failure") from error
+        for path in promoted:
+            path.unlink()
+        sync_directory(output)
+        raise
+    finally:
+        shutil.rmtree(staging)  # Only this invocation's newly-created directory.
 
 
 def supersede(output):
@@ -1646,9 +2206,11 @@ def main():
     imp.add_argument("--allow-other-profile-tests", action="store_true", help="allow only changes to other shipped profiles' test files")
     transferred = sub.add_parser("transfer", help="accept one reviewed, target-bound original PASS as inherited coverage")
     transferred.add_argument("--output", type=Path, required=True)
-    transferred.add_argument("--from", dest="source_output", type=Path, required=True)
-    transferred.add_argument("--check", required=True, help="one exact declared executable check")
-    transferred.add_argument("--review", type=Path, required=True, help="target-bound public review declaration JSON")
+    transferred.add_argument("--from", dest="source_output", type=Path)
+    transferred.add_argument("--check", help="one exact declared executable check")
+    transferred.add_argument("--review", type=Path, help="target-bound public review declaration JSON")
+    transferred.add_argument("--batch", type=Path, help="bound batch request JSON; exclusive with single-check flags")
+    transferred.add_argument("--plan", action="store_true", help="print shared manifests, diffs and unsigned review drafts for --batch")
     superseded = sub.add_parser("supersede", help="retain original evidence and explicitly retire this candidate")
     superseded.add_argument("--output", type=Path, required=True)
     deferred = sub.add_parser("defer-external", help="record authorized external deferrals; execution stays not-run")
@@ -1673,6 +2235,13 @@ def main():
         with acceptance_lock(output), acceptance_lock(args.source_output.resolve(), shared=True):
             return import_evidence(output, args.source_output.resolve(), args.check, args.allow_other_profile_tests)
     if args.action == "transfer":
+        if args.batch:
+            if args.source_output or args.check or args.review:
+                parser.error("--batch is mutually exclusive with --from, --check and --review")
+            result = transfer_batch(output, args.batch, args.plan)
+            return 0 if args.plan else result
+        if args.plan or not all((args.source_output, args.check, args.review)):
+            parser.error("transfer requires --batch or all of --from, --check and --review; --plan requires --batch")
         with acceptance_lock(output), acceptance_lock(args.source_output.resolve(), shared=True):
             return transfer_evidence(output, args.source_output.resolve(), args.check, args.review.resolve())
     if args.action == "supersede":

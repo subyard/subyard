@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import copy
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -144,6 +145,8 @@ class TestAcceptance(unittest.TestCase):
                     m.load_bound(output)
 
     def test_optional_coverage_skips_live_prerequisite_but_can_be_selected(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)
             receipt = {"version": "test", "source_fingerprint": "a" * 64, "candidate_bundle_sha256": "b" * 64, "profiles": {}, "external_obligations": {},
@@ -197,6 +200,421 @@ class TestAcceptance(unittest.TestCase):
         declaration = directory / "review.json"
         declaration.write_text(json.dumps(review))
         return first, second, name, declaration, review
+
+    def test_source_fingerprint_preserves_raw_path_mode_and_link_order(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            paths = [b"executable", b"link", b"\xff", "\uf000".encode()]
+            for raw in paths:
+                path = directory / os.fsdecode(raw)
+                if raw == b"link":
+                    path.symlink_to("missing-target")
+                else:
+                    path.write_bytes(b"source bytes " + raw)
+                    path.chmod(0o755 if raw == b"executable" else 0o644)
+            expected = hashlib.sha256()
+            for raw in sorted(paths):
+                path = directory / os.fsdecode(raw)
+                expected.update(raw + b"\0" + (b"755\0" if path.lstat().st_mode & 0o111 else b"644\0"))
+                expected.update(b"link\0missing-target" if path.is_symlink() else bytes.fromhex(m.digest(path)))
+            with patch.object(m.subprocess, "check_output", return_value=b"\0".join(reversed(paths)) + b"\0") as listing:
+                self.assertEqual(m.source_fingerprint(directory), expected.hexdigest())
+            self.assertEqual(listing.call_count, 1)
+
+    def test_single_transfer_uses_shared_writer_without_batch_admission_guards(self):
+        for version in (1, 2):
+            with self.subTest(version=version), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                fixture = self.transfer_fixture if version == 1 else self.immutable_transfer_fixture
+                source, _, name, declaration, review = fixture(directory)
+                checkout = directory / "checkout"
+                lanes = checkout / "config/profiles/peer/tests/e2e/acceptance-lanes.json"
+                lanes.write_text(json.dumps({"schema_version": 1, "lanes": [{"id": "new", "arguments": ["--lane", "new"]}]}))
+                target = directory / "third"
+                target_root, receipt = prepare_fixture(checkout, target)
+                receipt["environment"]["go"] = "go version another valid preparation"
+                m.save(target, receipt)
+                if version == 1:
+                    review["target"] = m.transfer_candidate(receipt)
+                else:
+                    review["target_manifest_sha256"] = m.evidence_hash(m.candidate_manifest(target_root, receipt))
+                declaration.write_text(json.dumps(review))
+                before = (target / "receipt.json").read_bytes()
+                with patch.object(m.shutil, "copyfileobj", side_effect=OSError("copy interrupted")):
+                    with self.assertRaises(OSError):
+                        m.transfer_evidence(target, source, name, declaration)
+                self.assertEqual((target / "receipt.json").read_bytes(), before)
+                self.assertEqual(list(target.glob("transfer-*")), [])
+                self.assertEqual(list(target.glob(".transfer-*")), [])
+                captured = io.StringIO()
+                with patch.object(m, "event", side_effect=OSError("event capture unavailable")), redirect_stdout(captured):
+                    with self.assertRaisesRegex(ValueError, "commit state committed"):
+                        m.transfer_evidence(target, source, name, declaration)
+                self.assertIn("TRANSFER state=committed", captured.getvalue())
+                _, committed = m.load_bound(target)
+                self.assertEqual(committed["checks"][name]["status"], "passed")
+                self.assertNotIn("transfer_batch_sha256", committed["checks"][name])
+                self.assertTrue(all((target / path).exists() for path in committed["checks"][name]["evidence_files"].values()))
+
+    def batch_fixture(self, directory):
+        checkout = fixture_checkout(directory)
+        adapter = checkout / "tests/real-host/adapter-contracts.sh"
+        adapter.parent.mkdir(parents=True)
+        adapter.write_text("#!/bin/bash\nexit 0\n")
+        source, target = directory / "source-candidate", directory / "target-candidate"
+        source_root, old = prepare_fixture(checkout, source)
+        names = ("verify", "local-adapters")
+        for name in names:
+            old["checks"][name] = m.execute(name, m.commands(source_root, "test", old["profiles"])[name], source_root, source, m.clean_environment())
+            result = old["checks"][name]
+            result["execution_environment"] = old["environment"]
+            result["original_attempt"] = m.completed_attempt(source, source_root, old, name, result)
+        m.save(source, old)
+        (checkout / "reviewed-document.txt").write_text("Unrelated reviewed fixture documentation\n")
+        with patch.dict(os.environ, {"SUBYARD_FIXTURE_GENERATED_AT": "2026-01-02T00:00:00Z"}):
+            _, current = prepare_fixture(checkout, target)
+        request = {"schema_version": 1, "target": m.transfer_candidate(current), "checks": [
+            {"check": name, "source": str(source), "attempt": old["checks"][name]["original_attempt"], "review": None} for name in names]}
+        path = directory / "batch.json"
+        path.write_text(json.dumps(request))
+        with redirect_stdout(io.StringIO()):
+            report = m.transfer_batch(target, path, plan=True)
+        for item, decision in zip(request["checks"], report["checks"]):
+            review = decision["review_draft"]
+            review["review"] = {"unchanged_scope": "Only synthetic documentation changed", "reason": "Reviewed fixture delta",
+                                "authorization_reference": "operator:batch-fixture"}
+            review_path = directory / (item["check"] + "-review.json")
+            review_path.write_text(json.dumps(review))
+            item["review"] = {"path": str(review_path), "sha256": m.digest(review_path)}
+        path.write_text(json.dumps(request))
+        return source, target, path, request
+
+    def test_batch_plan_scans_unique_candidates_once_and_does_not_mutate_evidence(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source, target, path, request = self.batch_fixture(Path(temporary))
+            before = (target / "receipt.json").read_bytes()
+            inventory = sorted(str(item.relative_to(target)) for item in target.rglob("*"))
+            with patch.object(m, "source_entries", wraps=m.source_entries) as scans, \
+                 patch.object(m, "source_fingerprint", side_effect=AssertionError("redundant source fingerprint scan")), \
+                 redirect_stdout(io.StringIO()):
+                report = m.transfer_batch(target, path, plan=True)
+            self.assertEqual(scans.call_count, 2)
+            self.assertEqual({call.args[0] for call in scans.call_args_list}, {source / "source", target / "source"})
+            self.assertEqual((target / "receipt.json").read_bytes(), before)
+            self.assertEqual(sorted(str(item.relative_to(target)) for item in target.rglob("*")), inventory)
+            self.assertEqual(len(report["manifests"]), 2)
+            self.assertEqual(len(report["pairs"]), 1)
+            self.assertEqual(set(report["pairs"][0]["source_changes"]), {"reviewed-document.txt"})
+            self.assertEqual(report["pairs"][0]["release_scope"], "generated-at-only")
+            for decision in report["checks"]:
+                self.assertNotIn("source_entries", decision)
+                self.assertTrue(all(value == "" for value in decision["review_draft"]["review"].values()))
+            shared_bytes = len(m.evidence_bytes(report))
+            repeated_bytes = sum(len(m.evidence_bytes(report["manifests"])) for _ in report["checks"])
+            self.assertLess(shared_bytes, repeated_bytes)
+            print(f"MEASURE batch_checks=2 unique_scans=2 shared_plan_bytes={shared_bytes} repeated_manifest_bytes={repeated_bytes}")
+            with self.assertRaisesRegex(ValueError, "1 MiB"):
+                m.bounded_batch({"padding": "x" * (1 << 20)})
+            invalid = copy.deepcopy(request)
+            invalid["checks"].append(copy.deepcopy(invalid["checks"][0]))
+            path.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                m.transfer_batch(target, path, plan=True)
+
+    def test_batch_atomic_application_ordered_locks_and_idempotent_retry(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            source, target, path, request = self.batch_fixture(directory)
+            alias = directory / "source-alias"
+            alias.symlink_to(source, target_is_directory=True)
+            request["checks"][1]["source"] = str(alias)
+            path.write_text(json.dumps(request))
+            acquired, native_lock = [], m.acceptance_lock
+            @m.contextmanager
+            def lock(output, shared=False):
+                acquired.append((output, shared))
+                with native_lock(output, shared):
+                    yield
+            with patch.object(m, "acceptance_lock", side_effect=lock), patch.object(m, "save", wraps=m.save) as saved, \
+                 patch.object(m, "source_entries", wraps=m.source_entries) as scans:
+                self.assertEqual(m.transfer_batch(target, path), 0)
+            self.assertEqual(saved.call_count, 1)
+            self.assertEqual(scans.call_count, 2)
+            self.assertEqual(acquired, [(candidate, candidate != target) for candidate in sorted((source, target), key=str)])
+            _, receipt = m.load_bound(target)
+            self.assertTrue(all(receipt["checks"][item["check"]]["inherited"] for item in request["checks"]))
+            # Shared canonical target/source manifests are copied once for the whole transaction.
+            self.assertEqual(len({receipt["checks"][item["check"]]["evidence_files"]["manifest"] for item in request["checks"]}), 1)
+            before = (target / "receipt.json").read_bytes()
+            with patch.object(m, "save", side_effect=AssertionError("retry rewrote receipt")), \
+                 patch.object(m.shutil, "copyfileobj", side_effect=AssertionError("retry copied evidence")):
+                self.assertEqual(m.transfer_batch(target, path), 0)
+            self.assertEqual((target / "receipt.json").read_bytes(), before)
+            # A later terminal failure supersedes the source attempt, but cannot erase the committed target fact.
+            source_root, old = m.load_bound(source)
+            name = request["checks"][0]["check"]
+            result = copy.deepcopy(old["checks"][name])
+            result.pop("original_attempt")
+            result.update(status="failed", exit_code=23)
+            old["checks"][name] = result
+            result["original_attempt"] = m.completed_attempt(source, source_root, old, name, result)
+            m.save(source, old)
+            self.assertEqual(m.transfer_batch(target, path), 0)
+            invalid = copy.deepcopy(request)
+            invalid["checks"][0]["attempt"] = result["original_attempt"]
+            path.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                m.transfer_batch(target, path)
+
+    def test_batch_precommit_failures_preserve_receipt_and_foreign_staging(self):
+        for failure in ("authorization", "copy", "save", "failed-target", "self-source", "review-mutation", "request-mutation", "chain", "stale-attempt"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                source, target, path, request = self.batch_fixture(Path(temporary))
+                foreign = target / ".transfer-unowned"
+                foreign.mkdir()
+                (foreign / "keep").write_text("unowned orphan staging is never applied\n")
+                if failure == "authorization":
+                    descriptor = request["checks"][1]["review"]
+                    review_path = Path(descriptor["path"])
+                    review = json.loads(review_path.read_text())
+                    review["review"]["authorization_reference"] = ""
+                    review_path.write_text(json.dumps(review))
+                    descriptor["sha256"] = m.digest(review_path)
+                if failure == "self-source":
+                    request["checks"][1]["source"] = str(target)
+                if failure == "chain":
+                    _, original = m.load_bound(source)
+                    result = original["checks"]["local-adapters"]
+                    result.pop("original_attempt")
+                    result.update(inherited=True, from_receipt_sha256="a" * 64, from_log_sha256=result["log_sha256"],
+                                  inherited_from={"scope": "exact-source", "source_fingerprint": original["source_fingerprint"],
+                                                  "target_source_fingerprint": original["source_fingerprint"]})
+                    request["checks"][1]["attempt"] = None
+                    m.save(source, original)
+                if failure == "stale-attempt":
+                    request["checks"][1]["attempt"]["id"] = "f" * 32
+                if failure == "failed-target":
+                    _, receipt = m.load_bound(target)
+                    receipt["checks"]["local-adapters"] = {"status": "failed", "exit_code": 23}
+                    m.save(target, receipt)
+                path.write_text(json.dumps(request))
+                before = (target / "receipt.json").read_bytes()
+                native_copy = m.shutil.copyfileobj
+                mutated = []
+                def copyfile(original, destination, *args):
+                    if not mutated:
+                        mutated.append(True)
+                        if failure == "copy":
+                            with Path(original.name).open("ab") as stream:
+                                stream.write(b"tamper during copy")
+                        if failure == "review-mutation":
+                            with Path(request["checks"][0]["review"]["path"]).open("ab") as stream:
+                                stream.write(b" ")
+                        if failure == "request-mutation":
+                            with path.open("ab") as stream:
+                                stream.write(b" ")
+                    return native_copy(original, destination, *args)
+                with patch.object(m.shutil, "copyfileobj", side_effect=copyfile):
+                    if failure == "save":
+                        with patch.object(m, "save", side_effect=OSError("precommit write failed")), self.assertRaises(OSError):
+                            m.transfer_batch(target, path)
+                    else:
+                        with self.assertRaises(ValueError):
+                            m.transfer_batch(target, path)
+                self.assertEqual((target / "receipt.json").read_bytes(), before)
+                self.assertTrue((foreign / "keep").exists())
+                self.assertEqual(list(target.glob("transfer-*")), [])
+                self.assertEqual(list(target.glob(".transfer-*")), [foreign])
+
+    def test_batch_postcommit_failures_preserve_references_and_report_committed(self):
+        for failure in ("event", "after-replace", "unknown-replace"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                _, target, path, request = self.batch_fixture(Path(temporary))
+                native_save, native_read = m.save, m.read_transfer_json
+                replaced = []
+                def save(output, receipt):
+                    native_save(output, receipt)
+                    replaced.append(True)
+                    if failure != "event":
+                        raise OSError("directory durability confirmation unavailable")
+                def read(filename):
+                    if failure == "unknown-replace" and replaced and filename == target / "receipt.json":
+                        raise OSError("receipt read unavailable")
+                    return native_read(filename)
+                capture = io.StringIO()
+                with patch.object(m, "save", side_effect=save), patch.object(m, "read_transfer_json", side_effect=read), \
+                     patch.object(m, "event", side_effect=OSError("event sink unavailable")), redirect_stdout(capture):
+                    with self.assertRaisesRegex(ValueError, "commit state"):
+                        m.transfer_batch(target, path)
+                self.assertIn("state=" + ("unknown" if failure == "unknown-replace" else "committed"), capture.getvalue())
+                _, receipt = m.load_bound(target)
+                for item in request["checks"]:
+                    result = receipt["checks"][item["check"]]
+                    for filename in result["evidence_files"].values():
+                        self.assertTrue((target / filename).is_file())
+                self.assertEqual(m.transfer_batch(target, path), 0)
+
+    def test_batch_cli_flags_and_nonblocking_lock_refusal(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source, target, path, _ = self.batch_fixture(Path(temporary))
+            before = (target / "receipt.json").read_bytes()
+            with m.acceptance_lock(source):
+                with self.assertRaisesRegex(ValueError, "already in use"):
+                    m.transfer_batch(target, path)
+            self.assertEqual((target / "receipt.json").read_bytes(), before)
+            for flags in (("--batch", str(path), "--check", "verify"), ("--plan",), ("--from", str(source), "--check", "verify")):
+                with patch.object(sys, "argv", ["release-acceptance", "transfer", "--output", str(target), *flags]), \
+                     redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+                    m.main()
+                self.assertEqual(result.exception.code, 2)
+
+    def immutable_transfer_fixture(self, directory):
+        first, second, name, declaration, review = self.transfer_fixture(directory)
+        source_root, source = m.load_bound(first)
+        result = source["checks"][name]
+        result["original_attempt"] = m.completed_attempt(first, source_root, source, name, result)
+        m.save(first, source)
+        record, manifest = m.original_attempt(first, source, name, result)
+        target_root, target = m.load_bound(second)
+        review = {"schema_version": 2, "check": name, "tested_manifest_sha256": m.evidence_hash(manifest),
+            "target_manifest_sha256": m.evidence_hash(m.candidate_manifest(target_root, target)),
+            "original_attempt": result["original_attempt"], "review": review["review"], "standalone": None}
+        declaration.write_text(json.dumps(review))
+        return first, second, name, declaration, review
+
+    def test_immutable_transfer_survives_unrelated_receipt_updates_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, second, name, declaration, review = self.immutable_transfer_fixture(Path(temporary))
+            source_root, source = m.load_bound(first)
+            record, manifest = m.original_attempt(first, source, name, source["checks"][name])
+            for path in (first / "attempts" / (record["id"] + ".json"), first / source["checks"][name]["log"],
+                         first / "manifests" / (record["manifest_sha256"] + ".json")):
+                contents = path.read_bytes()
+                path.write_bytes(contents + b" ")
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                path.write_bytes(contents)
+            for mutate in (lambda item: item.update(extra=True),
+                           lambda item: item["original_attempt"].update(id="c" * 32),
+                           lambda item: item.update(target_manifest_sha256="d" * 64)):
+                invalid = copy.deepcopy(review)
+                mutate(invalid)
+                declaration.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+            declaration.write_text(json.dumps(review))
+            old_digest = m.digest(first / "receipt.json")
+            source["unrelated_note"] = "another check continued"
+            m.save(first, source)
+            self.assertNotEqual(m.digest(first / "receipt.json"), old_digest)
+            self.assertEqual(m.transfer_evidence(second, first, name, declaration), 0)
+            _, target = m.load_bound(second)
+            self.assertEqual(target["checks"][name]["evidence_transfer"]["schema_version"], 2)
+            self.assertNotIn("from_receipt_sha256", target["checks"][name])
+            self.assertNotIn("original_attempt", target["checks"][name])
+            m.supersede(first)
+            with self.assertRaises(ValueError):
+                m.transfer_evidence(second, first, name, declaration)
+
+    def test_current_attempt_crash_failure_and_orphan_never_restore_old_pass(self):
+        for crash in ("execute", "aggregate", "failed", "interrupted"):
+            with self.subTest(crash=crash), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                first, second, name, declaration, _ = self.immutable_transfer_fixture(Path(temporary))
+                _, before = m.load_bound(first)
+                old_reference = before["checks"][name]["original_attempt"]
+                terminal_execute = m.execute
+                def execute(check, command, root, output, env, slot=None):
+                    persisted = json.loads((output / "receipt.json").read_text())["checks"][check]
+                    self.assertEqual(persisted["status"], "running")
+                    self.assertNotIn("original_attempt", persisted)
+                    if crash == "execute":
+                        raise OSError("controller crashed")
+                    result = terminal_execute(check, command, root, output, env, slot)
+                    if crash in ("failed", "interrupted"):
+                        result.update(status=crash, exit_code=23 if crash == "failed" else -15,
+                                      termination="exit" if crash == "failed" else "signal")
+                    return result
+                save, count = m.save, []
+                def save_until_terminal(output, receipt):
+                    count.append(True)
+                    if crash == "aggregate" and len(count) == 3:
+                        raise OSError("aggregate commit failed")
+                    save(output, receipt)
+                with patch.object(m, "execute", side_effect=execute), patch.object(m, "save", side_effect=save_until_terminal), \
+                     patch.object(m, "execution_environment", return_value=before["environment"]):
+                    if crash in ("execute", "aggregate"):
+                        with self.assertRaises(OSError):
+                            m.run_checks(first, [], [name], True)
+                    else:
+                        self.assertEqual(m.run_checks(first, [], [name], True), 1)
+                _, after = m.load_bound(first)
+                current = after["checks"][name]
+                self.assertEqual(current["status"], "running" if crash in ("execute", "aggregate") else crash)
+                self.assertNotEqual(current.get("original_attempt"), old_reference)
+                attempts = list((first / "attempts").glob("*.json"))
+                self.assertEqual(len(attempts), 1 if crash == "execute" else 2)
+                with self.assertRaises(ValueError):
+                    m.transfer_evidence(second, first, name, declaration)
+                # The historical PASS remains intact, including after an unindexed terminal record.
+                self.assertEqual(json.loads((first / "attempts" / (old_reference["id"] + ".json")).read_text())["result"]["status"], "passed")
+
+    def test_immutable_creation_exact_modes_and_incomplete_foreign_records(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            first, _, name, _, _ = self.immutable_transfer_fixture(Path(temporary))
+            _, source = m.load_bound(first)
+            result = source["checks"][name]
+            record, manifest = m.original_attempt(first, source, name, result)
+            legacy = {"schema_version": 1, "check": name, "tested": manifest["candidate"], "target": manifest["candidate"],
+                "command": record["command"], "origin": "receipt", "preparation_environment": manifest["environment"],
+                "artifacts": {"receipt": m.digest(first / "receipt.json"), "review": "a" * 64, "log": result["log_sha256"]},
+                "review": {"unchanged_scope": "Synthetic scope", "reason": "Fixture review", "authorization_reference": "fixture"},
+                **m.attempt_facts(record)}
+            m.validate_evidence_transfer(legacy, name, result["command"], manifest["candidate"], result["log_sha256"])
+            # Immutable v1 manifests retain their original accepted text; transfer declarations have narrower public bounds.
+            for field, value in (("version", "v" * 65), ("version", " "), ("version", "test\nversion"),
+                                 ("runtime_file", "r" * 129), ("runtime_file", "runtime\nfile"), ("asset", "a" * 129)):
+                with self.subTest(field=field, value=value):
+                    compatible = copy.deepcopy(manifest)
+                    candidate = compatible["candidate"]
+                    if field == "runtime_file":
+                        candidate["release_files"][value] = candidate["release_files"].pop(candidate["runtime_file"])
+                    if field == "asset":
+                        candidate["release_files"][value] = "b" * 64
+                    else:
+                        candidate[field] = value
+                    m.validate_manifest(compatible)
+                    transfer = {**legacy, "tested": candidate, "target": candidate}
+                    with self.assertRaisesRegex(ValueError, "transferred candidate"):
+                        m.validate_evidence_transfer(transfer, name, result["command"], candidate, result["log_sha256"])
+            for field, value in (("version", ""), ("version", None), ("runtime_file", "../foreign"), ("runtime_sha256", "c" * 64)):
+                invalid = copy.deepcopy(manifest)
+                invalid["candidate"][field] = value
+                with self.assertRaises(ValueError):
+                    m.validate_manifest(invalid)
+            path = first / "attempts" / (record["id"] + ".json")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            original = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                m.immutable_json(path, {"replacement": True})
+            self.assertEqual(path.read_bytes(), original)
+            for mutate in (lambda item: item["result"].update(capture_status=None),
+                           lambda item: item["result"].update(duration_seconds=None),
+                           lambda item: item["result"].update(execution_environment=None),
+                           lambda item: item.update(manifest_sha256="f" * 64),
+                           lambda item: item["result"].update(extra=True)):
+                invalid = copy.deepcopy(record)
+                mutate(invalid)
+                with self.assertRaises(ValueError):
+                    m.validate_attempt(invalid, manifest, name, result["command"], result["log_sha256"])
+            # Every terminal state is checked against its candidate, reference and log.
+            result.update(status="failed", exit_code=23)
+            result["original_attempt"] = m.completed_attempt(first, first / "source", source, name, result)
+            m.save(first, source)
+            path = first / "attempts" / (result["original_attempt"]["id"] + ".json")
+            path.write_bytes(path.read_bytes() + b" ")
+            with self.assertRaises(ValueError):
+                m.load_bound(first)
 
     def test_reviewed_receipt_transfer_retains_old_identity_and_strict_import(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -794,6 +1212,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 m.defer_external(output, ["sample:account"], "Unavailable external account", "operator-authorization-1")
 
     def test_transport_override_is_scoped_to_physical_controllers(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             root = output / "source"
@@ -964,6 +1384,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(before, set(checkout.rglob("*")))
 
     def test_first_order_dynamic_dispatch_resume_and_exclusions(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             checks = {name: ["true"] for name in ("verify", "compatibility", "p0-release-smoke", "profile:sample/one", "profile:sample/two", "profile:sample/three")}
@@ -1027,6 +1449,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                     self.assertEqual(result['phase_budgets']['lease-release'], {'budget_seconds':180, 'grace_seconds':5})
 
     def test_required_local_failure_blocks_every_live_allocation(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             checks = {name: ['true'] for name in ('verify', 'compatibility', 'p0-release-smoke', 'profile:sample')}
@@ -1364,6 +1788,8 @@ while True: time.sleep(1)
             self.assertNotIn("do-not-export", json.dumps(events))
 
     def test_prelease_capacity_refusal_continues_once_and_later_retries_same_candidate(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for resource in ("memory", "disk"):
             with self.subTest(resource=resource), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
                 output = Path(temporary)
@@ -1396,7 +1822,7 @@ while True: time.sleep(1)
                     persisted = json.loads((output / "receipt.json").read_text())
                     self.assertEqual(persisted["result"], "incomplete")
                     self.assertEqual(persisted["checks"][blocked], original[blocked] | {
-                        "execution_environment": m.execution_environment()})
+                        "execution_environment": m.execution_environment(), "original_attempt": {"id": "a" * 32, "sha256": "b" * 64}})
                     self.assertEqual(persisted["checks"][blocked]["reason"], "capacity_" + resource)
                     self.assertEqual(persisted["checks"][following]["status"], "passed")
                     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
@@ -1420,6 +1846,8 @@ while True: time.sleep(1)
                                      [json.dumps(item, sort_keys=True) for item in events])
 
     def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
         lease = "E2E lease: slot=slot-1 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
         guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
@@ -1456,6 +1884,8 @@ while True: time.sleep(1)
                 self.assertEqual(events[-1]["status"], "failed")
 
     def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             names = ["verify", "profile:sample/one", "profile:sample/two"]
@@ -1502,6 +1932,8 @@ while True: time.sleep(1)
                 self.assertEqual(persisted["result"], "incomplete")
 
     def test_invocation_selected_pass_reuse_and_final_receipt_binding(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)
             checks = {"verify": ["true"], "compatibility": ["true"]}
@@ -1549,6 +1981,8 @@ while True: time.sleep(1)
                 self.assertEqual(json.loads((output / final["result"]).read_text())["receipt_sha256"], final["receipt_sha256"])
 
     def test_invocation_prerequisite_rerun_stop_capacity_and_interruption(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for case in ("prerequisite", "rerun", "blocked", "interrupted", "excluded", "stopped"):
             with self.subTest(case=case), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
@@ -1641,6 +2075,8 @@ while True: time.sleep(1)
             self.assertEqual(stale.path.read_bytes(), stale_bytes)
 
     def test_invocation_capture_failure_preserves_last_successful_receipt(self):
+        # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)
             receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
@@ -1660,7 +2096,7 @@ while True: time.sleep(1)
             sidecar = json.loads(next((output / "runs").glob("*.json")).read_text())
             self.assertEqual((sidecar["state"], sidecar["selected_status"], sidecar["overall_status"]),
                              ("error", "incomplete", "incomplete"))
-            self.assertEqual(sidecar["checks"]["verify"]["exit_code"], 0)
+            self.assertIsNone(sidecar["checks"]["verify"]["exit_code"])  # Durable pre-dispatch write failed; no native execution.
             self.assertEqual(sidecar["receipt_sha256"], m.digest(output / "receipt.json"))
             self.assertEqual(json.loads((output / "receipt.json").read_text())["checks"]["verify"]["status"], "pending")
             # Failure to persist the terminal sidecar leaves this invocation running, never a prior result.

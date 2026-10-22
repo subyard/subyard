@@ -491,7 +491,7 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
-    checks = {}
+    checks, manifests = {}, {}
     for name, result in receipt["checks"].items():
         if name in deferred_profiles:
             checks[name] = {"status": "not-run", "execution": "operator-deferred", "profile_deferral": deferred_profiles[name]}
@@ -515,6 +515,15 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
         if "evidence_transfer" in result:
             checks[name]["execution"] = "inherited"
             checks[name]["evidence_transfer"] = result["evidence_transfer"]
+            transfer = result["evidence_transfer"]
+            if transfer["schema_version"] == 2:
+                for key, role in (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest")):
+                    manifests[transfer[key]] = a.read_transfer_json(output / result["evidence_files"][role])
+        if "original_attempt" in result:
+            record, manifest = a.original_attempt(output, receipt, name, result)
+            checks[name]["original_attempt"] = record
+            checks[name]["attempt_sha256"] = result["original_attempt"]["sha256"]
+            manifests[record["manifest_sha256"]] = manifest
     external = {}
     for name, result in receipt["external_obligations"].items():
         if "deferral" in result:
@@ -527,12 +536,13 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                 raise ValueError("external obligation lacks actual evidence SHA-256 or authorized deferral")
             external[name] = {"status": "passed", "evidence_sha256": result["evidence_sha256"]}
     transfers = sorted(name for name, result in checks.items() if "evidence_transfer" in result)
-    document = {"schema_version": 4 if deferred_profiles else 3 if accepted else 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
+    document = {"schema_version": 5 if manifests else 4 if deferred_profiles else 3 if accepted else 2 if transfers else 1, "candidate_id": identity["candidate_id"], "identity_sha256": identity_hash(identity),
             "receipt_sha256": a.digest(output / "receipt.json"), "environment": receipt["environment"],
             "checks": checks, "external_obligations": external,
-            **({"reviewed_transfers": transfers} if transfers or accepted or deferred_profiles else {}),
-            **({"operator_acceptances": sorted(accepted)} if accepted or deferred_profiles else {}),
-            **({"profile_deferrals": sorted(deferred_profiles)} if deferred_profiles else {})}
+            **({"reviewed_transfers": transfers} if transfers or accepted or deferred_profiles or manifests else {}),
+            **({"operator_acceptances": sorted(accepted)} if accepted or deferred_profiles or manifests else {}),
+            **({"profile_deferrals": sorted(deferred_profiles)} if deferred_profiles or manifests else {}),
+            **({"manifests": manifests} if manifests else {})}
     validate_attestation(document, identity, root)
     return document
 
@@ -540,28 +550,46 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
 def validate_attestation(document, identity, root):
     version = document.get("schema_version")
     keys = {"schema_version", "candidate_id", "identity_sha256", "receipt_sha256", "environment", "checks", "external_obligations"}
-    if version in (2, 3, 4):
+    if version in (2, 3, 4, 5):
         keys.add("reviewed_transfers")
-    if version in (3, 4):
+    if version in (3, 4, 5):
         keys.add("operator_acceptances")
-    if version == 4:
+    if version in (4, 5):
         keys.add("profile_deferrals")
-    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3, 4) or document["candidate_id"] != identity["candidate_id"]
+    if version == 5:
+        keys.add("manifests")
+    if len(canonical(document).encode()) > ATTESTATION_BYTE_LIMIT:
+        raise ValueError("acceptance attestation exceeds uncompressed byte limit")
+    if (set(document) != keys or type(version) is not int or version not in (1, 2, 3, 4, 5) or document["candidate_id"] != identity["candidate_id"]
         or document["identity_sha256"] != identity_hash(identity)
         or not re.fullmatch(r"[0-9a-f]{64}", document["receipt_sha256"])):
         raise ValueError("acceptance attestation identity mismatch")
     transfers = sorted(name for name, result in document["checks"].items() if "evidence_transfer" in result)
-    if (version == 1 and transfers or version in (2, 3, 4) and
+    if (version == 1 and transfers or version in (2, 3, 4, 5) and
         (version == 2 and not transfers or document["reviewed_transfers"] != transfers)):
         raise ValueError("reviewed transfer attestation inventory mismatch")
     accepted = sorted(name for name, result in document["checks"].items() if "operator_acceptance" in result)
-    if (version not in (3, 4) and accepted or version in (3, 4) and
+    if (version not in (3, 4, 5) and accepted or version in (3, 4, 5) and
         (version == 3 and not accepted or document["operator_acceptances"] != accepted)):
         raise ValueError("operator acceptance attestation inventory mismatch")
     deferred_profiles = sorted(name for name, result in document["checks"].items() if "profile_deferral" in result)
-    if (version != 4 and deferred_profiles or version == 4 and
-        (not deferred_profiles or document["profile_deferrals"] != deferred_profiles)):
+    if (version not in (4, 5) and deferred_profiles or version in (4, 5) and
+        (version == 4 and not deferred_profiles or document["profile_deferrals"] != deferred_profiles)):
         raise ValueError("profile deferral attestation inventory mismatch")
+    manifests, referenced, attempt_ids = document.get("manifests", {}), set(), {}
+    def bind_attempt(record):
+        identifier, sha = record["id"], a.evidence_hash(record)
+        if identifier in attempt_ids and attempt_ids[identifier] != sha:
+            raise ValueError("conflicting original attempt references")
+        attempt_ids[identifier] = sha
+
+    if version == 5:
+        if not isinstance(manifests, dict) or not manifests:
+            raise ValueError("missing attestation manifests")
+        for sha, manifest in manifests.items():
+            a.validate_manifest(manifest)
+            if not a.is_sha(sha) or a.evidence_hash(manifest) != sha:
+                raise ValueError("attestation manifest hash mismatch")
     environment = document["environment"]
     if (not isinstance(environment, dict) or set(environment) != {"system", "machine", "go"}
         or any(not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value)
@@ -597,15 +625,42 @@ def validate_attestation(document, identity, root):
             keys = {"status", "log_sha256", "exit_code"} | ({"environments"} if a.is_live(name) else set())
             if "evidence_transfer" in result:
                 keys |= {"execution", "evidence_transfer"}
+            if "original_attempt" in result:
+                keys |= {"original_attempt", "attempt_sha256"}
             if (set(result) != keys or result["status"] != "passed" or type(result["exit_code"]) is not int or result["exit_code"] != 0
                 or not re.fullmatch(r"[0-9a-f]{64}", result["log_sha256"])):
                 raise ValueError("missing passing acceptance evidence")
             if "evidence_transfer" in result:
                 target = {"candidate_sha256": identity_hash(identity), "version": identity["version"],
                           "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}
-                a.validate_evidence_transfer(result["evidence_transfer"], name, a.command_identity(command, root), target, result["log_sha256"])
+                transfer = result["evidence_transfer"]
+                if transfer.get("schema_version") == 2:
+                    if version != 5:
+                        raise ValueError("original attempt transfer requires v5 attestation")
+                    referenced.update(transfer[key] for key in ("tested_manifest_sha256", "target_manifest_sha256"))
+                a.validate_evidence_transfer(transfer, name, a.command_identity(command, root), target, result["log_sha256"], manifests)
+                if transfer.get("schema_version") == 2:
+                    bind_attempt(transfer["original_attempt"])
                 if result["execution"] != "inherited" or result.get("environments", []) != result["evidence_transfer"]["environments"]:
                     raise ValueError("reviewed transfer execution provenance changed")
+            if "original_attempt" in result:
+                record = result["original_attempt"]
+                if version != 5 or "evidence_transfer" in result or not isinstance(record, dict) or record.get("manifest_sha256") not in manifests:
+                    raise ValueError("dangling or conflicting original attempt reference")
+                manifest_sha = record["manifest_sha256"]
+                referenced.add(manifest_sha)
+                manifest = manifests[manifest_sha]
+                a.validate_attempt(record, manifest, name, a.command_identity(command, root), result["log_sha256"])
+                bind_attempt(record)
+                if (a.evidence_hash(record) != result["attempt_sha256"] or record["result"]["status"] != "passed"
+                    or record["result"]["exit_code"] != 0 or record["result"]["capture_status"] != "recorded"
+                    or manifest["environment"] != document["environment"]
+                    or record["result"]["execution_environment"] != document["environment"]
+                    or result.get("environments", []) != record["result"]["environments"]
+                    or any(manifest["candidate"][key] != value for key, value in {
+                        "candidate_sha256": identity_hash(identity), "version": identity["version"],
+                        "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}.items())):
+                    raise ValueError("attestation original attempt changed")
             if a.is_live(name):
                 environments = result["environments"]
                 if not isinstance(environments, list) or not environments:
@@ -616,6 +671,8 @@ def validate_attestation(document, identity, root):
                         or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100
                         or not re.fullmatch(r"[0-9a-f]{64}", item["base_fingerprint"])):
                         raise ValueError("invalid physical acceptance environment")
+    if set(manifests) != referenced:
+        raise ValueError("extra or dangling attestation manifest references")
     external = a.external_inventory(root)
     if set(document["external_obligations"]) != set(external):
         raise ValueError("external obligation attestation inventory mismatch")

@@ -92,6 +92,32 @@ verifies its source fingerprint and publishes its exact assets. Branch movement 
 candidate. [Reviewed evidence transfers](../testing.md#reviewed-evidence-transfers) retain the actual tested
 candidate and distinguish inherited coverage from current execution; affected scenarios need fresh checks.
 
+Attestation v5 carries original completed-attempt evidence without repeating its full candidate
+manifest for each check. It has exactly the v4 top-level fields plus `manifests`; the transfer,
+operator acceptance and profile deferral inventories are always present (including empty lists).
+`manifests` is keyed by SHA-256 of each canonical v1 manifest's exact bytes. Direct checks add
+`original_attempt` (the complete v1 record) and `attempt_sha256`; their record references a manifest
+by hash. Reviewed transfers v2 instead reference `tested_manifest_sha256` and
+`target_manifest_sha256`, and retain the original record in `original_attempt`. Their other exact
+fields are `schema_version`, `check`, `command`, `actual_command`, `origin` (`attempt`), `artifacts`,
+`review`, `preparation_environment`, `execution_environment`, `environments`, `duration_seconds`
+and `launched_at_utc`. `artifacts` has exactly `attempt`, `manifest`, `target_manifest`, `review`
+and `log` digests. These refer to immutable attempt/manifest evidence rather than a mutable
+source receipt. The v2 declaration and v1 sidecar fields are defined in the
+[acceptance contract](../testing.md#reviewed-evidence-transfers).
+
+All table entries must be referenced, all references must resolve, and every hash and exact-key
+object must validate. A direct record must match the published check's candidate, command,
+status, log and environment facts; a transferred record must match the reviewed original facts.
+Extra, dangling or conflicting references fail before remote mutation. This is deduplication
+inside one attestation, without an external artifact store. Legacy v1 declarations and attestation
+versions 1–4 remain readable; mixed legacy evidence and v2 transfers can coexist in v5.
+Package preparation and explicit publication exceptions retain their existing provenance and gates.
+Batch preparation and atomic application use the same
+[transfer command](../testing.md#batch-transfer-preparation-and-application). A batch contributes the
+existing per-check v2 references and shared v5 manifest table; it introduces no additional wire
+schema or publication exception. Legacy declarations and standalone evidence may share that batch.
+
 Attestation encoding and schema selection are automatic. Compressed and legacy plain inputs have
 a 1 MiB uncompressed limit; complete dispatch inputs must fit GitHub's
 [65,535-character limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).

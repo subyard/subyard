@@ -96,6 +96,20 @@ def accepted(directory, prepared, identity, external_passed=True):
     return output, root, m.attestation(output, identity)
 
 
+
+def capture_attempts(output, names=None):
+    root, receipt = m.a.load_bound(output)
+    for name, result in receipt["checks"].items():
+        if name == "package" or result["status"] != "passed" or result.get("inherited") or names is not None and name not in names:
+            continue
+        result.update(termination="exit", capture_status="recorded", duration_seconds=1)
+        if m.a.is_live(name):
+            result.update(environment_evidence="recorded", cleanup_status="recorded",
+                          cleanup={"lease-release": {"exit_code": 0, "duration_seconds": 1}})
+        result["original_attempt"] = m.a.completed_attempt(output, root, receipt, name, result)
+    m.a.save(output, receipt)
+    return root, receipt
+
 class FakeGitHub:
     repository = m.REPOSITORY
     def __init__(self, identity):
@@ -196,6 +210,111 @@ class Downloads(unittest.TestCase):
 
 
 class Contracts(unittest.TestCase):
+    def test_v5_deduplicates_manifests_and_rejects_extra_dangling_conflicting_references(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            output, root, legacy = accepted(directory, prepared, identity)
+            self.assertEqual(legacy["schema_version"], 1)
+            capture_attempts(output)
+            document = m.attestation(output, identity)
+            self.assertEqual(document["schema_version"], 5)
+            self.assertEqual(len(document["manifests"]), 1)
+            self.assertGreater(sum("original_attempt" in item for item in document["checks"].values()), 2)
+            m.validate_attestation(m.decode_attestation(json.loads(base64.b64decode(m.encode_attestation(document)))), identity, root)
+            name = "verify"
+            for mutate in (lambda item: item["manifests"].update({"a" * 64: next(iter(item["manifests"].values()))}),
+                           lambda item: item["checks"][name]["original_attempt"].update(manifest_sha256="e" * 64),
+                           lambda item: item["checks"][name].update(attempt_sha256="d" * 64),
+                           lambda item: item["checks"][name]["original_attempt"]["result"].update(capture_status=None),
+                           lambda item: item["checks"][name]["original_attempt"].update(extra=True)):
+                invalid = copy.deepcopy(document)
+                mutate(invalid)
+                with self.assertRaises(ValueError):
+                    m.validate_attestation(invalid, identity, root)
+            invalid = copy.deepcopy(document)
+            extra = copy.deepcopy(next(iter(invalid["manifests"].values())))
+            extra["environment"]["go"] += " other controller"
+            invalid["manifests"][m.a.evidence_hash(extra)] = extra
+            with self.assertRaisesRegex(ValueError, "extra or dangling"):
+                m.validate_attestation(invalid, identity, root)
+            invalid = copy.deepcopy(document)
+            other = next(key for key, value in invalid["checks"].items() if key != name and "original_attempt" in value)
+            record = invalid["checks"][other]["original_attempt"]
+            record["id"] = invalid["checks"][name]["original_attempt"]["id"]
+            invalid["checks"][other]["attempt_sha256"] = m.a.evidence_hash(record)
+            with self.assertRaisesRegex(ValueError, "conflicting"):
+                m.validate_attestation(invalid, identity, root)
+            invalid = copy.deepcopy(document)
+            invalid["extra"] = "x" * (1 << 20)
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                m.validate_attestation(invalid, identity, root)
+
+    def test_v5_preserves_legacy_transfer_and_profile_deferral(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            source, _, _ = accepted(directory, prepared, identity)
+            _, old = m.a.load_bound(source)
+            target_dir = directory / "target"
+            target_dir.mkdir()
+            target, root, _ = accepted(target_dir, prepared, identity)
+            _, current = m.a.load_bound(target)
+            for name in ("verify", "profile:sample"):
+                if name == "profile:sample":
+                    (target / current["checks"][name]["log"]).unlink()  # Remove only the synthetic fixture's unrun log.
+                current["checks"][name] = {"status": "pending"}
+            m.a.save(target, current)
+            review = {"schema_version": 1, "check": "verify", "tested": m.a.transfer_candidate(old),
+                "target": m.a.transfer_candidate(current), "source_receipt_sha256": m.a.digest(source / "receipt.json"),
+                "review": {"unchanged_scope": "Exact synthetic check", "reason": "Same inputs", "authorization_reference": "fixture-review"},
+                "standalone": None}
+            path = directory / "review-v1.json"
+            path.write_text(json.dumps(review))
+            self.assertEqual(m.a.transfer_evidence(target, source, "verify", path), 0)
+            capture_attempts(target)
+            document = m.attestation(target, identity, (), ["profile:sample"], "Known fixture issue", "operator:fixture")
+            self.assertEqual(document["schema_version"], 5)
+            self.assertEqual(document["checks"]["verify"]["evidence_transfer"]["schema_version"], 1)
+            self.assertEqual(document["profile_deferrals"], ["profile:sample"])
+            self.assertEqual(document["checks"]["profile:sample"]["status"], "not-run")
+            m.validate_attestation(document, identity, root)
+
+    def test_v2_attempt_transfer_publishes_with_shared_v5_manifests(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            source, _, _ = accepted(directory, prepared, identity)
+            _, old = capture_attempts(source)
+            target_dir = directory / "target"
+            target_dir.mkdir()
+            target, root, _ = accepted(target_dir, prepared, identity)
+            _, current = m.a.load_bound(target)
+            current["checks"]["verify"] = {"status": "pending"}
+            m.a.save(target, current)
+            record, source_manifest = m.a.original_attempt(source, old, "verify", old["checks"]["verify"])
+            target_manifest = m.a.candidate_manifest(root, current)
+            review = {"schema_version": 2, "check": "verify", "tested_manifest_sha256": m.a.evidence_hash(source_manifest),
+                "target_manifest_sha256": m.a.evidence_hash(target_manifest), "original_attempt": old["checks"]["verify"]["original_attempt"],
+                "review": {"unchanged_scope": "Exact synthetic check", "reason": "Same inputs", "authorization_reference": "fixture-review"},
+                "standalone": None}
+            path = directory / "review-v2.json"
+            path.write_text(json.dumps(review))
+            self.assertEqual(m.a.transfer_evidence(target, source, "verify", path), 0)
+            capture_attempts(target)
+            document = m.attestation(target, identity)
+            self.assertEqual(document["schema_version"], 5)
+            self.assertEqual(document["reviewed_transfers"], ["verify"])
+            # Each transport-bound identity appears once even when many checks share it.
+            self.assertEqual(set(document["manifests"]), {review["tested_manifest_sha256"], review["target_manifest_sha256"]})
+            m.validate_attestation(document, identity, root)
+            github = FakeGitHub(identity)
+            self.assertEqual(m.publish_remote(github, prepared, document, root)["html_url"], "https://fixture/release")
+            invalid = copy.deepcopy(document)
+            invalid["checks"]["verify"]["evidence_transfer"]["original_attempt"]["id"] = "d" * 32
+            with self.assertRaises(ValueError):
+                m.validate_attestation(invalid, identity, root)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="subyard-publication-", dir="/tmp")
         self.directory = Path(self.temporary.name)
@@ -658,33 +777,81 @@ class Contracts(unittest.TestCase):
 
     def test_profile_deferral_coexists_with_transfers_failures_and_external_deferrals(self):
         mixed = self.directory / "mixed"
-        self.root, self.prepared, self.identity = fixture(mixed, ("one", "two"))
+        lanes = ("one", "two", "three")
+        self.root, self.prepared, self.identity = fixture(mixed, lanes)
         self.output, self.frozen, _ = accepted(mixed, self.prepared, self.identity)
         self.github = FakeGitHub(self.identity)
-        failure, _, original_output = self.operator_failure("profile:sample/one", ("one", "two"))
-        self.unrun_profile("profile:sample/two")
-        _, original = m.a.load_bound(original_output)
+        failure, _, original_output = self.operator_failure("profile:sample/one", lanes)
+        self.unrun_profile("profile:sample/three")
+        original_root, original = m.a.load_bound(original_output)
+        original["checks"]["profile:sample/two"] = {"status": "pending"}
+        m.a.save(original_output, original)
+        _, original = capture_attempts(original_output, ["local-adapters"])
+        # The operator declaration binds this synthetic source receipt's final evidence inventory.
+        decision = json.loads(failure.read_text())
+        decision["source"]["receipt_sha256"] = m.a.digest(original_output / "receipt.json")
+        m.write_json(failure, decision)
         _, receipt = m.a.load_bound(self.output)
-        receipt["checks"]["verify"] = {"status": "pending"}
+        for name in ("verify", "local-adapters", "profile:sample/two"):
+            receipt["checks"][name] = {"status": "pending"}
         external = receipt["external_obligations"]["sample:fixture-external"]
         external["status"] = "not-run"
         del external["evidence_sha256"]
         m.a.save(self.output, receipt)
-        review = {"schema_version": 1, "check": "verify", "tested": m.a.transfer_candidate(original),
-                 "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(original_output / "receipt.json"),
-                 "review": {"unchanged_scope": "Unchanged verification scope", "reason": "Reuse reviewed native PASS",
-                            "authorization_reference": "operator:fixture"}, "standalone": None}
-        path = self.directory / "mixed-review.json"
-        m.write_json(path, review)
-        m.a.transfer_evidence(self.output, original_output, "verify", path)
+        target_manifest = m.a.candidate_manifest(self.frozen, receipt)
+        source_manifest = m.a.candidate_manifest(original_root, original)
+        review_text = {"unchanged_scope": "Exact synthetic fixture behavior", "reason": "Reviewed complete candidate delta",
+                       "authorization_reference": "operator:batch-fixture"}
+        native, launch, log = (self.directory / ("standalone-" + role) for role in ("native", "launch", "log"))
+        native.write_text(json.dumps({"exit_code": 0, "chunk_id": "original", "output": "", "wall_time_seconds": 1}))
+        command = m.a.commands(original_root, self.identity["version"], original["profiles"])["profile:sample/two"]
+        launch.write_text(json.dumps({"cwd": str(original_root), "source_fingerprint": original["source_fingerprint"],
+            "runtime_sha256": original["runtime_sha256"], "bundle_sha256": original["candidate_bundle_sha256"],
+            "acceptance_script_sha256": m.a.digest(original_root / command[1]),
+            "argv": ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
+                "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/controller",
+                "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]}))
+        log.write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
+            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
+            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
+            "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
+            "E2E lease released: slot=2 run=fixture\n")
+        standalone = {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in
+                      (("native", native), ("launch", launch), ("log", log))}
+        request = {"schema_version": 1, "target": m.a.transfer_candidate(receipt), "checks": []}
+        for name in ("verify", "local-adapters", "profile:sample/two"):
+            reference = original["checks"][name].get("original_attempt")
+            if reference:
+                review = {"schema_version": 2, "check": name, "tested_manifest_sha256": m.a.evidence_hash(source_manifest),
+                    "target_manifest_sha256": m.a.evidence_hash(target_manifest), "original_attempt": reference,
+                    "review": review_text, "standalone": None}
+            else:
+                review = {"schema_version": 1, "check": name, "tested": m.a.transfer_candidate(original),
+                    "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(original_output / "receipt.json"),
+                    "review": review_text, "standalone": standalone if name == "profile:sample/two" else None}
+            path = self.directory / (name.replace(":", "-").replace("/", "-") + "-batch-review.json")
+            m.write_json(path, review)
+            request["checks"].append({"check": name, "source": str(original_output), "attempt": reference,
+                                      "review": {"path": str(path), "sha256": m.a.digest(path)}})
+        request_path = self.directory / "batch-request.json"
+        m.write_json(request_path, request)
+        with patch.object(m.a, "source_entries", wraps=m.a.source_entries) as scans, patch.object(m.a, "save", wraps=m.a.save) as saved:
+            self.assertEqual(m.a.transfer_batch(self.output, request_path), 0)
+        self.assertEqual((scans.call_count, saved.call_count), (2, 1))
+        m.a.load_bound(self.output)
         m.a.defer_external(self.output, ["sample:fixture-external"], "External account unavailable", "operator:fixture")
         before = (self.output / "receipt.json").read_bytes()
-        document = self.profile_deferral_attestation(["profile:sample/two"], [failure])
+        document = self.profile_deferral_attestation(["profile:sample/three"], [failure])
+        self.assertEqual(document["schema_version"], 5)
         self.assertEqual((document["reviewed_transfers"], document["operator_acceptances"], document["profile_deferrals"]),
-                         (["verify"], ["profile:sample/one"], ["profile:sample/two"]))
+                         (["local-adapters", "profile:sample/two", "verify"], ["profile:sample/one"], ["profile:sample/three"]))
+        self.assertEqual(document["checks"]["profile:sample/two"]["evidence_transfer"]["origin"], "standalone")
         self.assertEqual(document["checks"]["profile:sample/one"]["status"], "failed")
         self.assertEqual(document["external_obligations"]["sample:fixture-external"]["status"], "not-run")
-        self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.frozen)["immutable"])
+        encoded = json.loads(base64.b64decode(m.encode_attestation(document)))
+        self.assertTrue(m.publish_remote(self.github, self.prepared, encoded, self.frozen)["immutable"])
+        print(f"MEASURE batch_checks=3 unique_scans=2 attestation_bytes={len(m.canonical(document).encode())}")
         self.assertEqual(before, (self.output / "receipt.json").read_bytes())
 
     def test_explicit_profile_failure_decision_preserves_native_failure_and_receipts(self):

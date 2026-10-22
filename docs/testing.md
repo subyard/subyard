@@ -542,7 +542,31 @@ attempt and include the controllers' source and environment evidence. The run ch
 and Go toolchain against preparation; receipts retain measured execution and available VM base identities.
 
 `receipt.json` records terminal results, including `blocked` capacity refusal and `interrupted`
-execution. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
+execution. Before dispatch, the collector durably replaces the selected check with `running`,
+removing its former PASS reference. A crash cannot restore that historical PASS. After terminal
+execution, log fsync and environment capture, the collector creates an immutable completed-attempt
+record before replacing the aggregate entry. An interrupted or failed attempt remains evidence,
+while a record orphaned by a failed aggregate commit is never discovered or indexed automatically.
+
+New direct checks (except package preparation) have `original_attempt: {id, sha256}` references.
+`attempts/ID.json` and shared `manifests/SHA256.json` use exact-key schema version 1 and canonical
+JSON bytes (sorted keys, compact separators, no trailing newline). Creation is exclusive with exact
+mode 0600, followed by file and directory fsync. Their hashes bind the exact saved bytes; immutability
+is a protocol, not a claim that local files cannot be edited. Validation rejects changed records/logs,
+foreign candidates and differences from the current authoritative receipt result. Historical receipts
+without these references remain readable. Package retains its final bundle or CI preparation binding.
+
+A manifest contains exactly `schema_version`, `candidate`, `source_entries` and `environment`.
+`candidate` is the full `transfer_candidate(receipt)` identity; `source_entries` maps every public
+source path to `[regular|executable, SHA256|link:TARGET]`. Validation rebuilds the source fingerprint
+and verifies runtime membership in the complete release asset map. `environment` is the measured
+preparation system/machine/Go identity. An attempt contains exactly `schema_version`, `id`,
+`manifest_sha256`, `check`, normalized `command` and `result`. The result has exactly `status`,
+`exit_code`, `termination`, `signal`, `duration_seconds`, `log_sha256`, `execution_environment`,
+`environments`, `environment_evidence`, `slot`, `cleanup`, `cleanup_status`, `capture_status`,
+`last_completed_phase`, `phase_budgets`, `failure_class` and `reason`. Absent measurements are null
+(`environments` is an empty list); capture, timing or environment evidence is never reconstructed.
+An incomplete capture cannot certify PASS. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
 phase durations use the controller clock. An unfinished phase has no successful end marker.
 Each validated `run` also prints a unique invocation ID and `runs/ID.json` pointer. This versioned
 sidecar records that selection's attempted, reused and not-started checks with reasons, outcome/log
@@ -598,7 +622,20 @@ python3 dev/release-acceptance.py transfer --output NEW --from OLD --check CHECK
 
 Both directories must be valid frozen candidates. The target check must still be pending;
 failed, blocked, interrupted or already passed target attempts cannot be overwritten.
-`REVIEW.json` has exactly `schema_version: 1`, `check`, `tested`, `target`,
+For a new original attempt, `REVIEW.json` has exactly `schema_version: 2`, `check`,
+`tested_manifest_sha256`, `target_manifest_sha256`, `original_attempt`, `review` and `standalone`.
+`original_attempt` is the source check's current `{id, sha256}` reference; `standalone` must be null.
+The tested manifest is the one referenced by that record. Obtain the target manifest hash with
+`evidence_hash(candidate_manifest(target_root, target_receipt))`; these helpers do not authorize
+reuse. `review` retains the scope/reason/authorization fields below. The source must be active and
+its current direct attempt must still be a complete PASS. A later FAIL, interruption or running
+rerun prevents selecting an older attempt. An unrelated source receipt update does not invalidate
+this declaration. The transfer copies and rehashes the original record, both manifests, review and
+log, with no dependency on a digest of the mutable carrier receipt. Physical attempt transfer also
+requires recorded environment and successful cleanup evidence.
+
+Legacy receipt and standalone declarations remain supported unchanged.
+Their `REVIEW.json` has exactly `schema_version: 1`, `check`, `tested`, `target`,
 `source_receipt_sha256`, `review` and `standalone`. Each candidate identity contains
 `version`, `source_fingerprint`, `runtime_file`, `runtime_sha256`,
 `candidate_bundle_sha256`, the complete `release_files` hash map and `candidate_sha256`.
@@ -634,9 +671,68 @@ The command must be the exact check plus `--slot N`, in the supported
 controller/transport assignments. Unmeasured duration and execution environment stay unknown;
 preparation environment and final-poll duration cannot substitute for them.
 
+Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure
+leaves the receipt unchanged; a later capture failure reports the commit state and preserves evidence.
 Transfer retains and revalidates the review, original evidence and exact target. Receipts distinguish
 `coverage.executed` from `coverage.inherited`; pending gates stay pending. Publication sends only
 sanitized identities, hashes, command/environment provenance and authorization.
+
+#### Batch transfer preparation and application
+
+Use the same transfer command for a batch of independently reviewed checks:
+
+```sh
+python3 dev/release-acceptance.py transfer --output NEW --batch REQUEST.json --plan > PLAN.json
+python3 dev/release-acceptance.py transfer --output NEW --batch REQUEST.json
+```
+
+`--batch` excludes `--from`, `--check` and `--review`; `--plan` requires `--batch`.
+The exact-key request schema is `schema_version: 1`, `target` and `checks`. `target` is the
+complete `transfer_candidate(target_receipt)` identity. Each check has exactly `check`, `source`,
+`attempt` and `review`. `source` names its original candidate output directory. `attempt` is its
+current `{id, sha256}` original-attempt reference, or null for legacy receipt/standalone evidence.
+`review` is `{path, sha256}` for the exact declaration bytes, or null during planning. Paths resolve
+relative to the request file. Duplicate checks and source paths resolving to the target are refused.
+
+Planning returns JSON with `schema_version: 1`, `target_manifest_sha256`, a shared hash-keyed
+`manifests` table, one `pairs` source/target diff per unique source and per-check `checks` decisions.
+Diffs retain changed source paths with their actual normalized modes and hashes, changed release
+assets, runtime equality and the validated `identical`, `generated-at-only` or `review-required`
+release scope. Each decision refers to the shared manifest and original attempt and includes an
+unsigned `review_draft`. Fill its public scope, reason and authorization reference in a separate
+review declaration, then bind its path and exact hash in the request. Planning never supplies
+an authorization. Legacy draft declarations retain their required v1 candidate identity fields;
+new v2 drafts use manifest references. To plan standalone evidence, supply a bound v1 review
+containing its original artifact descriptors; its decision strings may still be blank.
+Planning preserves receipts and evidence; existing collector-lock bookkeeping still applies.
+Request and preparation JSON are bounded to 1 MiB.
+
+Apply is a separate invocation and revalidates current identities, inventories, commands,
+environments, original attempts and reviews. Equal runtime bytes alone never establish unchanged
+behavior. The ordinary generated-at-only provenance rule remains available in the shared diff;
+semantic differences still require explicit review. New physical attempts require recorded base
+and successful cleanup evidence. Standalone evidence retains the original launcher, bundle,
+terminal-result and cleanup checks; unknown timings remain unknown. Inherited evidence cannot
+be chained, active sources must remain current, and only pending target checks can be replaced.
+
+Canonical paths are deduplicated and existing nonblocking locks are acquired in sorted order:
+exclusive for the target, shared for every source. Each unique snapshot builds its public source
+manifest once, and each source/target pair computes one diff. Mandatory artifact copying still
+rehashes the bytes. All checks are validated before copying into an invocation-owned staging
+directory; shared artifacts are copied once by role/hash. The collector validates every staged
+result, publishes its artifacts and performs one atomic receipt replacement for the whole batch.
+Any precommit failure preserves the receipt and removes only that invocation's staging/artifacts.
+Unrelated or orphan staging is never applied or removed.
+
+Committed checks retain `transfer_batch_sha256`, derived from the target and canonical
+source/check/attempt/review references. Retrying those exact references returns `state=committed`
+without copying or rewriting the receipt. New-attempt retry identity excludes the mutable source
+receipt digest. A later source rerun cannot make a completed target transfer appear untouched;
+conflicting references are rejected. A postcommit event/capture or durability-confirmation error
+reports the reached commit state and preserves referenced artifacts. If replacement cannot be
+observed, the state is `unknown` and potentially referenced artifacts are preserved for a safe retry.
+There is no separate transaction database. Publication uses the existing v2 transfer/v5 attestation
+schemas, including mixed legacy receipt/standalone evidence and explicit publication exceptions.
 
 #### External checks and publication
 
