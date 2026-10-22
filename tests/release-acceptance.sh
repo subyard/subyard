@@ -1501,6 +1501,237 @@ while True: time.sleep(1)
                 self.assertEqual(persisted["candidate_bundle_sha256"], "b" * 64)
                 self.assertEqual(persisted["result"], "incomplete")
 
+    def test_invocation_selected_pass_reuse_and_final_receipt_binding(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            checks = {"verify": ["true"], "compatibility": ["true"]}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {name: {"status": "pending"} for name in checks}}
+            def result():
+                return json.loads(max((output / "runs").glob("*.json"), key=lambda path: path.stat().st_mtime_ns).read_text())
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64):
+                self.assertEqual(m.run_checks(output, [], ["verify"], False), 1)
+                first = result()
+                self.assertEqual((first["state"], first["selected_status"], first["overall_status"]),
+                                 ("finished", "passed", "incomplete"))
+                self.assertEqual(first["attempted"], ["verify"])
+                self.assertEqual(first["reused"], [])
+                self.assertEqual(first["receipt_sha256"], m.digest(output / "receipt.json"))
+                saved = json.loads((output / "receipt.json").read_text())
+                self.assertIn("execution_environment", saved["checks"]["verify"])
+                self.assertNotIn("execution_environment", first["checks"]["verify"])
+                self.assertEqual(first["checks"]["verify"]["log"], saved["checks"]["verify"]["log"])
+                frozen = (output / "receipt.json").read_bytes()
+                m.Invocation(output, receipt, {"verify"}, [], []).write("finished")
+                self.assertEqual((output / "receipt.json").read_bytes(), frozen, "sidecar changed receipt digest")
+                self.assertEqual(m.run_checks(output, [], ["verify"], False), 1)
+                reused = result()
+                self.assertNotEqual(first["invocation_id"], reused["invocation_id"])
+                self.assertEqual(reused["reused"], ["verify"])
+                self.assertEqual(reused["attempted"], [])
+                self.assertEqual(reused["selected_status"], "passed")
+                self.assertEqual(len(list((output / "runs").glob("*.json"))), 3)
+                for path in (output / "runs").glob("*.json"):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
+                self.assertEqual(events[-1]["invocation_id"], reused["invocation_id"])
+                self.assertEqual(events[-1]["receipt_sha256"], reused["receipt_sha256"])
+                # The actual producer journal projects a final pointer to this exact saved result.
+                projector = root / "dev/project-run-events.py"
+                projected = subprocess.run([sys.executable, "-B", str(projector), "--compact", str(output / "events.jsonl")],
+                                           capture_output=True, text=True, check=True)
+                final = json.loads(projected.stdout)["events"][-1]
+                self.assertEqual(final["result"], "runs/" + reused["invocation_id"] + ".json")
+                self.assertEqual(final["selected_status"], "passed")
+                self.assertEqual(json.loads((output / final["result"]).read_text())["receipt_sha256"], final["receipt_sha256"])
+
+    def test_invocation_prerequisite_rerun_stop_capacity_and_interruption(self):
+        for case in ("prerequisite", "rerun", "blocked", "interrupted", "excluded", "stopped"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                checks = {"verify": ["true"], "compatibility": ["true"], "profile:sample": ["true"]}
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {name: {"status": "passed" if case in ("rerun", "blocked", "interrupted", "excluded", "stopped") else "pending"}
+                                      for name in checks}}
+                calls = []
+                def execute(name, *args):
+                    calls.append(name)
+                    if case == "interrupted":
+                        m.STOP.set()
+                        return {"status": "interrupted", "exit_code": -15, "cleanup_status": "drained"}
+                    if case == "blocked":
+                        return {"status": "blocked", "exit_code": 4, "termination": "exit", "reason": "capacity_memory"}
+                    return {"status": "failed", "exit_code": 23}
+                selected = ["profile:sample"] if case in ("prerequisite", "blocked", "interrupted") else []
+                with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                     patch.object(m, "commands", return_value=checks), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "save", wraps=m.save) as saved, \
+                     patch.object(m, "execute", side_effect=execute):
+                    try:
+                        if case == "stopped":
+                            m.STOP.set()
+                        self.assertEqual(m.run_checks(output, [1], selected, case in ("rerun", "blocked", "interrupted", "stopped"),
+                                                      exclude=["compatibility"] if case == "excluded" else []), 1)
+                    finally:
+                        m.STOP.clear()
+                invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+                if case == "prerequisite":
+                    self.assertEqual(saved.call_count, 1, "display-only prerequisite summary rewrote the receipt")
+                    self.assertEqual(calls, [])
+                    self.assertEqual(invocation["attempted"], [])
+                    self.assertEqual(invocation["not_started"], [{"check": "profile:sample", "reason": "prerequisite-stop"}])
+                elif case == "rerun":
+                    self.assertEqual(invocation["selected_status"], "failed")
+                    self.assertEqual(invocation["checks"]["compatibility"]["status"], "not-started")
+                    self.assertEqual(invocation["checks"]["profile:sample"]["status"], "not-started")
+                    self.assertEqual(invocation["reused"], [])
+                elif case == "stopped":
+                    self.assertEqual(calls, [])
+                    self.assertEqual(invocation["attempted"], [])
+                    self.assertEqual(invocation["selected_status"], "incomplete")
+                    self.assertEqual(invocation["state"], "interrupted")
+                    self.assertEqual({item["status"] for item in invocation["checks"].values()}, {"not-started"})
+                elif case == "excluded":
+                    self.assertEqual(invocation["selected_status"], "passed")
+                    self.assertEqual(invocation["overall_status"], "incomplete")
+                else:
+                    self.assertEqual(invocation["selected_status"], "incomplete")
+                    self.assertEqual(invocation["checks"]["profile:sample"]["exit_code"], -15 if case == "interrupted" else 4)
+                    self.assertEqual(invocation["state"], "interrupted" if case == "interrupted" else "finished")
+
+    def test_invocation_errors_and_stale_running_do_not_certify_pass(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            checks = {"verify": ["true"]}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {"verify": {"status": "passed", "exit_code": 0}}}
+            m.save(output, receipt)
+            stale = m.Invocation(output, receipt, {"verify"}, [], [])
+            self.assertEqual(stale.document["selected_status"], "incomplete")
+            stale_bytes = stale.path.read_bytes()
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "execute", side_effect=OSError("capture unavailable")):
+                with self.assertRaises(OSError):
+                    m.run_checks(output, [], [], True)
+            self.assertEqual(stale.path.read_bytes(), stale_bytes)
+            failed = [json.loads(path.read_text()) for path in (output / "runs").glob("*.json")
+                      if path != stale.path][0]
+            self.assertEqual((failed["state"], failed["selected_status"], failed["capture_status"]),
+                             ("error", "incomplete", "failed"))
+            self.assertEqual(failed["checks"]["verify"]["cleanup_status"], "unknown")
+            count = len(list((output / "runs").glob("*.json")))
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks):
+                with self.assertRaises(ValueError):
+                    m.run_checks(output, [], ["unknown-check"], False)
+            self.assertEqual(len(list((output / "runs").glob("*.json"))), count)
+            with patch.object(m.Invocation, "write", side_effect=OSError("sidecar unavailable")), \
+                 patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "execute", side_effect=AssertionError("capture failure dispatched work")):
+                with self.assertRaises(OSError):
+                    m.run_checks(output, [], [], True)
+            self.assertEqual(stale.path.read_bytes(), stale_bytes)
+
+    def test_invocation_capture_failure_preserves_last_successful_receipt(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {"verify": {"status": "pending"}}}
+            save, saves = m.save, []
+            def fail_after_initial(output, receipt):
+                saves.append(True)
+                if len(saves) > 1:
+                    raise OSError("receipt capture unavailable")
+                save(output, receipt)
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value={"verify": ["true"]}), \
+                 patch.object(m, "save", side_effect=fail_after_initial):
+                with self.assertRaises(OSError):
+                    m.run_checks(output, [], [], False)
+            sidecar = json.loads(next((output / "runs").glob("*.json")).read_text())
+            self.assertEqual((sidecar["state"], sidecar["selected_status"], sidecar["overall_status"]),
+                             ("error", "incomplete", "incomplete"))
+            self.assertEqual(sidecar["checks"]["verify"]["exit_code"], 0)
+            self.assertEqual(sidecar["receipt_sha256"], m.digest(output / "receipt.json"))
+            self.assertEqual(json.loads((output / "receipt.json").read_text())["checks"]["verify"]["status"], "pending")
+            # Failure to persist the terminal sidecar leaves this invocation running, never a prior result.
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value={"verify": ["true"]}), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m.Invocation, "finish", side_effect=OSError("sidecar capture unavailable")):
+                with self.assertRaises(OSError):
+                    m.run_checks(output, [], [], False)
+            documents = [json.loads(path.read_text()) for path in (output / "runs").glob("*.json")]
+            running = next(item for item in documents if item["state"] == "running")
+            self.assertEqual(running["selected_status"], "incomplete")
+            self.assertNotEqual(running["invocation_id"], sidecar["invocation_id"])
+
+        for case in ("start-capture-error", "stop-during-start"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "checks": {"verify": {"status": "passed", "exit_code": 0}}}
+                write = m.Invocation.write
+                injected = []
+                def dispatch_write(invocation, *args, **kwargs):
+                    if invocation.attempted and not injected:
+                        injected.append(True)
+                        if case == "start-capture-error":
+                            raise OSError("dispatch sidecar capture unavailable")
+                        result = write(invocation, *args, **kwargs)
+                        m.STOP.set()  # Arrives while persisting the start, before execute.
+                        return result
+                    return write(invocation, *args, **kwargs)
+                with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                     patch.object(m, "commands", return_value={"verify": ["true"]}), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m.Invocation, "write", dispatch_write), \
+                     patch.object(m, "execute", side_effect=AssertionError("undispatched check executed")):
+                    try:
+                        if case == "start-capture-error":
+                            with self.assertRaises(OSError):
+                                m.run_checks(output, [], [], True)
+                        else:
+                            self.assertEqual(m.run_checks(output, [], [], True), 1)
+                    finally:
+                        m.STOP.clear()
+                invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+                self.assertEqual(invocation["state"], "error" if case == "start-capture-error" else "interrupted")
+                self.assertEqual(invocation["attempted"], [])
+                self.assertEqual(invocation["reused"], [])
+                self.assertEqual(invocation["selected_status"], "incomplete")
+                self.assertEqual(invocation["checks"]["verify"]["status"], "not-started")
+                self.assertEqual(invocation["not_started"], [{"check": "verify", "reason":
+                    "dispatch-capture-error" if case == "start-capture-error" else "interrupted-before-dispatch"}])
+
+    def test_zero_workload_exit_does_not_hide_cleanup_or_capture_failure(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            script = output / "cleanup.sh"
+            script.write_text("printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=3\\n'\nexit 0\n")
+            result = m.execute("cleanup", ["bash", str(script)], output, output, m.clean_environment())
+            self.assertEqual((result["status"], result["exit_code"], result["cleanup_status"]), ("failed", 0, "recorded"))
+            self.assertEqual(result["cleanup"]["cleanup/release"]["exit_code"], 3)
+            event = m.event
+            def capture(output, kind, **fields):
+                if kind == "check-result":
+                    raise OSError("capture unavailable")
+                return event(output, kind, **fields)
+            with patch.object(m, "event", side_effect=capture):
+                result = m.execute("capture", ["true"], output, output, m.clean_environment())
+            self.assertEqual((result["status"], result["exit_code"], result["capture_status"]), ("failed", 0, "failed"))
+            self.assertEqual(result["cleanup_status"], "unknown")
+
     def test_single_collector_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)

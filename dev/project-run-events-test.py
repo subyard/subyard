@@ -123,6 +123,45 @@ class ProjectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid cursor"):
             projection.project(self.journal, cursor)
 
+    def test_explicit_compact_whitelist_and_unknown_payload(self):
+        self.journal.write_bytes(record("run-start", checks={"private": "untrusted"})
+            + record("phase", state="started") + record("heartbeat")
+            + record("check-result", check="one", status="failed", exit_code=7, log="one.log",
+                     command=["untrusted"], environment={"secret": "do-not-echo"},
+                     cleanup={"lease-release": {"exit_code": 9, "duration_seconds": 2, "output": "untrusted"}})
+            + record("unknown-kind", payload="do-not-echo")
+            + record("run-result", invocation_id="one", status="incomplete", selected_status="passed",
+                     overall_status="incomplete", result="runs/one.json"))
+        raw = projection.project(self.journal)
+        compact = projection.project(self.journal, compact=True)
+        self.assertEqual(compact["cursor"], raw["cursor"])
+        self.assertEqual([item["event"] for item in compact["events"]],
+                         ["check-result", "unknown-event", "run-result"])
+        self.assertEqual(compact["events"][0]["cleanup"],
+                         {"lease-release": {"exit_code": 9, "duration_seconds": 2}})
+        unknown = compact["events"][1]
+        self.assertEqual((unknown["type"], unknown["count"]), ("unknown-kind", 1))
+        self.assertGreater(unknown["offset"], 0)
+        self.assertNotIn("do-not-echo", json.dumps(compact))
+        self.assertNotIn("untrusted", json.dumps(compact))
+        self.assertNotIn("required_action", json.dumps(compact))
+        self.assertEqual(projection.project(self.journal, compact["cursor"], compact=True)["events"], [])
+
+    def test_snapshot_eof_does_not_expand_when_appended(self):
+        self.journal.write_bytes(record("heartbeat") * 3 + record("check-result", status="blocked"))
+        first = projection.project(self.journal, max_lines=1, compact=True)
+        boundary = first["eof"]
+        with self.journal.open("ab") as stream:
+            stream.write(record("run-result", status="incomplete"))
+        rest = projection.project(self.journal, first["cursor"], compact=True, until=boundary)
+        self.assertEqual([item["event"] for item in rest["events"]], ["check-result"])
+        self.assertFalse(rest["backlog"])
+        self.assertEqual(rest["cursor"]["offset"], boundary)
+        later = projection.project(self.journal, rest["cursor"], compact=True)
+        self.assertEqual(later["events"][0]["event"], "run-result")
+        with self.assertRaisesRegex(ValueError, "snapshot EOF"):
+            projection.project(self.journal, later["cursor"], until=boundary)
+
 
 if __name__ == "__main__":
     unittest.main()

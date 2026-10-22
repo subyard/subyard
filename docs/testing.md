@@ -160,70 +160,181 @@ the existing journal remains append-only evidence, not a writable observation st
 A single record must fit the byte cap (8 KiB in the template); oversized lines are diagnostics.
 If a valid native record needs a larger cap, adjust projection and output budgets explicitly.
 
-For tool-based observation, initialize `store("observer-run", state)` once with the process
-`session_id`, absolute `journal` path, unused `terminal_path` under `.build/` without newlines,
-`cursor: null`, `backlog: false` and `terminal: false`. Bind that state to the assigned candidate/command and retain
-it when resuming a cell or starting the next observation step. This single-run template executes
-poll and delta projection in the same cell; use the assigned working directory. After a material
-return, route progress to the designated recipient and alerts/terminal evidence to both roles,
-then continue the same state through cleanup. If the outer call yields, use `functions.wait` on
-that exact cell (up to 60000 ms within client limits); do not start another cell until it finishes.
-If launch itself returns a terminal exit, save that full native launch object and its artifact first,
-initialize `terminal: true` and drain projection without a process poll. Keep the accepted cursor
-and stream identity with handles/evidence in any compaction handoff; do not initialize it again.
+For tool-based observation, initialize `store("observer-sources", ids)` once with stable IDs.
+Each `store("observer-source:" + id, state)` contains `session_id`, absolute `journal`, unique
+unused `terminal_path` under `.build/`, `cursor: null`, `backlog: false`, `terminal: false` and
+`closed: false`. Bind these states to the candidate/command. Native objects use separate
+`observer-native:ID` keys; terminal objects use `observer-terminal:ID`. Never share a terminal path
+or native key between sources. A launch that already terminated must save its full native object
+and artifact first and initialize `terminal: true`; it then drains without polling.
+
+The step below polls independent handles concurrently. Each worker stores its full native object
+before waiting for another source or reading its final projection. Ready journals drain one page
+per turn through a shared queue. Each active journal's EOF is fixed at its initial metadata read;
+a newly terminal journal instead uses its final EOF. Appends cannot extend the current step.
+`observer-max-pages` optionally bounds total projection work (default 100 pages); pending cursors
+and snapshot EOFs survive the step. Resume pending drain without another native poll. Terminal
+sources drain to final EOF; a trailing partial record is an observation diagnostic. Native completion
+and journal completion are separate facts. Closed handles are never polled again.
 
 ```js
 // @exec: {"yield_time_ms": 60000, "max_output_tokens": 24000}
 // observer-poll-template
-const state = load("observer-run");
 const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
-if (!state.terminal && !state.backlog) {
-  const native = await tools.write_stdin({session_id: state.session_id, chars: "", yield_time_ms: 55000});
-  if (native.exit_code !== undefined && native.exit_code !== null) {
-    state.terminal = true;
-    store("observer-native-terminal", native); // Full object, before any artifact read.
-    store("observer-run", state);
-    const body = JSON.stringify(native, null, 2) + "\n";
-    await tools.apply_patch("*** Begin Patch\n*** Add File: " + state.terminal_path + "\n"
-      + body.trimEnd().split("\n").map(line => "+" + line).join("\n") + "\n*** End Patch");
-  }
-}
-while (true) {
-  let delta = {events: [], backlog: false};
-  let observation_error;
-  if (!state.projection_disabled) {
+const ids = load("observer-sources");
+let pages = 0, draining = false;
+const ready = [];
+const limit = load("observer-max-pages") ?? 100;
+const persist = source => store("observer-source:" + source.id, source.state);
+const report = (source, fields) => notify(JSON.stringify({source: source.id, ...fields}));
+async function drain() {
+  draining = true;
+  while (ready.length) {
+    const job = ready.shift(), {source, resolve} = job, state = source.state;
+    if (pages >= limit) {
+      state.backlog = true;
+      persist(source);
+      report(source, {pending: true, cursor: state.cursor, eof: state.pending_eof});
+      resolve();
+      continue;
+    }
+    pages++;
     try {
-      const command = "python3 dev/project-run-events.py --max-bytes 8192 " + quote(state.journal)
-        + (state.cursor === null ? "" : " --cursor " + quote(JSON.stringify(state.cursor)));
-      const projection = await tools.exec_command({cmd: command, max_output_tokens: 24000});
-      if (projection.exit_code !== 0) throw new Error(projection.output.trim() || "projection did not finish");
-      delta = JSON.parse(projection.output);
-      state.cursor = delta.cursor; // Advance only after accepting the complete projection.
+      const command = "python3 dev/project-run-events.py --compact --max-bytes 8192 " + quote(state.journal)
+        + (state.cursor === null ? "" : " --cursor " + quote(JSON.stringify(state.cursor)))
+        + (state.pending_eof === undefined ? "" : " --until " + state.pending_eof);
+      const native = await tools.exec_command({cmd: command, max_output_tokens: 24000});
+      if (native.exit_code !== 0) throw new Error("projection failed: " + native.output.trim());
+      const delta = JSON.parse(native.output);
+      if (!delta.cursor || !Array.isArray(delta.events) || typeof delta.backlog !== "boolean")
+        throw new Error("invalid projection response");
+      state.cursor = delta.cursor; // Accept the whole page before advancing its cursor.
       state.backlog = delta.backlog;
+      state.pending_eof = delta.eof;
+      persist(source);
+      if (delta.events.length) report(source, {events: delta.events});
+      if (delta.backlog) ready.push(job); // Round-robin among all ready sources.
+      else {
+        delete state.pending_eof;
+        if (state.terminal) {
+          state.closed = true;
+          if (delta.incomplete_bytes) report(source, {observation_error: "incomplete terminal journal tail",
+            incomplete_bytes: delta.incomplete_bytes});
+        }
+        persist(source);
+        resolve();
+      }
     } catch (error) {
-      observation_error = error.message;
-      state.projection_disabled = true; // Continue native polling; repair observation explicitly.
+      state.projection_disabled = true;
       state.backlog = false;
+      persist(source);
+      report(source, {observation_error: error.message});
+      resolve();
     }
   }
-  store("observer-run", state);
-  if (observation_error || delta.events.length || (state.terminal && !state.backlog)) {
-    text({events: delta.events, observation_error, terminal: state.terminal,
-      backlog: state.backlog, incomplete_bytes: delta.incomplete_bytes,
-      native_terminal: state.terminal ? state.terminal_path : undefined});
-    break;
-  }
-  if (!state.backlog) break; // Unchanged: no text/notify or second long poll.
+  draining = false;
 }
+function enqueue(source) {
+  return new Promise(resolve => {
+    ready.push({source, resolve});
+    if (!draining) void drain();
+  });
+}
+await Promise.allSettled(ids.map(id => (async () => {
+  const source = {id, state: load("observer-source:" + id)}, state = source.state;
+  if (state.closed) return;
+  // Metadata only: freeze active EOF before polling; no final artifact/projection read yet.
+  if (!state.terminal && !state.backlog && !state.projection_disabled) {
+    try {
+      const snapshot = await tools.exec_command({cmd: "python3 -c "
+        + quote("import os,sys; print(os.stat(sys.argv[1]).st_size)") + " " + quote(state.journal), max_output_tokens: 1000});
+      if (snapshot.exit_code !== 0 || !/^\d+\s*$/.test(snapshot.output)) throw new Error("journal snapshot unavailable");
+      state.pending_eof = Number(snapshot.output.trim());
+    } catch (error) {
+      report(source, {observation_error: error.message});
+      state.projection_disabled = true;
+    }
+  }
+  if (!state.terminal && !state.backlog) {
+    const native = await tools.write_stdin({session_id: state.session_id, chars: "", yield_time_ms: 55000});
+    store("observer-native:" + id, native); // FULL object FIRST, before waiting for peers.
+    if (native.exit_code !== undefined && native.exit_code !== null) {
+      state.terminal = true;
+      delete state.pending_eof; // Terminal drain captures final EOF after native completion.
+      store("observer-terminal:" + id, native);
+      persist(source);
+      report(source, {terminal: true, native_exit_code: native.exit_code,
+        native_terminal: state.terminal_path});
+      const body = JSON.stringify(native, null, 2) + "\n";
+      try {
+        const saved = await tools.apply_patch("*** Begin Patch\n*** Add File: " + state.terminal_path + "\n"
+          + body.trimEnd().split("\n").map(line => "+" + line).join("\n") + "\n*** End Patch");
+        if (saved?.isError) throw new Error("native artifact save rejected");
+      } catch (error) {
+        report(source, {capture_error: error.message, native_key: "observer-terminal:" + id});
+      }
+    }
+  }
+  persist(source);
+  if (!state.projection_disabled) await enqueue(source);
+})().catch(error => notify(JSON.stringify({source: id, observation_error: error.message})))));
 ```
 
-Keep the full native object in the persistent store if writing its artifact fails; report that
-failure to both roles and retrieve it without polling the terminal handle again. Projection errors
-after terminal cannot replace its exit code or lose the object. Observation errors leave the journal
-cursor unchanged and disable projection until explicitly repaired; continue the same runner's native
-completion/cleanup. Full logs and native receipts retain authority. The template is an observation
-step, not a runner, receipt writer or replacement controller. Its host-free checks are
-`python3 -B dev/project-run-events-test.py` and `node dev/observer-poll-test.mjs`.
+Unchanged steps emit no text/notify. Reports use immediate `notify` delivery because `text` is buffered
+until the cell returns. Material native failures are reported as soon as received;
+material journal failures are reported as each page is accepted, while other workers may still be
+waiting. A rejected source does not discard another source's cursor or full native result. Artifact
+save failure retains the terminal object in its own persistent key and reports capture separately.
+Projection errors retain the accepted cursor and disable projection until explicitly repaired;
+continue native polling through completion and cleanup. The full native `exec_command`/`write_stdin`
+object remains authoritative for process exit; a producer JSON result cannot replace it. The template
+is an observation step, not a runner, receipt writer or replacement controller. Its host-free checks
+are `python3 -B dev/project-run-events-test.py` and `node dev/observer-poll-test.mjs`.
+
+For supplied GitHub run IDs, the same wake can query each ID once through the existing authorized
+read-only path below. Initialize `github-sources` with stable `REPOSITORY/RUN_ID` IDs and separate
+`github-source:ID` states containing `repository`, `run_id` and `closed: false`. The full native query
+and decoded API response have separate per-source keys. API failure is an observation error; only
+the API's `status` and `conclusion` describe the workflow. Completed IDs close independently, so
+completion order does not cause serial watches. This example adds no network behavior to the projector.
+
+```js
+// github-observer-template
+const githubIds = load("github-sources");
+await Promise.allSettled(githubIds.map(async id => {
+  const state = load("github-source:" + id);
+  if (state.closed) return;
+  try {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(state.repository) || !/^\d+$/.test(String(state.run_id)))
+      throw new Error("invalid GitHub run identity");
+    const native = await tools.exec_command({cmd: "subyard-github run -- gh api repos/" + state.repository
+      + "/actions/runs/" + state.run_id, max_output_tokens: 24000});
+    store("github-native:" + id, native);
+    if (native.exit_code !== 0) throw new Error("GitHub status query failed");
+    const response = JSON.parse(native.output);
+    store("github-response:" + id, response);
+    if (response.id !== Number(state.run_id) || typeof response.status !== "string"
+        || !(response.conclusion === null || typeof response.conclusion === "string"))
+      throw new Error("invalid GitHub run response");
+    const changed = state.status !== response.status || state.conclusion !== response.conclusion;
+    state.status = response.status;
+    state.conclusion = response.conclusion;
+    state.closed = response.status === "completed";
+    store("github-source:" + id, state);
+    if (changed) notify(JSON.stringify({source: id, status: response.status, conclusion: response.conclusion, closed: state.closed}));
+  } catch (error) {
+    notify(JSON.stringify({source: id, observation_error: error.message}));
+  }
+}));
+```
+
+A concise handoff retains the candidate's source/bundle identity; each stable source ID, handle,
+journal, accepted cursor, pending EOF and native-result key; the operator's next wake time; and the
+last material result with its sidecar/log/native pointers. For example: `candidate=<source>/<bundle>;
+release: session=42, journal=.build/acceptance/events.jsonl, cursor=<accepted JSON>, pending=false;
+GitHub: owner/repo/123=queued; next-wake=<operator-selected UTC>; last=selected passed, overall incomplete;
+result=.build/acceptance/runs/<invocation>.json; native=.build/native-release.json`. Observation intervals
+are assigned per session; these templates do not define a global interval.
 
 For parallel acceptance, read new `check-result` events/current receipt as well as process
 completion. Report failed/blocked checks when observed, without waiting for `run-result`;
@@ -433,6 +544,16 @@ and Go toolchain against preparation; receipts retain measured execution and ava
 `receipt.json` records terminal results, including `blocked` capacity refusal and `interrupted`
 execution. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
 phase durations use the controller clock. An unfinished phase has no successful end marker.
+Each validated `run` also prints a unique invocation ID and `runs/ID.json` pointer. This versioned
+sidecar records that selection's attempted, reused and not-started checks with reasons, outcome/log
+pointers and the final receipt digest. `selected_status=passed` means every selected check passed
+(or its existing inventory permits N/A); `overall_status=incomplete` still prevents publication and
+retains the legacy nonzero aggregate exit. Exclusions leave required acceptance incomplete. A rerun
+uses its new attempts; undispatched checks cannot inherit an earlier PASS. `running`, `interrupted`
+or `error` sidecars cannot certify selection PASS. Capture failure is separate from the native workload
+exit and known cleanup evidence; absent native facts remain unknown. Sidecars never alter the receipt
+format or digest. `run-start` and `run-result` carry the same ID; read the terminal sidecar after its
+final saved receipt, rather than treating an early `check-result` as the final summary.
 Fixtures may emit `E2E_PHASE phase=fixture/NAME state=start|end duration_seconds=N exit_code=N`
 with a lowercase name of up to 60 letters, digits or hyphens. Start markers use zero duration and
 exit code; end markers retain the measured duration and original exit code (0–255). The collector

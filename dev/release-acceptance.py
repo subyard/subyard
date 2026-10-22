@@ -317,6 +317,98 @@ def save(output, receipt):
     sync_directory(output)
 
 
+class Invocation:
+    """One selection run, distinct from the candidate's accumulated evidence."""
+    OUTCOME_FIELDS = ("status", "exit_code", "termination", "signal", "reason", "duration_seconds",
+                      "log", "log_sha256", "failure_class", "last_completed_phase", "cleanup",
+                      "cleanup_status", "capture_status", "environment_evidence", "slot")
+
+    def __init__(self, output, receipt, selected, pending, excluded):
+        self.output, self.receipt = output, receipt
+        self.id = uuid.uuid4().hex
+        self.path = output / "runs" / (self.id + ".json")
+        self.selected, self.pending = sorted(selected), set(pending)
+        self.attempted, self.outcomes = set(), {}
+        self.not_started_reasons = {}
+        self.reused = sorted(name for name in selected - self.pending
+                             if receipt["checks"][name]["status"] == "passed")
+        self.document = {"schema_version": 1, "invocation_id": self.id,
+            "candidate": {key: receipt.get(key) for key in
+                          ("version", "source_fingerprint", "runtime_sha256", "candidate_bundle_sha256")},
+            "started_at": datetime.now(timezone.utc).isoformat(), "selected": self.selected,
+            "excluded": sorted(excluded), "state": "running"}
+        self.path.parent.mkdir(mode=0o700, exist_ok=True)
+        sync_directory(output)
+        self.write()
+        print(f"INVOCATION id={self.id} result={self.path}", flush=True)
+
+    def start(self, name):
+        self.attempted.add(name)
+        try:
+            self.write()
+        except Exception:
+            self.attempted.remove(name)
+            self.not_started_reasons[name] = "dispatch-capture-error"
+            raise
+
+    def cancel_start(self, name):
+        self.attempted.remove(name)
+        self.not_started_reasons[name] = "interrupted-before-dispatch"
+        self.write()
+
+    def record(self, name, result):
+        self.outcomes[name] = {key: result[key] for key in self.OUTCOME_FIELDS if key in result}
+
+    def write(self, state="running", reason="not-dispatched", capture_status="recorded"):
+        checks = {}
+        for name in self.selected:
+            if name in self.attempted:
+                checks[name] = self.outcomes.get(name, {"status": "incomplete", "reason": "attempt-result-unavailable",
+                                                       "exit_code": None, "termination": "unknown",
+                                                       "capture_status": "unknown", "cleanup_status": "unknown"})
+            elif name in self.reused or name not in self.pending:
+                checks[name] = {key: value for key, value in self.receipt["checks"][name].items()
+                                if key in self.OUTCOME_FIELDS}
+            else:
+                checks[name] = {"status": "not-started", "reason": self.not_started_reasons.get(name, reason)}
+        statuses = [item["status"] for item in checks.values()]
+        selected_status = ("failed" if "failed" in statuses else
+                           "passed" if all(status in ("passed", "not-applicable") for status in statuses)
+                           else "incomplete")
+        # A running or failed capture can never certify the selected invocation.
+        if state in ("running", "interrupted", "error") and selected_status == "passed":
+            selected_status = "incomplete"
+        receipt_bytes = (self.output / "receipt.json").read_bytes() if (self.output / "receipt.json").is_file() else None
+        saved_receipt = json.loads(receipt_bytes) if receipt_bytes is not None else {}
+        self.document.update(state=state, attempted=sorted(self.attempted), reused=self.reused,
+            not_started=[{"check": name, "reason": item["reason"]} for name, item in checks.items()
+                         if item["status"] == "not-started"], checks=checks,
+            selected_status=selected_status, reproducible_status=saved_receipt.get("reproducible_result", "incomplete"),
+            overall_status=saved_receipt.get("result", "incomplete"), capture_status=capture_status,
+            receipt="receipt.json", receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest() if receipt_bytes is not None else None)
+        if state != "running":
+            self.document["finished_at"] = datetime.now(timezone.utc).isoformat()
+        temporary = self.path.with_suffix(".json.next")
+        with private_file(temporary) as stream:
+            stream.write(json.dumps(self.document, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(self.path)
+        sync_directory(self.path.parent)
+
+    def finish(self, state, reason="not-dispatched", capture_status="recorded"):
+        self.write(state, reason, capture_status)
+        event(self.output, "run-result", invocation_id=self.id,
+              status="interrupted" if state == "interrupted" else self.document["overall_status"],
+              state=state, selected_status=self.document["selected_status"],
+              reproducible_status=self.document["reproducible_status"], overall_status=self.document["overall_status"],
+              result=f"runs/{self.id}.json", receipt_sha256=self.document["receipt_sha256"],
+              capture_status=capture_status)
+        print(f"INVOCATION id={self.id} state={state} selected={self.document['selected_status']} "
+              f"reproducible={self.document['reproducible_status']} overall={self.document['overall_status']} "
+              f"result={self.path}", flush=True)
+
+
 def execute(name, command, root, output, env, slot=None):
     log = output / (name.replace(":", "-").replace("/", "-") + "-" + uuid.uuid4().hex[:8] + ".log")
     argv = command + (["--slot", str(slot)] if slot else [])
@@ -329,31 +421,43 @@ def execute(name, command, root, output, env, slot=None):
     phases = {}
     offset = 0
     next_heartbeat = start + HEARTBEAT_SECONDS
-    with private_file(log, "wb") as stream:
-        process = subprocess.Popen(argv, cwd=root, env=env, stdout=stream,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
-        while process.poll() is None:
-            if STOP.wait(0.2):
+    process, code, capture_error = None, None, False
+    try:
+        with private_file(log, "wb") as stream:
+            process = subprocess.Popen(argv, cwd=root, env=env, stdout=stream,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            while process.poll() is None:
+                if STOP.wait(0.2):
+                    interrupted = True
+                    # This new process group belongs exclusively to this invocation.
+                    cleanup_status = interrupt_group(process)
+                    break
+                if time.monotonic() >= next_heartbeat:
+                    event(output, "heartbeat", check=name, slot=slot,
+                          duration_seconds=round(time.monotonic() - start, 2))
+                    next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+                offset = phase_events(output, name, log, offset, markers, phases=phases)
+            if STOP.is_set() and not interrupted:
                 interrupted = True
-                # This new process group belongs exclusively to this invocation.
                 cleanup_status = interrupt_group(process)
-                break
-            if time.monotonic() >= next_heartbeat:
-                event(output, "heartbeat", check=name, slot=slot,
-                      duration_seconds=round(time.monotonic() - start, 2))
-                next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
-            offset = phase_events(output, name, log, offset, markers, phases=phases)
-        if STOP.is_set() and not interrupted:
-            interrupted = True
-            cleanup_status = interrupt_group(process)
-        code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
-        stream.flush()
-        os.fsync(stream.fileno())
-    phase_events(output, name, log, offset, markers, final=True, phases=phases)
+            code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
+            stream.flush()
+            os.fsync(stream.fileno())
+        phase_events(output, name, log, offset, markers, final=True, phases=phases)
+    except (OSError, subprocess.SubprocessError):
+        capture_error = True
+        if process is not None:
+            if process.poll() is None:
+                cleanup_status = interrupt_group(process)
+            code = process.poll()
+    try:
+        log_sha256 = digest(log)
+    except OSError:
+        log_sha256, capture_error = None, True
     blocked = capacity_reason(log) if code == 4 and not interrupted else None
-    result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 else "failed", "exit_code": code,
+    result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 and not capture_error else "failed", "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
-              "log_sha256": digest(log), "command": command_identity(command, root)}
+              "log_sha256": log_sha256, "command": command_identity(command, root)}
     result["termination"] = ("signal" if code is not None and (code < 0 or code in (130, 137, 143))
                              else "timeout" if code == 124 else "exit" if code is not None else "unknown")
     if result["termination"] == "signal":
@@ -361,6 +465,10 @@ def execute(name, command, root, output, env, slot=None):
     result["last_completed_phase"] = phases.get("last_completed_phase", "unknown")
     if phases.get("cleanup"):
         result["cleanup"] = phases["cleanup"]
+        if result["status"] == "passed" and any(item["exit_code"] != 0 for item in phases["cleanup"].values()):
+            result["status"] = "failed"
+    result["capture_status"] = "failed" if capture_error else "recorded"
+    result["cleanup_status"] = "recorded" if phases.get("cleanup") else "unknown"
     if phases.get("budgets"):
         result["phase_budgets"] = phases["budgets"]
     if code != 0:
@@ -377,8 +485,13 @@ def execute(name, command, root, output, env, slot=None):
         result["cleanup_status"] = cleanup_status
     if slot:
         result["slot"] = slot
+    try:
+        event(output, "check-result", check=name, **{key: value for key, value in result.items() if key != "command"})
+    except OSError:
+        result["capture_status"] = "failed"
+        if result["status"] == "passed":
+            result["status"] = "failed"
     print(f"RESULT {name} {result['status']} exit={code} log={log}", flush=True)
-    event(output, "check-result", check=name, **{key: value for key, value in result.items() if key != "command"})
     return result
 
 
@@ -819,76 +932,111 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and (rerun or receipt["checks"][name]["status"] != "passed")]
-    for name in sorted(selected - set(pending)):
-        result = receipt["checks"][name]
-        if result["status"] == "passed":
-            origin = "inherited" if result.get("inherited") else "direct"
-            print(f"REUSE {name} {origin}: validated command, inputs, environment and complete PASS", flush=True)
-            event(output, "check-reuse", check=name, origin=origin, reason="validated-applicable-pass")
     live = [name for name in pending if is_live(name)]
     if live and not slots:
         raise ValueError("live checks require --slots N [N ...]")
-    receipt["operator_exclusions"] = sorted(excluded)
-    save(output, receipt)
-    event(output, "run-start", checks=pending, slots=slots, exclusions=sorted(excluded))
-    for name in [item for item in pending if item not in live]:
-        if STOP.is_set():
-            break
-        receipt["checks"][name] = execute(name, checks[name], root, output, env)
-        receipt["checks"][name]["execution_environment"] = measured_environment
-        save(output, receipt)
-        if receipt["checks"][name]["status"] != "passed":
-            break
-    local_names = [name for name in checks if not is_live(name)] + (["package"] if "package" in receipt["checks"] else [])
-    if live and any(receipt["checks"][name]["status"] != "passed"
-                    and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)
-                    for name in local_names):
-        print("INCOMPLETE: live checks await successful local gates", flush=True)
-        event(output, "run-result", status="interrupted" if STOP.is_set() else "incomplete")
-        return 1
-    # Only physical controllers consume the frozen transport. Host-free tests build
-    # synthetic worktrees and must retain the normal bundler contract.
-    env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
-               SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
-               SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
-               SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
-    # One controller per approved slot, taking the next independent check when free.
+    try:
+        invocation = Invocation(output, receipt, selected, pending, excluded)
+    except OSError:
+        print("release-acceptance: invocation capture failed before dispatch", file=sys.stderr)
+        raise
+    failure_reason = "not-dispatched"
     lock = threading.Lock()
-    work = queue.Queue()
-    for name in live:
-        work.put(name)
-    def collect(slot):
-        while not STOP.is_set():
-            try:
-                name = work.get_nowait()
-            except queue.Empty:
-                return
-            result = execute(name, checks[name], root, output, env, slot)
-            result["execution_environment"] = measured_environment
+    try:
+        receipt["operator_exclusions"] = sorted(excluded)
+        save(output, receipt)
+        event(output, "run-start", invocation_id=invocation.id, checks=pending, slots=slots, exclusions=sorted(excluded))
+        for name in invocation.reused:
+            origin = "inherited" if receipt["checks"][name].get("inherited") else "direct"
+            print(f"REUSE {name} {origin}: validated command, inputs, environment and complete PASS", flush=True)
+            event(output, "check-reuse", invocation_id=invocation.id, check=name,
+                  origin=origin, reason="validated-applicable-pass")
+
+        def attempt(name, slot=None):
+            # Register only immediately before execute: a stopped queue retains no old PASS.
             with lock:
-                receipt["checks"][name] = result
-                save(output, receipt)
-            # execute() classifies capacity only before any lease/guest boundary.
-            # Preserve the attempt without retrying it in this run.
-            capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
-                                and result.get("termination") == "exit"
-                                and result.get("reason") in ("capacity_memory", "capacity_disk"))
-            if result["status"] != "passed" and not capacity_blocked:
-                return
-    with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
-        futures = [pool.submit(collect, slot) for slot in slots]
-        for future in as_completed(futures):
-            future.result()
-    if source_fingerprint(root) != receipt["source_fingerprint"]:
-        receipt["checks"]["verify"]["status"] = "failed"
-        receipt["error"] = "source changed during acceptance"
-    save(output, receipt)
-    event(output, "run-result", status="interrupted" if STOP.is_set() else receipt["result"])
-    optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
-    if optional:
-        print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
-    print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
-    return 0 if receipt["result"] == "passed" else 1
+                if STOP.is_set():
+                    return None
+                invocation.start(name)
+            if STOP.is_set():
+                with lock:
+                    invocation.cancel_start(name)
+                return None
+            result = execute(name, checks[name], root, output, env, slot) if slot else execute(name, checks[name], root, output, env)
+            result["execution_environment"] = measured_environment
+            return result
+
+        for name in [item for item in pending if item not in live]:
+            if STOP.is_set():
+                break
+            result = attempt(name)
+            if result is None:
+                break
+            receipt["checks"][name] = result
+            invocation.record(name, result)
+            save(output, receipt)
+            invocation.write()
+            if result["status"] != "passed":
+                failure_reason = "local-check-stop"
+                break
+        local_names = [name for name in checks if not is_live(name)] + (["package"] if "package" in receipt["checks"] else [])
+        if live and any(receipt["checks"][name]["status"] != "passed"
+                        and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)
+                        for name in local_names):
+            print("INCOMPLETE: live checks await successful local gates", flush=True)
+            invocation.finish("interrupted" if STOP.is_set() else "finished", "prerequisite-stop")
+            return 1
+        # Physical controllers consume the frozen transport; local tests keep normal bundling.
+        env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
+                   SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
+                   SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
+                   SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
+        work = queue.Queue()
+        for name in live:
+            work.put(name)
+        def collect(slot):
+            while not STOP.is_set():
+                try:
+                    name = work.get_nowait()
+                except queue.Empty:
+                    return
+                result = attempt(name, slot)
+                if result is None:
+                    return
+                with lock:
+                    receipt["checks"][name] = result
+                    invocation.record(name, result)
+                    save(output, receipt)
+                    invocation.write()
+                capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
+                                    and result.get("termination") == "exit"
+                                    and result.get("reason") in ("capacity_memory", "capacity_disk"))
+                if result["status"] != "passed" and not capacity_blocked:
+                    return
+        with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
+            futures = [pool.submit(collect, slot) for slot in slots]
+            for future in as_completed(futures):
+                future.result()
+        if source_fingerprint(root) != receipt["source_fingerprint"]:
+            receipt["checks"]["verify"]["status"] = "failed"
+            receipt["error"] = "source changed during acceptance"
+            if "verify" in invocation.outcomes:
+                invocation.record("verify", receipt["checks"]["verify"])
+        save(output, receipt)
+        invocation.finish("interrupted" if STOP.is_set() else "finished",
+                          "interrupted-before-dispatch" if STOP.is_set() else failure_reason)
+        optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
+        if optional:
+            print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
+        print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
+        return 0 if receipt["result"] == "passed" and not STOP.is_set() else 1
+    except Exception:
+        # Keep the current identity even when capture fails; never fall back to another run.
+        try:
+            invocation.finish("error", "collector-error", "failed")
+        except Exception:
+            print(f"release-acceptance: invocation capture failed id={invocation.id} result={invocation.path}", file=sys.stderr)
+        raise
 
 
 def source_entries(root):
