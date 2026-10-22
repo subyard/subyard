@@ -346,7 +346,7 @@ verify_legacy_rollback_refusal() {
     "$OPERATOR_HOME/.config/subyard/migrations/state.json" "$grant")
   capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
   for path in "${paths[@]}"; do
-    # Fresh v0.11.0 is V2: retain V1 evidence if present, never manufacture it.
+    # V2 predecessors may lack V1 evidence: preserve it when present, never manufacture it.
     if [ "$index" = 3 ] && operator_env test ! -e "$path" && operator_env test ! -L "$path"; then
       printf 'absent\n' > "$STATE_ROOT/refusal-$index.mode"
     else
@@ -356,7 +356,7 @@ verify_legacy_rollback_refusal() {
     index=$((index + 1))
   done
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
-    die 'incompatible published v0.11.0 rollback unexpectedly succeeded'
+    die "incompatible published v$OLD_VERSION rollback unexpectedly succeeded"
   fi
   grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
     || die 'published predecessor rollback failed for an unexpected reason'
@@ -373,7 +373,7 @@ verify_legacy_rollback_refusal() {
     index=$((index + 1))
   done
   assert_legacy_native_policy
-  ok 'incompatible published v0.11.0 rollback refused without mutation'
+  ok "incompatible published v$OLD_VERSION rollback refused without mutation"
 }
 
 check_compatible_transition() {

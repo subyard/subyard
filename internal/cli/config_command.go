@@ -1120,7 +1120,7 @@ func sameConfigTargetSet(
 }
 
 func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
-	assets, err := config.SelectMaterializationSources(loaded.Environment, loaded.Context.DevUser, config.MaterializationConfigAssets, nil)
+	assets, err := config.SelectMaterializationSources(loaded.Environment, loaded.Context.DevUser, config.MaterializationConfigAssets, loaded.Catalog.Integrations()...)
 	if err != nil {
 		return nil, err
 	}

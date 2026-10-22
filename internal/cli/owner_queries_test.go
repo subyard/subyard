@@ -160,6 +160,47 @@ func TestOwnerProfileQueryChecksOnlyRunningSelectedEligibleHooks(t *testing.T) {
 	}
 }
 
+func TestOwnerProfileQueryKeepsUnsafePresetMetadataWithoutProbing(t *testing.T) {
+	for _, status := range []string{"Running", "Stopped"} {
+		t.Run(status, func(t *testing.T) {
+			handler, runner, incus := ownerQueryFixture(t)
+			var err error
+			handler.loaded, err = config.WithEnvironmentProfiles(handler.loaded, []string{"legacy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			preset := filepath.Join(handler.cli.options.RepositoryRoot, "config/profiles/legacy/yard.env")
+			if err := os.Symlink("/nonexistent", preset); err != nil {
+				t.Fatal(err)
+			}
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = status
+			incus.Instances["subyard/yard"] = instance
+			result, err := handler.profileList(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.Requests) != 0 {
+				t.Fatal("unsafe bundle reached native profile probe")
+			}
+			for _, entry := range result.Profiles {
+				if entry.Name != "legacy" {
+					continue
+				}
+				diagnostic := "check-unavailable"
+				if status == "Stopped" {
+					diagnostic = "yard-not-running"
+				}
+				if !entry.Selected || !entry.Eligible || !entry.Provisionable || entry.HasYardPreset || entry.Convergence != "unknown" || entry.Diagnostic != diagnostic {
+					t.Fatalf("query/effect boundary=%+v", entry)
+				}
+				return
+			}
+			t.Fatal("safe profile inventory disappeared with unsafe optional preset")
+		})
+	}
+}
+
 func TestOwnerProfileRPCChecksUseRealAdapterWithIsolatedOperationIdentity(t *testing.T) {
 	handler, _, incus := ownerQueryFixture(t)
 	root := handler.cli.options.RepositoryRoot

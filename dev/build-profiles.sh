@@ -13,11 +13,13 @@ fi
 cd "$ROOT"
 for manifest in config/profiles/*/profile.json config/agents/*/integration.json; do
   [ -f "$manifest" ] || continue
-  declarations="$(jq -er '
+  schema_limit=1
+  if [[ "$manifest" = config/agents/* ]]; then schema_limit=2; fi
+  declarations="$(jq -er --argjson max_schema "$schema_limit" '
     def safe_path: type == "string" and
       test("^[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$") and
       (split("/") | all(. != "." and . != ".."));
-    if .schema_version != 1 or
+    if (.schema_version != 1 and .schema_version != $max_schema) or
        ((.native // []) | type != "array" or
          any(.[]; (.package | safe_path | not) or (.path | safe_path | not)))
     then error("invalid native profile declaration")

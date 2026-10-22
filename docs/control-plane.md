@@ -144,11 +144,12 @@ Profile resource commands use the separate `.res` interface below because profil
 commands and mechanics.
 
 Bash and Zsh completion obtain yard and project candidates exclusively from the read-only
-`yard list --complete-yards` and `yard list --complete-projects` providers. They preserve successful
+`yard list --complete-yards`, `yard list --complete-projects` and
+`yard list --complete-profiles` providers. They preserve successful
 newline-delimited records. An unavailable, failing or empty provider yields only `default` for
 yards and no dynamic project candidates. Completion never reads yard registrations, project state,
-HostID or configuration files. Profile discovery still reads shipped `config/profiles/*/profile.conf`
-until it shares the component resolver.
+HostID or configuration files. Profile completion resolves shipped packages before owner,
+network or power observations, including descriptorless and resource-only packages.
 
 The installer configures both shells' startup files, including Zsh's `ZDOTDIR` when set; explicit
 `YARD_SHELL_RC` and `YARD_LOGIN_RC` overrides limit installation to the selected startup files.
@@ -1523,6 +1524,15 @@ presence and provenance remain available for authoring and inventory; the normal
 An absent setting uses eligible descriptor-declared defaults, and an explicitly empty setting
 selects nothing. Project-owned requests cannot expand the yard set. Import and `up` recheck
 membership before mutation; `down` and removal remain available after deselection.
+
+The native `internal/profile` package inventory binds shipped config, provision hooks, presets,
+resource descriptors and optional profile declarations. It includes descriptorless and resource-only
+packages. Provisioning evaluates the assignment layer in Go, forwards only its declared public
+keys and carries the complete package source binding through check, apply and verify. The producer
+captures that approved bundle before starting Incus; changed sources, unsafe file kinds, hardlinks
+and symlinked native references refuse before effects. Resource handlers retain their separate
+in-profile intermediate-symlink policy. Retained repository directory descriptors remain pinned.
+Operator `profiles/<name>/profile.env` belongs to the separate protected secret boundary.
 
 L2 profiles declare writable dependency directories in `CACHES` and read-only toolchain assets
 as `source:destination:ro` in `ENV_MOUNTS`. The runner and static security audit share the same

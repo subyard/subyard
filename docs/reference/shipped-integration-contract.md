@@ -6,7 +6,8 @@ introduce another selection resolver, planner, registry of operator executable
 code or desired-state store. Environment profiles retain their own selection and
 `profile.Load` remains profile-only.
 
-An optional `config/agents/<id>/integration.json` uses schema version `1`. The
+An optional `config/agents/<id>/integration.json` uses schema version `1`, or
+version `2` for declared artifacts. Version 1 cannot declare artifacts. The
 common shipped loader rejects unsupported versions, unknown fields, duplicate
 names, unsafe or symbolic-link source paths and setting collisions. Integration
 IDs retain the directory name and existing `AGENT_<id>_*` metadata contracts.
@@ -14,6 +15,20 @@ Package declarations own immutable typed inputs, scalar settings, existing agent
 metadata, lifecycle sources and dashboard metadata. Immutable input values cannot
 be replaced by persistent settings, command overrides or ambient environment.
 Their bytes and values bind package identity and operation scope.
+
+Schema 2 `artifacts` declare config and instruction delivery. The same resolver
+serves CLI config assets, runtime, prepared execution and release activation.
+Config sources retain file-setting import/edit and `AGENT_<id>_CONFIG[_DEST]`
+overrides; instructions reference an optional integration-owned `absolute-path`
+scalar. Existing host-file path settings may serve as compatibility references
+without being redeclared. Config-status scope excludes instructions. Raw JSONC
+stays raw at its default `.jsonc` destination even when an imported source has a
+different filename. The `destination` format policy retains legacy JSON/TOML
+ownership when CONFIG_DEST changes. See the
+[artifact decision and safety contract](integration-artifacts.md) for schema,
+precedence, capture, permissions, preview, adoption and rollback rules. Remaining
+recommendation, credential and persistence boundaries are documented in
+[consumer compatibility](integration-consumer-compatibility.md).
 
 An optional `native` array reuses the shipped profile package/path declaration
 for package-owned Go executables. Development uses `.build/agents/<id>/`;

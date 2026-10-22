@@ -257,6 +257,11 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					t.Fatal(absErr)
 				}
 				program.options.RepositoryRoot = publicRoot
+				catalog, catalogErr := config.LoadCatalog(publicRoot)
+				if catalogErr != nil {
+					t.Fatal(catalogErr)
+				}
+				program.catalog = catalog
 			}
 			fake := &fullOwnershipFixture{Incus: incus, owner: owner}
 			program.options.Incus = fake

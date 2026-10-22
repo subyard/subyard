@@ -50,7 +50,9 @@ manifest schema, global registry or storage format.
 
 Config materialization also separates desired artifacts and observations from
 source reads and guest execution. `SelectMaterializationSources` takes an explicit
-`config-assets` or `runtime` scope and adapter-supplied instruction declarations.
+`config-assets` or `runtime` scope, operation-local integration declarations and
+optional adapter instruction declarations for compatibility fixtures. Shipped
+Claude, Codex, OpenCode and pi consumers use their package artifacts.
 Config status checks CONFIG/RULES only; runtime additionally selects allowed host
 instructions and generated preview content. `PrepareMaterializationContent`
 preserves strict missing sources for status, optional missing raw sources for

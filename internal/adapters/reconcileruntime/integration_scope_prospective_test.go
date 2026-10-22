@@ -76,6 +76,7 @@ func TestPreparedFullIntegrationPlanRetainsNativeOwnershipAndAdoption(t *testing
 	executor := &preparedAdoptionExecutor{fingerprint: strings.Repeat("a", 64), configFingerprint: strings.Repeat("c", 64), initial: true}
 	instance := ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}
 	runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}, Executor: executor, Yard: domain.Context{IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + instructions, "AGENT_codex_CONFIG=" + asset, "AGENT_codex_CONFIG_DEST=.codex/config.json"}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
 	oldRuntime, _, err := runtime.PrepareLegacyIntegrationAdoption(context.Background())
 	if err != nil {
 		t.Fatal(err)

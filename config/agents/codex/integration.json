@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "provision": "provision.sh",
+  "command": "codex",
+  "check": "codex-policy-check",
+  "persist": "\n.codex/sessions:/mnt/host/agent-sessions/codex/sessions\n",
+  "artifacts": [
+    {
+      "id": "config",
+      "kind": "config",
+      "source": "config.toml",
+      "destination": ".codex/config.toml",
+      "format": "destination"
+    },
+    {
+      "id": "rules",
+      "kind": "config",
+      "source": "rules/repo.rules",
+      "destination": ".codex/rules/repo.rules",
+      "format": "raw"
+    },
+    {
+      "id": "instructions",
+      "label": "Codex instructions",
+      "kind": "instructions",
+      "source_setting": "HOST_CODEX_AGENTS_MD",
+      "destination": ".codex/AGENTS.md",
+      "format": "raw"
+    }
+  ]
+}

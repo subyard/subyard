@@ -34,13 +34,15 @@ type guestConfigFile struct {
 // PreparedConfigs retains the exact component source/payload/destination set.
 // Its private fields cannot be reconstructed from a binding supplied over IPC.
 type PreparedConfigs struct {
-	files    []guestConfigFile
-	payloads map[string][]byte
-	entries  []integrationArtifact
-	binding  string
-	runtime  string
-	instance string
-	sources  map[configSourceKey]configSourceBytes
+	files             []guestConfigFile
+	payloads          map[string][]byte
+	entries           []integrationArtifact
+	binding           string
+	runtime           string
+	instance          string
+	sources           map[configSourceKey]configSourceBytes
+	packageSources    []config.MaterializedAsset
+	packageIdentities map[string]string
 }
 
 type configSourceKey struct {
@@ -137,6 +139,21 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		sources[key] = configSourceBytes{payload, err == nil}
 		return payload, err
 	}
+	packageSources, err := runtime.artifactPackageSources()
+	if err != nil {
+		return nil, err
+	}
+	packageIdentities := map[string]string{}
+	for _, source := range packageSources {
+		if _, err := reader(source); err != nil {
+			return nil, err
+		}
+		identity, err := materializedSourceIdentity(source.Source)
+		if err != nil {
+			return nil, err
+		}
+		packageIdentities[source.Source] = identity
+	}
 	for index := range files {
 		files[index].readAsset = reader
 	}
@@ -176,6 +193,9 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	for destination, payload := range payloads {
 		bindings[destination] = fmt.Sprintf("%x", sha256.Sum256(payload))
 	}
+	for _, source := range packageSources {
+		bindings["package:"+runtime.bindingPath(source.Source)] = fmt.Sprintf("%x", sha256.Sum256(sources[configSourceKey{source.Source, false}].payload))
+	}
 	type sourceBinding struct {
 		Integration, Label, Source, Destination, PreviewSource, OwnedFormat string
 		FollowSymlinks, PreviewInstructions                                 bool
@@ -194,7 +214,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedConfigs{files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources}, nil
+	return &PreparedConfigs{files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
 // ApplyPreparedConfigs rechecks the captured sources and uses only the cached
@@ -208,6 +228,24 @@ func (runtime Runtime) ApplyPreparedConfigs(ctx context.Context, prepared *Prepa
 func (runtime Runtime) CheckPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
+	}
+	packageSources, err := runtime.artifactPackageSources()
+	if err != nil {
+		return errors.Join(domain.ErrPlanStale, err)
+	}
+	if len(packageSources) != len(prepared.packageSources) {
+		return domain.ErrPlanStale
+	}
+	for _, source := range packageSources {
+		identity, err := materializedSourceIdentity(source.Source)
+		if err != nil || identity != prepared.packageIdentities[source.Source] {
+			return domain.ErrPlanStale
+		}
+		expected, present := prepared.sources[configSourceKey{source.Source, false}]
+		actual, err := source.ReadSource()
+		if err != nil || !present || !expected.exists || !slices.Equal(actual, expected.payload) {
+			return domain.ErrPlanStale
+		}
 	}
 	for _, file := range prepared.files {
 		// Prepared readers may project an approved future import. Mutation checks
@@ -371,10 +409,10 @@ func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
 		return errors.New("yard is not running")
 	}
 	user := runtime.devUser()
+	home := "/home/" + user
 	if !domain.SafeName(user) {
 		return errors.New("invalid developer user")
 	}
-	home := "/home/" + user
 	dropin := filepath.Join(runtime.Yard.Paths.DataHome, "gitconfig")
 	if regularFile(dropin) {
 		payload, err := os.ReadFile(dropin)
@@ -422,23 +460,13 @@ func (runtime Runtime) guestConfigFiles() ([]guestConfigFile, error) {
 
 func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.MaterializedAsset) ([]byte, error)) ([]guestConfigFile, error) {
 	user := runtime.devUser()
-	home := "/home/" + user
 	files := []guestConfigFile{}
-	values := make(map[string]string)
-	for _, entry := range runtime.Environment {
-		if key, value, ok := strings.Cut(entry, "="); ok {
-			values[key] = value
-		}
+	values := runtimeEnvironment(runtime.Environment)
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, err
 	}
-	declaredInstructions := []config.MaterializationSource{
-		{Integration: "claude", Label: "Claude instructions", PreviewInstructions: true,
-			Asset: config.MaterializedAsset{Name: "claude.instructions", Source: runtime.environmentValue("HOST_CLAUDE_MD"), Destination: home + "/.claude/CLAUDE.md", FollowSymlinks: true}},
-		{Integration: "codex", Label: "Codex instructions", PreviewInstructions: true,
-			Asset: config.MaterializedAsset{Name: "codex.instructions", Source: runtime.environmentValue("HOST_CODEX_AGENTS_MD"), Destination: home + "/.codex/AGENTS.md", FollowSymlinks: true}},
-		{Integration: "opencode", Label: "OpenCode instructions", PreviewInstructions: true,
-			Asset: config.MaterializedAsset{Name: "opencode.instructions", Source: runtime.environmentValue("HOST_OPENCODE_AGENTS_MD"), Destination: home + "/.config/opencode/AGENTS.md", FollowSymlinks: true}},
-	}
-	sources, err := config.SelectMaterializationSources(values, user, config.MaterializationRuntime, declaredInstructions)
+	sources, err := config.SelectMaterializationSources(values, user, config.MaterializationRuntime, definitions...)
 	if err != nil {
 		return nil, err
 	}
@@ -613,4 +641,33 @@ func firstError(primary, fallback error) error {
 		return primary
 	}
 	return fallback
+}
+
+// Artifact declarations enter the existing captured-source grammar. This adds no
+// recipe fields and leaves descriptorless source/fingerprint bytes unchanged.
+func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, error) {
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	var sources []config.MaterializedAsset
+	for _, definition := range definitions {
+		if len(definition.Artifacts) == 0 {
+			continue
+		}
+		paths := []string{"integration.json"}
+		for _, artifact := range definition.Artifacts {
+			if artifact.Source != "" {
+				paths = append(paths, artifact.Source)
+			}
+		}
+		for _, source := range paths {
+			path, err := definition.ArtifactSourcePath(source)
+			if err != nil {
+				return nil, err
+			}
+			sources = append(sources, config.MaterializedAsset{Source: path})
+		}
+	}
+	return sources, nil
 }

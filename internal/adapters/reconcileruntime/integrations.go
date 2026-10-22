@@ -311,8 +311,14 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		uid = 1000
 	}
 	legacy := []string{}
-	for _, relative := range []string{".claude/CLAUDE.md", ".claude/settings.json", ".codex/AGENTS.md", ".codex/config.toml", ".codex/rules/repo.rules", ".config/opencode/AGENTS.md", ".config/opencode/opencode.jsonc", ".pi/agent/settings.json"} {
-		legacy = append(legacy, home+"/"+relative)
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return integrationObservation{}, err
+	}
+	for _, definition := range definitions {
+		for _, artifact := range definition.Artifacts {
+			legacy = append(legacy, home+"/"+artifact.Destination)
+		}
 	}
 	// Explicit operator links have no integration ownership and are preserved.
 	explicit := map[string]bool{}
@@ -322,7 +328,8 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			explicit[home+"/"+parts[0]] = true
 		}
 	}
-	for _, id := range []string{"claude", "codex", "opencode", "pi"} {
+	for _, definition := range definitions {
+		id := definition.Name
 		for _, link := range strings.Fields(runtime.environmentValue("AGENT_" + id + "_PERSIST")) {
 			parts := strings.Split(link, ":")
 			path := home + "/" + parts[0]

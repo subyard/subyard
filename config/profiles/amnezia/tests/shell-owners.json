@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "owners": [
-    {"path": "config/profiles/amnezia/provision.sh", "kind": "profile", "owner": "internal/cli/provision.go", "reference": "\"provision.sh\""},
+    {"path": "config/profiles/amnezia/provision.sh", "kind": "profile", "owner": "internal/profile/packages.go", "reference": "\"provision.sh\""},
     {"path": "config/profiles/amnezia/resources/vpn/handler.sh", "kind": "profile", "owner": "config/profiles/amnezia/resources/vpn.res", "reference": "HANDLER=resources/vpn/handler.sh"},
     {"path": "config/profiles/amnezia/resources/vpn-admin/handler.sh", "kind": "profile", "owner": "config/profiles/amnezia/resources/vpn-admin.res", "reference": "HANDLER=resources/vpn-admin/handler.sh"}
   ]

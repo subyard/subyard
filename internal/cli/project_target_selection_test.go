@@ -12,6 +12,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/state"
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestProjectTargetAdmissionRequiresActiveProfileAndRetainsShutdown(t *testing.T) {
@@ -74,6 +75,42 @@ func TestProjectTargetAdmissionRequiresActiveProfileAndRetainsShutdown(t *testin
 	execution := &projectExecution{Loaded: active, Record: record, RequiresProjects: true, RequiresActiveTarget: true}
 	if _, err := program.beginProjectMutation(context.Background(), execution); err == nil || !strings.Contains(err.Error(), "not active") {
 		t.Fatalf("deselection after consent=%v", err)
+	}
+}
+
+func TestProjectAndPresetReadersRejectUnsafePackageSources(t *testing.T) {
+	for _, filename := range []string{"profile.conf", "yard.env"} {
+		t.Run(filename, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			writeProvisionProfile(t, root, "sample")
+			preset := filepath.Join(root, "config/profiles/sample/yard.env")
+			testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o644)
+			program, err := New(Options{RepositoryRoot: root, Environment: environment})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded.Environment["ENVIRONMENT_PROFILES"] = "sample"
+			path := filepath.Join(root, "config/profiles/sample", filename)
+			if err := os.Rename(path, path+"-original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(path+"-original", path); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateProjectTarget(root, loaded, "sample"); (err == nil) != (filename == "yard.env") {
+				t.Fatalf("project config admission with %s: %v", filename, err)
+			}
+			if _, _, err := program.loadInitContext("new-yard", true, []string{"--profile", "sample"}); err == nil {
+				t.Fatal("unsafe preset package accepted")
+			}
+			if _, err := program.prepareProvisionExecution(loaded, []string{"sample"}, nil); err == nil {
+				t.Fatal("unsafe package admitted to provision")
+			}
+		})
 	}
 }
 

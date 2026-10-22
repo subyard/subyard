@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/state"
 )
@@ -1047,12 +1048,18 @@ func loadProjectEnvironmentProfile(
 	if !domain.SafeName(name) {
 		return application.ProjectEnvironmentProfile{}, "", fmt.Errorf("invalid project profile %q", name)
 	}
-	path := filepath.Join(root, "config", "profiles", name, "profile.conf")
-	declared, err := config.ReadAssignments(path)
+	pkg, err := profile.ResolvePackage(root, name)
 	if err != nil {
 		return application.ProjectEnvironmentProfile{}, "", err
 	}
-	values, err := config.ReadAssignmentsOver(path, base)
+	if pkg.Config == nil {
+		return application.ProjectEnvironmentProfile{}, "", fmt.Errorf("unknown project profile %q", name)
+	}
+	declared, err := config.ProfileValues(pkg.Config, nil)
+	if err != nil {
+		return application.ProjectEnvironmentProfile{}, "", err
+	}
+	values, err := config.ProfileValues(pkg.Config, base)
 	if err != nil {
 		return application.ProjectEnvironmentProfile{}, "", err
 	}
@@ -1633,8 +1640,8 @@ func validateProjectTarget(root string, loaded config.Loaded, target string) err
 	if !slices.Contains(strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]), target) {
 		return fmt.Errorf("project target %q is not active on yard %q", target, loaded.Context.YardName)
 	}
-	path := filepath.Join(root, "config", "profiles", target, "profile.conf")
-	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+	pkg, err := profile.ResolvePackage(root, target)
+	if err != nil || pkg.Config == nil {
 		return fmt.Errorf("unknown project target %q", target)
 	}
 	return nil

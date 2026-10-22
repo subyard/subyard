@@ -21,18 +21,21 @@ jq -e '
   (has("model") | not)
 ' "$policy" >/dev/null || fail "OpenCode yard policy contract is invalid"
 
-SUBYARD_CONFIG_DIR="$ROOT/config"
-# shellcheck source=config/agents.env
-set -a
-. "$ROOT/config/agents.env"
-set +a
-[ "$AGENT_opencode_CONFIG" = "$policy" ] || fail "OpenCode template is not wired"
-[ "$AGENT_opencode_CONFIG_DEST" = .config/opencode/opencode.jsonc ] \
-  || fail "OpenCode config destination drifted"
-[ "$AGENT_opencode_PROVISION" = "$ROOT/config/agents/opencode/provision.sh" ] \
-  || fail "OpenCode provision hook is not wired"
-[ "$AGENT_opencode_COMMAND" = opencode ] || fail "OpenCode convergence command drifted"
-[ -x "$AGENT_opencode_PROVISION" ] || fail "OpenCode provision hook is not executable"
+manifest="$ROOT/config/agents/opencode/integration.json"
+jq -e '
+  .schema_version == 2 and .command == "opencode" and .provision == "provision.sh" and
+  (.artifacts | length) == 2 and
+  (.artifacts[0] | .id == "config" and .source == "opencode.jsonc" and
+    .destination == ".config/opencode/opencode.jsonc" and .format == "destination") and
+  (.artifacts[1] | .kind == "instructions" and .source_setting == "HOST_OPENCODE_AGENTS_MD" and
+    .destination == ".config/opencode/AGENTS.md")
+' "$manifest" >/dev/null || fail "OpenCode declaration drifted"
+AGENT_opencode_PERSIST="$(jq -r '.persist' "$manifest")"
+[ -x "$ROOT/config/agents/opencode/$(jq -r '.provision' "$manifest")" ] \
+  || fail "OpenCode provision hook is not executable"
+if grep -Eq '^AGENT_opencode_' "$ROOT/config/agents.env"; then
+  fail "OpenCode shipped defaults have two authorities"
+fi
 grep -Fq '_provision_var="AGENT_' "$ROOT/scripts/reconcile-integrations.sh" \
   || fail "Bounded integration adapter does not discover agent provision hooks"
 case "$AGENT_opencode_PERSIST" in

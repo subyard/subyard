@@ -115,6 +115,8 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 
 func activationProfileRepairAssets() map[string]string {
 	return map[string]string{
+		"config/profiles/fixture-selected/profile.conf":  "PROFILE_NAME=fixture-selected\n",
+		"config/profiles/fixture-legacy/profile.conf":    "PROFILE_NAME=fixture-legacy\n",
 		"config/profiles/fixture-selected/profile.json":  `{"schema_version":1,"selected_provision_only":true}`,
 		"config/profiles/fixture-selected/provision.sh":  "#!/bin/sh\n# subyard-provision-check-v1\nexit 99\n",
 		"config/profiles/fixture-legacy/provision.sh":    "#!/bin/sh\n# subyard-provision-check-v1\nexit 99\n",

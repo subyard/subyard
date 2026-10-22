@@ -220,6 +220,9 @@ func (runtime Runtime) materializedConfigDescription(p *PreparedConfigs) (materi
 		if err != nil {
 			return d, err
 		}
+		if approved, guarded := p.packageIdentities[key.path]; guarded && identity != approved {
+			return d, domain.ErrPlanStale
+		}
 		payload := ""
 		if value.exists {
 			payload = materializedBlobPath(value.payload)
@@ -365,7 +368,7 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 		fresh, err = runtime.PrepareConfigs(ctx)
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(domain.ErrPlanStale, err)
 	}
 	description, err := runtime.materializedConfigDescription(fresh)
 	if err != nil {

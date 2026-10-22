@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
@@ -16,6 +14,7 @@ import (
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -23,6 +22,7 @@ type provisionExecution struct {
 	explicitProfile     string
 	endpoint            *provisionEndpoint
 	profiles            []string
+	bindings            map[string]profile.ProvisionBinding
 	changedProfiles     []string
 	approvedProfiles    []application.ProvisionProfileStep
 	approvedPowerCycle  bool
@@ -110,8 +110,8 @@ func (cli *CLI) prepareProvisionExecution(
 		seen[name] = true
 		if !byName[name] {
 			if want != "" {
-				info, err := os.Stat(filepath.Join(cli.options.RepositoryRoot, "config", "profiles", name))
-				if err != nil || !info.IsDir() {
+				_, err := profile.ResolvePackage(cli.options.RepositoryRoot, name)
+				if err != nil {
 					return nil, fmt.Errorf("unknown environment profile %q", name)
 				}
 			}
@@ -119,41 +119,36 @@ func (cli *CLI) prepareProvisionExecution(
 		}
 		profiles = append(profiles, name)
 	}
-	return &provisionExecution{profiles: profiles, explicitProfile: want}, nil
+	bindings := make(map[string]profile.ProvisionBinding, len(profiles))
+	for _, name := range profiles {
+		pkg, err := profile.ResolvePackage(cli.options.RepositoryRoot, name)
+		if err != nil {
+			return nil, err
+		}
+		binding, err := config.ProfileProvisionBinding(pkg, loaded.Environment)
+		if err != nil {
+			return nil, err
+		}
+		bindings[name] = binding
+	}
+	return &provisionExecution{profiles: profiles, bindings: bindings, explicitProfile: want}, nil
 }
 
 func provisionableProfiles(root string) ([]string, error) {
-	directories, err := filepath.Glob(filepath.Join(root, "config", "profiles", "*"))
+	packages, err := profile.Packages(root)
 	if err != nil {
 		return nil, err
 	}
-	profiles := make([]string, 0, len(directories))
-	for _, directory := range directories {
-		name := filepath.Base(directory)
-		if !domain.SafeName(name) {
+	profiles := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		if pkg.Provision == nil {
 			continue
 		}
-		hookPath := filepath.Join(directory, "provision.sh")
-		info, err := os.Stat(hookPath)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
+		if _, err := pkg.BindProvision(); err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("profile %q provision hook is not a regular file", name)
-		}
-		content, err := os.ReadFile(hookPath)
-		if err != nil {
-			return nil, err
-		}
-		if !strings.Contains(string(content), "\n# subyard-provision-check-v1\n") {
-			return nil, fmt.Errorf("profile %q provision hook does not support check protocol", name)
-		}
-		profiles = append(profiles, name)
+		profiles = append(profiles, pkg.Name)
 	}
-	sort.Strings(profiles)
 	return profiles, nil
 }
 
@@ -204,6 +199,7 @@ func (execution *provisionExecution) captureApproved(conditional bool) {
 	for _, name := range execution.profiles {
 		execution.approvedProfiles = append(execution.approvedProfiles, application.ProvisionProfileStep{
 			Profile: name, Converged: !conditional && !slices.Contains(execution.changedProfiles, name), Conditional: conditional,
+			Binding: execution.bindings[name],
 		})
 	}
 	execution.approvedPowerCycle = execution.requiresPowerCycle || conditional
@@ -273,10 +269,15 @@ func (cli *CLI) observeProvisionExecution(
 	).Runner
 	contextValues := structuredCommandContext(loaded)
 	for _, profile := range execution.profiles {
+		binding := execution.bindings[profile]
+		if err := binding.Check(); err != nil {
+			return fmt.Errorf("%w: %v", domain.ErrPlanStale, err)
+		}
 		result, diagnostics, err := runner.Run(ctx, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: cli.env["SUBYARD_OPERATION_ID"],
 			Adapter: "provision", Action: "profile-check",
 			Arguments: []string{"--check", profile}, Context: contextValues,
+			Input: map[string]any{"profileBinding": binding},
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("check provision profile %q: %w", profile, err)

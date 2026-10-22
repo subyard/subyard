@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -42,11 +44,13 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	incus := runningIncus(10)
 	var output bytes.Buffer
 	runtime := Runtime{
-		Environment: environment, Incus: incus, Executor: incus, Stdout: &output,
+		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}, {ID: "rules", Kind: "config", Destination: ".config/opencode/repo.rules", Format: "raw"}}}},
+		Environment:  environment, Incus: incus, Executor: incus, Stdout: &output,
 		Yard: domain.Context{
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001,
 		},
 	}
+	bindArtifactTestPackages(t, &runtime, root)
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +76,7 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 			len(call.Request.Command) != 7 ||
 			call.Request.Command[0] != "sh" ||
 			!strings.Contains(call.Request.Command[3], "mktemp") ||
+			!strings.Contains(call.Request.Command[3], "chmod 0644") ||
 			call.Request.Command[6] != "1001" {
 			t.Fatalf("config write %d is not the atomic typed contract: %#v", index, call)
 		}
@@ -124,6 +129,7 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 				Incus:       incus, Executor: incus,
 				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 			}
+			bindInstructionTestPackage(t, &runtime, root, "codex")
 			got, err := runtime.ConfigsConverged(context.Background())
 			if err != nil || got != test.want {
 				t.Fatalf("converged=%t err=%v", got, err)
@@ -187,6 +193,7 @@ func TestRefreshConfigsRejectsSymlinkSourceBeforeGuestMutation(t *testing.T) {
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
 	if err := runtime.RefreshConfigs(context.Background()); err == nil ||
 		!strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("symlink source error = %v", err)
@@ -222,6 +229,7 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
+	bindInstructionTestPackage(t, &runtime, root, "claude")
 	if err := runtime.RefreshConfigs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -352,6 +360,7 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 		Incus:       incus, Executor: incus,
 		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
 	}
+	bindInstructionTestPackage(t, &runtime, filepath.Dir(source), "codex")
 	converged, err := runtime.ConfigsConverged(context.Background())
 	if err != nil || !converged {
 		t.Fatalf("owned TOML observation rejected: converged=%v err=%v", converged, err)
@@ -374,6 +383,14 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 				"CODING_TOOL_INTEGRATIONS=" + agent, key + "=" + source,
 				"AGENT_" + agent + "_RULES=" + source, "AGENT_" + agent + "_RULES_DEST=rules",
 			}}
+			if agent == "opencode" {
+				runtime.Integrations = []profile.IntegrationDefinition{{Name: agent, Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: key, Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "rules", Kind: "config", Destination: "rules", Format: "raw"}}}}
+			}
+			if agent != "opencode" {
+				bindInstructionTestPackage(t, &runtime, root, agent)
+			} else {
+				bindArtifactTestPackages(t, &runtime, root)
+			}
 			files, err := runtime.guestConfigFiles()
 			if err != nil || len(files) != 2 || files[0].integration != agent {
 				t.Fatalf("selected files=%#v err=%v", files, err)
@@ -410,9 +427,9 @@ func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
 	testkit.WriteFile(t, source, host, 0o600)
 	fileForRuntime := func(repository string) guestConfigFile {
 		t.Helper()
-		files, err := (Runtime{RepositoryRoot: repository, Environment: []string{
-			"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source,
-		}}).guestConfigFiles()
+		runtime := Runtime{RepositoryRoot: repository, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}}
+		bindInstructionTestPackage(t, &runtime, root, "codex")
+		files, err := runtime.guestConfigFiles()
 		if err != nil || len(files) != 1 {
 			t.Fatalf("runtime instruction files=%#v err=%v", files, err)
 		}
@@ -479,7 +496,9 @@ func TestPreviewInstructionAssetRejectsNonregularSources(t *testing.T) {
 			} else if err := os.Symlink("missing.md", asset); err != nil {
 				t.Fatal(err)
 			}
-			files, err := (Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}).guestConfigFiles()
+			runtime := Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}
+			bindInstructionTestPackage(t, &runtime, root, "codex")
+			files, err := runtime.guestConfigFiles()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -497,6 +516,7 @@ func TestPreparedConfigsRefusesChangedSourceBeforeGuestMutation(t *testing.T) {
 	incus := runningIncus(0)
 	runtime := Runtime{Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}, Incus: incus, Executor: incus,
 		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
 	prepared, err := runtime.PrepareConfigs(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -508,4 +528,81 @@ func TestPreparedConfigsRefusesChangedSourceBeforeGuestMutation(t *testing.T) {
 	if len(incus.ExecCalls) != 0 {
 		t.Fatalf("stale prepared config mutated guest: %#v", incus.ExecCalls)
 	}
+}
+
+// Bind semantic fixture declarations to real package files before testing effects.
+func bindArtifactTestPackages(t *testing.T, runtime *Runtime, root string) {
+	t.Helper()
+	for index := range runtime.Integrations {
+		definition := &runtime.Integrations[index]
+		if len(definition.Artifacts) == 0 {
+			continue
+		}
+		definition.SchemaVersion, definition.Root = 2, root
+		for index := range definition.Artifacts {
+			artifact := &definition.Artifacts[index]
+			if artifact.Kind == "config" && artifact.Source == "" {
+				artifact.Source = filepath.Base(runtime.environmentValue("AGENT_" + definition.Name + "_" + strings.ToUpper(artifact.ID)))
+			}
+		}
+		if _, err := definition.Metadata(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(root, "integration.json"), data, 0600)
+	}
+}
+
+// Instruction fixtures are real immutable packages, including across child
+// processes. Reopening a fixture must not rewrite its source identities.
+func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent string) {
+	t.Helper()
+	setting := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD"}[agent]
+	destination := map[string]string{"claude": ".claude/CLAUDE.md", "codex": ".codex/AGENTS.md"}[agent]
+	label := map[string]string{"claude": "Claude instructions", "codex": "Codex instructions"}[agent]
+	directory := filepath.Join(root, "config/agents", agent)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeOnce := func(path string, data []byte) {
+		t.Helper()
+		old, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			testkit.WriteFile(t, path, data, 0600)
+			return
+		}
+		if err != nil || !bytes.Equal(old, data) {
+			t.Fatal("instruction fixture package changed", path, err)
+		}
+	}
+	definition := profile.IntegrationDefinition{SchemaVersion: 2, Name: agent, Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", Label: label, SourceSetting: setting, Destination: destination, Format: "raw"}}}
+	for _, kind := range []string{"CONFIG", "RULES"} {
+		key := "AGENT_" + agent + "_" + kind
+		if runtime.environmentValue(key) == "" || runtime.environmentValue(key+"_DEST") == "" {
+			continue
+		}
+		name := strings.ToLower(kind)
+		format := "raw"
+		if kind == "CONFIG" {
+			format = "destination"
+		}
+		definition.Artifacts = append(definition.Artifacts, profile.IntegrationArtifact{ID: name, Kind: "config", Source: name, Destination: runtime.environmentValue(key + "_DEST"), Format: format})
+		writeOnce(filepath.Join(directory, name), []byte("{}\n"))
+	}
+	data, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeOnce(filepath.Join(directory, "integration.json"), data)
+	loaded, err := profile.LoadIntegrations(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.RepositoryRoot == "" {
+		runtime.RepositoryRoot = root
+	}
+	runtime.Integrations = loaded
 }

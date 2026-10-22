@@ -1057,7 +1057,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}},
 	}
 	runtime := Runtime{
-		Integrations: []profile.IntegrationDefinition{},
+		Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}}}},
 		Incus:        incus, Executor: incus,
 		RepositoryRoot: "../../..",
 		Yard:           domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev"},
@@ -1066,6 +1066,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 			"HOST_OPENCODE_AGENTS_MD=" + instructions,
 		},
 	}
+	bindArtifactTestPackages(t, &runtime, filepath.Dir(instructions))
 	assertStage(t, runtime, "provision", true, "matching running provision state")
 	if command := incus.ExecCalls[8].Request.Command; len(command) != 3 ||
 		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {

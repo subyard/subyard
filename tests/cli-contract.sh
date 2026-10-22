@@ -24,8 +24,8 @@ set -e
 
 for cmd in $commands; do "$ROOT/bin/yard" "$cmd" --help >/dev/null; done
 
-profiles="$(for f in "$ROOT"/config/profiles/*/profile.conf; do basename "$(dirname "$f")"; done | sort)"
-bash_profiles="$(TEST_ROOT="$ROOT" bash -c '. "$TEST_ROOT/completions/yard.bash"; _yard_repo(){ printf "%s\\n" "$TEST_ROOT"; }; _yard_profiles yard' | sort)"
+profiles="$("$ROOT/bin/yard" list --complete-profiles | sort)"
+bash_profiles="$(TEST_ROOT="$ROOT" bash -c '. "$TEST_ROOT/completions/yard.bash"; _yard_profiles "$TEST_ROOT/bin/yard"' | sort)"
 [ "$bash_profiles" = "$profiles" ] || fail "bash completion profiles drifted"
 
 # Bash consumes option/verb tokens from the command manifest, including options that previously
@@ -34,10 +34,11 @@ completion_words="$({
   # shellcheck source=completions/yard.bash
   . "$ROOT/completions/yard.bash"
   COMP_WORDS=("$ROOT/bin/yard" init --r); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
-  mkdir -p "$CLI_TMP/profiles/config/profiles/synthetic"
-  : > "$CLI_TMP/profiles/config/profiles/synthetic/profile.conf"
-  _yard_repo(){ printf '%s\n' "$CLI_TMP/profiles"; }
-  COMP_WORDS=("$ROOT/bin/yard" provision syn); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
+  fixture_engine() {
+    if [ "${1:-}" = list ] && [ "${2:-}" = --complete-profiles ]; then printf '%s\n' synthetic
+    else "$ROOT/bin/yard" "$@"; fi
+  }
+  COMP_WORDS=(fixture_engine provision syn); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" --res); COMP_CWORD=1; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" integration en); COMP_CWORD=2; _yard; printf '%s\n' "${COMPREPLY[@]}"
   COMP_WORDS=("$ROOT/bin/yard" -Y demo integration dis); COMP_CWORD=4; _yard; printf '%s\n' "${COMPREPLY[@]}"
@@ -114,7 +115,7 @@ for shell in bash zsh; do
   [ -z "$source_output" ] || fail "$shell noninteractive source emitted diagnostics: $source_output"
   [ -z "$(find "$CLI_TMP/noninteractive-$shell" -mindepth 1 -print -quit)" ] ||
     fail "$shell noninteractive source wrote startup state"
-  for provider in yards projects; do
+  for provider in yards projects profiles; do
     for mode in success empty failure failure-output; do
       actual="$(TEST_COMPLETION_FILE="$ROOT/completions/yard.$shell" TEST_PROVIDER="$provider" TEST_MODE="$mode" \
         SUBYARD_CONFIG_HOME="$CLI_TMP/config" "$shell" "${shell_args[@]}" '
@@ -175,8 +176,7 @@ zsh -f "$ROOT/tests/helpers/zsh-completion-buffers.zsh" "$ROOT/completions/yard.
   || fail 'Zsh native multi-record completion corrupted the command buffer'
 zsh_profiles="$(TEST_ROOT="$ROOT" zsh -fc '
   source "$TEST_ROOT/completions/yard.zsh"
-  _yard_repo() { print -r -- "$TEST_ROOT" }
-  _yard_profiles
+  _yard_profiles "$TEST_ROOT/bin/yard"
 ' | sort)"
 [ "$zsh_profiles" = "$profiles" ] || fail "Zsh completion joined profile records: $zsh_profiles"
 

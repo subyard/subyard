@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "owners": [
-    {"path": "config/profiles/subyard-dev/provision.sh", "kind": "profile", "owner": "internal/cli/provision.go", "reference": "\"provision.sh\""}
+    {"path": "config/profiles/subyard-dev/provision.sh", "kind": "profile", "owner": "internal/profile/packages.go", "reference": "\"provision.sh\""}
   ]
 }

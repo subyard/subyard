@@ -421,6 +421,77 @@ func TestSecurityRuntimeRejectsProfileSocketMount(t *testing.T) {
 	}
 }
 
+func TestSecurityRuntimeRejectsUnselectedUnsafePackageSource(t *testing.T) {
+	runtime := testRuntime(t)
+	directory := filepath.Join(runtime.RepositoryRoot, "config/profiles/unselected")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(runtime.RepositoryRoot, "external.conf")
+	if err := os.WriteFile(target, []byte("CACHES=/srv/cache/safe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(directory, "profile.conf")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.CheckSecurity(context.Background(), false, true); !errors.Is(err, ErrContract) {
+		t.Fatalf("unsafe unselected source=%v", err)
+	}
+}
+
+func TestSecurityRuntimeProfilesEntryAliasPreservesUnselectedChecks(t *testing.T) {
+	runtime := testRuntime(t)
+	profiles := filepath.Join(runtime.RepositoryRoot, "config/profiles")
+	directory := filepath.Join(profiles, "unselected")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "profile.conf"), []byte("ENV_MOUNTS=/var/run/docker.sock:/var/run/docker.sock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(runtime.RepositoryRoot, "profiles-alias")
+	if err := os.Symlink(profiles, alias); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Environment["SUBYARD_PROFILES_DIR"] = alias
+	for _, finding := range runtime.staticFindings() {
+		if finding.level == "fail" && strings.Contains(finding.message, "unselected") && strings.Contains(finding.message, "socket") {
+			return
+		}
+	}
+	t.Fatal("entry alias bypassed unselected profile socket policy")
+}
+
+func TestSecurityRuntimeRejectsAppendedProfilesSymlink(t *testing.T) {
+	for _, relative := range []string{"config", "config/profiles"} {
+		t.Run(relative, func(t *testing.T) {
+			runtime := testRuntime(t)
+			target := testkit.TempDir(t)
+			path := filepath.Join(runtime.RepositoryRoot, relative)
+			if err := os.Rename(path, path+"-old"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			if relative == "config" {
+				if err := os.Mkdir(filepath.Join(target, "profiles"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, finding := range runtime.staticFindings() {
+				if finding.level == "fail" && strings.Contains(finding.message, "read profiles:") {
+					return
+				}
+			}
+			t.Fatal("default profile inventory accepted appended symlink")
+		})
+	}
+}
+
 func TestSecurityRuntimeRejectsUnsupportedAndDisabledNestedDevices(t *testing.T) {
 	for name, source := range map[string]string{
 		"unsupported": "/dev/mem",

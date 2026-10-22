@@ -11,6 +11,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 )
 
@@ -249,13 +250,15 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		}
 		selectedProfiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
 		if loaded.Context.AccessKind == domain.AccessLocal && len(selectedProfiles) != 0 {
-			metadata, err := filepath.Glob(filepath.Join(plan.cli.options.RepositoryRoot, "config", "profiles", "*", "resources", "*.res"))
+			packages, err := profile.Packages(plan.cli.options.RepositoryRoot)
 			if err != nil {
 				return "", "", err
 			}
-			for _, path := range metadata {
-				if err := observe(path); err != nil {
-					return "", "", err
+			for _, pkg := range packages {
+				for _, source := range pkg.Resources {
+					if err := observe(source.Path); err != nil {
+						return "", "", err
+					}
 				}
 			}
 			registry, err := resource.Load(plan.cli.options.RepositoryRoot)
@@ -278,9 +281,18 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 				}
 			}
 		}
-		for _, profile := range strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]) {
-			if err := observe(filepath.Join(paths.ConfigDir, "profiles", profile, "profile.conf")); err != nil {
+		for _, name := range strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]) {
+			pkg, err := profile.ResolvePackageInConfig(paths.ConfigDir, name)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
 				return "", "", err
+			}
+			if pkg.Config != nil {
+				if err := observe(pkg.Config.Path); err != nil {
+					return "", "", err
+				}
 			}
 		}
 		for _, candidate := range config.YardFileCandidates(paths.ConfigDir, paths.ConfigHome, name) {

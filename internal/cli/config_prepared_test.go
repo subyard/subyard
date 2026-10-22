@@ -623,6 +623,39 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 	}
 }
 
+func TestConfigProspectiveSelectedProfileThroughConfigAlias(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/sample/profile.conf"), "PROFILE_NAME=sample\n")
+	target := filepath.Join(configHome, "yards/named/config.env")
+	writeConfigCommandFile(t, target, "SSH_PORT=2290\nENVIRONMENT_PROFILES=sample\n")
+	alias := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Symlink(filepath.Join(root, "config"), alias); err != nil {
+		t.Fatal(err)
+	}
+	environment = append(environment, "SUBYARD_CONFIG_DIR="+alias)
+	loaded := loadConfigCommandContext(t, root, environment, "named")
+	if loaded.Environment["ENVIRONMENT_PROFILES"] != "sample" {
+		t.Fatal("selected profile lost through alias")
+	}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: configExactProgram(t, root, environment, nil, nil), Loaded: loaded}
+	t.Cleanup(func() { _ = prepared.Close() })
+	if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.execute(context.Background(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	fresh := loadConfigCommandContext(t, root, environment, "named")
+	if fresh.Environment["ENVIRONMENT_PROFILES"] != "sample" {
+		t.Fatal("prospective alias lost selected profile")
+	}
+	values, err := config.ReadAssignments(target)
+	if err != nil || values["SSH_PORT"] != "2390" {
+		t.Fatalf("prospective scoped update=%v err=%v", values, err)
+	}
+}
+
 func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	home := filepath.Join(root, "state")

@@ -298,6 +298,12 @@ func TestIntegrationStatusAssessesLegacyAdoptionReadOnly(t *testing.T) {
 			executor := &initAdoptionExecutor{fingerprint: strings.Repeat("a", 64), conflict: conflict}
 			cli.options.IntegrationRuntime = nil
 			cli.options.Executor = executor
+			declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
+			catalog, err := config.LoadCatalog(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cli.catalog = catalog
 			loaded, err := cli.loadContext("default")
 			if err != nil {
 				t.Fatal(err)

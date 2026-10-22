@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 // ProfileProvisionScope is metadata on the existing environment profile, not a
@@ -16,10 +16,14 @@ func ProfileProvisionScope(configDir, name string) (string, error) {
 	if !domain.SafeName(name) {
 		return "", fmt.Errorf("invalid environment profile %q", name)
 	}
-	values, err := ReadAssignments(filepath.Join(configDir, "profiles", name, "profile.conf"))
+	pkg, err := profile.ResolvePackageInConfig(configDir, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return "shared", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	values, err := ProfileValues(pkg.Config, nil)
 	if err != nil {
 		return "", err
 	}

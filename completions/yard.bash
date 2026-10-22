@@ -2,22 +2,13 @@
 # shellcheck disable=SC2034,SC2207 # completion API requires dynamic word splitting/global names
 # yard.bash — bash completion for the `yard` (and `sy`) CLI.
 # Self-contained: no bash-completion package required. Top-level commands come
-# from `yard --list` so they stay in sync with bin/yard; profile names are read
-# from the repo's config/profiles/ (resolved via the yard symlink on PATH).
-
-_yard_repo() {
-  local bin
-  bin="$(command -v "${1:-yard}" 2>/dev/null)" || return 1
-  bin="$(readlink -f "$bin" 2>/dev/null)" || return 1
-  ( cd "$(dirname "$bin")/.." && pwd )
-}
+# from `yard --list`; native inventory supplies profile names.
 
 _yard_profiles() {
-  local repo; repo="$(_yard_repo "$1")" || return 0
-  local d="$repo/config/profiles"
-  [ -d "$d" ] || return 0
-  local f
-  for f in "$d"/*/profile.conf; do [ -r "$f" ] && basename "$(dirname "$f")"; done
+  local inventory
+  if inventory="$("${1:-yard}" list --complete-profiles 2>/dev/null)" && [ -n "$inventory" ]; then
+    printf '%s\n' "$inventory"
+  fi
 }
 
 # The native inventory owns yard/project discovery. A missing or incompatible engine

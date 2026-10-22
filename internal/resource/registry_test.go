@@ -623,6 +623,17 @@ func TestLoadRejectsInvalidFinalHandler(t *testing.T) {
 		setup func(*testing.T, string)
 	}{
 		{
+			name: "hardlink",
+			setup: func(t *testing.T, handler string) {
+				t.Helper()
+				actual := filepath.Join(filepath.Dir(handler), "actual.sh")
+				testkit.WriteFile(t, actual, []byte("#!/bin/sh\nexit 0\n"), 0o700)
+				if err := os.Link(actual, handler); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
 			name: "symlink",
 			setup: func(t *testing.T, handler string) {
 				t.Helper()

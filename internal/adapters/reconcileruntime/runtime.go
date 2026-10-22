@@ -1321,24 +1321,23 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 	devices := map[string]bool{}
 	hostMemory := "0"
 	base := runtimeEnvironment(runtime.Environment)
-	for _, profile := range strings.Fields(base["ENVIRONMENT_PROFILES"]) {
-		if !domain.SafeName(profile) {
-			return nil, fmt.Errorf("invalid ENVIRONMENT_PROFILES entry %q", profile)
+	for _, name := range strings.Fields(base["ENVIRONMENT_PROFILES"]) {
+		if !domain.SafeName(name) {
+			return nil, fmt.Errorf("invalid ENVIRONMENT_PROFILES entry %q", name)
 		}
-		path := filepath.Join(runtime.RepositoryRoot,
-			"config", "profiles", profile, "profile.conf")
-		values, err := config.ReadAssignmentsOver(path, base)
+		pkg, err := profile.ResolvePackage(runtime.RepositoryRoot, name)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				resources, globErr := filepath.Glob(filepath.Join(runtime.RepositoryRoot,
-					"config", "profiles", profile, "resources", "*.res"))
-				if globErr != nil {
-					return nil, globErr
-				}
-				if len(resources) > 0 {
-					continue
-				}
-			}
+			return nil, err
+		}
+		if pkg.Config == nil && len(pkg.Resources) != 0 {
+			continue
+		}
+		if pkg.Config == nil {
+			return nil, fmt.Errorf("profile %q configuration is missing", name)
+		}
+		path := pkg.Config.Path
+		values, err := config.ProfileValues(pkg.Config, base)
+		if err != nil {
 			return nil, err
 		}
 		if base["ALLOWS_HOST_ACCESS"] == "false" {

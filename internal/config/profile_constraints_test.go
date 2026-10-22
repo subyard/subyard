@@ -9,6 +9,35 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestProfileProvisionScopeRejectsAppendedProfilesSymlink(t *testing.T) {
+	root := testkit.TempDir(t)
+	target := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(target, "sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(target, "sample/profile.conf"), []byte("PROVISION_SCOPE=dedicated\n"), 0o644)
+	if err := os.Symlink(target, filepath.Join(root, "profiles")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileProvisionScope(root, "sample"); err == nil {
+		t.Fatal("scope accepted appended profiles symlink")
+	}
+	if err := os.Remove(filepath.Join(root, "profiles")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "profiles/sample"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "profiles/sample/profile.conf"), []byte("PROVISION_SCOPE=dedicated\n"), 0o644)
+	alias := filepath.Join(testkit.TempDir(t), "config-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	if scope, err := ProfileProvisionScope(alias, "sample"); err != nil || scope != "dedicated" {
+		t.Fatalf("explicit config entrypoint alias: scope=%q err=%v", scope, err)
+	}
+}
+
 func TestDedicatedProfileConstraints(t *testing.T) {
 	root := testkit.TempDir(t)
 	profile := filepath.Join(root, "profiles", "service")

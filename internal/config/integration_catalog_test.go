@@ -43,7 +43,7 @@ func TestIntegrationCatalogImmutableInputsAndDerivedPort(t *testing.T) {
 
 func TestIntegrationCatalogFailsClosed(t *testing.T) {
 	for _, declaration := range []string{
-		`{"schema_version":2}`, `{"schema_version":1,"unknown":true}`,
+		`{"schema_version":3}`, `{"schema_version":1,"unknown":true}`,
 		`{"schema_version":1,"lifecycle":{"handler":"../lifecycle.sh","source_files":[],"instance_config_keys":[],"instance_devices":[]}}`,
 		`{"schema_version":1,"inputs":[{"name":"SSH_PORT","type":"string","value":"9999"}]}`,
 		`{"schema_version":1,"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped"],"application":"yard-init","minimum":1024,"maximum":65535,"default_from":{"setting":"SAMPLE_PORT","offset":0}}]}`,

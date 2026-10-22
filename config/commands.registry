@@ -24,7 +24,7 @@ teardown|uninstall|@teardown||forward|mutate|dynamic|public|lifecycle|teardown|t
 sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|create a new independent snapshot copy in the yard|--name --target --yes --help|
 bind||@project||deny|mutate|dynamic|public|projects|project-target|bind [path]|explicitly mount a host project path into the yard|--name --target --yes --help|
 clone||@project||local|mutate|dynamic|public|projects|clone|clone <url> [name]|clone a repository directly into the yard|--name --target --yes --help|
-list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --help|
+list||@list||local|read|never|public|projects|simple|list|list projects currently registered in yards|--live --complete-yards --complete-projects --complete-profiles --help|
 code||@project||local|mutate|never|public|projects|project|code [project]|open a project with VS Code Remote-SSH|--yes --help|
 codex||@client-projects|codex|local|mutate|never|public|projects|integration|codex <command>|export all projects of the selected yard to Codex Desktop on this Linux controller|--check --config --yes --help|export open
 export||@project||local|mutate|dynamic|public|projects|path|export [path]|copy changes from a synced yard project back to the host|--yes --help|

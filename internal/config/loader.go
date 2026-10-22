@@ -172,16 +172,22 @@ func load(
 	values["SUBYARD_HOME"] = filepath.Clean(dataHome)
 	setConfigurationRolePaths(values, configHome, "default")
 
-	// Immutable inputs never inherit operator or ambient values.
+	// Immutable shipped defaults are the lowest-precedence layer.
+	defaultLayer := tracker.addLayer(
+		"default", "shipped defaults", configDir, pathPresent(configDir), settingAny,
+	)
 	integrationDefaultSources := map[string]string{}
 	for _, owner := range tracker.catalog.Integrations() {
-		integrationDefaultSources["integration:"+owner.Name] = filepath.Join(owner.Root, "integration.json")
+		source := filepath.Join(owner.Root, "integration.json")
+		integrationDefaultSources["integration:"+owner.Name] = source
+		// Immutable inputs never inherit operator or ambient values.
 		for _, input := range owner.Inputs {
 			delete(values, input.Name)
 			delete(commandEnvironment, input.Name)
 		}
 		metadata := map[string]string{"PROVISION": owner.Provision, "COMMAND": owner.Command, "CHECK": owner.Check, "HEALTH": owner.Health, "CLEANUP": owner.Cleanup, "DEPENDS": strings.Join(owner.Depends, " "), "PERSIST": owner.Persist}
-		for suffix, value := range metadata {
+		for _, suffix := range []string{"PROVISION", "COMMAND", "CHECK", "HEALTH", "CLEANUP", "DEPENDS", "PERSIST"} {
+			value := metadata[suffix]
 			if value == "" {
 				continue
 			}
@@ -192,12 +198,24 @@ func load(
 			if values[name] == "" {
 				values[name] = value
 			}
+			tracker.record(defaultLayer, name, values[name], source, 0, "package mechanics default")
+		}
+		for _, artifact := range owner.Artifacts {
+			if artifact.Kind != "config" {
+				continue
+			}
+			key := "AGENT_" + owner.Name + "_" + strings.ToUpper(artifact.ID)
+			if _, present := values[key]; !present {
+				values[key] = filepath.Join(owner.Root, artifact.Source)
+			}
+			if _, present := values[key+"_DEST"]; !present {
+				values[key+"_DEST"] = artifact.Destination
+			}
+			for _, name := range []string{key, key + "_DEST"} {
+				tracker.record(defaultLayer, name, values[name], source, 0, "package artifact default")
+			}
 		}
 	}
-	// Immutable shipped defaults are the lowest-precedence layer.
-	defaultLayer := tracker.addLayer(
-		"default", "shipped defaults", configDir, pathPresent(configDir), settingAny,
-	)
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		if !definition.HasDefault && (definition.DefaultFrom == nil || integrationDefaultSources[definition.Owner] == "") {
 			continue
@@ -319,6 +337,19 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	logicalAssets := agentAssetMappings(values, configDir)
+	// Package defaults use canonical immutable roots, even when configDir is an
+	// allowed source alias. Preserve the same file-setting overlay identities.
+	for _, owner := range tracker.catalog.Integrations() {
+		for _, artifact := range owner.Artifacts {
+			if artifact.Kind != "config" {
+				continue
+			}
+			key := "AGENT_" + owner.Name + "_" + strings.ToUpper(artifact.ID)
+			if values[key] == filepath.Join(owner.Root, artifact.Source) {
+				logicalAssets[key] = filepath.Join(owner.Name, artifact.Source)
+			}
+		}
+	}
 	gitSharedAssets := filepath.Join(gitRoot, "overrides", "shared", "agents")
 	gitHostAssets := filepath.Join(gitRoot, "overrides", "host", "agents")
 	gitYardAssets := filepath.Join(gitRoot, "yards", yardName, "overrides", "agents")
@@ -414,6 +445,15 @@ func load(
 		return domain.Context{}, nil, err
 	}
 	normalizeAgentPersistLinks(values, tracker, defaultLayer)
+	if values["ALLOWS_HOST_ACCESS"] == "false" {
+		for _, owner := range tracker.catalog.Integrations() {
+			for _, artifact := range owner.Artifacts {
+				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
+					return domain.Context{}, nil, fmt.Errorf("selected yard role forbids non-empty %s", artifact.SourceSetting)
+				}
+			}
+		}
+	}
 	if err := validateProfileConstraints(configDir, yardName, values); err != nil {
 		return domain.Context{}, nil, err
 	}

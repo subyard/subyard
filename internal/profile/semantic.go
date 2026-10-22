@@ -159,8 +159,11 @@ func (definition *Definition) validateSemantic() error {
 }
 
 func (definition *IntegrationDefinition) validateSemantic() error {
-	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
+	if (definition.SchemaVersion != 1 && definition.SchemaVersion != 2) || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported integration schema or name")
+	}
+	if err := definition.validateArtifacts(); err != nil {
+		return err
 	}
 	if definition.Retired {
 		if definition.Lifecycle == nil || definition.Provision != "" || definition.Cleanup != "" || definition.Persist != "" || len(definition.Depends) != 0 || definition.Command != "" || definition.Check != "" || definition.Health != "" || len(definition.Native) != 0 || len(definition.Inputs) != 0 || len(definition.Settings) != 0 || definition.Dashboard != nil {
@@ -309,7 +312,7 @@ func (definition *Definition) validateExtensions() error {
 			}
 			scopes[scope] = true
 		}
-		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" && setting.Type != "version" && setting.Type != "image-reference" && setting.Type != "sha256" {
+		if setting.Type != "string" && setting.Type != "boolean" && setting.Type != "integer" && setting.Type != "port" && setting.Type != "size" && setting.Type != "name" && setting.Type != "version" && setting.Type != "image-reference" && setting.Type != "sha256" && setting.Type != "absolute-path" {
 			return errors.New("unsupported profile setting type")
 		}
 		if len(setting.Enum) != 0 {
@@ -406,6 +409,8 @@ func (setting Setting) validateDefault(value string) error {
 		valid = raw != value && err == nil && n > 0
 	case "name":
 		valid = domain.SafeName(value)
+	case "absolute-path":
+		valid = filepath.IsAbs(value) && filepath.Clean(value) == value
 	}
 	if len(setting.Enum) != 0 {
 		match := false

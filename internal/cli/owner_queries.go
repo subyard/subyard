@@ -52,7 +52,6 @@ func (handler *rpcHandler) ownerQueries() ownerapi.Service {
 		Environment: handler.cli.baseEnv, Instances: incus, Resources: handler.cli.resources,
 		ProjectsAllowed: requireProjectRole(handler.loaded) == nil,
 		OperationID:     handler.cli.env["SUBYARD_OPERATION_ID"], Credentials: handler.credentials(),
-		ProvisionProfiles: func() ([]string, error) { return provisionableProfiles(handler.cli.options.RepositoryRoot) },
 		ProfileCheck: func() ownerapi.ProfileCheck {
 			definition, ok := handler.cli.manifest.Lookup("provision")
 			if !ok {

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -65,7 +66,7 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 		if err != nil {
 			return Catalog{}, err
 		}
-		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Cleanup: data.Cleanup, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native})
+		integrations = append(integrations, profile.IntegrationDefinition{SchemaVersion: data.SchemaVersion, Retired: data.Retired, RetiredRoutes: data.RetiredRoutes, RetiredSettings: data.RetiredSettings, Name: data.Name, Inputs: data.Inputs, Settings: data.Settings, Provision: data.Provision, Command: data.Command, Check: data.Check, Health: data.Health, Cleanup: data.Cleanup, Depends: data.Depends, Persist: data.Persist, Lifecycle: data.Lifecycle, Dashboard: data.Dashboard, Native: data.Native, Artifacts: data.Artifacts})
 	}
 	result := Catalog{profiles: make(map[string]SettingDefinition), declarations: definitions, integrations: integrations}
 	type settingsOwner struct {
@@ -141,13 +142,29 @@ func BuildCatalog(profiles []profile.Metadata, agents []profile.IntegrationMetad
 			current = source
 		}
 	}
+	var destinations []string
+	var links strings.Builder
 	for _, owner := range integrations {
+		links.WriteString(owner.Persist)
+		links.WriteByte(' ')
+		for _, artifact := range owner.Artifacts {
+			destinations = append(destinations, artifact.Destination)
+			if artifact.SourceSetting != "" {
+				field, ok := result.LookupSetting(artifact.SourceSetting)
+				if !ok || field.Kind != SettingScalar || field.Type != SettingAbsolutePath || !field.Optional || (field.Owner != "integration:"+owner.Name && field.Owner != "host-files") {
+					return Catalog{}, fmt.Errorf("integration artifact requires its optional absolute-path source setting")
+				}
+			}
+		}
 		if owner.Dashboard != nil {
 			field, ok := result.LookupSetting(owner.Dashboard.PortSetting)
 			if !ok || field.Type != SettingPort || field.Owner != "integration:"+owner.Name {
 				return Catalog{}, fmt.Errorf("integration dashboard requires its owned port setting")
 			}
 		}
+	}
+	if err := validateManagedDestinations(destinations, links.String(), ""); err != nil {
+		return Catalog{}, err
 	}
 	return result, nil
 }

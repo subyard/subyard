@@ -4677,7 +4677,7 @@ power_rollback_fixture_contract() {
     . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
-    CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
+    OLD_VERSION=0.8.0 CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
     OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
     COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e

@@ -308,6 +308,7 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 					{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: conflict}},
 				},
 			}
+			declareCLIInstructionFixture(t, root, "claude", "HOST_CLAUDE_MD", ".claude/CLAUDE.md", "Claude instructions")
 			var stdout, stderr bytes.Buffer
 			program, err := New(Options{RepositoryRoot: root, Environment: environment,
 				Incus: fake, Executor: fake, Stdout: &stdout, Stderr: &stderr})

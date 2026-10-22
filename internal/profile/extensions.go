@@ -2,7 +2,6 @@ package profile
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,50 +57,13 @@ func (definition Definition) sourcePath(path string, executable bool) (string, e
 	if !relative(path) {
 		return "", errors.New("handler path escapes profile")
 	}
-	root, err := filepath.Abs(definition.Root)
+	root, err := packageDirectory(definition.Root)
 	if err != nil {
-		return "", errors.New("profile root cannot be resolved")
-	}
-	// Child hook processes do not inherit the engine's descriptor table.
-	if strings.HasPrefix(root, "/proc/self/fd/") {
-		root = fmt.Sprintf("/proc/%d/fd/%s", os.Getpid(), strings.TrimPrefix(root, "/proc/self/fd/"))
+		return "", err
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
-	rootInfo, rootErr := os.Lstat(root)
-	if pinnedRepositoryRoot.MatchString(root) {
-		// A declared development native asset also validates go.mod directly
-		// beneath the retained repository descriptor, rather than a package.
-		rootInfo, rootErr = os.Stat(root)
-	}
-	if err != nil || rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("profile root must be a real directory")
-	}
-	if resolvedRoot != root {
-		// Only the kernel directory-descriptor anchor may be a symlink. Check
-		// every component below it, including the profile package's ancestors.
-		anchor := strings.TrimSuffix(profileDescriptorRoot.FindString(root), "/")
-		if pinnedRepositoryRoot.MatchString(root) {
-			anchor = root
-		}
-		if anchor == "" {
-			return "", errors.New("profile root must be a real directory")
-		}
-		info, err := os.Stat(anchor)
-		if err != nil || !info.IsDir() {
-			return "", errors.New("profile directory descriptor is unavailable")
-		}
-		current := anchor
-		parts := []string{}
-		if root != anchor {
-			parts = strings.Split(strings.TrimPrefix(root, anchor+"/"), string(filepath.Separator))
-		}
-		for _, part := range parts {
-			current = filepath.Join(current, part)
-			info, err := os.Lstat(current)
-			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-				return "", errors.New("profile root must not traverse symlinks")
-			}
-		}
+	if err != nil {
+		return "", err
 	}
 	current := root
 	for _, part := range strings.Split(path, string(filepath.Separator)) {

@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "persist": "\n.claude/projects:/mnt/host/agent-sessions/claude/projects\n.claude-memory:/mnt/host/agent-sessions/claude/memory\n",
+  "artifacts": [
+    {
+      "id": "config",
+      "kind": "config",
+      "source": "settings.json",
+      "destination": ".claude/settings.json",
+      "format": "destination"
+    },
+    {
+      "id": "instructions",
+      "label": "Claude instructions",
+      "kind": "instructions",
+      "source_setting": "HOST_CLAUDE_MD",
+      "destination": ".claude/CLAUDE.md",
+      "format": "raw"
+    }
+  ]
+}

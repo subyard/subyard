@@ -235,3 +235,25 @@ func TestIntegrationInventoryUsesEffectiveDependencyAndRoleSnapshot(t *testing.T
 		}
 	}
 }
+
+func TestProfileCompletionUsesNativePackagesBeforeOwnerObservation(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	for _, name := range []string{"declared", "descriptorless", "resource-only"} {
+		if err := os.MkdirAll(filepath.Join(root, "config/profiles", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/profiles/declared/profile.json"), []byte(`{"schema_version":1}`), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "config/profiles/descriptorless/profile.conf"), nil, 0o644)
+	var output bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"-Y", "unregistered-owner/unregistered-yard", "list", "--complete-profiles"}, Stdout: &output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("completion code=%d", code)
+	}
+	if output.String() != "declared\ndescriptorless\nresource-only\n" {
+		t.Fatalf("inventory=%q", output.String())
+	}
+}

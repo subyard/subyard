@@ -48,6 +48,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ownerapi"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -485,6 +486,19 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if core && definition.Handler == "@network" && commandHelpRequested(commandArguments) {
 		cli.networkUsage()
+		return 0
+	}
+	// Profile completion needs only shipped native inventory, before owner,
+	// network, power or selected-yard observations.
+	if core && definition.Handler == "@list" && len(commandArguments) == 1 && commandArguments[0] == "--complete-profiles" {
+		packages, err := profile.Packages(cli.options.RepositoryRoot)
+		if err != nil {
+			cli.errorf("profile catalog: %v", err)
+			return 1
+		}
+		for _, pkg := range packages {
+			fmt.Fprintln(cli.options.Stdout, pkg.Name)
+		}
 		return 0
 	}
 	configSync, configSyncCheck, configSyncStatus := false, false, false
@@ -2141,7 +2155,7 @@ func (cli *CLI) runProjectList(
 		case "--complete-projects":
 			completion = "projects"
 		case "-h", "--help":
-			fmt.Fprintf(cli.options.Stdout, "Usage: %s list [--live]\n", cli.options.Program)
+			fmt.Fprintf(cli.options.Stdout, "Usage: %s list [--live | --complete-yards | --complete-projects | --complete-profiles]\n", cli.options.Program)
 			return 0
 		case "--yes":
 		default:

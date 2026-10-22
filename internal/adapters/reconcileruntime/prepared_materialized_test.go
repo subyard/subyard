@@ -108,8 +108,10 @@ func materializedConfigFixture(t *testing.T, root string) (Runtime, string) {
 	source := filepath.Join(root, "approved.instructions")
 	incus := runningIncus(3)
 	incus.Reconcile.Instance.Config = map[string]string{"volatile.uuid": "original-instance"}
-	return Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}, Incus: incus, Executor: incus,
-		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001}}, source
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}, Incus: incus, Executor: incus,
+		Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
+	return runtime, source
 }
 
 func TestMaterializedConfigsFreshProcessOriginalRecipe(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 type initMode uint8
@@ -40,6 +41,7 @@ type initArguments struct {
 }
 
 type initBootstrap struct {
+	source     *profile.Source
 	profile    string
 	sourcePath string
 	targetPath string
@@ -188,22 +190,21 @@ func (cli *CLI) loadInitContext(
 			"--profile requires selecting a non-default yard with -Y",
 		)
 	}
-	source := filepath.Join(
-		cli.options.RepositoryRoot, "config", "profiles", request.profile, "yard.env",
-	)
-	info, err := os.Lstat(source)
+	pkg, err := profile.ResolvePackage(cli.options.RepositoryRoot, request.profile)
+	if errors.Is(err, os.ErrNotExist) {
+		return config.Loaded{}, nil, &config.SourceError{Key: "YARD_TEMPLATE", Role: "init profile", Reason: "selected profile has no named-yard preset"}
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return config.Loaded{}, nil, &config.SourceError{Path: source, Key: "YARD_TEMPLATE", Role: "init profile", Reason: "selected profile has no named-yard preset"}
-		}
 		return config.Loaded{}, nil, fmt.Errorf("inspect profile preset: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return config.Loaded{}, nil, fmt.Errorf(
-			"profile %q named-yard preset is not a regular file", request.profile,
-		)
+	if pkg.PresetError != nil {
+		return config.Loaded{}, nil, fmt.Errorf("inspect profile preset: %w", pkg.PresetError)
 	}
-	content, err := os.ReadFile(source)
+	if pkg.Preset == nil {
+		return config.Loaded{}, nil, &config.SourceError{Key: "YARD_TEMPLATE", Role: "init profile", Reason: "selected profile has no named-yard preset"}
+	}
+	source := pkg.Preset.Path
+	content, err := pkg.Preset.Read()
 	if err != nil {
 		return config.Loaded{}, nil, fmt.Errorf("read profile preset: %w", err)
 	}
@@ -267,7 +268,7 @@ func (cli *CLI) loadInitContext(
 		)
 	}
 	return loaded, &initBootstrap{
-		profile: request.profile, sourcePath: source, targetPath: target, content: content,
+		profile: request.profile, sourcePath: source, targetPath: target, content: content, source: pkg.Preset,
 	}, nil
 }
 
@@ -931,6 +932,11 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) err
 }
 
 func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *CLI) error {
+	if execution.bootstrap != nil && execution.bootstrap.source != nil {
+		if _, err := execution.bootstrap.source.Read(); err != nil {
+			return fmt.Errorf("%w: profile preset changed", domain.ErrPlanStale)
+		}
+	}
 	if err := execution.legacyContinuation.check(ctx, cli, execution); err != nil {
 		return err
 	}

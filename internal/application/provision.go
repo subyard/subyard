@@ -9,6 +9,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 type ProvisionReporter interface {
@@ -21,6 +22,7 @@ type ProvisionProfileStep struct {
 	Profile     string
 	Converged   bool
 	Conditional bool
+	Binding     profile.ProvisionBinding
 }
 
 type ProvisionRunner struct {
@@ -52,6 +54,11 @@ func (runner ProvisionRunner) Run(
 		step := runner.ApprovedProfiles[index]
 		if step.Profile != name || step.Converged && step.Conditional {
 			return domain.AdapterResult{}, "", fmt.Errorf("%w: provision profile authorization changed", domain.ErrPlanStale)
+		}
+		if step.Binding.Root != "" {
+			if err := step.Binding.Check(); err != nil {
+				return domain.AdapterResult{}, "", fmt.Errorf("%w: %v", domain.ErrPlanStale, err)
+			}
 		}
 	}
 	observed, err := runner.Power.Instances.Instance(ctx, runner.Yard.IncusProject, runner.Yard.YardInstanceName)
@@ -154,6 +161,7 @@ func (runner ProvisionRunner) Run(
 		physical := request
 		physical.Action = "profile"
 		physical.Arguments = []string{profile}
+		physical.Input = runner.profileInput(profile)
 		physicalResult, text, execErr := runner.Physical.Run(ctx, physical, nil)
 		output.WriteString(text)
 		if execErr == nil && physicalResult.Status != "ok" {
@@ -200,6 +208,7 @@ func (runner ProvisionRunner) checkProfile(
 	physical := request
 	physical.Action = "profile-check"
 	physical.Arguments = []string{"--check", profile}
+	physical.Input = runner.profileInput(profile)
 	result, diagnostics, err := runner.Physical.Run(ctx, physical, nil)
 	if err != nil {
 		return false, err
@@ -215,4 +224,13 @@ func (runner ProvisionRunner) checkProfile(
 	default:
 		return false, errors.New("invalid check result")
 	}
+}
+
+func (runner ProvisionRunner) profileInput(name string) map[string]any {
+	for _, step := range runner.ApprovedProfiles {
+		if step.Profile == name {
+			return map[string]any{"profileBinding": step.Binding}
+		}
+	}
+	return nil
 }

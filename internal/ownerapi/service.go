@@ -25,17 +25,16 @@ type ProfileCheck struct {
 // Service uses existing owner readers. Lazy bridges preserve the CLI's shared
 // catalog/adapter and registered Git authority without exposing transport state.
 type Service struct {
-	Loaded            config.Loaded
-	RepositoryRoot    string
-	Environment       map[string]string
-	Instances         ports.Incus
-	Resources         resource.Registry
-	ProjectsAllowed   bool
-	OperationID       string
-	ProvisionProfiles func() ([]string, error)
-	ProfileCheck      func() ProfileCheck
-	InspectGit        func(context.Context, configsync.SourceRecord) GitState
-	Credentials       ports.CredentialMetadataReader
+	Loaded          config.Loaded
+	RepositoryRoot  string
+	Environment     map[string]string
+	Instances       ports.Incus
+	Resources       resource.Registry
+	ProjectsAllowed bool
+	OperationID     string
+	ProfileCheck    func() ProfileCheck
+	InspectGit      func(context.Context, configsync.SourceRecord) GitState
+	Credentials     ports.CredentialMetadataReader
 }
 
 // GitState contains inspected registration facts before the public remote redaction.

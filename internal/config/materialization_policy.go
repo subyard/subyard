@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 // MaterializationScope preserves the different consumers of status and runtime
@@ -29,15 +31,40 @@ type MaterializationSource struct {
 	PreviewInstructions bool
 }
 
-// SelectMaterializationSources resolves declarations only. Instruction mappings
-// are supplied by the owning adapter; this policy does not register integrations.
-func SelectMaterializationSources(values map[string]string, developer string, scope MaterializationScope, instructions []MaterializationSource) ([]MaterializationSource, error) {
+// SelectMaterializationSources resolves operation-local artifact declarations.
+func SelectMaterializationSources(values map[string]string, developer string, scope MaterializationScope, definitions ...profile.IntegrationDefinition) ([]MaterializationSource, error) {
 	if scope != MaterializationConfigAssets && scope != MaterializationRuntime {
 		return nil, errors.New("invalid materialization scope")
 	}
-	assets, err := MaterializedAssets(values, developer)
+	if values["ALLOWS_HOST_ACCESS"] == "false" {
+		for _, definition := range definitions {
+			for _, artifact := range definition.Artifacts {
+				if artifact.SourceSetting != "" && strings.TrimSpace(values[artifact.SourceSetting]) != "" {
+					return nil, fmt.Errorf("selected yard role forbids non-empty %s", artifact.SourceSetting)
+				}
+			}
+		}
+	}
+	assets, err := MaterializedAssets(values, developer, definitions...)
 	if err != nil {
 		return nil, err
+	}
+	var instructions []MaterializationSource
+	for _, definition := range definitions {
+		for _, artifact := range definition.Artifacts {
+			if artifact.Kind != "instructions" {
+				continue
+			}
+			path, err := artifactDestination(developer, artifact.Destination)
+			if err != nil {
+				return nil, err
+			}
+			label := artifact.Label
+			if label == "" {
+				label = definition.Name + " instructions"
+			}
+			instructions = append(instructions, MaterializationSource{Integration: definition.Name, Label: label, PreviewInstructions: true, Asset: MaterializedAsset{Name: definition.Name + "." + artifact.ID, Setting: artifact.SourceSetting, Source: values[artifact.SourceSetting], Destination: path, FollowSymlinks: true}})
+		}
 	}
 	result := []MaterializationSource{}
 	if scope == MaterializationConfigAssets {
@@ -61,6 +88,13 @@ func SelectMaterializationSources(values map[string]string, developer string, sc
 				result = append(result, MaterializationSource{Asset: asset, Integration: integration, Label: strings.Replace(asset.Name, ".", " ", 1)})
 			}
 		}
+	}
+	destinations := make([]string, 0, len(result))
+	for _, source := range result {
+		destinations = append(destinations, source.Asset.Destination)
+	}
+	if err := validateManagedDestinations(destinations, values["INTEGRATION_HOST_LINKS"], filepath.Join("/home", developer)); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

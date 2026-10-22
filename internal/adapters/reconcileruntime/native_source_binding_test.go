@@ -40,6 +40,8 @@ func TestRetainedRepositoryDescriptorNumbersDoNotChangePreparedBindings(t *testi
 		t.Fatal(err)
 	}
 	defer second.Close()
+	fixtureRuntime := Runtime{}
+	bindInstructionTestPackage(t, &fixtureRuntime, root, "codex")
 	logical := "/approved/artifact"
 	makeRuntime := func(file *os.File) Runtime {
 		physical := fmt.Sprintf("/proc/self/fd/%d", file.Fd())

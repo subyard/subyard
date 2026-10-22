@@ -102,6 +102,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 	writeCLIFile(t, filepath.Join(root, "config/projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o644)
 	instructions := filepath.Join(root, "instructions.md")
 	writeCLIFile(t, instructions, "Selected instructions\n", 0o644)
+	declareCLIInstructionFixture(t, root, "codex", "HOST_CODEX_AGENTS_MD", ".codex/AGENTS.md", "Codex instructions")
 	var output bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &output})
 	if err != nil {
@@ -773,4 +774,17 @@ func TestInitIntegrationBaselineBindsInstalledPackageDefaultsAndAssets(t *testin
 	if err := execution.checkIntegrationBaseline(program); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("installed package asset drift was not rejected: %v", err)
 	}
+}
+
+func declareCLIInstructionFixture(t *testing.T, root, agent, setting, destination, label string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"schema_version": 2, "artifacts": []map[string]string{{"id": "instructions", "kind": "instructions", "source_setting": setting, "destination": destination, "label": label, "format": "raw"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "config/agents", agent)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(directory, "integration.json"), string(data)+"\n", 0600)
 }

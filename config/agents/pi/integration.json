@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "persist": "\n.pi/agent/sessions:/mnt/host/agent-sessions/pi/sessions\n",
+  "artifacts": [
+    {
+      "id": "config",
+      "kind": "config",
+      "source": "settings.json",
+      "destination": ".pi/agent/settings.json",
+      "format": "destination"
+    }
+  ]
+}

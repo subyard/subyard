@@ -27,6 +27,8 @@ LINK_TARGET=/mnt/host/agent-sessions/claude/projects
 HISTORY_PATH="$LINK_TARGET/legacy-upgrade-history"
 CANDIDATE_LAUNCHER=''
 HOST_CONFIG_FINGERPRINT=''
+OPENCODE_CONFIG="$OPERATOR_HOME/opencode-fixture.jsonc"
+OPENCODE_INSTRUCTIONS="$OPERATOR_HOME/opencode-instructions.md"
 
 die() {
   printf 'integration-legacy-upgrade: %s\n' "$*" >&2
@@ -168,7 +170,9 @@ p0_capacity_reset_build_cache
 # The shared helper deliberately prepares AGENTS=none for its own fixture. Remove it entirely:
 # v0.14.0 must resolve its ordinary shipped five-tool default.
 # This integration-only fixture explicitly selects no optional environment profiles.
-operator_env bash -c 'cat > "$1" <<EOF
+# The controller opens this public asset: the fixture operator cannot traverse
+# the private transported checkout. Fail before baseline setup on any copy error.
+operator_env bash -eu -c 'cat > "$1" <<EOF
 ENVIRONMENT_PROFILES=
 BASE_IMAGE=subyard-e2e-debian-13-cloud-container
 BASE_IMAGE_FALLBACK=images:debian/13/cloud
@@ -176,9 +180,15 @@ DEV_UID=2000
 FORWARD_SSH_AGENT=0
 HOST_CLAUDE_MD=
 HOST_CODEX_AGENTS_MD=
-HOST_OPENCODE_AGENTS_MD=
+HOST_OPENCODE_AGENTS_MD=$3
+AGENT_opencode_CONFIG=$2
 EOF
-chmod 0600 "$1"' _ "$HOST_CONFIG"
+chmod 0600 "$1"
+printf "%s\n" "// artifact declaration cutover preserves raw JSONC" > "$2"
+cat >> "$2"
+printf "%s\n" "OpenCode operator instructions survive artifact cutover." > "$3"
+chmod 0600 "$2" "$3"' _ "$HOST_CONFIG" "$OPENCODE_CONFIG" "$OPENCODE_INSTRUCTIONS" \
+  < "$ROOT/config/agents/opencode/opencode.jsonc"
 
 info "packaging candidate $CANDIDATE_VERSION"
 "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
@@ -199,6 +209,13 @@ incus project create "$PROJECT" \
 operator_yard init --yes
 operator_yard start --yes
 assert_old_active
+OLD_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+case "$OLD_RELEASE_TARGET" in
+  releases/"$OLD_VERSION"-*) ;;
+  *) die 'published baseline runtime target does not identify the predecessor' ;;
+esac
+[[ "${OLD_RELEASE_TARGET#releases/"$OLD_VERSION"-}" =~ ^[0-9a-f]{12}$ ]] \
+  || die 'published baseline runtime target has an invalid artifact identity'
 
 guest sh -eu -c '
   command -v codex >/dev/null
@@ -244,10 +261,15 @@ assert_unadopted "$BASELINE_FINGERPRINT"
 find_candidate_launcher \
   || die 'could not identify the one verified published candidate launcher'
 
-info 'declining the explicit candidate init adoption plan'
-run_declined "$STATE_ROOT/init-declined.log" "file://$RELEASE_ROOT" \
-  "$CANDIDATE_LAUNCHER" init
-assert_adoption_plan "$STATE_ROOT/init-declined.log"
+info 'refusing candidate init without installed-owner legacy continuation'
+set +e
+operator_env "$CANDIDATE_LAUNCHER" init >"$STATE_ROOT/init-continuation-required.log" 2>&1
+init_rc=$?
+set -e
+[ "$init_rc" -eq 1 ] \
+  && grep -Fq 'existing unmarked project has no continuation consent; use yard init --continue-legacy to assess limited normal reconciliation; this grants no deletion ownership' \
+    "$STATE_ROOT/init-continuation-required.log" \
+  || die 'candidate init did not refuse the exact missing-continuation boundary'
 assert_unadopted "$BASELINE_FINGERPRINT"
 
 info 'rejecting a changed legacy plain file without claiming or replacing it'
@@ -255,10 +277,12 @@ guest sh -eu -c 'cp "$1" /tmp/subyard-legacy-rules; printf "%s\n" changed-legacy
   subyard "$PLAIN_PATH"
 PLAIN_DRIFT_FINGERPRINT="$(legacy_fingerprint)"
 set +e
-operator_env "$CANDIDATE_LAUNCHER" init --yes >"$STATE_ROOT/plain-drift.log" 2>&1
+operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes \
+  >"$STATE_ROOT/plain-drift.log" 2>&1
 plain_rc=$?
 set -e
-[ "$plain_rc" -ne 0 ] || die 'candidate init adopted a changed legacy plain file'
+[ "$plain_rc" -ne 0 ] || die 'published updater adopted a changed legacy plain file'
 grep -Fq "$PLAIN_PATH" "$STATE_ROOT/plain-drift.log" \
   || die 'plain-file refusal omitted the conflicting path'
 assert_unadopted "$PLAIN_DRIFT_FINGERPRINT"
@@ -452,6 +476,13 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
 [ "$(operator_yard --version)" = "yard $CANDIDATE_VERSION" ] \
   || die 'candidate release was not activated'
+CANDIDATE_RELEASE_TARGET="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current")"
+case "$CANDIDATE_RELEASE_TARGET" in
+  releases/"$CANDIDATE_VERSION"-*) ;;
+  *) die 'activated runtime target does not identify the candidate' ;;
+esac
+[[ "${CANDIDATE_RELEASE_TARGET#releases/"$CANDIDATE_VERSION"-}" =~ ^[0-9a-f]{12}$ ]] \
+  || die 'activated runtime target has an invalid artifact identity'
 guest test -f "$INVENTORY" || die 'successful upgrade did not publish integration inventory'
 guest sh -eu -c '
   [ "$(cat "$1")" = "$2" ]
@@ -475,6 +506,72 @@ jq -e '
 ' "$STATE_ROOT/adopted-status.json" >/dev/null \
   || die 'successful upgrade did not preserve the four current integrations'
 assert_preserved_user_state
+
+# Prove the installed candidate carries the declaration and uses both resolved
+# sources through release activation. The baseline already copied these raw bytes.
+find_candidate_launcher || die 'activated candidate package is unavailable'
+candidate_root="${CANDIDATE_LAUNCHER%/bin/yard}"
+operator_env jq -e '.schema_version == 2 and (.artifacts | length) == 2' \
+  "$candidate_root/config/agents/opencode/integration.json" >/dev/null \
+  || die 'activated runtime lacks the artifact declaration'
+[ "$(guest sha256sum /home/dev/.config/opencode/opencode.jsonc | awk '{print $1}')" = \
+  "$(operator_env sha256sum "$OPENCODE_CONFIG" | awk '{print $1}')" ] \
+  || die 'artifact activation changed raw JSONC bytes'
+guest sh -eu -c '
+  grep -Fq "OpenCode operator instructions survive artifact cutover." /home/dev/.config/opencode/AGENTS.md
+  [ "$(grep -c "<!-- subyard-preview -->" /home/dev/.config/opencode/AGENTS.md)" = 1 ]
+  [ "$(stat -c "%a:%u" /home/dev/.config/opencode/AGENTS.md)" = "644:2000" ]
+  [ "$(stat -c "%a:%u" /home/dev/.config/opencode/opencode.jsonc)" = "644:2000" ]
+' || die 'declared instructions lost preview, content or permissions'
+
+continuation_grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
+operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
+  || die 'legacy continuation was established before explicit consent'
+inventory_before="$(guest sha256sum "$INVENTORY")"
+config_before="$(yard_config_fingerprint)"
+state_before="$(legacy_fingerprint)"
+continuation_host_before="$(operator_env sha256sum "$HOST_CONFIG")"
+runtime_links_before="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
+instructions_before="$(guest sha256sum /home/dev/.config/opencode/AGENTS.md)"
+artifact_modes_before="$(guest stat -c '%a:%u:%g' /home/dev/.config/opencode/AGENTS.md /home/dev/.config/opencode/opencode.jsonc)"
+info 'staging current installation ownership after authentic updater adoption'
+# The authentic v0.14 updater publishes with its own historical helper, which
+# predates installation.json. Use the current supported installer to establish
+# that boundary without reactivating the release or reconciling the legacy yard.
+operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+  "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only --yes
+[ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")" = "$runtime_links_before" ] \
+  && [ "$(guest sha256sum /home/dev/.config/opencode/AGENTS.md)" = "$instructions_before" ] \
+  && [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/opencode/AGENTS.md /home/dev/.config/opencode/opencode.jsonc)" = "$artifact_modes_before" ] \
+  && [ "$(guest sha256sum "$INVENTORY")" = "$inventory_before" ] \
+  && [ "$(yard_config_fingerprint)" = "$config_before" ] \
+  && [ "$(legacy_fingerprint)" = "$state_before" ] \
+  && [ "$(operator_env sha256sum "$HOST_CONFIG")" = "$continuation_host_before" ] \
+  || die 'publication-only ownership staging changed activation or adopted state'
+operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
+  || die 'publication-only ownership staging granted legacy continuation'
+[ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
+  || die 'publication-only ownership staging acquired destructive installation ownership'
+
+info 'declining installed-owner continuation without changing the adopted state'
+run_declined "$STATE_ROOT/continuation-declined.log" "file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" init --continue-legacy
+grep -Fq '[apply] init.legacy-continuation:' "$STATE_ROOT/continuation-declined.log" \
+  || die 'continuation decline did not assess its explicit typed grant'
+operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
+  || die 'declined continuation wrote a protected grant'
+[ "$(guest sha256sum "$INVENTORY")" = "$inventory_before" ] \
+  && [ "$(yard_config_fingerprint)" = "$config_before" ] \
+  && [ "$(legacy_fingerprint)" = "$state_before" ] \
+  && [ "$(operator_env sha256sum "$HOST_CONFIG")" = "$continuation_host_before" ] \
+  || die 'declined continuation changed adopted artifacts or settings'
+[ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
+  || die 'declined continuation acquired destructive installation ownership'
+
+info 'establishing limited continuation through the active installed owner'
+# This shared helper also owns any required disk-/tmp restart and the exact
+# activation-only repair, while proving no full removal ownership is acquired.
+establish_legacy_continuation
 
 info 'repeating init without materializing an inherited selection'
 config_before="$(yard_config_fingerprint)"
@@ -505,37 +602,52 @@ info 'disabling and re-enabling Claude while preserving user-owned state'
 operator_yard integration disable claude --yes
 operator_yard integration status --json > "$STATE_ROOT/disabled-status.json"
 jq -e '
-  .observed == "ready" and (.selection.requested | length) == 4 and
-  (.selection.requested | index("claude") | not)
+  .observed == "ready" and .selection.requested == ["codex","opencode","pi"]
 ' "$STATE_ROOT/disabled-status.json" >/dev/null \
-  || die 'Claude disable did not converge to the four-tool requested set'
+  || {
+    jq -c '{observed, requested: .selection.requested}' "$STATE_ROOT/disabled-status.json" >&2 || true
+    die 'Claude disable did not preserve the three remaining integrations'
+  }
 guest test ! -L "$LINK_PATH" || die 'Claude disable retained the owned history link'
 assert_preserved_user_state
 
 operator_yard integration enable claude --yes
 operator_yard integration status --json > "$STATE_ROOT/re-enabled-status.json"
+# Enabling appends to the persisted requested order; it does not restore defaults.
 jq -e '
-  .observed == "ready" and (.selection.requested | length) == 4 and
-  (.selection.requested | index("claude") != null)
+  .observed == "ready" and .selection.requested == ["codex","opencode","pi","claude"]
 ' "$STATE_ROOT/re-enabled-status.json" >/dev/null \
-  || die 'Claude re-enable did not converge to the four-tool requested set'
+  || {
+    jq -c '{observed, requested: .selection.requested}' "$STATE_ROOT/re-enabled-status.json" >&2 || true
+    die 'Claude re-enable did not restore the four current integrations'
+  }
 [ "$(guest readlink "$LINK_PATH")" = "$LINK_TARGET" ] \
   || die 'Claude re-enable did not restore the owned history link'
 assert_preserved_user_state
 
-info 'rolling back to the unmodified v0.14.0 reader and refreshing its configs'
-operator_yard update --rollback --yes
-assert_old_active
-operator_yard init --configs --yes
+info 'refusing incompatible v0.14.0 rollback without changing adopted state'
+config_before="$(yard_config_fingerprint)"
+inventory_before="$(guest sha256sum "$INVENTORY")"
+state_before="$(legacy_fingerprint)"
+verify_legacy_rollback_refusal
+[ "$(yard_config_fingerprint)" = "$config_before" ] \
+  && [ "$(guest sha256sum "$INVENTORY")" = "$inventory_before" ] \
+  && [ "$(legacy_fingerprint)" = "$state_before" ] \
+  || die 'refused rollback changed integration artifacts or settings'
 assert_preserved_user_state
+assert_legacy_continuation
 
-info 'retrying the candidate upgrade after retained-runtime config writes'
+info 'retrying the active candidate after incompatible rollback refusal'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
 operator_yard integration status --json > "$STATE_ROOT/re-upgraded-status.json"
-jq -e '.observed == "ready" and (.selection.requested | length) == 4' \
+jq -e '.observed == "ready" and .selection.requested == ["codex","opencode","pi","claude"]' \
   "$STATE_ROOT/re-upgraded-status.json" >/dev/null \
-  || die 'candidate did not recover after retained-runtime config writes'
+  || {
+    jq -c '{observed, requested: .selection.requested}' "$STATE_ROOT/re-upgraded-status.json" >&2 || true
+    die 'candidate did not remain converged after refused rollback and update retry'
+  }
 assert_preserved_user_state
+assert_legacy_continuation
 
-ok 'pinned v0.14.0 adoption, refusal, decline, lifecycle preservation, rollback and forward retry passed'
+ok 'pinned v0.14.0 adoption, refusal, decline, lifecycle preservation, rollback refusal and candidate retry passed'

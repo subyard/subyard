@@ -12,8 +12,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 type Definition struct {
@@ -166,21 +168,30 @@ type descriptorValues struct {
 }
 
 func Load(root string) (Registry, error) {
-	pattern := filepath.Join(root, "config", "profiles", "*", "resources", "*.res")
-	files, err := filepath.Glob(pattern)
+	packages, err := profile.Packages(root)
 	if err != nil {
 		return Registry{}, err
 	}
-	specs := make([]ResourceSpec, 0, len(files))
-	bindings := make([]string, 0, len(files))
-	for _, file := range files {
-		definition, actions, err := loadDefinition(root, file)
-		if err != nil {
-			return Registry{}, err
+	specs := []ResourceSpec{}
+	bindings := []string{}
+	for _, pkg := range packages {
+		for _, source := range pkg.Resources {
+			data, err := source.Read()
+			if err != nil {
+				return Registry{}, err
+			}
+			file := source.Path
+			spec, err := parseResource(pkg.Name, strings.TrimSuffix(filepath.Base(file), ".res"), strings.NewReader(string(data)), file)
+			if err != nil {
+				return Registry{}, err
+			}
+			binding, err := resolveResourceHandler(pkg.Root, file, spec.definition)
+			if err != nil {
+				return Registry{}, err
+			}
+			bindings = append(bindings, binding)
+			specs = append(specs, spec)
 		}
-		bindings = append(bindings, definition.path)
-		definition.path = ""
-		specs = append(specs, ResourceSpec{definition: definition, actions: actions, valid: true})
 	}
 	registry, err := BuildRegistry(specs)
 	if err != nil {
@@ -357,27 +368,6 @@ func cloneDefinition(definition Definition) Definition {
 	return definition
 }
 
-func loadDefinition(root, path string) (Definition, []domain.ActionDefinition, error) {
-	profile := filepath.Base(filepath.Dir(filepath.Dir(path)))
-	name := strings.TrimSuffix(filepath.Base(path), ".res")
-	file, err := os.Open(path)
-	if err != nil {
-		return Definition{}, nil, err
-	}
-	defer file.Close()
-	spec, err := parseResource(profile, name, file, path)
-	if err != nil {
-		return Definition{}, nil, err
-	}
-	definition := spec.Definition()
-	binding, err := resolveResourceHandler(root, path, definition)
-	if err != nil {
-		return Definition{}, nil, err
-	}
-	definition.path = binding
-	return definition, cloneActionDefinitions(spec.actions), nil
-}
-
 // ParseResource validates descriptor syntax and semantics from a reader. It does
 // not require a package directory or an executable handler.
 func ParseResource(profile, name string, reader io.Reader) (ResourceSpec, error) {
@@ -505,8 +495,7 @@ func parseResource(profile, name string, reader io.Reader, path string) (Resourc
 	}, actions: actionDefinitions, valid: true}, nil
 }
 
-func resolveResourceHandler(root, path string, definition Definition) (string, error) {
-	profileRoot := filepath.Join(root, "config", "profiles", definition.Profile)
+func resolveResourceHandler(profileRoot, path string, definition Definition) (string, error) {
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, definition.Handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -518,6 +507,9 @@ func resolveResourceHandler(root, path string, definition Definition) (string, e
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
 		return "", fmt.Errorf("resource handler is not an executable regular file: %s", handlerPath)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Nlink != 1 {
+		return "", fmt.Errorf("resource handler must have one link: %s", handlerPath)
 	}
 	resolvedProfileRoot, err := filepath.EvalSymlinks(profileRoot)
 	if err != nil {
@@ -531,7 +523,9 @@ func resolveResourceHandler(root, path string, definition Definition) (string, e
 	if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("resource handler escapes resolved profile: %s", path)
 	}
-	return resolvedHandlerPath, nil
+	// Keep retained repository descriptors in the binding after resolving the
+	// handler's permitted in-profile intermediate links.
+	return filepath.Join(profileRoot, resolvedRelative), nil
 }
 
 func parseEndpointDefaults(record, path string) (*EndpointDefaults, error) {

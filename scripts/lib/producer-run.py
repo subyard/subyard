@@ -3,6 +3,9 @@
 import ctypes
 import fcntl
 import json
+import hashlib
+import re
+import tempfile
 import os
 from pathlib import Path
 import signal
@@ -26,27 +29,15 @@ def code(status):
     return status if status >= 0 else 128 - status
 
 
-def directory(path):
+def directory(path, create=False):
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in Path(path).parts[1:]:
-            try:
-                os.mkdir(part, 0o700, dir_fd=fd)
-            except FileExistsError:
-                pass
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def directory_existing(path):
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in Path(path).parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
@@ -160,7 +151,7 @@ def worker(kind, lock, data, original_ns, bindings, command):
     # Inherited directory FDs pin the parent's mount namespace. Reopen and check
     # their identities in this mount namespace before using them as bind sources.
     def local(fd):
-        current = directory_existing(os.readlink(f"/proc/self/fd/{fd}"))
+        current = directory(os.readlink(f"/proc/self/fd/{fd}"))
         if inode(current) != inode(fd):
             raise ValueError("operation bind source replaced")
         return current
@@ -217,7 +208,7 @@ def launch(source, kind, root, command):
     storage = Path(root) / f".build/paseo-operation-{os.getuid()}" if kind == "paseo" else Path("/var/lib/subyard/profile-operation")
     parent = os.getppid()
     pdeath(parent)
-    parent_fd = directory(str(storage.parent))
+    parent_fd = directory(str(storage.parent), create=True)
     try:
         os.mkdir(storage.name, 0o700, dir_fd=parent_fd)
         os.chmod(storage.name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
@@ -281,7 +272,7 @@ def launch(source, kind, root, command):
             if str(Path(path)) != path or not any(path.startswith(prefix + "/") for prefix in ("/tmp", "/var/tmp", "/dev/shm")) or ".." in Path(path).parts:
                 raise ValueError("invalid shared temporary directory")
             try:
-                fd = directory_existing(path)
+                fd = directory(path)
             except FileNotFoundError:
                 continue
             bindings.append((path, fd))
@@ -315,36 +306,135 @@ def launch(source, kind, root, command):
     return status
 
 
-def capture(mode, bundle, command):
+def source_identity(info, digest=None):
+    result = dict(mode=info.st_mode, device=info.st_dev, inode=info.st_ino,
+                  size=info.st_size, modified=info.st_mtime_ns, changed=info.st_ctime_ns,
+                  links=info.st_nlink, uid=info.st_uid, gid=info.st_gid)
+    if digest is not None:
+        result["digest"] = digest
+    return result
+
+
+def capture_bundle(binding):
+    """Capture the approved regular-file tree before starting the guest command."""
+    root = binding["root"]
+    anchor = re.match(r"^/proc/[1-9][0-9]*/fd/(?:0|[1-9][0-9]*)(?=/|$)", root)
+    if anchor:
+        fd = os.open(anchor[0], os.O_RDONLY | os.O_DIRECTORY)
+        parts = Path(root[len(anchor[0]):]).parts
+    else:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        parts = Path(root).parts[1:]
+    try:
+        for part in parts:
+            if part in ("/", ""):
+                continue
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        def check_parents():
+            for parent, expected in binding["parents"].items():
+                info = os.stat(parent) if re.fullmatch(r"/proc/[1-9][0-9]*/fd/(?:0|[1-9][0-9]*)", parent) else os.lstat(parent)
+                actual = dict(mode=info.st_mode, device=info.st_dev, inode=info.st_ino,
+                              size=0, modified=0, changed=0, links=0, uid=info.st_uid, gid=info.st_gid)
+                if actual != expected:
+                    raise ValueError("profile source parent changed")
+        check_parents()
+        entries = binding["entries"]
+        archive = tempfile.TemporaryFile(dir="/var/tmp")
+        shared_tmp = []
+        try:
+            with tarfile.open(fileobj=archive, mode="w") as target:
+                def walk(parent, relative):
+                    expected = entries[relative]
+                    if source_identity(os.fstat(parent)) != expected:
+                        raise ValueError("profile directory changed")
+                    names = sorted(os.listdir(parent))
+                    children = sorted(name for name in entries if name != "." and str(Path(name).parent) == relative)
+                    actual = [str(Path(relative) / name) for name in names]
+                    if actual != children:
+                        raise ValueError("profile bundle inventory changed")
+                    for name, path in zip(names, actual):
+                        approved = entries[path]
+                        child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                        try:
+                            info = os.fstat(child)
+                            if stat.S_ISDIR(info.st_mode):
+                                member = tarfile.TarInfo(path)
+                                member.type, member.mode = tarfile.DIRTYPE, stat.S_IMODE(info.st_mode)
+                                target.addfile(member)
+                                walk(child, path)
+                            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                                with os.fdopen(os.dup(child), "rb") as source:
+                                    digest = hashlib.file_digest(source, "sha256").hexdigest()
+                                    if source_identity(info, digest) != approved:
+                                        raise ValueError("profile source changed")
+                                    source.seek(0)
+                                    member = tarfile.TarInfo(path)
+                                    member.size, member.mode = info.st_size, stat.S_IMODE(info.st_mode)
+                                    target.addfile(member, source)
+                                    if path == "provision-tmp-paths":
+                                        source.seek(0)
+                                        shared_tmp.extend(source.read().decode().splitlines())
+                                if source_identity(os.fstat(child), digest) != approved:
+                                    raise ValueError("profile source changed during capture")
+                            else:
+                                raise ValueError("unsafe profile bundle source")
+                        finally:
+                            os.close(child)
+                    if source_identity(os.fstat(parent)) != expected or sorted(os.listdir(parent)) != names:
+                        raise ValueError("profile directory changed during capture")
+                walk(fd, ".")
+            check_parents()
+            archive.seek(0)
+            return archive, shared_tmp
+        except BaseException:
+            archive.close()
+            raise
+    finally:
+        os.close(fd)
+
+
+def capture(mode, profile, command):
     pdeath(os.getppid())
+    with os.fdopen(int(os.environ["SUBYARD_METADATA_FD"])) as metadata:
+        request = json.load(metadata)
+    binding = request["input"]["profileBinding"]
+    if Path(binding["root"]).name != profile or not re.fullmatch(r"[a-zA-Z0-9_-]+", profile):
+        raise ValueError("invalid bound profile")
+    archive, shared_tmp = capture_bundle(binding)
+    environment = binding["environment"]
+    env_args = []
+    for key, value in sorted(environment.items()):
+        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", key) or "\0" in value:
+            raise ValueError("invalid profile environment")
+        env_args.extend(["--env", key + "=" + value])
+    separator = command.index("--")
+    command[separator:separator] = env_args
+    command[-2] = json.dumps(shared_tmp)
     owner = os.getpid()
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-                               preexec_fn=lambda: pdeath(owner))
-    archive = subprocess.Popen(["tar", "-C", bundle, "-cf", "-", "."], stdout=subprocess.PIPE,
                                preexec_fn=lambda: pdeath(owner))
     cancelled = 0
     def interrupted(signum, _frame):
         nonlocal cancelled
         cancelled = signum
-        for child in (process, archive):
+        for child in (process,):
             if child.poll() is None:
                 child.kill()
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
-    tar_status = []
     def send():
         try:
-            while block := archive.stdout.read(65536):
+            while block := archive.read(65536):
                 process.stdin.write(block)
             process.stdin.flush()
-            tar_status.append(code(archive.wait()))
-            if tar_status[0]:
-                process.terminate()
             # Keep stdin open until the guest operation completes.
         except (BrokenPipeError, ValueError):
-            archive.terminate()
-            archive.wait()
+            pass
+        finally:
+            archive.close()
     sender = threading.Thread(target=send, daemon=True)
     sender.start()
     retained = bytearray()
@@ -368,7 +458,7 @@ def capture(mode, bundle, command):
     if mode == "check" and status in (0, 10):
         print("converged" if status == 0 else "changed")
         status = 0
-    return status or (tar_status[0] if tar_status else 0)
+    return status
 
 
 def main():

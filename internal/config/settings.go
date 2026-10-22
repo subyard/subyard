@@ -254,9 +254,28 @@ func SettingNames(settings map[string]SettingTrace) []string {
 func SyncableFileMappings(loaded Loaded) []FileSettingMapping {
 	var result []FileSettingMapping
 	seen := map[string]struct{}{}
+	declared := map[string]bool{}
+	// Declared defaults have package-relative authoring identities independent
+	// of native root aliases, current source overrides and prospective payloads.
+	for _, owner := range loaded.Catalog.Integrations() {
+		for _, artifact := range owner.Artifacts {
+			if artifact.Kind != "config" {
+				continue
+			}
+			name := "AGENT_" + owner.Name + "_" + strings.ToUpper(artifact.ID)
+			declared[name] = true
+			field, ok := loaded.Catalog.LookupSetting(name)
+			if !ok || field.Kind != SettingFile || !field.Syncable {
+				continue
+			}
+			relative := filepath.ToSlash(filepath.Join(owner.Name, artifact.Source))
+			seen[relative] = struct{}{}
+			result = append(result, FileSettingMapping{Name: name, Relative: relative, Application: field.Application})
+		}
+	}
 	agentsRoot := filepath.Join(loaded.Context.Paths.ConfigDir, "agents")
 	for name, trace := range loaded.Settings {
-		if trace.Kind != SettingFile || !trace.Syncable {
+		if declared[name] || trace.Kind != SettingFile || !trace.Syncable {
 			continue
 		}
 		for _, resolution := range trace.Resolutions {

@@ -61,6 +61,7 @@ type IntegrationDefinition struct {
 	Lifecycle       *IntegrationLifecycle `json:"lifecycle,omitempty"`
 	Dashboard       *IntegrationDashboard `json:"dashboard,omitempty"`
 	Native          []Native              `json:"native,omitempty"`
+	Artifacts       []IntegrationArtifact `json:"artifacts,omitempty"`
 
 	validationInputs []string
 }
@@ -114,13 +115,18 @@ func (definition IntegrationDefinition) ReadSource(path string) ([]byte, error) 
 		return nil, err
 	}
 	info, err := os.Stat(validated)
-	if err != nil || info.Size() > 4<<20 {
+	if err != nil || info.Size() > 4<<20 || len(definition.Artifacts) != 0 && !safeArtifactFile(info) {
 		return nil, errors.New("integration source is unbounded")
 	}
 	return os.ReadFile(validated)
 }
 func (definition IntegrationDefinition) SourceBinding() (string, error) {
 	files := []string{"integration.json"}
+	for _, artifact := range definition.Artifacts {
+		if artifact.Source != "" {
+			files = append(files, artifact.Source)
+		}
+	}
 	for _, path := range []string{definition.Provision, definition.Cleanup} {
 		if path != "" {
 			files = append(files, path)
@@ -193,6 +199,20 @@ func (definition IntegrationDefinition) ValidationInputs() []string {
 }
 
 func (definition *IntegrationDefinition) validatePackage() error {
+	if len(definition.Artifacts) != 0 {
+		if _, err := definition.ReadSource("integration.json"); err != nil {
+			return err
+		}
+	}
+	for _, artifact := range definition.Artifacts {
+		if artifact.Source != "" {
+			path, err := definition.ArtifactSourcePath(artifact.Source)
+			if err != nil {
+				return err
+			}
+			definition.validationInputs = append(definition.validationInputs, path)
+		}
+	}
 	for _, path := range []string{definition.Provision, definition.Cleanup} {
 		if path != "" {
 			resolved, err := definition.ExecutablePath(path)

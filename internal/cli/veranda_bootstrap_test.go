@@ -188,29 +188,36 @@ func TestVerandaBootstrapRejectsCrossYardSelectionOutsideExactProfileInit(t *tes
 
 func TestVerandaProfileNamedPresetIsProtectedMetadata(t *testing.T) {
 	handler, _, _ := ownerQueryFixture(t)
-	preset := filepath.Join(handler.cli.options.RepositoryRoot, "config/profiles/resource-only/yard.env")
-	for _, mode := range []string{"regular", "unsafe", "symlink", "missing"} {
-		t.Run(mode, func(t *testing.T) {
-			_ = os.Remove(preset)
-			switch mode {
-			case "regular":
-				testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o644)
-			case "unsafe":
-				testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o666)
-			case "symlink":
-				if err := os.Symlink("/nonexistent", preset); err != nil {
+	for _, name := range []string{"resource-only", "legacy"} {
+		preset := filepath.Join(handler.cli.options.RepositoryRoot, "config/profiles", name, "yard.env")
+		for _, mode := range []string{"regular", "unsafe", "symlink", "missing"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				_ = os.Remove(preset)
+				switch mode {
+				case "regular":
+					testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o644)
+				case "unsafe":
+					testkit.WriteFile(t, preset, []byte("SSH_PORT=2234\n"), 0o666)
+				case "symlink":
+					if err := os.Symlink("/nonexistent", preset); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode != "regular" && mode != "missing" {
+					if _, _, err := handler.cli.loadInitContext("preset-fixture", true, []string{"--profile", name}); err == nil {
+						t.Fatal("unsafe preset admitted to init")
+					}
+				}
+				result, err := handler.profileList(context.Background())
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			result, err := handler.profileList(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, profile := range result.Profiles {
-				if profile.Name == "resource-only" && profile.HasYardPreset != (mode == "regular") {
-					t.Fatal("preset metadata accepted an unsafe file or missed a valid preset")
+				for _, profile := range result.Profiles {
+					if profile.Name == name && profile.HasYardPreset != (mode == "regular") {
+						t.Fatal("preset metadata accepted an unsafe file or missed a valid preset")
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }

@@ -87,40 +87,38 @@ func (runtime Runtime) staticFindings() []finding {
 	for _, entry := range strings.Fields(runtime.Environment["HOST_MOUNTS"]) {
 		result = append(result, mountFindings("HOST_MOUNTS", entry)...)
 	}
-	profiles := filepath.Join(runtime.RepositoryRoot, "config", "profiles")
+	var packages []profile.Package
+	var err error
 	if configured := runtime.Environment["SUBYARD_PROFILES_DIR"]; configured != "" {
-		profiles = configured
+		packages, err = profile.PackagesIn(configured)
+	} else {
+		packages, err = profile.Packages(runtime.RepositoryRoot)
 	}
-	entries, err := os.ReadDir(profiles)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		result = append(result, finding{"fail", "read profiles: " + err.Error()})
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, pkg := range packages {
+		if pkg.Config == nil {
 			continue
 		}
-		path := filepath.Join(profiles, entry.Name(), "profile.conf")
-		values, err := config.ReadAssignments(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		values, err := config.ProfileValues(pkg.Config, nil)
 		if err != nil {
-			result = append(result, finding{"fail", fmt.Sprintf("read profile %s: %v", entry.Name(), err)})
+			result = append(result, finding{"fail", fmt.Sprintf("read profile %s: %v", pkg.Name, err)})
 			continue
 		}
 		for _, value := range strings.Fields(values["YARD_MOUNTS"]) {
-			result = append(result, mountFindings(entry.Name()+" YARD_MOUNTS", value)...)
+			result = append(result, mountFindings(pkg.Name+" YARD_MOUNTS", value)...)
 		}
 		for _, value := range strings.Fields(values["CACHES"]) {
 			if err := domain.ValidateProjectCachePath(value); err != nil {
 				result = append(result, finding{"fail",
-					fmt.Sprintf("%s: %s", entry.Name(), err)})
+					fmt.Sprintf("%s: %s", pkg.Name, err)})
 			}
 		}
 		for _, value := range strings.Fields(values["ENV_MOUNTS"]) {
 			if err := domain.ValidateProjectEnvironmentMount(value); err != nil {
 				result = append(result, finding{"fail",
-					fmt.Sprintf("%s: %s", entry.Name(), err)})
+					fmt.Sprintf("%s: %s", pkg.Name, err)})
 			}
 		}
 	}

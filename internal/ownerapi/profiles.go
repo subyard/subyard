@@ -2,10 +2,7 @@ package ownerapi
 
 import (
 	"context"
-	"errors"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -13,6 +10,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 type ProfileSelection struct {
@@ -55,35 +53,30 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 			Requested: slices.Clone(loaded.EnvironmentProfiles.Requested), Effective: slices.Clone(loaded.EnvironmentProfiles.Effective),
 			Provenance: settingProvenance(loaded.Settings["ENVIRONMENT_PROFILES"], false)},
 		Profiles: []Profile{}}
-	hooks, err := service.ProvisionProfiles()
+	packages, err := profile.Packages(service.RepositoryRoot)
 	if err != nil {
-		return result, &Error{Code: "profile_catalog_invalid", Message: "shipped provision catalog is invalid"}
-	}
-	entries, err := os.ReadDir(filepath.Join(service.RepositoryRoot, "config", "profiles"))
-	if errors.Is(err, os.ErrNotExist) {
-		return result, nil
-	}
-	if err != nil {
-		return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile catalog is unavailable"}
+		return result, &Error{Code: "profile_catalog_invalid", Message: "shipped profile catalog is invalid"}
 	}
 	declarations := loaded.Catalog.Profiles()
 	selection, explicit := loaded.Environment["ENVIRONMENT_PROFILES"], loaded.EnvironmentProfiles.Present
 	result.Selection.Present = explicit
 	_, _, sourceGroup := config.ComponentSelectionSource(loaded.Settings["ENVIRONMENT_PROFILES"])
-	for _, directory := range entries {
-		name := directory.Name()
-		if !directory.IsDir() || !domain.SafeName(name) {
-			continue
+	for _, pkg := range packages {
+		name := pkg.Name
+		provisionable := pkg.Provision != nil
+		if provisionable {
+			if err := pkg.CheckProvisionHook(); err != nil {
+				return result, &Error{Code: "profile_catalog_invalid", Message: "shipped provision catalog is invalid"}
+			}
 		}
 		scope, err := config.ProfileProvisionScope(loaded.Context.Paths.ConfigDir, name)
 		if err != nil {
 			return result, &Error{Code: "profile_catalog_invalid", Message: "shipped provision scope is invalid"}
 		}
-		entry := Profile{Name: name, Provisionable: slices.Contains(hooks, name), ProvisionScope: scope,
+		entry := Profile{Name: name, Provisionable: provisionable, ProvisionScope: scope,
 			Selected: slices.Contains(strings.Fields(selection), name), Eligible: true,
 			Eligibility: "allowed", Convergence: "not-applicable", Resources: []string{}}
-		preset, presetErr := os.Lstat(filepath.Join(service.RepositoryRoot, "config", "profiles", name, "yard.env"))
-		entry.HasYardPreset = presetErr == nil && preset.Mode().IsRegular() && preset.Mode().Perm()&0o022 == 0 && preset.Size() <= 8<<20
+		entry.HasYardPreset = pkg.Preset != nil
 		for _, declaration := range declarations {
 			if declaration.Name == name {
 				version := declaration.SchemaVersion
@@ -162,10 +155,19 @@ func (service Service) ProfileList(ctx context.Context) (ProfileList, error) {
 			continue
 		}
 		entry.Diagnostic = "check-unavailable"
+		pkg, err := profile.ResolvePackage(service.RepositoryRoot, entry.Name)
+		if err != nil {
+			continue
+		}
+		binding, err := config.ProfileProvisionBinding(pkg, loaded.Environment)
+		if err != nil {
+			continue
+		}
 		checked, output, err := runner.Run(ctx, domain.AdapterRequest{
 			Schema: shelladapter.ProtocolSchema, OperationID: service.OperationID,
 			Adapter: "provision", Action: "profile-check", Arguments: []string{"--check", entry.Name},
 			Context: maps.Clone(check.Context),
+			Input:   map[string]any{"profileBinding": binding},
 		}, nil)
 		if err != nil || checked.Status != "ok" {
 			if ctx.Err() != nil {

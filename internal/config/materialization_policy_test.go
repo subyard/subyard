@@ -8,11 +8,13 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 func TestMaterializationScopeSelectsOnlyDeclaredConsumers(t *testing.T) {
 	values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample other", "AGENT_sample_CONFIG": "source-label", "AGENT_sample_CONFIG_DEST": "config.json", "AGENT_sample_RULES": "rules-label", "AGENT_sample_RULES_DEST": "rules"}
-	instruction := MaterializationSource{Integration: "sample", Label: "Synthetic instructions", PreviewInstructions: true, Asset: MaterializedAsset{Name: "sample.instructions", Source: "instruction-label", Destination: "/home/dev/instructions", FollowSymlinks: true}}
+	instruction := profile.IntegrationDefinition{Name: "sample", Root: "/immutable/package", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "SAMPLE_INSTRUCTIONS", Destination: "instructions", Format: "raw"}}}
+	values["SAMPLE_INSTRUCTIONS"] = "instruction-label"
 	for _, test := range []struct {
 		name   string
 		scope  MaterializationScope
@@ -25,7 +27,7 @@ func TestMaterializationScopeSelectsOnlyDeclaredConsumers(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			values["ALLOWS_CODING_TOOLS"] = test.allows
-			selected, err := SelectMaterializationSources(values, "dev", test.scope, []MaterializationSource{instruction})
+			selected, err := SelectMaterializationSources(values, "dev", test.scope, instruction)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,7 +44,7 @@ func TestMaterializationScopeSelectsOnlyDeclaredConsumers(t *testing.T) {
 		})
 	}
 	values["CODING_TOOL_INTEGRATIONS"] = "other"
-	selected, err := SelectMaterializationSources(values, "dev", MaterializationRuntime, []MaterializationSource{instruction})
+	selected, err := SelectMaterializationSources(values, "dev", MaterializationRuntime, instruction)
 	if err != nil || len(selected) != 0 {
 		t.Fatal("unselected consumer escaped scope")
 	}

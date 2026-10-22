@@ -213,7 +213,7 @@ Usage: yard clone <url> [name]
 list projects currently registered in yards.
 
 ```text
-Usage: yard list [--live]
+Usage: yard list [--live | --complete-yards | --complete-projects | --complete-profiles]
 ```
 
 ## code

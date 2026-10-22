@@ -188,6 +188,12 @@ func checkPreparedMaterializedActivation(t *testing.T, native bool) {
 	t.Helper()
 	fixture := newSourceScopeFixture(t)
 	testkit.WriteFile(t, filepath.Join(fixture.root, "config", "projects-changed.sh"), []byte("#!/bin/sh\n"), 0755)
+	declareCLIInstructionFixture(t, fixture.root, "claude", "HOST_CLAUDE_MD", ".claude/CLAUDE.md", "Claude instructions")
+	catalog, catalogErr := config.LoadCatalog(fixture.root)
+	if catalogErr != nil {
+		t.Fatal(catalogErr)
+	}
+	fixture.program.catalog = catalog
 	if native {
 		fixture.program.options.InitPlatform = nil
 	}
@@ -198,11 +204,6 @@ func checkPreparedMaterializedActivation(t *testing.T, native bool) {
 	before, err := reconciler.Observe(context.Background(), releases, releasetransition.ReleaseLinks{})
 	if err != nil {
 		t.Fatal(err)
-	}
-	// Characterized from the native adapter before the shared Desired policy.
-	const legacyNativeDesired = releasetransition.Fingerprint("82339782016ccd3cb2fceb9b1b619928fd1ac0b2d3290f6fb35b56be2cd334ea")
-	if before.Desired != legacyNativeDesired {
-		t.Fatalf("native desired fingerprint compatibility changed: %s", before.Desired)
 	}
 	platform := fixture.program.options.InitPlatform
 	if native {

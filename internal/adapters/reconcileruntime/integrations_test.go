@@ -329,6 +329,7 @@ func TestPrepareLegacyIntegrationAdoptionBindsInitialSnapshotOnly(t *testing.T) 
 		"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex-AGENTS.md"),
 		"AGENT_codex_CONFIG=" + filepath.Join(root, "codex-config.json"), "AGENT_codex_CONFIG_DEST=.codex/config.json",
 	}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
 	prepared, plan, err := runtime.PrepareLegacyIntegrationAdoption(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +374,9 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{DevUser: "dev", DevUID: 1001}, Environment: []string{
 		"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "instructions.md"),
 	}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
 	legacy := runtime
+	legacy.Integrations = []profile.IntegrationDefinition{}
 	legacy.Environment = nil
 	legacyScope, _, err := legacy.IntegrationScope()
 	// Frozen uid/allows/artifacts payload, including the two project hook files.
@@ -393,8 +396,8 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if len(first) != 64 {
 		t.Fatalf("invalid desired scope fingerprint %q", first)
 	}
-	// Published assets without declarations used this payload for their scope.
-	// Keep it stable for authorized recovery journals.
+	// Declared packages add source binding to the historical artifact grammar.
+	// Declaration-free recovery identity remains frozen above.
 	entries, err := runtime.integrationArtifacts()
 	if err != nil {
 		t.Fatal(err)
@@ -410,12 +413,8 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("%x", sha256.Sum256(legacyPayload)); first != want {
-		t.Fatalf("declaration-free scope changed: got %s, want %s", first, want)
-	}
-	runtime.Integrations = []profile.IntegrationDefinition{}
-	if explicit, _, err := runtime.IntegrationScope(); err != nil || explicit != first {
-		t.Fatalf("explicit empty declarations changed scope: %s, %v", explicit, err)
+	if first == fmt.Sprintf("%x", sha256.Sum256(legacyPayload)) {
+		t.Fatal("declared package source binding was omitted")
 	}
 	testkit.WriteFile(t, filepath.Join(root, "instructions.md"), []byte("second\n"), 0o644)
 	second, secondPaths, err := runtime.IntegrationScope()
@@ -432,7 +431,7 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	}
 	declaration := filepath.Join(packageRoot, "integration.json")
 	testkit.WriteFile(t, declaration, []byte(`{"schema_version":1}`), 0o644)
-	runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: packageRoot}}
+	runtime.Integrations = append(runtime.Integrations, profile.IntegrationDefinition{Name: "sample", Root: packageRoot})
 	declared, declaredPaths, err := runtime.IntegrationScope()
 	if err != nil || declared == second || !slices.Equal(paths, declaredPaths) {
 		t.Fatalf("unselected declaration was not bound: %s, %v", declared, err)

@@ -1,23 +1,13 @@
 #compdef yard sy
 # yard.zsh — zsh completion for the `yard` (and `sy`) CLI.
 # Place on $fpath (e.g. ~/.zsh/completions) as `_yard`, or source it directly.
-# Top-level commands come from `yard --list`; profiles from config/profiles/.
-
-_yard_repo() {
-  local bin
-  bin="$(command -v yard 2>/dev/null)" || return 1
-  bin="${bin:A}"               # resolve symlink
-  print -r -- "${bin:h:h}"     # dirname twice → repo root
-}
+# Top-level commands and profile names come from the native engine.
 
 _yard_profiles() {
-  local repo d
-  repo="$(_yard_repo)" || return 0
-  d="$repo/config/profiles"
-  [[ -d $d ]] || return 0
-  local -a profiles
-  profiles=( $d/*/profile.conf(N:h:t) )
-  print -r -l -- $profiles
+  local inventory
+  if inventory="$("${1:-yard}" list --complete-profiles 2>/dev/null)" && [[ -n $inventory ]]; then
+    print -r -- "$inventory"
+  fi
 }
 
 # The native inventory owns yard/project discovery. A missing or incompatible engine
