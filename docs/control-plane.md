@@ -569,6 +569,47 @@ Provision readiness checks the actual backing filesystem, root ownership and mod
 ask the owner to close sessions and stop/start that yard. Intentionally stopped yards
 retain their deferred policy marker and verify the actual filesystem when running.
 Initial observation failures also retain these reasons; repairable drift stays a state.
+
+The same guest policy installs bounded native temporary cleanup. The early
+`subyard-tmp-shutdown.service` starts before `sysinit.target`, so its stop command
+runs after ordinary services and before local filesystems unmount. It invokes
+`systemd-tmpfiles` with an explicit `/etc/subyard-guest-tmpfiles.conf`, clearing
+the contents of `/tmp` while retaining its inode and mode 1777. Symlink targets
+and descendant mounts are preserved. A separate `subyard-tmp-boot.service`
+recovers leftovers before workloads start, including after an emergency hard stop.
+It runs before native tmpfiles setup, which recreates vendor service directories.
+Live installation enables boot recovery without running it and only arms the
+shutdown service. Manual disarming refuses whole-`/tmp` deletion outside native
+shutdown. Each cleanup has a 30-second native deadline; failure, timeout or an
+unsafe traversal root fails the native unit and is visible through its Result
+and journal. The CLI's stopped message confirms physical power state, not cleanup
+success. A hard stop provides no shutdown-cleanup guarantee; an already stopped
+yard remains stopped. Journals across reboot depend on guest journal persistence.
+
+Runtime cleanup is hourly, with an initial check 15 minutes after boot, and only
+ages the explicit opt-in `/tmp/subyard-disposable` tree. Files and directories
+whose modification time is older than one day are eligible. Active producers
+must hold a BSD `flock` on their own descendant operation directory for the full
+operation; a lock on the configured root or an ordinary open file descriptor
+does not provide that protection. Fresh or locked data is preserved. Generic
+`/tmp` content is outside this additional timer; vendor tmpfiles rules and the
+vendor clean timer remain unchanged. Service runtime directories should normally
+use systemd `RuntimeDirectory=` instead. Cleanup refuses symlink, foreign-owned,
+incorrect-mode or mounted traversal roots, including a bind mount at the opt-in
+root. A transitional live tmpfs `/tmp` also refuses whole-root cleanup until the
+requested restart activates disk backing. `/var/tmp`, `/srv`, credentials,
+workspaces and operation-owned producer scratch are outside blanket cleanup.
+
+To roll back cleanup, disable `subyard-tmp-boot.service`,
+`subyard-tmp-shutdown.service` and `subyard-tmp-clean.timer` inside the selected
+guest, then stop the timer and shutdown service. The latter reports a deliberate
+refusal when manually stopped; active temporary files remain intact. After
+verifying exact policy content, root ownership and modes, remove only those
+three unit files, `subyard-tmp-clean.service`,
+`/usr/local/lib/subyard-guest-tmp` and `/etc/subyard-guest-tmpfiles.conf`, then reload
+the manager. Keep the disk policy's `tmp.mount` mask unless separately reverting
+disk backing. Repeating initialization restores cleanup without clearing live
+data. Foreign policy files or unit overrides are preserved and refused.
 Route-consumer ownership conflicts identify the affected yard, validated native instance
 and route device, with a read-only Incus inspection command. Configuration inspection
 failures retain safe source context and direct operators to the affected yard's config status.

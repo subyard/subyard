@@ -66,6 +66,16 @@ mount. Failed cases retain bounded boot/mount properties and cleanup-step exits.
 It checks actual disk backing, mode
 1777, ordinary-user writes, repeat initialization and native teardown. The controller
 retains responsibility for lease release; no outer-yard restart is involved.
+Temporary-cleanup coverage also records an observation outside `/tmp` during
+shutdown, after the cleanup unit and before unmount. It verifies freed blocks,
+normal workload exit, hidden/nested payload removal, the unchanged root inode,
+and protected symlink, bind-mount and tmpfs targets. Scoped periodic cleanup uses
+controlled modification times and a real directory flock; it checks fresh and
+unclassified data, unsafe traversal roots, native refusal/failure/timeout, live
+policy rollback and boot recovery after a hard stop. This evidence comes from
+the native shutdown observation, rather than inferring stop cleanup from boot
+recovery. See the [guest cleanup contract](control-plane.md#release-migrations)
+for policy scope, failure visibility and cleanup rollback.
 
 To undo the policy on a yard, first verify that `/etc/systemd/system/tmp.mount` is
 the `/dev/null` mask, then remove that mask with `systemctl unmask tmp.mount` inside

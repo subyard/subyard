@@ -73,6 +73,11 @@ cleanup() {
         timeout --kill-after=2 10 sudo -n /usr/bin/incus exec "yard-$name" --project "subyard-$name" -- sh -c '
           systemctl show -p SystemState
           systemctl show tmp.mount -p LoadState -p ActiveState -p SubState -p Result
+          systemctl show subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.service \
+            -p Id -p ActiveState -p SubState -p Result -p ExecMainStatus
+          if [ -f /var/lib/subyard-tmp-fixture/shutdown.json ]; then
+            head -c 2048 /var/lib/subyard-tmp-fixture/shutdown.json
+          fi
           findmnt -n -T /tmp -o FSTYPE,SOURCE,OPTIONS
         ' || printf 'disk-tmp-acceptance: boot_mount_diagnostics_exit=%s\n' "$?"
       fi
@@ -131,10 +136,17 @@ restart_identity() {
   fi
 }
 disk_ready() {
+  guest sh -s -- wait-boot < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
   guest sh -s -- check < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
   [ "$(guest id -u "$fixture_dev_user")" = "$fixture_dev_uid" ] || die 'guest user does not match the configured fixture identity'
   guest runuser -u "$fixture_dev_user" -- sh -eu -c 'p=$(mktemp /tmp/subyard-disk-write.XXXXXX); rm "$p"'
   guest findmnt -n -T /tmp -o FSTYPE,SOURCE,OPTIONS
+  guest sh -eu -c '
+    for directory in /tmp/.X11-unix /tmp/.ICE-unix; do
+      [ -d "$directory" ] && [ ! -L "$directory" ]
+      [ "$(stat -c %a:%u:%g "$directory")" = 1777:0:0 ]
+    done
+  '
 }
 restart_yard() {
   local before
@@ -152,6 +164,279 @@ assert s.recv(128)==b"named:unlinked"
 ' "$holder"
 }
 
+periodic_cleanup() {
+  guest python3 - <<'PY'
+import os,time
+from pathlib import Path
+p=Path('/tmp/subyard-disposable')
+(p/'old').mkdir();(p/'old/payload').write_text('old')
+(p/'fresh').write_text('fresh')
+Path('/tmp/.subyard-unclassified').write_text('preserve')
+for item in (p/'old/payload',p/'old',Path('/tmp/.subyard-unclassified')):
+ os.utime(item,(time.time()-172800,)*2)
+PY
+  guest systemd-run --quiet --unit=subyard-tmp-lock-fixture -- python3 -c '
+import fcntl,os,time
+p="/tmp/subyard-disposable/locked";os.mkdir(p);f=os.open(p,os.O_RDONLY);fcntl.flock(f,fcntl.LOCK_EX)
+with open(p+"/payload","w") as w:w.write("active")
+for q in (p+"/payload",p):os.utime(q,(time.time()-172800,)*2)
+while True:time.sleep(1)
+'
+  for _ in {1..30}; do guest test ! -f /tmp/subyard-disposable/locked/payload || break; sleep 1; done
+  guest systemctl start subyard-tmp-clean.service
+  guest sh -eu -c '
+    test ! -e /tmp/subyard-disposable/old
+    test -f /tmp/subyard-disposable/fresh
+    test -f /tmp/subyard-disposable/locked/payload
+    test -f /tmp/.subyard-unclassified
+    [ "$(systemctl show subyard-tmp-clean.service -p Result --value)" = success ]
+  '
+  guest systemctl stop subyard-tmp-lock-fixture
+  guest systemctl start subyard-tmp-clean.service
+  guest test ! -e /tmp/subyard-disposable/locked
+  # The traversal root itself needs a guard; tmpfiles only skips descendant mounts.
+  guest sh -eu -c '
+    install -d -m 1777 /var/lib/subyard-tmp-mount-fixture
+    touch /var/lib/subyard-tmp-mount-fixture/protected
+    mount --bind /var/lib/subyard-tmp-mount-fixture /tmp/subyard-disposable
+    rc=0
+    systemctl start subyard-tmp-clean.service >/dev/null 2>&1 || rc=$?
+    test "$rc" != 0
+    test -f /var/lib/subyard-tmp-mount-fixture/protected
+    [ "$(systemctl show subyard-tmp-clean.service -p Result --value)" = exit-code ]
+    umount /tmp/subyard-disposable
+    systemctl reset-failed subyard-tmp-clean.service
+    chmod 0666 /etc/subyard-guest-tmpfiles.conf
+    rc=0
+    systemctl start subyard-tmp-clean.service >/dev/null 2>&1 || rc=$?
+    test "$rc" != 0
+    chmod 0644 /etc/subyard-guest-tmpfiles.conf
+    systemctl reset-failed subyard-tmp-clean.service
+  '
+  printf 'evidence: %s scoped_age_flock_mount_and_mode_guards=PASS\n' "$kind"
+}
+
+policy_refusals() {
+  for fault in mode owner symlink; do
+    guest sh -eu -c '
+      file=/etc/subyard-guest-tmpfiles.conf
+      case "$1" in
+        mode) chmod 0666 "$file" ;;
+        owner) chown 1:0 "$file" ;;
+        symlink) mv "$file" /var/lib/subyard-tmp-policy-saved; ln -s /var/lib/subyard-tmp-policy-saved "$file" ;;
+      esac
+    ' _ "$fault"
+    rc=0
+    guest sh -s -- apply < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh" >/dev/null 2>&1 || rc=$?
+    [ "$rc" != 0 ] || die 'unsafe guest policy was accepted'
+    guest sh -eu -c '
+      file=/etc/subyard-guest-tmpfiles.conf
+      case "$1" in
+        mode) chmod 0644 "$file" ;;
+        owner) chown 0:0 "$file" ;;
+        symlink) rm "$file"; mv /var/lib/subyard-tmp-policy-saved "$file" ;;
+      esac
+    ' _ "$fault"
+  done
+  disk_ready
+  printf 'evidence: %s policy_owner_mode_symlink_refusal=PASS\n' "$kind"
+}
+
+shutdown_cleanup() {
+  guest bash -s <<'GUEST'
+set -euo pipefail
+state=/var/lib/subyard-tmp-fixture
+install -d -m 0700 "$state" /var/tmp/subyard-tmp-protected /tmp/.subyard-protected/bind /tmp/.subyard-protected/mount
+printf protected > /var/tmp/subyard-tmp-protected/payload
+printf protected > /srv/.subyard-tmp-protected
+mount --bind /var/tmp/subyard-tmp-protected /tmp/.subyard-protected/bind
+mount -t tmpfs -o size=1m tmpfs /tmp/.subyard-protected/mount
+printf protected > /tmp/.subyard-protected/mount/payload
+ln -s /var/tmp/subyard-tmp-protected /tmp/.subyard-symlink
+cat > "$state/workload.py" <<'PY'
+import os,signal,time
+from pathlib import Path
+p=Path('/tmp/.subyard-clean-payload');p.mkdir()
+with (p/'allocated').open('wb') as f:
+ for _ in range(64):f.write(b'x'*1048576)
+(p/'.hidden').write_text('hidden');(p/'nested').mkdir();(p/'nested/file').touch()
+f=(p/'open-unlinked').open('w+b');f.write(b'y'*33554432);f.flush();(p/'open-unlinked').unlink()
+Path('/var/lib/subyard-tmp-fixture/workload-ready').touch()
+def stop(*_):
+ assert (p/'allocated').exists()
+ f.close();Path('/var/lib/subyard-tmp-fixture/workload-stopped').touch();raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+while True:time.sleep(1)
+PY
+cat > "$state/observe.py" <<'PY'
+import json,os,subprocess
+from pathlib import Path
+state=Path('/var/lib/subyard-tmp-fixture')
+before=json.loads((state/'before.json').read_text())
+result=subprocess.check_output(['systemctl','show','subyard-tmp-shutdown.service','-p','Result','--value'],text=True).strip()
+free=os.statvfs('/tmp').f_bavail*os.statvfs('/tmp').f_frsize
+observation=dict(cleanup_result=result,payload_absent=not Path('/tmp/.subyard-clean-payload').exists(),
+ workload_stopped=(state/'workload-stopped').exists(),root_inode=os.stat('/tmp').st_ino==before['inode'],
+ freed_bytes=free-before['free'],protected=all(Path(p).read_text()=='protected' for p in
+ ['/var/tmp/subyard-tmp-protected/payload','/srv/.subyard-tmp-protected','/tmp/.subyard-protected/bind/payload','/tmp/.subyard-protected/mount/payload']))
+(state/'shutdown.json').write_text(json.dumps(observation))
+PY
+cat > /etc/systemd/system/subyard-tmp-workload-fixture.service <<'UNIT'
+[Unit]
+Description=Disposable normal workload for shutdown ordering
+[Service]
+ExecStart=/usr/bin/python3 /var/lib/subyard-tmp-fixture/workload.py
+UNIT
+cat > /etc/systemd/system/subyard-tmp-observer-fixture.service <<'UNIT'
+[Unit]
+Description=Disposable observation after temporary cleanup and before unmount
+DefaultDependencies=no
+After=local-fs.target
+Before=subyard-tmp-shutdown.service sysinit.target shutdown.target umount.target
+Conflicts=shutdown.target umount.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/usr/bin/python3 /var/lib/subyard-tmp-fixture/observe.py
+TimeoutStopSec=10s
+UNIT
+systemctl daemon-reload
+systemctl start subyard-tmp-workload-fixture.service subyard-tmp-observer-fixture.service
+for _ in {1..30}; do [ ! -f "$state/workload-ready" ] || break; sleep 1; done
+test -f "$state/workload-ready"
+python3 - <<'PY'
+import json,os
+from pathlib import Path
+v=os.statvfs('/tmp')
+Path('/var/lib/subyard-tmp-fixture/before.json').write_text(json.dumps(dict(inode=os.stat('/tmp').st_ino,free=v.f_bavail*v.f_frsize)))
+PY
+GUEST
+  yard stop --yes
+  [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'cleanup stop did not physically stop'
+  yard stop --yes
+  [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'stopped no-op restarted guest'
+  yard start --yes
+  guest sh -s -- wait-boot < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
+  guest python3 - <<'PY'
+import json
+from pathlib import Path
+d=json.loads(Path('/var/lib/subyard-tmp-fixture/shutdown.json').read_text())
+print('evidence: stop_observation='+json.dumps(d,sort_keys=True))
+assert d['cleanup_result']=='success'
+assert all(d[k] for k in ['payload_absent','workload_stopped','root_inode','protected'])
+assert d['freed_bytes']>=64*1024*1024
+assert Path('/var/tmp/subyard-tmp-protected/payload').read_text()=='protected'
+assert Path('/srv/.subyard-tmp-protected').read_text()=='protected'
+assert not Path('/tmp/.subyard-clean-payload').exists()
+PY
+  disk_ready
+  guest sh -eu -c '
+    rm /etc/systemd/system/subyard-tmp-workload-fixture.service /etc/systemd/system/subyard-tmp-observer-fixture.service
+    systemctl daemon-reload
+  '
+  printf 'evidence: %s stop_freed_bytes_ordering_and_protected_targets=PASS\n' "$kind"
+}
+
+cleanup_failure_recovery() {
+  # Native manual disarm must refuse deletion, rather than clear a running guest.
+  guest sh -eu -c '
+    touch /tmp/.subyard-manual-stop
+    rc=0
+    systemctl stop subyard-tmp-shutdown.service >/dev/null 2>&1 || rc=$?
+    result=$(systemctl show subyard-tmp-shutdown.service -p Result --value)
+    printf "evidence: manual_disarm_cli_exit=%s native_result=%s\n" "$rc" "$result"
+    [ "$result" = exit-code ]
+    test -f /tmp/.subyard-manual-stop
+    systemctl reset-failed subyard-tmp-shutdown.service
+    systemctl start subyard-tmp-shutdown.service
+    install -d -m 0755 /etc/systemd/system/subyard-tmp-shutdown.service.d
+    printf "[Service]\nExecStop=\nExecStop=/bin/sleep 30\nTimeoutStopSec=1s\n" > /etc/systemd/system/subyard-tmp-shutdown.service.d/fixture.conf
+    systemctl daemon-reload
+    rc=0
+    systemctl stop subyard-tmp-shutdown.service >/dev/null 2>&1 || rc=$?
+    result=$(systemctl show subyard-tmp-shutdown.service -p Result --value)
+    printf "evidence: timeout_cli_exit=%s native_result=%s\n" "$rc" "$result"
+    [ "$result" = timeout ]
+    test -f /tmp/.subyard-manual-stop
+    rm /etc/systemd/system/subyard-tmp-shutdown.service.d/fixture.conf
+    rmdir /etc/systemd/system/subyard-tmp-shutdown.service.d
+    systemctl daemon-reload
+    systemctl reset-failed subyard-tmp-shutdown.service
+    systemctl start subyard-tmp-shutdown.service
+  '
+  guest bash -s <<'GUEST'
+set -euo pipefail
+touch /tmp/.subyard-failed-stop
+install -d -m 0755 /etc/systemd/system/subyard-tmp-shutdown.service.d
+printf '[Service]\nExecStop=\nExecStop=/usr/bin/false\n' > /etc/systemd/system/subyard-tmp-shutdown.service.d/fixture.conf
+cat > /etc/systemd/system/subyard-tmp-failure-observer.service <<'UNIT'
+[Unit]
+Description=Disposable native cleanup failure observer
+DefaultDependencies=no
+After=local-fs.target
+Before=subyard-tmp-shutdown.service shutdown.target umount.target
+Conflicts=shutdown.target umount.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/bin/sh -ec "systemctl show subyard-tmp-shutdown.service -p Result --value > /var/lib/subyard-tmp-fixture/failure-result; test -f /tmp/.subyard-failed-stop; touch /var/lib/subyard-tmp-fixture/failure-retained"
+UNIT
+systemctl daemon-reload
+systemctl start subyard-tmp-failure-observer.service
+GUEST
+  yard stop --yes
+  [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'failed cleanup did not physically stop'
+  yard start --yes
+  guest sh -s -- wait-boot < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
+  guest sh -eu -c '
+    [ "$(cat /var/lib/subyard-tmp-fixture/failure-result)" = exit-code ]
+    test -f /var/lib/subyard-tmp-fixture/failure-retained
+    test ! -e /tmp/.subyard-failed-stop
+    rm /etc/systemd/system/subyard-tmp-shutdown.service.d/fixture.conf \
+      /etc/systemd/system/subyard-tmp-failure-observer.service
+    rmdir /etc/systemd/system/subyard-tmp-shutdown.service.d
+    systemctl daemon-reload
+  '
+  # A genuine emergency hard stop bypasses the hook. Only the next boot recovers.
+  guest sh -eu -c 'touch /tmp/.subyard-hard-stop; sync'
+  incus stop "$instance" --project "$project" --force
+  [ "$(incus list "$instance" --project "$project" -f csv -c s)" = STOPPED ] || die 'emergency stop did not stop'
+  yard start --yes
+  guest sh -s -- wait-boot < "$YARD_RUNTIME_ROOT/current/scripts/guest-disk-tmp.sh"
+  guest sh -eu -c '
+    test ! -e /tmp/.subyard-hard-stop
+    test ! -e /tmp/.subyard-manual-stop
+    [ "$(systemctl show subyard-tmp-boot.service -p Result --value)" = success ]
+  '
+  disk_ready
+  printf 'evidence: %s native_skip_failure_timeout_and_hard_stop_recovery=PASS\n' "$kind"
+}
+
+rollback_cleanup() {
+  guest sh -eu -c '
+    systemctl disable subyard-tmp-shutdown.service subyard-tmp-boot.service subyard-tmp-clean.timer
+    systemctl stop subyard-tmp-clean.timer
+    rc=0
+    systemctl stop subyard-tmp-shutdown.service >/dev/null 2>&1 || rc=$?
+    [ "$(systemctl show subyard-tmp-shutdown.service -p Result --value)" = exit-code ]
+    for file in /etc/systemd/system/subyard-tmp-shutdown.service \
+      /etc/systemd/system/subyard-tmp-boot.service \
+      /etc/systemd/system/subyard-tmp-clean.service \
+      /etc/systemd/system/subyard-tmp-clean.timer \
+      /etc/subyard-guest-tmpfiles.conf /usr/local/lib/subyard-guest-tmp; do
+      test -f "$file" && test ! -L "$file"
+      [ "$(stat -c %u:%g "$file")" = 0:0 ]
+      grep -q "Subyard guest temporary storage policy v1" "$file"
+      rm "$file"
+    done
+    systemctl daemon-reload
+  '
+  probe_holder
+  printf 'evidence: %s live_cleanup_rollback_preserves_workload=PASS\n' "$kind"
+}
+
 for kind in container vm; do
   suffix="${STATE##*.}"
   name="tmp-$kind-${suffix,,}"
@@ -166,6 +451,10 @@ for kind in container vm; do
   yard start --yes
   disk_ready
   printf 'evidence: %s normal_minimal_creation=PASS\n' "$kind"
+  policy_refusals
+  periodic_cleanup
+  shutdown_cleanup
+  cleanup_failure_recovery
 
   # Roll back only the policy on the exact disposable yard. Restore the native
   # image's tmpfs unit for a genuine old-yard transition on its next boot.
@@ -214,6 +503,7 @@ while True:
 ' "$holder"
   for _ in {1..30}; do guest test ! -S "$holder/socket" || break; sleep 1; done
   probe_holder
+  rollback_cleanup
   before="$(restart_identity)"
   output="$STATE/repeat-$kind.log"
   rc=0
