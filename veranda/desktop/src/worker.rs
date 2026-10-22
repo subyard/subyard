@@ -9,6 +9,7 @@ use veranda_lib::client::{
 };
 use veranda_lib::connections::{ConnectionSummary, NavigationSelection};
 use veranda_lib::local_fleet::{LocalFleetSnapshot, NativeError};
+use veranda_lib::observation::{Batch, Observation, Observed, ReadProof, Retirement};
 
 pub enum Update {
     Initialized {
@@ -24,6 +25,7 @@ pub enum Update {
         connection: Option<String>,
         invalidation: u64,
         result: Result<LocalFleetSnapshot, NativeError>,
+        observation: Option<ReadObservation>,
     },
     Saved {
         selection: NavigationSelection,
@@ -45,6 +47,7 @@ pub enum Update {
         scope: Scope,
         invalidation: u64,
         result: Result<Details, NativeError>,
+        observation: Option<ReadObservation>,
     },
     StateSaved {
         revision: u64,
@@ -74,6 +77,24 @@ pub enum Update {
     },
     Events,
     Closed,
+}
+
+/// Original hints and actual native read proof, paired with the outer update's
+/// generation/invalidation. Neither hints nor a monitor snapshot prove UI apply.
+#[derive(Clone)]
+pub struct ReadObservation {
+    /// Requested scope; the outer Update owns generation and invalidation.
+    pub scope: Scope,
+    /// Actual callback scope, only when it exactly matches the requested scope.
+    /// Owner-wide hints are retained separately, never lent to a selected yard.
+    pub hint_scope: Option<Scope>,
+    pub batch: Batch,
+    pub proof: Option<ReadProof>,
+}
+impl ReadObservation {
+    fn retire(&self, observer: &Observation, reason: Retirement) {
+        observer.retire(&observer.live(&self.batch), reason);
+    }
 }
 
 /// Concrete pre-admission failure, including failed local intent persistence.
@@ -166,7 +187,10 @@ fn save_state(
 /// Callbacks are hints, never ordered inventory. A hint invalidates every read
 /// started before it, even when callback delivery lags a newer native snapshot.
 #[derive(Default)]
-pub(crate) struct Invalidations(HashMap<Option<String>, Hint>);
+pub(crate) struct Invalidations {
+    hints: HashMap<Option<String>, Hint>,
+    observation: Option<Observation>,
+}
 
 #[derive(Default)]
 struct Hint {
@@ -175,11 +199,38 @@ struct Hint {
     available: bool,
     last_available: u64,
     failed_at: Option<u64>,
+    observations: Option<Vec<ReadObservation>>,
 }
 
 impl Invalidations {
     pub(crate) fn hint(&mut self, connection: Option<String>, available: bool) {
-        let entry = self.0.entry(connection).or_default();
+        self.hint_observed(connection, None, available, None);
+    }
+    fn hint_observed(
+        &mut self,
+        connection: Option<String>,
+        yard: Option<String>,
+        available: bool,
+        batch: Option<Batch>,
+    ) {
+        // Closed/retired sources must not leave an accumulating side queue in
+        // inactive owners. This only removes metadata with a recorded terminal
+        // reason; ordinary dirty/version/availability state is unchanged.
+        if let Some(observer) = &self.observation {
+            for hint in self.hints.values_mut() {
+                if let Some(items) = &mut hint.observations {
+                    for old in items.iter_mut() {
+                        old.batch = observer.live(&old.batch);
+                    }
+                    items.retain(|old| !old.batch.tickets().is_empty());
+                }
+            }
+        }
+        let scope = self.observation.as_ref().map(|_| Scope {
+            connection: connection.clone(),
+            yard,
+        });
+        let entry = self.hints.entry(connection).or_default();
         entry.version = entry
             .version
             .checked_add(1)
@@ -189,20 +240,66 @@ impl Invalidations {
         if available {
             entry.last_available = entry.version;
         }
+        if let (Some(observer), Some(scope), Some(batch)) = (&self.observation, scope, batch) {
+            let batch = observer.inventory(&batch);
+            if !batch.tickets().is_empty() {
+                let observations = entry.observations.get_or_insert_with(Vec::new);
+                if let Some(old) = observations.iter_mut().find(|old| old.scope == scope) {
+                    old.batch = observer.merge(&old.batch, &batch);
+                } else {
+                    observations.push(ReadObservation {
+                        hint_scope: Some(scope.clone()),
+                        scope,
+                        batch,
+                        proof: None,
+                    });
+                }
+            }
+        }
+    }
+    fn carry(&self, connection: &Option<String>, yard: &Option<String>) -> Option<ReadObservation> {
+        let observer = self.observation.as_ref()?;
+        let scope = Scope {
+            connection: connection.clone(),
+            yard: yard.clone(),
+        };
+        let batch = self
+            .hints
+            .get(connection)
+            .and_then(|hint| hint.observations.as_ref())
+            .and_then(|items| items.iter().find(|item| item.scope == scope))
+            .map(|item| observer.live(&item.batch))
+            .unwrap_or_default();
+        let hint_scope = (!batch.tickets().is_empty()).then(|| scope.clone());
+        Some(ReadObservation {
+            scope,
+            hint_scope,
+            batch,
+            proof: None,
+        })
+    }
+    fn close_observations(&mut self) {
+        if let Some(observer) = &self.observation {
+            for hint in self.hints.values_mut() {
+                for item in hint.observations.take().unwrap_or_default() {
+                    item.retire(observer, Retirement::Unknown);
+                }
+            }
+        }
     }
 
     pub(crate) fn version(&self, connection: &Option<String>) -> u64 {
-        self.0.get(connection).map_or(0, |entry| entry.version)
+        self.hints.get(connection).map_or(0, |entry| entry.version)
     }
 
     pub(crate) fn finished(&mut self, connection: &Option<String>, failed: bool) {
-        let entry = self.0.entry(connection.clone()).or_default();
+        let entry = self.hints.entry(connection.clone()).or_default();
         entry.failed_at = failed.then_some(entry.version);
     }
 
     pub(crate) fn permits_read(&self, connection: &Option<String>, explicit: bool) -> bool {
         explicit
-            || self.0.get(connection).is_none_or(|entry| {
+            || self.hints.get(connection).is_none_or(|entry| {
                 entry
                     .failed_at
                     .is_none_or(|failed| entry.last_available > failed)
@@ -210,7 +307,7 @@ impl Invalidations {
     }
 
     fn take(&mut self) -> Vec<(Option<String>, bool)> {
-        self.0
+        self.hints
             .iter_mut()
             .filter_map(|(connection, entry)| {
                 if std::mem::take(&mut entry.dirty) {
@@ -225,6 +322,9 @@ impl Invalidations {
 
 #[derive(Default)]
 struct Pending {
+    observation: Option<Observation>,
+    read_observation: Option<ReadObservation>,
+    details_observation: Option<ReadObservation>,
     read: Option<(u64, Option<String>, Option<String>, bool)>,
     details: Option<(u64, Scope)>,
     state: Option<(u64, AppState)>,
@@ -262,6 +362,23 @@ impl Pending {
         yard: Option<String>,
         explicit: bool,
     ) {
+        self.read_observed(generation, connection, yard, explicit, None);
+    }
+    fn read_observed(
+        &mut self,
+        generation: u64,
+        connection: Option<String>,
+        yard: Option<String>,
+        explicit: bool,
+        carry: Option<ReadObservation>,
+    ) {
+        Self::merge_carry(
+            &self.observation,
+            &mut self.read_observation,
+            carry,
+            &connection,
+            &yard,
+        );
         if self.read.as_ref().is_some_and(
             |(old_generation, old_connection, old_yard, old_explicit)| {
                 *old_generation == generation
@@ -274,6 +391,64 @@ impl Pending {
             return;
         }
         self.read = Some((generation, connection, yard, explicit));
+    }
+    fn merge_carry(
+        observer: &Option<Observation>,
+        old: &mut Option<ReadObservation>,
+        next: Option<ReadObservation>,
+        connection: &Option<String>,
+        yard: &Option<String>,
+    ) {
+        let Some(observer) = observer else {
+            return;
+        };
+        if old
+            .as_ref()
+            .is_some_and(|item| item.scope.connection != *connection || item.scope.yard != *yard)
+        {
+            old.take().unwrap().retire(observer, Retirement::Superseded);
+        }
+        if let Some(mut next) = next {
+            if next.scope.connection != *connection || next.scope.yard != *yard {
+                next.retire(observer, Retirement::Unknown);
+                return;
+            }
+            next.batch = observer.live(&next.batch);
+            if next.batch.tickets().is_empty() {
+                next.hint_scope = None;
+            }
+            if let Some(old) = old {
+                old.batch = observer.merge(&old.batch, &next.batch);
+                if !next.batch.tickets().is_empty() {
+                    old.hint_scope = next.hint_scope;
+                }
+            } else {
+                *old = Some(next);
+            }
+        }
+    }
+    fn details_observed(&mut self, generation: u64, scope: Scope, carry: Option<ReadObservation>) {
+        Self::merge_carry(
+            &self.observation,
+            &mut self.details_observation,
+            carry,
+            &scope.connection,
+            &scope.yard,
+        );
+        self.details = Some((generation, scope));
+    }
+    fn close_observations(&mut self) {
+        if let Some(observer) = &self.observation {
+            for item in [
+                self.read_observation.take(),
+                self.details_observation.take(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                item.retire(observer, Retirement::Unknown);
+            }
+        }
     }
 }
 
@@ -309,6 +484,41 @@ impl ReviewedToken {
     }
 }
 
+fn receive_event(
+    events: &Mutex<Invalidations>,
+    operations: &Mutex<HashMap<String, VerandaEvent>>,
+    event: VerandaEvent,
+) {
+    if let Some(id) = &event.operation_id {
+        if let Ok(mut operations) = operations.lock() {
+            record_operation(&mut operations, id.clone(), event);
+        }
+    } else if let Ok(mut pending) = events.lock() {
+        // Monitor read proofs and snapshot values are never authoritative Worker results.
+        let batch = event.observation.map(|metadata| metadata.batch);
+        pending.hint_observed(
+            event.connection_id,
+            event.yard,
+            event.snapshot.is_some(),
+            batch,
+        );
+    }
+}
+fn finish_read<T>(
+    result: Result<Observed<T>, NativeError>,
+    mut observation: Option<ReadObservation>,
+) -> (Result<T, NativeError>, Option<ReadObservation>) {
+    match result {
+        Ok(read) => {
+            if let Some(metadata) = &mut observation {
+                metadata.proof = read.proof;
+            }
+            (Ok(read.value), observation)
+        }
+        Err(error) => (Err(error), observation),
+    }
+}
+
 /// One current read, preference write and trust command, independent of click/event frequency.
 /// The worker sleeps on the condition variable; no idle timer or polling loop.
 pub struct Worker {
@@ -323,28 +533,39 @@ pub struct Worker {
 
 impl Worker {
     pub fn start(root: PathBuf) -> (Self, Receiver<Update>) {
+        Self::start_with_observation(root, None)
+    }
+    pub fn observed(root: PathBuf, observation: Observation) -> (Self, Receiver<Update>) {
+        Self::start_with_observation(root, Some(observation))
+    }
+    fn start_with_observation(
+        root: PathBuf,
+        observation: Option<Observation>,
+    ) -> (Self, Receiver<Update>) {
         let (updates, receiver) = async_channel::bounded(8);
-        let events = Arc::new(Mutex::new(Invalidations::default()));
+        let events = Arc::new(Mutex::new(Invalidations {
+            observation: observation.clone(),
+            ..Invalidations::default()
+        }));
         let event_map = events.clone();
         let notifications = updates.clone();
         let operation_events = Arc::new(Mutex::new(HashMap::<String, VerandaEvent>::new()));
         let operations = operation_events.clone();
-        let client = Client::new(
-            root,
-            Arc::new(move |event| {
-                if let Some(id) = &event.operation_id {
-                    if let Ok(mut operations) = operations.lock() {
-                        record_operation(&mut operations, id.clone(), event);
-                    }
-                } else if let Ok(mut pending) = event_map.lock() {
-                    // Yard events invalidate details and owner inventory; payloads
-                    // and callback delivery order never become displayed facts.
-                    pending.hint(event.connection_id, event.snapshot.is_some());
-                }
-                let _ = notifications.try_send(Update::Events);
+        let emit = Arc::new(move |event| {
+            receive_event(&event_map, &operations, event);
+            let _ = notifications.try_send(Update::Events);
+        });
+        let client = match &observation {
+            Some(observer) => Client::observed(root, emit, observer.clone()),
+            None => Client::new(root, emit),
+        };
+        let pending = Arc::new((
+            Mutex::new(Pending {
+                observation: observation.clone(),
+                ..Pending::default()
             }),
-        );
-        let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
+            Condvar::new(),
+        ));
         let requests = pending.clone();
         let native = client.clone();
         let replies = updates.clone();
@@ -423,11 +644,17 @@ impl Worker {
                         break;
                     }
                     (
-                        pending.read.take(),
+                        pending
+                            .read
+                            .take()
+                            .map(|read| (read, pending.read_observation.take())),
                         pending.save.take(),
                         pending.trust.take(),
                         pending.cancellation.take(),
-                        pending.details.take(),
+                        pending
+                            .details
+                            .take()
+                            .map(|details| (details, pending.details_observation.take())),
                         pending.state.take(),
                         pending.owner.take(),
                     )
@@ -584,17 +811,18 @@ impl Worker {
                         break;
                     }
                 }
-                let read = read.filter(|(_, connection, _, explicit)| {
+                let read = read.filter(|((_, connection, _, explicit), _)| {
                     invalidations
                         .lock()
                         .unwrap()
                         .permits_read(connection, *explicit)
                 });
-                if let Some((generation, connection, yard, _)) = read {
+                if let Some(((generation, connection, yard, _), observation)) = read {
                     let invalidation = invalidations.lock().unwrap().version(&connection);
                     let result = native
                         .retain_read_scope(connection.clone(), yard)
-                        .and_then(|()| native.fleet(connection.clone()));
+                        .and_then(|()| native.fleet_observed(connection.clone()));
+                    let (result, observation) = finish_read(result, observation);
                     invalidations
                         .lock()
                         .unwrap()
@@ -605,22 +833,32 @@ impl Worker {
                             connection,
                             invalidation,
                             result,
+                            observation,
                         })
                         .is_err()
                     {
                         break;
                     }
                 }
-                if let Some((generation, scope)) = details {
+                if let Some(((generation, scope), observation)) = details {
                     let invalidation = invalidations.lock().unwrap().version(&scope.connection);
                     let result = native
                         .retain_read_scope(scope.connection.clone(), scope.yard.clone())
                         .and_then(|()| match &scope.yard {
                             Some(yard) => native
-                                .yard(scope.connection.clone(), yard.clone())
-                                .map(Details::Yard),
-                            None => native.host(scope.connection.clone()).map(Details::Host),
+                                .yard_observed(scope.connection.clone(), yard.clone())
+                                .map(|read| Observed {
+                                    value: Details::Yard(read.value),
+                                    proof: read.proof,
+                                }),
+                            None => native.host_observed(scope.connection.clone()).map(|read| {
+                                Observed {
+                                    value: Details::Host(read.value),
+                                    proof: read.proof,
+                                }
+                            }),
                         });
+                    let (result, observation) = finish_read(result, observation);
                     invalidations
                         .lock()
                         .unwrap()
@@ -631,6 +869,7 @@ impl Worker {
                             scope,
                             invalidation,
                             result,
+                            observation,
                         })
                         .is_err()
                     {
@@ -722,18 +961,17 @@ impl Worker {
         yard: Option<String>,
         explicit: bool,
     ) -> bool {
-        if !self
-            .events
-            .lock()
-            .unwrap()
-            .permits_read(&connection, explicit)
-        {
-            return false;
-        }
+        let observation = {
+            let events = self.events.lock().unwrap();
+            if !events.permits_read(&connection, explicit) {
+                return false;
+            }
+            events.carry(&connection, &yard)
+        };
         let (lock, wake) = &*self.pending;
         let mut pending = lock.lock().unwrap();
         if !pending.stopped {
-            pending.read(generation, connection, yard, explicit);
+            pending.read_observed(generation, connection, yard, explicit, observation);
             wake.notify_one();
             return true;
         }
@@ -741,10 +979,15 @@ impl Worker {
     }
 
     pub fn details(&self, generation: u64, scope: Scope) {
+        let observation = self
+            .events
+            .lock()
+            .unwrap()
+            .carry(&scope.connection, &scope.yard);
         let (lock, wake) = &*self.pending;
         let mut pending = lock.lock().unwrap();
         if !pending.stopped {
-            pending.details = Some((generation, scope));
+            pending.details_observed(generation, scope, observation);
             wake.notify_one();
         }
     }
@@ -804,8 +1047,10 @@ impl Worker {
         let final_selection = {
             let mut pending = lock.lock().unwrap();
             pending.stopped = true;
+            pending.close_observations();
             pending.save.take()
         };
+        self.events.lock().unwrap().close_observations();
         wake.notify_one();
         let native = self.client.clone();
         let replies = self.updates.clone();
@@ -850,6 +1095,7 @@ mod tests {
             state: state.into(),
             message: None,
             snapshot: None,
+            observation: None,
         };
         for index in 0..32 {
             let id = format!("operation-{index}");
@@ -964,6 +1210,160 @@ mod tests {
         assert_eq!(pending.read, Some((1, None, None, true)));
         pending.read(2, Some("remote".into()), None, false);
         assert_eq!(pending.read, Some((2, Some("remote".into()), None, false)));
+    }
+    fn observed_carry(scope: Scope, batch: Batch) -> ReadObservation {
+        ReadObservation {
+            hint_scope: Some(scope.clone()),
+            scope,
+            batch,
+            proof: None,
+        }
+    }
+    #[test]
+    fn observation_pending_preserves_starts_refresh_generation_and_supersedes_only_old_scope() {
+        use veranda_lib::observation::SourceKind;
+        let observation = Observation::new();
+        let local = observation.source(SourceKind::Local);
+        let first = local.request().unwrap();
+        let scope = Scope {
+            connection: None,
+            yard: None,
+        };
+        let mut pending = Pending {
+            observation: Some(observation.clone()),
+            ..Pending::default()
+        };
+        pending.read_observed(
+            1,
+            None,
+            None,
+            true,
+            Some(observed_carry(scope.clone(), local.batch())),
+        );
+        local.request().unwrap();
+        pending.read_observed(
+            1,
+            None,
+            None,
+            false,
+            Some(observed_carry(scope.clone(), local.batch())),
+        );
+        assert_eq!(pending.read, Some((1, None, None, true)));
+        assert_eq!(
+            pending
+                .read_observation
+                .as_ref()
+                .unwrap()
+                .batch
+                .tickets()
+                .len(),
+            2
+        );
+        assert_eq!(
+            pending.read_observation.as_ref().unwrap().batch.tickets()[0].started(),
+            first.started()
+        );
+        pending.read_observed(
+            2,
+            None,
+            None,
+            false,
+            Some(observed_carry(scope, local.batch())),
+        );
+        assert_eq!(pending.read.as_ref().unwrap().0, 2);
+        assert_eq!(
+            pending.read_observation.as_ref().unwrap().batch.tickets()[0].started(),
+            first.started()
+        );
+        let remote = observation.source(SourceKind::Remote);
+        let remote_ticket = remote.request().unwrap();
+        let next_scope = Scope {
+            connection: Some("synthetic-other".into()),
+            yard: None,
+        };
+        pending.read_observed(
+            3,
+            next_scope.connection.clone(),
+            None,
+            false,
+            Some(observed_carry(next_scope.clone(), remote.batch())),
+        );
+        assert!(local.batch().tickets().is_empty());
+        assert_eq!(
+            pending.read_observation.as_ref().unwrap().batch.tickets()[0].ordinal(),
+            remote_ticket.ordinal()
+        );
+        local.request().unwrap();
+        pending.read_observed(
+            3,
+            next_scope.connection.clone(),
+            None,
+            false,
+            Some(observed_carry(
+                Scope {
+                    connection: None,
+                    yard: None,
+                },
+                local.batch(),
+            )),
+        );
+        assert!(
+            local.batch().tickets().is_empty(),
+            "wrong requested scope is explicitly unknown, never lent"
+        );
+        assert_eq!(pending.read_observation.as_ref().unwrap().scope, next_scope);
+        assert_eq!(observation.counts().pending, 1);
+        pending.close_observations();
+        assert_eq!(observation.counts().pending, 0);
+    }
+    #[test]
+    fn observation_callback_filters_foreign_context_without_changing_owner_invalidation_or_operations(
+    ) {
+        use veranda_lib::observation::{SourceKind, UpdateObservation};
+        let observation = Observation::new();
+        let foreign = Observation::new();
+        let source = foreign.source(SourceKind::Remote);
+        source.request().unwrap();
+        let hints = Mutex::new(Invalidations {
+            observation: Some(observation.clone()),
+            ..Invalidations::default()
+        });
+        let operations = Mutex::new(HashMap::new());
+        let event = |operation_id| VerandaEvent {
+            connection_id: None,
+            yard: Some("synthetic-yard".into()),
+            operation_id,
+            state: "running".into(),
+            message: None,
+            snapshot: None,
+            observation: Some(UpdateObservation {
+                batch: source.batch(),
+                read: None,
+            }),
+        };
+        receive_event(&hints, &operations, event(None));
+        assert_eq!(hints.lock().unwrap().version(&None), 1);
+        assert_eq!(hints.lock().unwrap().take(), vec![(None, false)]);
+        let carry = hints
+            .lock()
+            .unwrap()
+            .carry(&None, &Some("synthetic-yard".into()))
+            .unwrap();
+        assert!(
+            carry.batch.tickets().is_empty() && carry.hint_scope.is_none() && carry.proof.is_none()
+        );
+        assert_eq!(observation.counts().rejected_batch_tickets, 1);
+        receive_event(
+            &hints,
+            &operations,
+            event(Some("operation-synthetic".into())),
+        );
+        assert_eq!(operations.lock().unwrap().len(), 1);
+        assert_eq!(
+            hints.lock().unwrap().version(&None),
+            1,
+            "operation dispatch route unchanged"
+        );
     }
 }
 

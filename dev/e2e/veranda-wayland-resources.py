@@ -249,8 +249,8 @@ def platform_environment(state):
         raise RuntimeError('platform cache must be plain')
     subprocess.run(['sudo', '-n', 'install', '-d', '-o', str(os.getuid()), '-g', str(os.getgid()),
                     '-m', '0711', str(platform)], check=True, timeout=5)
-    config, data = state / 'prepare-config', state / 'prepare-data'
-    for directory in (config, data, config / 'yards'):
+    config, data, units = state / 'prepare-config', state / 'prepare-data', state / 'prepare-key-units'
+    for directory in (config, data, config / 'yards', units):
         probe.private_dir(directory)
     name = 'vp-' + state.name.rsplit('-', 1)[-1].replace('_', '-') + '-0'
     yard = config / 'yards' / name
@@ -264,7 +264,8 @@ def platform_environment(state):
     env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(home),
            'SUBYARD_OPERATOR_HOME': str(home), 'SUBYARD_CONFIG_HOME': str(config), 'SUBYARD_HOME': str(data),
            'SUBYARD_REPOSITORY_ROOT': str(ROOT), 'STORAGE_PATH': str(platform / 'incus/incus/storage'),
-           'SUBYARD_NO_AUDIT': '1', 'SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE': '1', 'MIN_DISK_GIB': '1'}
+           'SUBYARD_NO_AUDIT': '1', 'SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE': '1',
+           'SUBYARD_KEYS_SYSTEMD_DIR': str(units), 'MIN_DISK_GIB': '1'}
     probe.isolated_defaults(state, env)
     return platform, name, env
 
@@ -327,11 +328,19 @@ def main():
     parser.add_argument('--gtk', action='store_true', help='current GTK ordinary baseline; historical marker/WebKit path otherwise')
     parser.add_argument('--x11', action='store_true', help='GTK only: private Xvfb/Openbox at 1920x1080')
     parser.add_argument('--short', action='store_true', help='GTK only: one launch/one second idle prerequisite, not budget acceptance')
+    parser.add_argument('--child-usage', action='store_true', help='GTK only: retain requested per-launch raw child and app observations')
+    parser.add_argument('--correlation-config', type=Path, help='optional private template; requires --child-usage; no producer')
     parser.add_argument('--diagnostic-gdk-gl', action='store_true',
                         help='short paired normal/early GTK GL diagnostic; not budget acceptance')
     parser.add_argument('--configured-fleet', action='store_true',
                         help='verify 20 uncreated local yards/200 project names per fresh launch')
+    parser.add_argument('--prepared-assets', type=Path,
+                        help='GTK only: validated staged runtime and exact Debian container image assets')
     args = parser.parse_args()
+    if args.child_usage and not args.gtk: parser.error('--child-usage requires --gtk')
+    if args.correlation_config and not args.child_usage: parser.error('--correlation-config requires --child-usage')
+    if args.prepared_assets is not None and not args.gtk:
+        parser.error('--prepared-assets requires --gtk')
     if (args.x11 or args.short) and not args.gtk:
         parser.error('--x11/--short require --gtk')
     if args.gtk and args.diagnostic_gdk_gl:
@@ -383,7 +392,8 @@ def main():
                'WAYLAND_DISPLAY': 'veranda-measure'}
         with contextlib.ExitStack() as preparation:
             if args.configured_fleet:
-                preparation.enter_context(prepared_platform(state, args.engine))
+                preparation.enter_context(prepared_platform(state, args.engine, prepared_assets=args.prepared_assets)
+                                          if args.prepared_assets is not None else prepared_platform(state, args.engine))
             payload = measure_gtk(state, args, env) if args.gtk else measure(state, args, env)
         # Report only after compositor and product preparation cleanup complete.
         payload.update(platform_cleanup='passed' if args.configured_fleet else 'not_required',
@@ -476,13 +486,17 @@ def measure_gtk(state, args, env):
             rc = run_probe([sys.executable, str(ROOT / 'dev/measure-veranda.py'), '--gtk', '--configured-fleet',
                             '--binary', '/usr/bin/subyard-veranda', '--engine', str(args.engine), '--output', str(output),
                             '--gtk-stderr-log', str(state / 'gtk-stderr.log'), '--starts', '1' if args.short else '30', '--idle-seconds', '1' if args.short else '120',
-                            '--idle-settle-seconds', '0' if args.short else '30', *flags], env, log,
+                            '--idle-settle-seconds', '0' if args.short else '30', *(['--child-usage'] if args.child_usage else []),
+                            *(['--correlation-config', str(args.correlation_config)] if args.correlation_config else []), *flags], env, log,
                            timeout_seconds=180 if args.short else 1200)
         if not output.is_file(): raise RuntimeError('GTK resource probe failed without metrics')
         metrics = json.loads(output.read_text())
         # Emit measured over-limit results before surfacing the native failure.
         if rc: print('VERANDA_GTK_RESOURCE_FAILURE ' + json.dumps(metrics), flush=True)
         if rc: raise RuntimeError('GTK resource probe failed')
+        if args.child_usage and metrics.get('observation_status') != 'passed':
+            print('VERANDA_GTK_RESOURCE_FAILURE ' + json.dumps(metrics), flush=True)
+            raise RuntimeError('requested raw resource observations unavailable')
         return {'schema_version': 1, 'measurement_kind': 'GTK one-launch prerequisite; not budget acceptance' if args.short else 'GTK ordinary sampled baseline',
                 'setup': {'backend': 'x11' if args.x11 else 'wayland', 'compositor': compositor_name,
                           'screen': geometry, 'renderer': 'shipping GTK default/auto; GSK_RENDERER unset; successful GSK class evidence per launch (GSK_DEBUG=renderer); hardware acceleration unmeasured',

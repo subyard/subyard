@@ -112,7 +112,7 @@ def image_remote(directory, data, state, env, command):
     invocation. The product still creates and owns its own isolated project.
     """
     token = state.name.removeprefix('veranda-wayland-').replace('_', '-')
-    remote = 'veranda-assets-' + token
+    remote = 'veranda-assets-' + token + '-image'
     alias = remote
     image = data['image']; fingerprint = image['fingerprint']
     def call(*argv, timeout=30):

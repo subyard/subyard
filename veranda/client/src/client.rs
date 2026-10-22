@@ -3,17 +3,21 @@ use crate::connections::{
     ConnectionStore, ConnectionSummary, ConsentedConnection, NavigationSelection, RemoveAssessment,
     TrustAssessment,
 };
-use crate::local_fleet::{safe_id, safe_name, LocalFleetSnapshot, NativeError, OwnerInventory};
+use crate::local_fleet::{LocalFleetSnapshot, NativeError, OwnerInventory, safe_id, safe_name};
+use crate::observation::{
+    Effect, Observation, Observed, Retirement, Source, SourceKind, UpdateObservation,
+};
 use crate::sessions::{self, Descriptor, Launch};
 use crate::transport::{self, Processes, RpcClient};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    mpsc, Arc, Mutex, Weak,
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +47,8 @@ pub struct VerandaEvent {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<LocalFleetSnapshot>,
+    #[serde(skip)]
+    pub observation: Option<UpdateObservation>,
 }
 pub type Emit = Arc<dyn Fn(VerandaEvent) + Send + Sync>;
 
@@ -53,6 +59,7 @@ struct SessionKey {
 }
 struct Session {
     rpc: RpcClient,
+    observation: Option<Source>,
     _pin: Option<ConsentedConnection>,
     key: SessionKey,
     host_id: String,
@@ -70,6 +77,9 @@ impl Drop for Session {
         // Dropping a cached session closes its RPC child deliberately. The
         // transport's cleanup notification is not a loss of a live session.
         self.retired.store(true, Ordering::Release);
+        if let Some(source) = &self.observation {
+            source.retire_all(Retirement::SessionClosed);
+        }
     }
 }
 struct HeldPlan {
@@ -95,6 +105,7 @@ pub struct Client {
     stopped: AtomicBool,
     launch_count: Arc<AtomicUsize>,
     processes: Processes,
+    observation: Option<Observation>,
 }
 
 /// A single provisional trust connection. Cancellation and registration share
@@ -154,6 +165,12 @@ fn connection_cancelled() -> NativeError {
 
 impl Client {
     pub fn new(root: PathBuf, emit: Emit) -> Arc<Self> {
+        Self::with_observation(root, emit, None)
+    }
+    pub fn observed(root: PathBuf, emit: Emit, observation: Observation) -> Arc<Self> {
+        Self::with_observation(root, emit, Some(observation))
+    }
+    fn with_observation(root: PathBuf, emit: Emit, observation: Option<Observation>) -> Arc<Self> {
         let (wake, receiver) = mpsc::sync_channel(1);
         let client = Arc::new(Self {
             store: Mutex::new(ConnectionStore::new(root)),
@@ -168,6 +185,7 @@ impl Client {
             stopped: AtomicBool::new(false),
             launch_count: Arc::new(AtomicUsize::new(0)),
             processes: Processes::default(),
+            observation,
         });
         let weak = Arc::downgrade(&client);
         thread::spawn(move || monitor(weak, receiver));
@@ -212,7 +230,14 @@ impl Client {
         self.store
             .lock()
             .map_err(|_| unavailable())?
-            .prepare_trust(destination, repair)
+            .prepare_trust_with_usage(
+                destination,
+                repair,
+                self.observation
+                    .as_ref()
+                    .and_then(Observation::child_usage_context)
+                    .as_ref(),
+            )
             .map(Assessment::from)
     }
     pub fn repair(&self, id: &str) -> Result<Assessment, NativeError> {
@@ -252,13 +277,18 @@ impl Client {
             .lock()
             .map_err(|_| unavailable())?
             .consented_ssh_command(token, confirmed, fingerprint)?;
-        crate::ssh::require_agent()?;
-        let rpc = RpcClient::open_tracked_attempt(
+        let usage = self
+            .observation
+            .as_ref()
+            .and_then(Observation::child_usage_context);
+        crate::ssh::require_agent(usage.as_ref())?;
+        let rpc = RpcClient::open_tracked_attempt_usage(
             pin.command(None)?,
             product_version(),
             Arc::new(|_| {}),
             Some(&self.processes),
             Some(&attempt.processes),
+            usage,
         )?;
         let inventory: OwnerInventory =
             decode(rpc.call("owner.inventory", "", json!({}), QUERY_TIMEOUT)?)?;
@@ -345,7 +375,7 @@ impl Client {
                 return Err(NativeError::new(
                     "remote_only",
                     "This platform supports remote owner hosts. Add an SSH connection.",
-                ))
+                ));
             }
         };
         let command = if let Some(pin) = &pin {
@@ -359,8 +389,30 @@ impl Client {
             command
         };
         if pin.is_some() {
-            crate::ssh::require_agent()?;
+            crate::ssh::require_agent(
+                self.observation
+                    .as_ref()
+                    .and_then(Observation::child_usage_context)
+                    .as_ref(),
+            )?;
         }
+        self.launch_session(key, pin, command)
+    }
+
+    fn launch_session(
+        &self,
+        key: &SessionKey,
+        pin: Option<ConsentedConnection>,
+        command: Command,
+    ) -> Result<Arc<Session>, NativeError> {
+        let observation = self.observation.as_ref().map(|observer| {
+            observer.source(if key.connection.is_some() {
+                SourceKind::Remote
+            } else {
+                SourceKind::Local
+            })
+        });
+        let callback_observation = observation.clone();
         let dirty = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));
         let retired = Arc::new(AtomicBool::new(false));
@@ -371,11 +423,14 @@ impl Client {
         let event_key = key.clone();
         let wake = self.wake.clone();
         let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-        let rpc = RpcClient::open_tracked(
+        let rpc = RpcClient::open_observed(
             command,
             product_version(),
             Arc::new(move |event| {
                 if callback_retired.load(Ordering::Acquire) {
+                    if let (Some(source), Some(ticket)) = (&callback_observation, event.receipt) {
+                        source.ignore(ticket);
+                    }
                     return;
                 }
                 let disconnected = event.event == "transport.disconnected";
@@ -389,7 +444,26 @@ impl Client {
                     || event.operation_id.starts_with("operation-")
                     || event.event.starts_with("incus.");
                 if !relevant {
+                    if let (Some(source), Some(ticket)) = (&callback_observation, event.receipt) {
+                        source.ignore(ticket);
+                    }
                     return;
+                }
+                if let (Some(source), Some(ticket)) = (&callback_observation, &event.receipt) {
+                    // A gap invalidates product state; it does not change the
+                    // measured effect of this particular receipt.
+                    let effect = if event.event.starts_with("incus.") {
+                        Some(Effect::Inventory)
+                    } else if event.operation_id.starts_with("operation-") {
+                        Some(Effect::Operation)
+                    } else {
+                        None
+                    };
+                    if let Some(effect) = effect {
+                        source.eligible(ticket, effect);
+                    } else {
+                        source.ignore(ticket.clone());
+                    }
                 }
                 callback_dirty.store(true, Ordering::Release);
                 let _ = wake.try_send(());
@@ -416,11 +490,15 @@ impl Client {
                                 event.event
                             }),
                             snapshot: None,
+                            observation: callback_observation
+                                .as_ref()
+                                .map(|source| source.update(None)),
                         });
                     }
                 }
             }),
             Some(&self.processes),
+            observation.clone(),
         )?;
         let context: CurrentContext =
             decode(rpc.call("context.get", "", json!({}), QUERY_TIMEOUT)?)?;
@@ -438,11 +516,15 @@ impl Client {
                 .ok_or_else(unavailable)?
                 .host_id;
             if snapshot.owner.id != expected {
-                return Err(NativeError::new("host_identity_changed", "The owner HostID changed. Review and repair this connection before continuing."));
+                return Err(NativeError::new(
+                    "host_identity_changed",
+                    "The owner HostID changed. Review and repair this connection before continuing.",
+                ));
             }
         }
         let session = Arc::new(Session {
             rpc,
+            observation,
             _pin: pin,
             key: key.clone(),
             host_id: snapshot.owner.id.clone(),
@@ -501,8 +583,14 @@ impl Client {
     }
 
     fn snapshot(&self, session: &Arc<Session>) -> Result<LocalFleetSnapshot, NativeError> {
+        Ok(self.snapshot_observed(session)?.value)
+    }
+    fn snapshot_observed(
+        &self,
+        session: &Arc<Session>,
+    ) -> Result<Observed<LocalFleetSnapshot>, NativeError> {
         self.validate_session(session)?;
-        let result = snapshot(session)?;
+        let result = snapshot_observed(session)?;
         self.validate_session(session)?;
         Ok(result)
     }
@@ -663,50 +751,78 @@ impl Client {
     }
 
     pub fn fleet(&self, connection: Option<String>) -> Result<LocalFleetSnapshot, NativeError> {
+        Ok(self.fleet_observed(connection)?.value)
+    }
+    pub fn fleet_observed(
+        &self,
+        connection: Option<String>,
+    ) -> Result<Observed<LocalFleetSnapshot>, NativeError> {
         let session = self.session(SessionKey {
             connection,
             yard: None,
         })?;
-        self.snapshot(&session)
+        self.snapshot_observed(&session)
     }
     pub fn yard(
         &self,
         connection: Option<String>,
         yard: String,
     ) -> Result<YardDetails, NativeError> {
+        Ok(self.yard_observed(connection, yard)?.value)
+    }
+    pub fn yard_observed(
+        &self,
+        connection: Option<String>,
+        yard: String,
+    ) -> Result<Observed<YardDetails>, NativeError> {
         let session = self.session(SessionKey {
             connection,
             yard: Some(yard),
         })?;
         session.rpc.require("profile-list-v1")?;
         session.rpc.require("settings-list-v1")?;
-        let profiles: ProfileList = query(&session, "profile.list")?;
+        let first: Observed<ProfileList> = query_observed(&session, "profile.list")?;
+        let profiles = first.value;
         let settings: SettingsList = query(&session, "settings.list")?;
         profiles.validate(&session.current_yard)?;
         settings.validate(&session.current_yard)?;
-        let diagnostics = match query::<YardStatus>(&session, "yard.status") {
-            Ok(status) => status.facts()?,
-            Err(error) => vec![Fact {
-                label: "Status".into(),
-                value: error.message,
-            }],
+        let (diagnostics, diagnostics_ready) = match query::<YardStatus>(&session, "yard.status") {
+            Ok(status) => (status.facts()?, true),
+            Err(error) => (
+                vec![Fact {
+                    label: "Status".into(),
+                    value: error.message,
+                }],
+                false,
+            ),
         };
-        Ok(YardDetails {
-            profiles: profiles.profiles,
-            selection: profiles.selection,
-            settings: settings.settings,
-            diagnostics,
-            capabilities: session.rpc.capabilities.clone(),
+        Ok(Observed {
+            proof: first.proof,
+            value: YardDetails {
+                profiles: profiles.profiles,
+                selection: profiles.selection,
+                settings: settings.settings,
+                diagnostics,
+                capabilities: session.rpc.capabilities.clone(),
+                observed_diagnostics_ready: session.observation.as_ref().map(|_| diagnostics_ready),
+            },
         })
     }
     pub fn host(&self, connection: Option<String>) -> Result<HostDetails, NativeError> {
+        Ok(self.host_observed(connection)?.value)
+    }
+    pub fn host_observed(
+        &self,
+        connection: Option<String>,
+    ) -> Result<Observed<HostDetails>, NativeError> {
         let session = self.session(SessionKey {
             connection,
             yard: None,
         })?;
         session.rpc.require("settings-list-v1")?;
         session.rpc.require("host-sync-status-v1")?;
-        let settings: SettingsList = query(&session, "settings.list")?;
+        let first: Observed<SettingsList> = query_observed(&session, "settings.list")?;
+        let settings = first.value;
         settings.validate(&session.current_yard)?;
         let sync: HostSyncStatus = query(&session, "host.sync.status")?;
         sync.validate(&session.host_id)?;
@@ -722,25 +838,28 @@ impl Client {
         } else {
             Vec::new()
         };
-        Ok(HostDetails {
-            profiles,
-            settings: settings
-                .settings
-                .into_iter()
-                .filter(|setting| setting.scopes.iter().any(|scope| scope == "host"))
-                .collect(),
-            diagnostics: vec![
-                Fact {
-                    label: "Owner".into(),
-                    value: session.host_id.clone(),
-                },
-                Fact {
-                    label: "Subyard".into(),
-                    value: session.rpc.engine_version.clone(),
-                },
-            ],
-            sync,
-            capabilities: session.rpc.capabilities.clone(),
+        Ok(Observed {
+            proof: first.proof,
+            value: HostDetails {
+                profiles,
+                settings: settings
+                    .settings
+                    .into_iter()
+                    .filter(|setting| setting.scopes.iter().any(|scope| scope == "host"))
+                    .collect(),
+                diagnostics: vec![
+                    Fact {
+                        label: "Owner".into(),
+                        value: session.host_id.clone(),
+                    },
+                    Fact {
+                        label: "Subyard".into(),
+                        value: session.rpc.engine_version.clone(),
+                    },
+                ],
+                sync,
+                capabilities: session.rpc.capabilities.clone(),
+            },
         })
     }
 
@@ -964,6 +1083,11 @@ impl Client {
                 state: state.into(),
                 message: Some(message),
                 snapshot: None,
+                observation: held
+                    .session
+                    .observation
+                    .as_ref()
+                    .map(|source| source.update(None)),
             });
             held.session.dirty.store(true, Ordering::Release);
             drop(held.session);
@@ -1025,12 +1149,22 @@ impl Client {
             connection.as_deref().unwrap_or("local"),
             session.current_yard
         );
-        sessions::launch(
+        let usage = session
+            .observation
+            .as_ref()
+            .and_then(Source::child_usage_context)
+            .or_else(|| {
+                self.observation
+                    .as_ref()
+                    .and_then(Observation::child_usage_context)
+            });
+        sessions::launch_with_usage(
             descriptor,
             pin,
             &mut store,
             self.launch_count.clone(),
             &editor_id,
+            usage.as_ref(),
         )
     }
     pub fn shell_command(
@@ -1173,11 +1307,9 @@ fn monitor(weak: Weak<Client>, receiver: mpsc::Receiver<()>) {
                     (client.emit)(state_event(&session, "reconnecting", None));
                     match client
                         .session(session.key.clone())
-                        .and_then(|next| client.snapshot(&next))
+                        .and_then(|next| client.snapshot_observed(&next).map(|read| (next, read)))
                     {
-                        Ok(snapshot) => {
-                            (client.emit)(state_event(&session, "connected", Some(snapshot)))
-                        }
+                        Ok((next, read)) => (client.emit)(read_event(&next, read)),
                         Err(error) => {
                             let incompatible = matches!(
                                 error.code.as_str(),
@@ -1206,10 +1338,8 @@ fn monitor(weak: Weak<Client>, receiver: mpsc::Receiver<()>) {
                     }
                 } else {
                     // No owner polling when idle. Coalesce events into one authoritative read.
-                    match client.snapshot(&session) {
-                        Ok(snapshot) => {
-                            (client.emit)(state_event(&session, "connected", Some(snapshot)))
-                        }
+                    match client.snapshot_observed(&session) {
+                        Ok(read) => (client.emit)(read_event(&session, read)),
                         Err(_) => (client.emit)(state_event(&session, "stale", None)),
                     }
                 }
@@ -1245,9 +1375,25 @@ fn state_event(
         state: state.into(),
         message: None,
         snapshot,
+        observation: session
+            .observation
+            .as_ref()
+            .map(|source| source.update(None)),
     }
 }
+fn read_event(session: &Session, read: Observed<LocalFleetSnapshot>) -> VerandaEvent {
+    let mut event = state_event(session, "connected", Some(read.value));
+    event.observation = session
+        .observation
+        .as_ref()
+        .map(|source| source.update(read.proof));
+    event
+}
+#[cfg(test)]
 fn snapshot(session: &Session) -> Result<LocalFleetSnapshot, NativeError> {
+    Ok(snapshot_observed(session)?.value)
+}
+fn snapshot_observed(session: &Session) -> Result<Observed<LocalFleetSnapshot>, NativeError> {
     // Inventory is a complete authoritative snapshot; event payloads never become owner state.
     let epoch = session.epoch.load(Ordering::Acquire);
     let initial = session
@@ -1255,14 +1401,17 @@ fn snapshot(session: &Session) -> Result<LocalFleetSnapshot, NativeError> {
         .lock()
         .map_err(|_| unavailable())?
         .take();
-    let snapshot = match initial.filter(|(captured, _)| *captured == epoch) {
-        Some((_, snapshot)) => snapshot,
+    let (snapshot, proof) = match initial.filter(|(captured, _)| *captured == epoch) {
+        Some((_, snapshot)) => (snapshot, session.observation.as_ref().map(Source::cached)),
         None => {
-            let inventory: OwnerInventory = query(session, "owner.inventory")?;
-            inventory.into_snapshot(
-                session.rpc.engine_version.clone(),
-                session.current_yard.clone(),
-            )?
+            let inventory: Observed<OwnerInventory> = query_observed(session, "owner.inventory")?;
+            (
+                inventory.value.into_snapshot(
+                    session.rpc.engine_version.clone(),
+                    session.current_yard.clone(),
+                )?,
+                inventory.proof,
+            )
         }
     };
     if snapshot.owner.id != session.host_id {
@@ -1273,13 +1422,26 @@ fn snapshot(session: &Session) -> Result<LocalFleetSnapshot, NativeError> {
         return Err(expired());
     }
     session.rpc.take_stale();
-    Ok(decorate_snapshot(session, snapshot))
+    Ok(Observed {
+        value: decorate_snapshot(session, snapshot),
+        proof,
+    })
 }
 fn decorate_snapshot(session: &Session, mut snapshot: LocalFleetSnapshot) -> LocalFleetSnapshot {
     snapshot.connection_id = session.key.connection.clone();
     snapshot.capabilities = session.rpc.capabilities.clone();
     snapshot.veranda_version = Some(product_version().into());
     snapshot
+}
+fn query_observed<T: for<'de> Deserialize<'de>>(
+    session: &Session,
+    method: &str,
+) -> Result<Observed<T>, NativeError> {
+    let (value, proof) = session.rpc.call_observed(method, QUERY_TIMEOUT)?;
+    Ok(Observed {
+        value: decode(value)?,
+        proof,
+    })
 }
 fn query<T: for<'de> Deserialize<'de>>(session: &Session, method: &str) -> Result<T, NativeError> {
     decode(session.rpc.call(method, "", json!({}), QUERY_TIMEOUT)?)
@@ -1764,6 +1926,8 @@ pub struct YardDetails {
     settings: Vec<Setting>,
     diagnostics: Vec<Fact>,
     capabilities: Vec<String>,
+    #[serde(skip)]
+    observed_diagnostics_ready: Option<bool>,
 }
 #[derive(Serialize)]
 pub struct HostDetails {
@@ -2053,16 +2217,20 @@ mod tests {
         }
         for selection in ["core\0tools", "core\u{001b}tools"] {
             value["selection"]["value"] = json!(selection);
-            assert!(decode::<ProfileList>(value.clone())
-                .unwrap()
-                .validate("default")
-                .is_err());
+            assert!(
+                decode::<ProfileList>(value.clone())
+                    .unwrap()
+                    .validate("default")
+                    .is_err()
+            );
             value["selection"]["value"] = json!("core tools");
             value["selection"]["provenance"][0]["value"] = json!(selection);
-            assert!(decode::<ProfileList>(value.clone())
-                .unwrap()
-                .validate("default")
-                .is_err());
+            assert!(
+                decode::<ProfileList>(value.clone())
+                    .unwrap()
+                    .validate("default")
+                    .is_err()
+            );
         }
     }
     #[test]
@@ -2072,36 +2240,46 @@ mod tests {
             .unwrap()
             .validate("selection-1", "config")
             .unwrap();
-        assert!(decode::<ExactPlan>(value.clone())
-            .unwrap()
-            .validate("another-operation", "config")
-            .is_err());
+        assert!(
+            decode::<ExactPlan>(value.clone())
+                .unwrap()
+                .validate("another-operation", "config")
+                .is_err()
+        );
         value["plan"]["steps"][0]["dependsOn"] = json!(["config.write"]);
-        assert!(decode::<ExactPlan>(value)
-            .unwrap()
-            .validate("selection-1", "config")
-            .is_err());
+        assert!(
+            decode::<ExactPlan>(value)
+                .unwrap()
+                .validate("selection-1", "config")
+                .is_err()
+        );
     }
     #[test]
     fn mismatched_schemas_and_owner_identity_fail_closed() {
         let mut value = fixture("profile-list");
         value["schemaVersion"] = json!(2);
-        assert!(decode::<ProfileList>(value)
-            .unwrap()
-            .validate("default")
-            .is_err());
-        assert!(decode::<HostSyncStatus>(fixture("host-sync-status"))
-            .unwrap()
-            .validate("different-owner")
-            .is_err());
+        assert!(
+            decode::<ProfileList>(value)
+                .unwrap()
+                .validate("default")
+                .is_err()
+        );
+        assert!(
+            decode::<HostSyncStatus>(fixture("host-sync-status"))
+                .unwrap()
+                .validate("different-owner")
+                .is_err()
+        );
     }
     #[test]
     fn owner_execution_must_be_confirmed_and_verified() {
-        assert!(validate_execution(
-            &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"ok"}}),
-            "one"
-        )
-        .is_ok());
+        assert!(
+            validate_execution(
+                &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"ok"}}),
+                "one"
+            )
+            .is_ok()
+        );
         assert!(validate_execution(
             &json!({"plan":{"operationId":"one","confirmed":true},"result":{"status":"running"}}),
             "one"
@@ -2246,6 +2424,9 @@ impl Fact {
     }
 }
 impl YardDetails {
+    pub fn observed_diagnostics_ready(&self) -> Option<bool> {
+        self.observed_diagnostics_ready
+    }
     pub fn profiles(&self) -> &[Profile] {
         &self.profiles
     }

@@ -2,6 +2,75 @@
 use super::*;
 use crate::transport::transport_tests::OwnerFixture;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn child_usage_provisional_cancel_keeps_publication_guard_and_two_registry_ownership() {
+    let observation = Observation::with_child_usage(1);
+    let context = observation.child_usage_context();
+    let fixture = OwnerFixture::new();
+    let command = fixture.command("negotiation-blocked");
+    let registry = Arc::new(Processes::default());
+    let attempt = Arc::new(ConnectionAttempt::default());
+    let registry_child = registry.clone();
+    let attempt_child = attempt.clone();
+    let opening = thread::spawn(move || {
+        RpcClient::open_tracked_attempt_usage(
+            command,
+            product_version(),
+            Arc::new(|event| assert!(event.receipt.is_none())),
+            Some(&registry_child),
+            Some(&attempt_child.processes),
+            context,
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while registry.tracked_count_for_test() == 0 {
+        assert!(Instant::now() < deadline);
+        thread::yield_now();
+    }
+    attempt.cancel();
+    assert!(opening.join().unwrap().is_err());
+    registry.shutdown();
+    let published = AtomicBool::new(false);
+    assert_eq!(
+        attempt
+            .publish(|| {
+                published.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap_err()
+            .code,
+        "cancelled"
+    );
+    assert!(!published.load(Ordering::SeqCst));
+    assert_eq!(attempt.processes.tracked_count_for_test(), 0);
+    assert_eq!(registry.tracked_count_for_test(), 0);
+    assert_eq!(observation.counts().session_sources, 0);
+    assert_eq!(observation.counts().received, 0);
+    let snapshot = serde_json::to_value(observation.seal()).unwrap();
+    let row = &snapshot["child_usage"]["records"][0];
+    assert_eq!(row["kind"], "ProvisionalRpc");
+    assert_eq!(row["state"], "Captured");
+    assert!(row["source"].is_null());
+    assert_eq!(row["captures"], 1);
+    assert_eq!(row["reaps"], 1);
+    let mut status = 0;
+    assert_eq!(
+        unsafe {
+            libc::waitpid(
+                row["owned_pid"].as_u64().unwrap() as i32,
+                &mut status,
+                libc::WNOHANG,
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -280,10 +349,12 @@ fn separate_process_store_lock_and_removal_reject_stale_cached_trust() {
     assert_eq!(run_store_actor(&root, "remove", Some(&record)), "ok");
     assert!(!fixture.session.rpc.is_closed());
     assert_eq!(fixture.stats()["executes"], 0);
-    assert!(fixture
-        .client
-        .execute(&plan.plan_id, &plan.digest, true)
-        .is_err());
+    assert!(
+        fixture
+            .client
+            .execute(&plan.plan_id, &plan.digest, true)
+            .is_err()
+    );
     assert!(fixture.session.rpc.is_closed());
     assert!(fixture.client.fleet(Some(record.id)).is_err());
 }
@@ -901,6 +972,7 @@ impl ManagerFixture {
         };
         let session = Arc::new(Session {
             rpc,
+            observation: None,
             _pin: pin,
             key: key.clone(),
             host_id: "example-owner".into(),
@@ -1130,6 +1202,7 @@ fn opening_across_trust_change_is_rejected(change: TrustChange) {
             let snapshot = inventory.into_snapshot(product_version().into(), "default".into())?;
             let session = Arc::new(Session {
                 rpc,
+                observation: None,
                 _pin: Some(pin),
                 key: key.clone(),
                 host_id: snapshot.owner.id.clone(),
@@ -1186,14 +1259,16 @@ fn opening_across_trust_change_is_rejected(change: TrustChange) {
         } else {
             assert_eq!(repaired.unwrap(), record);
         }
-        assert!(client
-            .store
-            .lock()
-            .unwrap()
-            .registered_ssh_command(&record.id)
-            .unwrap()
-            .public_pin()
-            .contains("BBBB"));
+        assert!(
+            client
+                .store
+                .lock()
+                .unwrap()
+                .registered_ssh_command(&record.id)
+                .unwrap()
+                .public_pin()
+                .contains("BBBB")
+        );
     } else {
         let removal = client.assess_removal(&record.id).unwrap();
         client.remove(&removal.assessment_id, true).unwrap();
@@ -1209,10 +1284,11 @@ fn opening_across_trust_change_is_rejected(change: TrustChange) {
     }
     assert!(opening.join().unwrap().is_err());
     assert!(old.rpc.is_closed());
-    assert!(old
-        .rpc
-        .call("synthetic.stats", "", json!({}), Duration::from_secs(1))
-        .is_err());
+    assert!(
+        old.rpc
+            .call("synthetic.stats", "", json!({}), Duration::from_secs(1))
+            .is_err()
+    );
     assert!(client.sessions.lock().unwrap().is_empty());
     assert!(client.opening.lock().unwrap().is_empty());
     client.shutdown();
@@ -1323,17 +1399,21 @@ fn native_multiline_settings_preserve_values_and_reject_unsafe_controls() {
             .validate("default")
             .unwrap();
         settings["settings"][0]["value"] = json!("first\u{0}second");
-        assert!(decode::<SettingsList>(settings.clone())
-            .unwrap()
-            .validate("default")
-            .is_err());
+        assert!(
+            decode::<SettingsList>(settings.clone())
+                .unwrap()
+                .validate("default")
+                .is_err()
+        );
     }
     settings["settings"][0]["type"] = json!("string");
     settings["settings"][0]["value"] = json!("first\nsecond");
-    assert!(decode::<SettingsList>(settings)
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<SettingsList>(settings)
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
 }
 
 #[test]
@@ -1386,10 +1466,12 @@ fn pending_host_identity_is_still_bound_and_bounded() {
         "".to_string(),
     ] {
         sync["hostId"] = json!(host);
-        assert!(decode::<HostSyncStatus>(sync.clone())
-            .unwrap()
-            .validate("example-owner")
-            .is_err());
+        assert!(
+            decode::<HostSyncStatus>(sync.clone())
+                .unwrap()
+                .validate("example-owner")
+                .is_err()
+        );
     }
 }
 
@@ -1397,18 +1479,22 @@ fn pending_host_identity_is_still_bound_and_bounded() {
 fn unavailable_setting_values_cannot_leak_through_direct_or_provenance_fields() {
     let mut settings = fixture("settings-list");
     settings["settings"][0]["valueAvailable"] = json!(false);
-    assert!(decode::<SettingsList>(settings.clone())
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<SettingsList>(settings.clone())
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
     settings["settings"][0]
         .as_object_mut()
         .unwrap()
         .remove("value");
-    assert!(decode::<SettingsList>(settings.clone())
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<SettingsList>(settings.clone())
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
     for entry in settings["settings"][0]["provenance"]
         .as_array_mut()
         .unwrap()
@@ -1443,20 +1529,24 @@ fn all_forwarded_setting_and_profile_metadata_remains_bounded() {
     }
     let mut profiles = fixture("profile-list");
     profiles["profiles"][0]["diagnostic"] = json!("x".repeat(129));
-    assert!(decode::<ProfileList>(profiles)
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<ProfileList>(profiles)
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
 }
 
 #[test]
 fn owner_expiry_format_is_validated_and_held_deadline_never_exceeds_five_minutes() {
     let mut exact = fixture("operation-exact");
     exact["expiresAt"] = json!("not-a-date");
-    assert!(decode::<ExactPlan>(exact)
-        .unwrap()
-        .validate("selection-1", "config")
-        .is_err());
+    assert!(
+        decode::<ExactPlan>(exact)
+            .unwrap()
+            .validate("selection-1", "config")
+            .is_err()
+    );
     let fixture = ManagerFixture::new("manager-long-expiry");
     let started = Instant::now();
     let plan = fixture.plan();
@@ -1515,12 +1605,14 @@ fn reviewed_execution_is_explicit_and_single_use(mode: &str, confirmation: &str)
             .code,
         "confirmation_required"
     );
-    assert!(fixture
-        .client
-        .plans
-        .lock()
-        .unwrap()
-        .contains_key(&plan.plan_id));
+    assert!(
+        fixture
+            .client
+            .plans
+            .lock()
+            .unwrap()
+            .contains_key(&plan.plan_id)
+    );
     assert_eq!(fixture.stats()["executes"], 0);
     let started = fixture
         .client
@@ -2291,9 +2383,15 @@ fn physical_ssh_byte_flow_stall(
     // killed to induce an outage. These phases do not simulate sleep/wake.
     assert!(fs::read(store_path).unwrap() == saved);
     match outage {
-        PhysicalOutage::PacketLoss => println!("ok: owned IPv4 packet loss fails bounded reads and autonomously restores pinned subscribed state"),
-        PhysicalOutage::ByteFlow => println!("ok: owned SSH byte-flow stall fails bounded reads and autonomously restores pinned subscribed state"),
-        PhysicalOutage::InterfaceReplacement => println!("ok: owned interface replacement fails bounded reads and autonomously restores pinned subscribed state"),
+        PhysicalOutage::PacketLoss => println!(
+            "ok: owned IPv4 packet loss fails bounded reads and autonomously restores pinned subscribed state"
+        ),
+        PhysicalOutage::ByteFlow => println!(
+            "ok: owned SSH byte-flow stall fails bounded reads and autonomously restores pinned subscribed state"
+        ),
+        PhysicalOutage::InterfaceReplacement => println!(
+            "ok: owned interface replacement fails bounded reads and autonomously restores pinned subscribed state"
+        ),
     }
 }
 
@@ -2606,10 +2704,12 @@ fn physical_ssh_recovery_and_churn(
         assert!(event.state != "connected" && event.snapshot.is_none());
         retried |= event.state == "reconnecting";
         if event.state == "disconnected" && retried {
-            assert!(event
-                .message
-                .as_ref()
-                .is_some_and(|message| !message.is_empty()));
+            assert!(
+                event
+                    .message
+                    .as_ref()
+                    .is_some_and(|message| !message.is_empty())
+            );
             break;
         }
     }
@@ -2647,10 +2747,14 @@ fn physical_ssh_recovery_and_churn(
             == settings_before,
         "owner settings changed during read-only listener recovery"
     );
-    println!("ok: owned listener outage preserves authenticated RPC and autonomously restores subscribed state");
+    println!(
+        "ok: owned listener outage preserves authenticated RPC and autonomously restores subscribed state"
+    );
     trusted.shutdown();
     assert!(phase_start.elapsed() < Duration::from_secs(45));
-    println!("ok: actual SSH key rotation, explicit repair, saved-store reload and autonomous monitor reconnect");
+    println!(
+        "ok: actual SSH key rotation, explicit repair, saved-store reload and autonomous monitor reconnect"
+    );
 
     physical_ssh_byte_flow_stall(record, control_root, PhysicalOutage::ByteFlow);
     physical_ssh_byte_flow_stall(record, control_root, PhysicalOutage::PacketLoss);
@@ -3340,7 +3444,10 @@ fn physical_editor_session(fleet: &LocalFleetSnapshot) {
                 break window.clone();
             }
         }
-        assert!(Instant::now() < connection_deadline, "editor connection deadline: verify sandbox, guest authorization and server download access");
+        assert!(
+            Instant::now() < connection_deadline,
+            "editor connection deadline: verify sandbox, guest authorization and server download access"
+        );
         std::thread::sleep(Duration::from_millis(200));
     };
     let xdo = |args: &[&str]| {
@@ -3356,7 +3463,9 @@ fn physical_editor_session(fleet: &LocalFleetSnapshot) {
             .len()
             <= 32 * 1024
     );
-    let input = format!("umask 077; set -C; printf '%s\\n' \"$PWD\" > /tmp/veranda-editor.{token}/pwd; chmod 0600 /tmp/veranda-editor.{token}/pwd; exit");
+    let input = format!(
+        "umask 077; set -C; printf '%s\\n' \"$PWD\" > /tmp/veranda-editor.{token}/pwd; chmod 0600 /tmp/veranda-editor.{token}/pwd; exit"
+    );
     // The fixture observer exposes only fixed stage markers. It makes each
     // XTEST gesture once, after the corresponding semantic UI state is ready.
     println!("native-stage: editor.accessibility");
@@ -3498,17 +3607,21 @@ fn native_owner_smoke() {
     // negotiation must not leave a saved record or temporary accepted pin.
     if let Ok(destination) = std::env::var("VERANDA_TEST_INCOMPATIBLE_DESTINATION") {
         let review = client.assess(&destination, None).unwrap();
-        assert!(client
-            .connect(&review.assessment_id, true, &review.fingerprint)
-            .is_err());
+        assert!(
+            client
+                .connect(&review.assessment_id, true, &review.fingerprint)
+                .is_err()
+        );
         assert!(client.connections().unwrap().is_empty());
-        assert!(!std::fs::read_dir(fixture.store_root())
-            .unwrap()
-            .any(|entry| entry
+        assert!(
+            !std::fs::read_dir(fixture.store_root())
                 .unwrap()
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.ends_with(".known_hosts"))));
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".known_hosts")))
+        );
     }
     let connection = std::env::var("VERANDA_TEST_SSH_DESTINATION")
         .ok()
@@ -3688,12 +3801,14 @@ fn cancelled_connection_consumes_review_and_prevents_registration() {
         "cancelled"
     );
     assert!(client.connections().unwrap().is_empty());
-    assert!(client
-        .store
-        .lock()
-        .unwrap()
-        .consented_ssh_command(&review.token, true, &review.fingerprint)
-        .is_err());
+    assert!(
+        client
+            .store
+            .lock()
+            .unwrap()
+            .consented_ssh_command(&review.token, true, &review.fingerprint)
+            .is_err()
+    );
     assert!(!owner.store_root().exists());
     let pin = synthetic_trust(&mut client.store.lock().unwrap(), None);
     let attempt = ConnectionAttempt::default();
@@ -3709,13 +3824,15 @@ fn cancelled_connection_consumes_review_and_prevents_registration() {
         "cancelled"
     );
     assert!(client.connections().unwrap().is_empty());
-    assert!(!std::fs::read_dir(owner.store_root())
-        .unwrap()
-        .any(|entry| entry
+    assert!(
+        !std::fs::read_dir(owner.store_root())
             .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".known_hosts")));
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".known_hosts"))
+    );
 }
 
 #[test]
@@ -3810,16 +3927,20 @@ fn profile_metadata_is_generic_bounded_and_value_keeps_owner_whitespace() {
     for field in ["reason", "sourceGroup"] {
         let mut bad = wire.clone();
         bad["profiles"][0][field] = json!("x".repeat(8193));
-        assert!(decode::<ProfileList>(bad)
-            .unwrap()
-            .validate("default")
-            .is_err());
+        assert!(
+            decode::<ProfileList>(bad)
+                .unwrap()
+                .validate("default")
+                .is_err()
+        );
     }
     wire["selection"]["requested"] = json!(vec!["a"; 4097]);
-    assert!(decode::<ProfileList>(wire)
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<ProfileList>(wire)
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
 }
 
 #[test]
@@ -3836,8 +3957,439 @@ fn profile_intent_large_duplicate_lists_use_existing_owner_byte_bound() {
             .unwrap();
     }
     wire["selection"]["requested"] = json!(vec!["a"; 4097]);
-    assert!(decode::<ProfileList>(wire)
-        .unwrap()
-        .validate("default")
-        .is_err());
+    assert!(
+        decode::<ProfileList>(wire)
+            .unwrap()
+            .validate("default")
+            .is_err()
+    );
+}
+
+// Uses the production callback, throttle, monitor, cache and authoritative query path.
+fn observation_manager() -> (
+    OwnerFixture,
+    Arc<Client>,
+    Arc<Session>,
+    mpsc::Receiver<VerandaEvent>,
+    Observation,
+) {
+    observation_manager_with(Observation::new())
+}
+
+fn observation_manager_with(
+    observation: Observation,
+) -> (
+    OwnerFixture,
+    Arc<Client>,
+    Arc<Session>,
+    mpsc::Receiver<VerandaEvent>,
+    Observation,
+) {
+    let owner = OwnerFixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let client = Client::observed(
+        owner.store_root(),
+        Arc::new(move |event| {
+            let _ = sender.send(event);
+        }),
+        observation.clone(),
+    );
+    let session = client
+        .session_with_open(
+            SessionKey {
+                connection: None,
+                yard: None,
+            },
+            |key| client.launch_session(key, None, owner.command("manager-observation")),
+        )
+        .unwrap();
+    (owner, client, session, receiver, observation)
+}
+
+#[test]
+fn observation_real_receipts_survive_callback_throttle_and_monitor_coalescing() {
+    let (_owner, client, session, events, observation) = observation_manager();
+    let _shutdown = SmokeShutdown(client.clone());
+    let initial = client.fleet_observed(None).unwrap();
+    assert_eq!(
+        initial.proof.unwrap().kind(),
+        crate::observation::ReadKind::InitialCache
+    );
+    let before = Instant::now();
+    session
+        .rpc
+        .call("synthetic.observation-burst", "", json!({}), QUERY_TIMEOUT)
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut callbacks = 0;
+    let retained = loop {
+        let event = events
+            .recv_timeout(end.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if event.state == "running" {
+            callbacks += 1;
+        }
+        if let Some(metadata) = event.observation {
+            if event.snapshot.is_some() && metadata.batch.tickets().len() == 3 {
+                break metadata;
+            }
+        }
+    };
+    assert_eq!(
+        callbacks, 1,
+        "three validated receipts inside one100ms throttle interval"
+    );
+    let tickets = retained.batch.tickets();
+    assert!(tickets[0].started() >= before);
+    assert!(tickets[2].started().duration_since(tickets[0].started()) < Duration::from_millis(100));
+    assert!(
+        tickets
+            .windows(2)
+            .all(|pair| pair[0].ordinal() < pair[1].ordinal())
+    );
+    assert_eq!(observation.counts().received, 3);
+    assert_eq!(
+        observation.counts().pending,
+        3,
+        "monitor does not complete paint tickets"
+    );
+    let read = client.fleet_observed(None).unwrap();
+    let proof = read.proof.unwrap();
+    assert_eq!(proof.kind(), crate::observation::ReadKind::Rpc);
+    for (original, captured) in tickets.iter().zip(proof.batch().tickets()) {
+        assert_eq!(original.ordinal(), captured.ordinal());
+        assert_eq!(original.started(), captured.started());
+    }
+    assert_eq!(proof.batch().tickets().len(), 3);
+    let wire = serde_json::to_value(state_event(&session, "connected", None)).unwrap();
+    assert!(wire.get("observation").is_none());
+}
+
+#[test]
+fn observation_real_late_event_and_gap_retry_keep_original_frontiers() {
+    for gap in [false, true] {
+        let (_owner, client, session, events, observation) = observation_manager();
+        let _shutdown = SmokeShutdown(client.clone());
+        let initial = client.fleet_observed(None).unwrap().proof.unwrap();
+        assert_eq!(initial.kind(), crate::observation::ReadKind::InitialCache);
+        assert!(initial.batch().tickets().is_empty() && initial.request().is_none());
+        session
+            .rpc
+            .call(
+                if gap {
+                    "synthetic.arm-gap"
+                } else {
+                    "synthetic.arm-late"
+                },
+                "",
+                json!({}),
+                QUERY_TIMEOUT,
+            )
+            .unwrap();
+        let before = Instant::now();
+        let result = client.fleet_observed(None);
+        if gap {
+            assert_eq!(result.err().unwrap().code, "plan_stale");
+        } else {
+            let proof = result.unwrap().proof.unwrap();
+            assert_eq!(proof.kind(), crate::observation::ReadKind::Rpc);
+            assert!(
+                proof.batch().tickets().is_empty(),
+                "event during RPC cannot join its earlier admission frontier"
+            );
+        }
+        let end = Instant::now() + Duration::from_secs(3);
+        let metadata = loop {
+            let event = events
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if let Some(metadata) = event.observation {
+                if event.snapshot.is_some()
+                    && metadata
+                        .read
+                        .as_ref()
+                        .is_some_and(|proof| !proof.batch().tickets().is_empty())
+                {
+                    break metadata;
+                }
+            }
+        };
+        let expected = if gap { 2 } else { 1 };
+        assert_eq!(observation.counts().received, expected);
+        let later = client.fleet_observed(None).unwrap().proof.unwrap();
+        assert_eq!(later.batch().tickets().len(), expected as usize);
+        for ticket in metadata.batch.tickets() {
+            assert!(ticket.started() >= before);
+            let original = later
+                .batch()
+                .tickets()
+                .iter()
+                .find(|candidate| candidate.ordinal() == ticket.ordinal())
+                .unwrap();
+            assert_eq!(original.started(), ticket.started());
+        }
+        assert_eq!(observation.counts().pending, expected as usize);
+    }
+}
+
+#[test]
+fn observation_disabled_manager_keeps_local_metadata_and_wire_absent() {
+    let manager = ManagerFixture::new("manager");
+    assert!(manager.client.observation.is_none() && manager.session.observation.is_none());
+    let read = manager.client.fleet_observed(None).unwrap();
+    assert!(read.proof.is_none());
+    let event = state_event(&manager.session, "connected", Some(read.value));
+    assert!(event.observation.is_none());
+    assert!(
+        serde_json::to_value(event)
+            .unwrap()
+            .get("observation")
+            .is_none()
+    );
+    let frame = transport::Event {
+        operation_id: String::new(),
+        event: "incus.lifecycle".into(),
+        sequence: 1,
+        revision: 1,
+        stale: false,
+        receipt: None,
+    };
+    assert!(
+        serde_json::to_value(frame)
+            .unwrap()
+            .get("receipt")
+            .is_none()
+    );
+}
+
+#[test]
+fn observation_real_cache_and_mixed_effects_do_not_claim_inventory_coverage() {
+    let (_owner, client, session, _events, observation) = observation_manager();
+    let _shutdown = SmokeShutdown(client.clone());
+    // Hold only the existing monitor gate so the genuine one-use cache is consumed
+    // after receipts; the caller still uses the production snapshot implementation.
+    session.refreshing.store(true, Ordering::Release);
+    session
+        .rpc
+        .call("synthetic.observation-mixed", "", json!({}), QUERY_TIMEOUT)
+        .unwrap();
+    let cache = client.fleet_observed(None).unwrap().proof.unwrap();
+    assert_eq!(cache.kind(), crate::observation::ReadKind::InitialCache);
+    assert!(cache.batch().tickets().is_empty() && cache.request().is_none());
+    assert_eq!(observation.counts().received, 3);
+    assert_eq!(observation.counts().eligible, 2);
+    assert_eq!(observation.counts().inventory_eligible, 1);
+    assert_eq!(observation.counts().operation_eligible, 1);
+    assert_eq!(observation.counts().ignored, 1);
+    assert_eq!(observation.counts().session_sources, 1);
+    assert_eq!(observation.counts().pending, 2);
+    let rpc = client.fleet_observed(None).unwrap().proof.unwrap();
+    assert_eq!(rpc.kind(), crate::observation::ReadKind::Rpc);
+    assert_eq!(rpc.batch().tickets().len(), 1);
+    assert_eq!(rpc.batch().tickets()[0].effect(), Some(Effect::Inventory));
+    for proof in [
+        client.host_observed(None).unwrap().proof.unwrap(),
+        client
+            .yard_observed(None, "default".into())
+            .unwrap()
+            .proof
+            .unwrap(),
+    ] {
+        assert_eq!(proof.kind(), crate::observation::ReadKind::Rpc);
+        assert_eq!(proof.source(), rpc.source());
+        assert_eq!(proof.batch().tickets().len(), 1);
+        assert_eq!(
+            proof.batch().tickets()[0].ordinal(),
+            rpc.batch().tickets()[0].ordinal()
+        );
+    }
+
+    let pending = session.observation.as_ref().unwrap().batch();
+    assert!(
+        pending
+            .tickets()
+            .iter()
+            .any(|ticket| ticket.effect() == Some(Effect::Operation))
+    );
+    let mut frame = transport::Event {
+        operation_id: String::new(),
+        event: "incus.lifecycle".into(),
+        sequence: 1,
+        revision: 1,
+        stale: false,
+        receipt: Some(pending.tickets()[0].clone()),
+    };
+    let observed_wire = serde_json::to_value(&frame).unwrap();
+    frame.receipt = None;
+    assert_eq!(observed_wire, serde_json::to_value(frame).unwrap());
+    assert_eq!(
+        observation.counts().pending,
+        2,
+        "neither cache nor RPC proof completes tickets"
+    );
+    session.refreshing.store(false, Ordering::Release);
+}
+
+#[test]
+fn observation_gapped_operation_retains_product_resync_without_inventory_coverage() {
+    let (_owner, client, session, events, observation) = observation_manager();
+    let _shutdown = SmokeShutdown(client.clone());
+    let _ = client.fleet_observed(None).unwrap();
+    while events.try_recv().is_ok() {}
+    // Hold the existing monitor gate to observe the original dirty/epoch effects
+    // before releasing the same production monitor for its authoritative reread.
+    session.refreshing.store(true, Ordering::Release);
+    let epoch = session.epoch.load(Ordering::Acquire);
+    session
+        .rpc
+        .call(
+            "synthetic.observation-gapped-mixed",
+            "",
+            json!({}),
+            QUERY_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(session.epoch.load(Ordering::Acquire), epoch + 1);
+    assert!(session.dirty.load(Ordering::Acquire));
+    let pending = session.observation.as_ref().unwrap().batch();
+    let proof = client.fleet_observed(None).unwrap().proof.unwrap();
+    assert_eq!(proof.kind(), crate::observation::ReadKind::Rpc);
+    assert_eq!(
+        proof.batch().tickets().len(),
+        1,
+        "gapped operation progress must not enter inventory proof"
+    );
+    assert_eq!(observation.counts().received, 3);
+    assert_eq!(observation.counts().inventory_eligible, 1);
+    assert_eq!(observation.counts().operation_eligible, 1);
+    assert_eq!(observation.counts().ignored, 1);
+    assert_eq!(pending.tickets().len(), 2);
+    assert_eq!(pending.tickets()[0].effect(), Some(Effect::Inventory));
+    assert_eq!(pending.tickets()[1].effect(), Some(Effect::Operation));
+    assert_eq!(
+        proof.batch().tickets()[0].ordinal(),
+        pending.tickets()[0].ordinal()
+    );
+    assert_eq!(
+        proof.batch().tickets()[0].started(),
+        pending.tickets()[0].started()
+    );
+    session.refreshing.store(false, Ordering::Release);
+    let _ = client.wake.try_send(());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let event = events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if event.snapshot.is_some() {
+            if let Some(metadata) = event.observation {
+                if let Some(read) = metadata.read {
+                    assert_eq!(read.kind(), crate::observation::ReadKind::Rpc);
+                    assert_eq!(read.batch().tickets().len(), 1);
+                    assert_eq!(
+                        read.batch().tickets()[0].started(),
+                        pending.tickets()[0].started()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        observation.counts().pending,
+        2,
+        "resync is not a paint completion"
+    );
+}
+
+#[test]
+fn correlation_actual_callback_throttle_monitor_and_read_keep_all_original_joins() {
+    use crate::observation::{EventTag, ValidatedEvent};
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let observation = Observation::with_event_tagger(Arc::new({
+        let captured = captured.clone();
+        move |event: ValidatedEvent<'_>| {
+            let entered = Instant::now();
+            assert!(event.received <= entered);
+            let frame: Value = serde_json::from_slice(event.frame).map_err(|_| ())?;
+            captured
+                .lock()
+                .unwrap()
+                .push((event.sequence, event.received, entered));
+            Ok(
+                match frame
+                    .get("data")
+                    .and_then(|data| data.get("offer"))
+                    .and_then(Value::as_u64)
+                {
+                    Some(1 | 2) => EventTag::Matched(frame["data"]["offer"].as_u64().unwrap()),
+                    Some(3) => EventTag::Other,
+                    _ => EventTag::Unclassifiable,
+                },
+            )
+        }
+    }));
+    let (_owner, client, session, events, observation) = observation_manager_with(observation);
+    let _shutdown = SmokeShutdown(client.clone());
+    let _initial = client.fleet_observed(None).unwrap();
+    session
+        .rpc
+        .call("synthetic.correlation-burst", "", json!({}), QUERY_TIMEOUT)
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut running = 0;
+    let metadata = loop {
+        let event = events
+            .recv_timeout(end.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if event.state == "running" {
+            running += 1;
+        }
+        if let Some(metadata) = event.observation {
+            if event.snapshot.is_some() && metadata.batch.tickets().len() == 4 {
+                break metadata;
+            }
+        }
+    };
+    assert_eq!(
+        running, 1,
+        "tagging cannot lose receipts suppressed by original100ms throttle"
+    );
+    let correlation = observation.correlation().unwrap();
+    assert_eq!(
+        (
+            correlation.counts.valid_raw,
+            correlation.counts.tagged,
+            correlation.counts.other,
+            correlation.counts.unclassifiable,
+            correlation.counts.admitted
+        ),
+        (4, 2, 1, 1, 4)
+    );
+    let captured = captured.lock().unwrap();
+    let read = client.fleet_observed(None).unwrap().proof.unwrap();
+    assert_eq!(read.batch().tickets().len(), 4);
+    for (((row, ticket), proof), captured) in correlation
+        .index
+        .iter()
+        .zip(metadata.batch.tickets())
+        .zip(read.batch().tickets())
+        .zip(captured.iter())
+    {
+        assert_eq!(
+            (row.source, row.ticket, row.sequence),
+            (ticket.source(), Some(ticket.ordinal()), captured.0)
+        );
+        assert_eq!(ticket.started(), captured.1);
+        assert_eq!(proof.started(), captured.1);
+        assert_eq!(proof.ordinal(), ticket.ordinal());
+    }
+    assert!(
+        correlation
+            .index
+            .windows(2)
+            .all(|rows| rows[0].ticket < rows[1].ticket)
+    );
+    let scalar = serde_json::to_string(&correlation).unwrap();
+    assert!(!scalar.contains("private") && !scalar.contains("data") && !scalar.contains("incus"));
 }

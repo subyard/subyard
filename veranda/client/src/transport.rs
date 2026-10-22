@@ -1,13 +1,16 @@
 //! Bounded Yard RPC sessions. Only the native shell owns process handles and frames.
-use crate::local_fleet::{read_frame, write_frame, NativeError};
+use crate::child_usage::{ChildKind, OwnedChild, UsageContext};
+use crate::local_fleet::{NativeError, read_frame_captured, write_frame};
+use crate::observation::{ReadProof, Source, Ticket, ValidatedEvent};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Mutex, Weak,
+    mpsc,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -23,6 +26,8 @@ pub struct Event {
     pub sequence: u64,
     pub revision: u64,
     pub stale: bool,
+    #[serde(skip)]
+    pub receipt: Option<Ticket>,
 }
 
 #[derive(Deserialize)]
@@ -68,7 +73,7 @@ pub struct Call {
 }
 
 pub struct RpcClient {
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<OwnedChild>>>,
     outgoing: Mutex<Option<mpsc::SyncSender<Value>>>,
     shared: Arc<Shared>,
     next_id: AtomicU64,
@@ -76,12 +81,13 @@ pub struct RpcClient {
     writer: Mutex<Option<JoinHandle<()>>>,
     pub engine_version: String,
     pub capabilities: Vec<String>,
+    observation: Option<Source>,
 }
 
 /// Includes children that are still negotiating and therefore not in a session cache yet.
 #[derive(Default)]
 pub struct Processes {
-    children: Mutex<Vec<Weak<Mutex<Option<Child>>>>>,
+    children: Mutex<Vec<Weak<Mutex<Option<OwnedChild>>>>>,
     stopped: AtomicBool,
 }
 impl Processes {
@@ -98,7 +104,7 @@ impl Processes {
     pub fn stop_accepting(&self) {
         self.stopped.store(true, Ordering::Release);
     }
-    fn track(&self, child: &Arc<Mutex<Option<Child>>>) -> Result<(), NativeError> {
+    fn track(&self, child: &Arc<Mutex<Option<OwnedChild>>>) -> Result<(), NativeError> {
         let mut children = self.children.lock().map_err(|_| disconnected())?;
         children.retain(|child| child.strong_count() != 0);
         if self.stopped.load(Ordering::Acquire) || children.len() >= 32 {
@@ -155,31 +161,96 @@ impl RpcClient {
     }
 
     pub(crate) fn open_tracked_attempt(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+        attempt: Option<&Processes>,
+    ) -> Result<Self, NativeError> {
+        Self::open_tracked_attempt_usage(
+            command,
+            expected_version,
+            notify,
+            processes,
+            attempt,
+            None,
+        )
+    }
+    pub(crate) fn open_tracked_attempt_usage(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+        attempt: Option<&Processes>,
+        usage: Option<UsageContext>,
+    ) -> Result<Self, NativeError> {
+        Self::open_with_observation(
+            command,
+            expected_version,
+            notify,
+            processes,
+            attempt,
+            None,
+            usage,
+            ChildKind::ProvisionalRpc,
+        )
+    }
+    pub(crate) fn open_observed(
+        command: Command,
+        expected_version: &str,
+        notify: Notify,
+        processes: Option<&Processes>,
+        observation: Option<Source>,
+    ) -> Result<Self, NativeError> {
+        let usage = observation.as_ref().and_then(Source::child_usage_context);
+        Self::open_with_observation(
+            command,
+            expected_version,
+            notify,
+            processes,
+            None,
+            observation,
+            usage,
+            ChildKind::RpcSession,
+        )
+    }
+    fn open_with_observation(
         mut command: Command,
         expected_version: &str,
         notify: Notify,
         processes: Option<&Processes>,
         attempt: Option<&Processes>,
+        observation: Option<Source>,
+        usage: Option<UsageContext>,
+        child_kind: ChildKind,
     ) -> Result<Self, NativeError> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .spawn().map_err(|_| NativeError::new("transport_unavailable", "Veranda could not start Yard or SSH. Check the installed tools and authentication reference."))?;
-        let mut input = child.stdin.take().ok_or_else(disconnected)?;
-        let mut output = child.stdout.take().ok_or_else(disconnected)?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = OwnedChild::spawn(&mut command, usage.as_ref(), child_kind)
+            .map_err(|_| NativeError::new("transport_unavailable", "Veranda could not start Yard or SSH. Check the installed tools and authentication reference."))?;
+        let mut input = child.take_stdin().ok_or_else(disconnected)?;
+        let mut output = child.take_stdout().ok_or_else(disconnected)?;
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
         });
+        let reader_observation = observation.clone();
         let reader_shared = shared.clone();
         let reader = thread::spawn(move || {
             loop {
-                let frame: Frame = match read_frame(&mut output) {
+                let capture = reader_observation
+                    .as_ref()
+                    .is_some_and(|source| source.event_tagger().is_some());
+                let (frame, payload): (Frame, _) = match read_frame_captured(&mut output, capture) {
                     Ok(frame) => frame,
                     Err(_) => break,
                 };
@@ -214,6 +285,21 @@ impl RpcClient {
                         {
                             break;
                         }
+                        let started = Instant::now();
+                        let receipt = reader_observation.as_ref().and_then(|source| {
+                            let reserved = source.reserve_event(frame.sequence, started);
+                            let tag = payload.as_deref().and_then(|raw| {
+                                source.classify_event(ValidatedEvent {
+                                    event: &frame.event,
+                                    operation_id: &frame.operation_id,
+                                    sequence: frame.sequence,
+                                    revision: frame.revision,
+                                    received: started,
+                                    frame: raw,
+                                })
+                            });
+                            source.finish_event(reserved, tag)
+                        });
                         let previous = reader_shared
                             .sequence
                             .swap(frame.sequence, Ordering::AcqRel);
@@ -227,6 +313,7 @@ impl RpcClient {
                             sequence: frame.sequence,
                             revision: frame.revision,
                             stale: gap,
+                            receipt,
                         });
                     }
                     _ => break,
@@ -244,6 +331,7 @@ impl RpcClient {
                 sequence: 0,
                 revision: 0,
                 stale: true,
+                receipt: None,
             });
         });
         let (outgoing, writes) = mpsc::sync_channel::<Value>(16);
@@ -270,6 +358,7 @@ impl RpcClient {
             writer: Mutex::new(Some(writer)),
             engine_version: String::new(),
             capabilities: Vec::new(),
+            observation,
         };
         if let Some(processes) = processes {
             processes.track(&client.child)?;
@@ -292,8 +381,13 @@ impl RpcClient {
             return Err(invalid());
         }
         if negotiation.engine_version != expected_version {
-            return Err(NativeError::new("incompatible_engine", format!(
-                "Veranda {expected_version} and Subyard {} are incompatible. Install both from the same release.", negotiation.engine_version)));
+            return Err(NativeError::new(
+                "incompatible_engine",
+                format!(
+                    "Veranda {expected_version} and Subyard {} are incompatible. Install both from the same release.",
+                    negotiation.engine_version
+                ),
+            ));
         }
         client.engine_version = negotiation.engine_version;
         client.capabilities = negotiation.capabilities;
@@ -305,8 +399,13 @@ impl RpcClient {
         if self.capabilities.iter().any(|value| value == capability) {
             Ok(())
         } else {
-            Err(NativeError::new("capability_missing", format!(
-            "Subyard {} does not support {capability}. Install Veranda and Subyard from the same release.", self.engine_version)))
+            Err(NativeError::new(
+                "capability_missing",
+                format!(
+                    "Subyard {} does not support {capability}. Install Veranda and Subyard from the same release.",
+                    self.engine_version
+                ),
+            ))
         }
     }
 
@@ -325,12 +424,28 @@ impl RpcClient {
         operation_id: &str,
         params: Value,
     ) -> Result<Call, NativeError> {
-        let (id, receiver) = self.send("request", method, operation_id, params)?;
+        let (id, receiver, _) = self.send("request", method, operation_id, params, false)?;
         Ok(Call {
             id,
             operation_id: operation_id.into(),
             receiver,
         })
+    }
+    pub(crate) fn call_observed(
+        &self,
+        method: &str,
+        timeout: Duration,
+    ) -> Result<(Value, Option<ReadProof>), NativeError> {
+        let (id, receiver, proof) = self.send("request", method, "", json!({}), true)?;
+        let value = self.wait(
+            Call {
+                id,
+                receiver,
+                operation_id: String::new(),
+            },
+            timeout,
+        )?;
+        Ok((value, proof))
     }
     pub fn wait(&self, call: Call, timeout: Duration) -> Result<Value, NativeError> {
         #[cfg(target_os = "linux")]
@@ -349,7 +464,10 @@ impl RpcClient {
                     &call.operation_id
                 };
                 let _ = self.cancel(operation_id);
-                Err(NativeError::new("rpc_timeout", "The Yard request timed out. Its final result is unavailable; refresh the owner before trying again."))
+                Err(NativeError::new(
+                    "rpc_timeout",
+                    "The Yard request timed out. Its final result is unavailable; refresh the owner before trying again.",
+                ))
             }
         }
     }
@@ -361,12 +479,19 @@ impl RpcClient {
             "incus.events",
             operation_id,
             json!({"types":["lifecycle","operation"]}),
+            false,
         )?;
         Ok(())
     }
 
     pub fn discard(&self, operation_id: &str) -> Result<(), NativeError> {
-        let _ = self.send("request", "operation.discard", operation_id, json!({}))?;
+        let _ = self.send(
+            "request",
+            "operation.discard",
+            operation_id,
+            json!({}),
+            false,
+        )?;
         Ok(())
     }
 
@@ -386,7 +511,15 @@ impl RpcClient {
         method: &str,
         operation_id: &str,
         params: Value,
-    ) -> Result<(String, mpsc::Receiver<Result<Value, NativeError>>), NativeError> {
+        observed: bool,
+    ) -> Result<
+        (
+            String,
+            mpsc::Receiver<Result<Value, NativeError>>,
+            Option<ReadProof>,
+        ),
+        NativeError,
+    > {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(disconnected());
         }
@@ -425,16 +558,26 @@ impl RpcClient {
         let request = json!({"version":1,"type":kind,"id":id,"method":method,"operationId":operation_id,"params":params});
         let result = (|| {
             let outgoing = self.outgoing.lock().map_err(|_| disconnected())?;
-            outgoing.as_ref().ok_or_else(disconnected)?.try_send(request).map_err(|_| NativeError::new(
-                "request_capacity", "The bounded Yard request queue is busy. Finish an existing request and try again."))
+            let outgoing = outgoing.as_ref().ok_or_else(disconnected)?;
+            // Conservative frontier immediately before this authoritative request is enqueued.
+            let proof = if observed {
+                self.observation.as_ref().map(Source::admit)
+            } else {
+                None
+            };
+            outgoing.try_send(request).map_err(|_| NativeError::new(
+                "request_capacity", "The bounded Yard request queue is busy. Finish an existing request and try again."))?;
+            Ok(proof)
         })();
-        if let Err(error) = result {
-            if let Ok(mut pending) = self.shared.pending.lock() {
-                pending.remove(&id);
+        match result {
+            Ok(proof) => Ok((id, receiver, proof)),
+            Err(error) => {
+                if let Ok(mut pending) = self.shared.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err(error)
             }
-            return Err(error);
         }
-        Ok((id, receiver))
     }
 
     pub fn is_closed(&self) -> bool {
@@ -544,7 +687,7 @@ fn receive_with_deadline<T>(
     }
 }
 
-fn stop_child(child: &mut Child) {
+fn stop_child(child: &mut OwnedChild) {
     // Kill the dedicated group before reaping its leader: descendants may keep
     // the pipes open after the leader exits. Ownership is consumed exactly once.
     #[cfg(unix)]
@@ -554,25 +697,8 @@ fn stop_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
-fn child_exited(child: &mut Child) -> bool {
-    #[cfg(unix)]
-    {
-        // WNOWAIT keeps the PID reserved until stop_child revokes the group.
-        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut status,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        result != 0 || unsafe { status.si_pid() } != 0
-    }
-    #[cfg(not(unix))]
-    {
-        matches!(child.try_wait(), Ok(Some(_)))
-    }
+fn child_exited(child: &mut OwnedChild) -> bool {
+    child.exited()
 }
 
 impl Drop for RpcClient {
@@ -596,30 +722,84 @@ fn version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b".+-".contains(&byte))
 }
 pub(crate) fn invalid() -> NativeError {
-    NativeError::new("invalid_response", "Subyard returned an unsupported response. Install Veranda and Subyard from the same release.")
+    NativeError::new(
+        "invalid_response",
+        "Subyard returned an unsupported response. Install Veranda and Subyard from the same release.",
+    )
 }
 fn disconnected() -> NativeError {
-    NativeError::new("disconnected", "The Yard connection closed. Reconnect and refresh; an interrupted operation has no confirmed final result.")
+    NativeError::new(
+        "disconnected",
+        "The Yard connection closed. Reconnect and refresh; an interrupted operation has no confirmed final result.",
+    )
 }
 
 fn public_fault(code: &str) -> NativeError {
     let (code, message) = match code {
-        "plan_stale" | "plan_binding_invalid" => ("plan_stale", "The owner state or plan changed. Refresh and request a new plan before applying."),
-        "plan_not_found" => ("plan_not_found", "The plan expired or was already used. Request a new plan."),
-        "cancelled" => ("cancelled", "The operation was cancelled. Refresh to observe the owner state."),
-        "confirmation_required" => ("confirmation_required", "Review and confirm the exact owner plan before applying."),
-        "operation_steps_unsupported" | "method_not_found" | "incompatible_version" => ("incompatible_engine", "This Subyard release does not support the requested schema or operation. Install Veranda and Subyard from the same release."),
-        "secret_forbidden" | "interactive_or_payload_command" => ("protected_operation", "This operation requires the owner's protected terminal transport."),
-        "session_tool_unavailable" => ("session_tool_unavailable", "Install htop on the selected owner for CPU / RAM, or open its host shell."),
-        "session_yard_unavailable" => ("session_yard_unavailable", "This yard is stopped or unavailable. Start it explicitly before opening a session."),
-        "session_ssh_unavailable" | "session_host_key_unavailable" => ("session_ssh_unavailable", "Reconcile the selected yard explicitly to prepare its verified VS Code SSH access."),
-        "session_project_unavailable" => ("session_project_unavailable", "The selected project is no longer registered. Refresh the yard and select it again."),
-        "session_project_forbidden" => ("session_project_forbidden", "This yard role does not permit project sessions."),
-        "profile_catalog_invalid" => ("incompatible_engine", "The owner profile catalog is incompatible or invalid. Install Veranda and Subyard from the same release."),
-        "owner_configuration_invalid" => ("owner_configuration_invalid", "The owner configuration or profile catalog is invalid. Review owner diagnostics and install Veranda and Subyard from the same release."),
-        "owner_context_changed" => ("owner_context_changed", "The owner context changed. Reconnect and refresh before continuing."),
-        "mutation_gate_failed" | "migration_required" => ("owner_repair_required", "The owner requires release or configuration repair before this operation."),
-        _ => ("owner_request_failed", "Subyard could not complete the request. Review owner diagnostics and refresh its state."),
+        "plan_stale" | "plan_binding_invalid" => (
+            "plan_stale",
+            "The owner state or plan changed. Refresh and request a new plan before applying.",
+        ),
+        "plan_not_found" => (
+            "plan_not_found",
+            "The plan expired or was already used. Request a new plan.",
+        ),
+        "cancelled" => (
+            "cancelled",
+            "The operation was cancelled. Refresh to observe the owner state.",
+        ),
+        "confirmation_required" => (
+            "confirmation_required",
+            "Review and confirm the exact owner plan before applying.",
+        ),
+        "operation_steps_unsupported" | "method_not_found" | "incompatible_version" => (
+            "incompatible_engine",
+            "This Subyard release does not support the requested schema or operation. Install Veranda and Subyard from the same release.",
+        ),
+        "secret_forbidden" | "interactive_or_payload_command" => (
+            "protected_operation",
+            "This operation requires the owner's protected terminal transport.",
+        ),
+        "session_tool_unavailable" => (
+            "session_tool_unavailable",
+            "Install htop on the selected owner for CPU / RAM, or open its host shell.",
+        ),
+        "session_yard_unavailable" => (
+            "session_yard_unavailable",
+            "This yard is stopped or unavailable. Start it explicitly before opening a session.",
+        ),
+        "session_ssh_unavailable" | "session_host_key_unavailable" => (
+            "session_ssh_unavailable",
+            "Reconcile the selected yard explicitly to prepare its verified VS Code SSH access.",
+        ),
+        "session_project_unavailable" => (
+            "session_project_unavailable",
+            "The selected project is no longer registered. Refresh the yard and select it again.",
+        ),
+        "session_project_forbidden" => (
+            "session_project_forbidden",
+            "This yard role does not permit project sessions.",
+        ),
+        "profile_catalog_invalid" => (
+            "incompatible_engine",
+            "The owner profile catalog is incompatible or invalid. Install Veranda and Subyard from the same release.",
+        ),
+        "owner_configuration_invalid" => (
+            "owner_configuration_invalid",
+            "The owner configuration or profile catalog is invalid. Review owner diagnostics and install Veranda and Subyard from the same release.",
+        ),
+        "owner_context_changed" => (
+            "owner_context_changed",
+            "The owner context changed. Reconnect and refresh before continuing.",
+        ),
+        "mutation_gate_failed" | "migration_required" => (
+            "owner_repair_required",
+            "The owner requires release or configuration repair before this operation.",
+        ),
+        _ => (
+            "owner_request_failed",
+            "Subyard could not complete the request. Review owner diagnostics and refresh its state.",
+        ),
     };
     NativeError::new(code, message)
 }
@@ -650,3 +830,7 @@ mod tests {
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 pub(crate) mod transport_tests;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[path = "child_usage_tests.rs"]
+mod child_usage_tests;

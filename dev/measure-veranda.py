@@ -385,7 +385,7 @@ class Tree:
         live = {(pid, item['start']) for pid, item in processes().items()}
         return [{**entry, 'alive_at_end': key in live} for key, entry in sorted(self.history.items())]
 
-    def stop(self, process, *, signal_processes=None):
+    def stop(self, process, *, signal_processes=None, wait_deadline=None):
         self.sample()
         # RPC children use independent groups; signal only recorded PID/starttime
         # identities through PIDfds, never a possibly recycled group wholesale.
@@ -414,7 +414,7 @@ class Tree:
 
         signal_owned(signal.SIGTERM)
         try:
-            process.wait(timeout=3)
+            process.wait(timeout=3 if wait_deadline is None else max(0, wait_deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             signal_owned(signal.SIGKILL)
             process.wait(timeout=3)
@@ -643,7 +643,7 @@ def readiness_kind(buffer):
     return 'native-workload-complete; no frontend frame'
 
 
-def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNULL, cgroup=None, gtk=False):
+def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNULL, cgroup=None, gtk=False, child_usage=None):
     started = time.monotonic()
     gate_read = gate_write = None
     command = [str(binary)]
@@ -657,8 +657,14 @@ def launch(binary, env, timeout, *, expected_fleet=None, stderr=subprocess.DEVNU
                    str(gate_read), str(binary)]
         options['pass_fds'] = (gate_read,)
     try:
-        process = subprocess.Popen(command, cwd=ROOT, env=env, start_new_session=True,
-                                   stdout=subprocess.PIPE, stderr=stderr, **options)
+        if child_usage is None:
+            process = subprocess.Popen(command, cwd=ROOT, env=env, start_new_session=True,
+                                       stdout=subprocess.PIPE, stderr=stderr, **options)
+        else:
+            from veranda_child_usage import popen
+            process = popen(command, usage=child_usage, cwd=ROOT, env=env,
+                            start_new_session=True, stdout=subprocess.PIPE,
+                            stderr=stderr, **options)
     except BaseException:
         if gate_write is not None:
             os.close(gate_write)
@@ -738,9 +744,9 @@ class WlrToplevel:
         self.env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
                     'WAYLAND_DISPLAY': display, 'XDG_RUNTIME_DIR': str(Path(display).parent)}
 
-    def command(self, action, *matches):
+    def command(self, action, *matches, timeout=3):
         result = subprocess.run(['wlrctl', 'toplevel', action, *matches], env=self.env,
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3)
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
         if result.returncode:
             raise RuntimeError('wlrctl compositor command or state query failed')
         return result.stdout
@@ -780,16 +786,18 @@ class WlrToplevel:
 
 class X11Toplevel:
     """Exact-PID window state on the caller-owned Xvfb/Openbox display."""
-    def __init__(self, pid, env, owned):
+    def __init__(self, pid, env, owned, *, visible_only=False):
         self.pid, self.env, self.owned = pid, env, owned
+        self.visible_only = visible_only
         self.window = self.singleton()
 
     def windows(self):
-        result = subprocess.run(['xdotool', 'search', '--pid', str(self.pid)], env=self.env,
+        result = subprocess.run(['xdotool', 'search', *(['--onlyvisible'] if self.visible_only else []), '--pid', str(self.pid)], env=self.env,
                                 text=True, capture_output=True, timeout=3)
         if result.returncode not in (0, 1): raise RuntimeError('X11 window query failed')
         windows = result.stdout.splitlines()
-        if any(not value.isdecimal() for value in windows): raise RuntimeError('invalid X11 window identity')
+        if result.returncode and windows: raise RuntimeError('X11 window query failed')
+        if any(re.fullmatch(r'[0-9]+', value) is None for value in windows): raise RuntimeError('invalid X11 window identity')
         return windows
 
     def singleton(self):
@@ -989,6 +997,82 @@ def assess_gtk_baseline(result):
             'complete_baseline_window': complete, 'missing_or_partial_metrics': invalid}
 
 
+def observation_module():
+    name = 'veranda_observations'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, ROOT/'dev/veranda_observations.py')
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); sys.modules[name] = module
+    return sys.modules[name]
+
+
+def request_owned_close(control, observer, deadline):
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0: raise TimeoutError('natural_close_deadline')
+        return value
+    observer.owned()
+    if isinstance(control, WlrToplevel):
+        lines = control.command('list', timeout=remaining()).splitlines()
+        if len(lines) != 1 or lines[0].partition(': ')[0] != control.app_id: raise RuntimeError('owned_close_ambiguous')
+        observer.owned()
+        control.command('close', 'app_id:' + control.app_id, timeout=remaining())
+    elif isinstance(control, X11Toplevel):
+        def query(*args):
+            return subprocess.check_output(['xdotool', *args], env=control.env, text=True, stderr=subprocess.DEVNULL, timeout=remaining()).strip()
+        if query('search', '--onlyvisible', '--pid', str(control.pid)).splitlines() != [control.window]: raise RuntimeError('owned_close_ambiguous')
+        if query('getwindowpid', control.window) != str(control.pid) or query('getactivewindow') != control.window: raise RuntimeError('owned_close_identity')
+        observer.owned()
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'alt+F4'], env=control.env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=remaining())
+    else: raise RuntimeError('natural_close_unsupported')
+
+
+class MeasureObservation:
+    """Connect the existing per-lifecycle collector and sole GUI owning wait."""
+    def __init__(self, directory, records, index, correlation=None):
+        self.record = {'launch': index + 1, 'app_outcome': 'UNKNOWN', 'measurement_body_outcome': 'UNKNOWN', 'natural_close': 'UNKNOWN',
+                       'cleanup_outcome': 'UNKNOWN', 'trace': {'status': 'UNKNOWN', 'reason': 'not_closed'}, 'gui_child_usage': None}
+        records.append(self.record)
+        self.collector = observation_module().TraceObservations(directory, ['local'], correlation, usage_capacity=8192)
+        self.env_config = self.collector.app_env({}, 'local')
+        from veranda_child_usage import UsageLedger
+        self.ledger = UsageLedger(capacity=1)
+        self.record['traces'] = self.collector.payloads
+        self.log = directory/'observation-app.log'; private_file(self.log, '')
+
+    def environment(self, env):
+        assert 'GSK_RENDERER' not in env, 'resource_renderer_must_remain_default'
+        return dict(env, **self.env_config)
+
+    def warm(self, app, deadline):
+        if self.collector.correlation is not None:
+            self.record['live_readiness'] = self.collector.wait_ready('local', app, deadline)
+
+    def close(self, process, tree, control):
+        # Natural request and original first wait share the existing three seconds.
+        deadline = time.monotonic() + 3
+        natural = False
+        try:
+            observer = getattr(tree, 'gtk_observer', None)
+            if observer is None or process.poll() is not None: raise RuntimeError('natural_close_unavailable')
+            request_owned_close(control, observer, deadline)
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+            natural = process.returncode == 0
+            self.record['natural_close'] = 'passed' if natural else 'UNKNOWN'
+        except (OSError, RuntimeError, AssertionError, subprocess.SubprocessError):
+            self.record['natural_close'] = 'UNKNOWN'
+        finally:
+            try:
+                tree.stop(process, wait_deadline=deadline)
+            finally:
+                self.record['gui_original_exit_code'] = process.returncode
+                self.record['app_outcome'] = 'passed' if natural and process.returncode == 0 else 'UNKNOWN'
+                self.record['gui_child_usage'] = self.ledger.snapshot()
+                try: self.record['gui_child_usage_status'] = observation_module().python_usage_status(self.record['gui_child_usage'])
+                except (AssertionError,ValueError,TypeError,KeyError): self.record['gui_child_usage_status'] = 'UNKNOWN'
+                lifetime = {'input_exit_code': 0, 'gui_original_exit_code': process.returncode if natural else None}
+                self.record['trace'] = self.collector.collect('local', lifetime, process, self.log)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True,
@@ -998,6 +1082,8 @@ def main():
     parser.add_argument('--screenshot', type=Path, default=ROOT / '.build/veranda-resources.png')
     parser.add_argument('--gtk', action='store_true', help='current GTK read-only accessibility readiness; no stdout marker/WebKit dependency')
     parser.add_argument('--gtk-stderr-log', type=Path, help='private GTK renderer log retained outside per-launch state')
+    parser.add_argument('--child-usage', action='store_true', help='GTK only: requested schema3 private app trace and raw owning GUI ledger')
+    parser.add_argument('--correlation-config', type=Path, help='optional private correlation template; requires --child-usage; no producer')
     parser.add_argument('--x11-display', help='GTK only: caller-owned isolated X11 display with ready window manager')
     parser.add_argument('--wayland', action='store_true',
                         help='use the current owned Wayland compositor; keep app data isolated and omit screenshots')
@@ -1030,6 +1116,8 @@ def main():
                         help='settle the final launch before the idle measurement (default: 30)')
     parser.add_argument('--timeout', type=float, default=30)
     args = parser.parse_args()
+    if args.child_usage and not args.gtk: parser.error('--child-usage requires --gtk')
+    if args.correlation_config and not args.child_usage: parser.error('--correlation-config requires --child-usage')
     if args.gtk and (not args.configured_fleet or (not args.wayland and not args.x11_display)):
         parser.error('--gtk requires --configured-fleet and --wayland or --x11-display')
     if args.gtk_stderr_log and not args.gtk:
@@ -1077,6 +1165,8 @@ def main():
     gtk_log = args.gtk_stderr_log or args.output.with_suffix('.gtk-stderr.log')
     if args.gtk: write_metrics(gtk_log, '')
     launches = []
+    observation_records = []
+    output_written = False
     try:
         if args.x11_display:
             display = args.x11_display
@@ -1111,11 +1201,21 @@ def main():
                     control.require_empty()
                 launch_options = {'cgroup': cgroup} if cgroup is not None else {}
                 if args.gtk: launch_options['gtk'] = True
+                observed = MeasureObservation(directory, observation_records, index, args.correlation_config) if args.child_usage else None
+                if observed is not None:
+                    env = observed.environment(env); launch_options['child_usage'] = observed.ledger
                 log_offset = gtk_log.stat().st_size if args.gtk else 0
-                with (gtk_log.open('ab') if args.gtk else contextlib.nullcontext()) as gtk_stderr:
-                    if args.gtk: launch_options['stderr'] = gtk_stderr
-                    process, tree, ready = launch(args.binary.resolve(), env, args.timeout,
-                                                 expected_fleet=FLEET_COUNTS if args.configured_fleet else None, **launch_options)
+                launch_log = observed.log if observed is not None else gtk_log
+                if observed is not None: log_offset = 0
+                readiness_deadline = time.monotonic() + args.timeout
+                try:
+                    with (launch_log.open('ab') if args.gtk else contextlib.nullcontext()) as gtk_stderr:
+                        if args.gtk: launch_options['stderr'] = gtk_stderr
+                        process, tree, ready = launch(args.binary.resolve(), env, args.timeout,
+                                                     expected_fleet=FLEET_COUNTS if args.configured_fleet else None, **launch_options)
+                except BaseException:
+                    if observed is not None: observed.record['gui_child_usage'] = observed.ledger.snapshot()
+                    raise
                 try:
                     if args.gtk and args.x11_display:
                         control = X11Toplevel(process.pid, env, tree.gtk_observer.owned)
@@ -1130,8 +1230,9 @@ def main():
                         if args.gtk:
                             tree.gtk_startup_partial = getattr(tree, 'gtk_startup_partial', False) or any(sampled.get(key, 0) for key in ('pss_missing_processes', 'fd_missing_processes', 'identity_changed_processes'))
                     renderer = None
+                    if observed is not None: observed.warm(process, readiness_deadline)
                     if args.gtk:
-                        with gtk_log.open('rb') as source:
+                        with launch_log.open('rb') as source:
                             source.seek(log_offset)
                             renderer = gtk_renderer_metadata(source.read(65537))
                     launches.append({'ready_seconds': ready,
@@ -1154,17 +1255,26 @@ def main():
                 finally:
                     failed = sys.exc_info()[0] is not None
                     try:
-                        tree.stop(process)
+                        if observed is None: tree.stop(process)
+                        else: observed.close(process, tree, control)
                         if cgroup is not None:
                             cgroup.require_empty()
                         if control is not None:
                             control.require_empty()
+                        if observed is not None: observed.record['cleanup_outcome'] = 'passed'
                     except BaseException:
                         if not failed:
                             raise
                         print('veranda-probe: app cleanup failed; original error preserved', file=sys.stderr)
                     if len(launches) == index + 1 and hasattr(tree, 'process_history'):
                         launches[-1]['process_history'] = tree.process_history()
+                    if observed is not None:
+                        observed.record['measurement_body_outcome'] = 'UNKNOWN' if failed else 'passed'
+                        try:
+                            with gtk_log.open('ab') as target, observed.log.open('rb') as source: target.write(source.read(2 * 1024 * 1024 + 1))
+                        except OSError:
+                            if not failed: raise
+                            print('veranda-probe: renderer log capture unavailable; original error preserved',file=sys.stderr)
                     if getattr(process, 'stdout', None) is not None:
                         process.stdout.close()
             timings = sorted(item['ready_seconds'] for item in launches)
@@ -1225,10 +1335,20 @@ def main():
                 result['assessment'] = assess_gtk_baseline(result)
                 result['unmeasured'] += ['paint', 'loaded-switch-to-paint', 'snapshot-to-paint', 'event-to-paint',
                                         'stress', 'reconnect-cycles', 'network-recovery', 'suspend-recovery']
+            if args.child_usage:
+                result['observations'] = observation_records
+                result['observation_status'] = 'passed' if len(observation_records) == args.starts and all(row['trace']['status'] == 'passed' and row['app_outcome'] == 'passed' and row['measurement_body_outcome'] == 'passed' and row['cleanup_outcome'] == 'passed' and row.get('gui_child_usage_status') == 'recorded' for row in observation_records) else 'UNKNOWN'
             write_metrics(args.output, json.dumps(result, indent=2) + '\n')
+            output_written = True
             print(f'Metrics: {args.output}', flush=True)
             if args.gtk and result['assessment']['status'] == 'fail':
                 raise RuntimeError('GTK ordinary baseline exceeded a hard limit or has incomplete metrics')
+            if args.child_usage and result['observation_status'] != 'passed': raise RuntimeError('requested_raw_observation_unknown')
+    except BaseException:
+        if args.child_usage and not output_written:
+            try: write_metrics(args.output, json.dumps({'observation_status':'UNKNOWN','observations':observation_records,'original_measurement_outcome':'failed'},indent=2)+'\n')
+            except BaseException: print('veranda-probe: partial raw capture unavailable; original error preserved',file=sys.stderr)
+        raise
     finally:
         if xvfb is not None:
             xvfb.terminate()

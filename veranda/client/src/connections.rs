@@ -276,7 +276,10 @@ impl ConnectionStore {
         ensure_private_root(&self.root)?;
         let _lock = StoreLock::acquire(&self.root)?;
         if self.desktop_document()? != baseline {
-            return Err(NativeError::new("desktop_state_changed", "Veranda drafts changed in another process. Reopen the application before saving or executing an operation."));
+            return Err(NativeError::new(
+                "desktop_state_changed",
+                "Veranda drafts changed in another process. Reopen the application before saving or executing an operation.",
+            ));
         }
         atomic_private_replace(&self.root.join(DESKTOP_FILE), bytes)
     }
@@ -344,12 +347,20 @@ impl ConnectionStore {
         destination: &str,
         repair_id: Option<&str>,
     ) -> Result<TrustAssessment, NativeError> {
+        self.prepare_trust_with_usage(destination, repair_id, None)
+    }
+    pub(crate) fn prepare_trust_with_usage(
+        &mut self,
+        destination: &str,
+        repair_id: Option<&str>,
+        usage: Option<&crate::child_usage::UsageContext>,
+    ) -> Result<TrustAssessment, NativeError> {
         let endpoint = Endpoint::parse(destination)?;
         if repair_id.is_some_and(|id| !safe_id(id)) {
             return Err(not_found());
         }
         let (baseline, data) = self.read()?;
-        let key = ssh::assess_host_key(&endpoint)?;
+        let key = ssh::assess_host_key(&endpoint, usage)?;
         self.prepare_with_key(endpoint, key, repair_id, baseline, data)
     }
 
@@ -382,7 +393,10 @@ impl ConnectionStore {
             None
         };
         if existing.is_some_and(|record| record.public_host_key != key.key) && repair.is_none() {
-            return Err(NativeError::new("host_key_changed", "The registered SSH host key changed. Verify the replacement independently, then use Repair host key."));
+            return Err(NativeError::new(
+                "host_key_changed",
+                "The registered SSH host key changed. Verify the replacement independently, then use Repair host key.",
+            ));
         }
         let previous_fingerprint = repair
             .as_ref()
@@ -635,7 +649,10 @@ impl ConnectionStore {
             .as_ref()
             .is_some_and(|record| record.host_id != authoritative_host_id)
         {
-            return Err(NativeError::new("repair_identity_mismatch", "The replacement SSH key belongs to a different owner host. The registered trust was preserved."));
+            return Err(NativeError::new(
+                "repair_identity_mismatch",
+                "The replacement SSH key belongs to a different owner host. The registered trust was preserved.",
+            ));
         }
         let _lock = StoreLock::acquire(&self.root)?;
         let (baseline, mut data) = self.read()?;
@@ -658,7 +675,10 @@ impl ConnectionStore {
                 .as_ref()
                 .is_none_or(|repair| repair.id != existing.id)
             {
-                return Err(NativeError::new("connection_exists", "This owner host or endpoint is already registered. Use its existing connection or repair it."));
+                return Err(NativeError::new(
+                    "connection_exists",
+                    "This owner host or endpoint is already registered. Use its existing connection or repair it.",
+                ));
             }
         }
         let record = Record {
@@ -808,7 +828,10 @@ impl ConnectionStore {
                     }
                 }
                 if count >= 128 {
-                    return Err(NativeError::new("editor_profile_limit", "The native editor profile limit was reached. Reuse an existing owner and yard profile."));
+                    return Err(NativeError::new(
+                        "editor_profile_limit",
+                        "The native editor profile limit was reached. Reuse an existing owner and yard profile.",
+                    ));
                 }
                 create_private_dir(&target)?;
             }
@@ -998,7 +1021,7 @@ impl ConnectionStore {
         check_ancestors(&self.root)?;
         match fs::symlink_metadata(&self.root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((Vec::new(), StoreData::default()))
+                return Ok((Vec::new(), StoreData::default()));
             }
             Err(_) => return Err(store_io()),
             Ok(_) => check_private_dir(&self.root)?,
@@ -1007,7 +1030,7 @@ impl ConnectionStore {
         let mut file = match open_private_read(&path) {
             Ok(file) => file,
             Err(error) if error.code == "store_missing" => {
-                return Ok((Vec::new(), StoreData::default()))
+                return Ok((Vec::new(), StoreData::default()));
             }
             Err(error) => return Err(error),
         };
@@ -1160,7 +1183,10 @@ fn random_id() -> Result<String, NativeError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 fn store_io() -> NativeError {
-    NativeError::new("connection_store_io", "Could not safely read or update the Veranda connection store. Check app-data access and try again.")
+    NativeError::new(
+        "connection_store_io",
+        "Could not safely read or update the Veranda connection store. Check app-data access and try again.",
+    )
 }
 fn invalid_store() -> NativeError {
     NativeError::new(
@@ -1169,7 +1195,10 @@ fn invalid_store() -> NativeError {
     )
 }
 fn unsafe_store() -> NativeError {
-    NativeError::new("unsafe_connection_store", "The Veranda connection store must be private, owned by the current user, and free of symlinks.")
+    NativeError::new(
+        "unsafe_connection_store",
+        "The Veranda connection store must be private, owned by the current user, and free of symlinks.",
+    )
 }
 fn stale() -> NativeError {
     NativeError::new(
@@ -1178,7 +1207,10 @@ fn stale() -> NativeError {
     )
 }
 fn invalid_assessment() -> NativeError {
-    NativeError::new("invalid_assessment", "This connection review was already used, cancelled, or does not match the requested action.")
+    NativeError::new(
+        "invalid_assessment",
+        "This connection review was already used, cancelled, or does not match the requested action.",
+    )
 }
 fn expired() -> NativeError {
     NativeError::new(
@@ -1411,13 +1443,13 @@ mod windows_access {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
     };
     use windows_sys::Win32::Security::Authorization::*;
     use windows_sys::Win32::Security::*;
     use windows_sys::Win32::Storage::FileSystem::*;
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::System::IO::OVERLAPPED;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     struct LocalAllocation(*mut c_void);
     impl Drop for LocalAllocation {
@@ -1883,13 +1915,15 @@ mod tests {
         assert_eq!(preserved["editor.fontSize"], 17);
         assert_eq!(preserved["unrelated"]["keep"], true);
         assert_eq!(preserved["remote.SSH.configFile"], "new");
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[("userdata/User/settings.json", r#"{"unapproved":"change"}"#)]
-            )
-            .is_err());
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[("userdata/User/settings.json", r#"{"unapproved":"change"}"#)]
+                )
+                .is_err()
+        );
         // Persistent profiles do not consume any of the sixteen active leases.
         for index in 0..17 {
             fixture
@@ -1922,16 +1956,18 @@ mod tests {
             .unwrap();
         let target = profile.join("userdata/User/settings.json");
         symlink(profile.join("owner-known-hosts"), &target).unwrap();
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[
-                    ("owner-known-hosts", "replacement\n"),
-                    ("userdata/User/settings.json", "{}")
-                ]
-            )
-            .is_err());
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[
+                        ("owner-known-hosts", "replacement\n"),
+                        ("userdata/User/settings.json", "{}")
+                    ]
+                )
+                .is_err()
+        );
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "original\n"
@@ -1940,16 +1976,18 @@ mod tests {
         let mut file = create_private_file(&target).unwrap();
         file.write_all(b"not-json").unwrap();
         drop(file);
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[
-                    ("owner-known-hosts", "replacement\n"),
-                    ("userdata/User/settings.json", "{}")
-                ]
-            )
-            .is_err());
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[
+                        ("owner-known-hosts", "replacement\n"),
+                        ("userdata/User/settings.json", "{}")
+                    ]
+                )
+                .is_err()
+        );
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "original\n"
@@ -1985,41 +2023,49 @@ mod tests {
             "CON.txt",
             "filename.",
         ] {
-            assert!(fixture
-                .store
-                .write_editor_profile(&profile, &[(invalid, "metadata")])
-                .is_err());
+            assert!(
+                fixture
+                    .store
+                    .write_editor_profile(&profile, &[(invalid, "metadata")])
+                    .is_err()
+            );
         }
         for invalid_id in ["../escape", "NUL", "CON.txt", "filename."] {
             assert!(fixture.store.prepare_editor_profile(invalid_id).is_err());
         }
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[(
-                    "owner-known-hosts",
-                    "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic forbidden payload"
-                )]
-            )
-            .is_err());
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[
-                    ("owner-known-hosts", "duplicate"),
-                    ("owner-known-hosts", "duplicate")
-                ]
-            )
-            .is_err());
-        assert!(fixture
-            .store
-            .write_editor_profile(
-                &profile,
-                &[("owner-known-hosts", &"x".repeat(STORE_LIMIT + 1))]
-            )
-            .is_err());
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[(
+                        "owner-known-hosts",
+                        "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic forbidden payload"
+                    )]
+                )
+                .is_err()
+        );
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[
+                        ("owner-known-hosts", "duplicate"),
+                        ("owner-known-hosts", "duplicate")
+                    ]
+                )
+                .is_err()
+        );
+        assert!(
+            fixture
+                .store
+                .write_editor_profile(
+                    &profile,
+                    &[("owner-known-hosts", &"x".repeat(STORE_LIMIT + 1))]
+                )
+                .is_err()
+        );
         assert_eq!(
             fs::read_to_string(profile.join("owner-known-hosts")).unwrap(),
             "public original pin\n"
@@ -2050,14 +2096,18 @@ mod tests {
             )
             .unwrap();
         let path = profile.join("owner-known-hosts");
-        assert!(session
-            .owner_command_with_pin(&["bash".into(), "-l".into()], true, &path)
-            .is_ok());
+        assert!(
+            session
+                .owner_command_with_pin(&["bash".into(), "-l".into()], true, &path)
+                .is_ok()
+        );
         assert!(session.proxy_command_with_pin(2222, &path).is_ok());
         assert!(session.proxy_command_with_pin(0, &path).is_err());
-        assert!(session
-            .owner_command(&["bash".into(), "-l".into()], true)
-            .is_ok());
+        assert!(
+            session
+                .owner_command(&["bash".into(), "-l".into()], true)
+                .is_ok()
+        );
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -2362,15 +2412,17 @@ mod tests {
         );
         assert_eq!(reopened.desktop_document().unwrap(), b"{}");
         assert!(reopened.save_desktop_document(b"{}", b"invalid").is_err());
-        assert!(reopened
-            .save_desktop_document(b"{}", &vec![b' '; DESKTOP_LIMIT + 1])
-            .is_err());
+        assert!(
+            reopened
+                .save_desktop_document(b"{}", &vec![b' '; DESKTOP_LIMIT + 1])
+                .is_err()
+        );
         assert_eq!(reopened.desktop_document().unwrap(), b"{}");
     }
     #[cfg(unix)]
     #[test]
     fn desktop_document_refuses_public_hardlinked_or_symlinked_state() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let fixture = Fixture::new();
         fixture.store.save_desktop_document(&[], b"{}").unwrap();
         let file = fixture.store.root.join(DESKTOP_FILE);
@@ -2396,7 +2448,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinks_hardlinks_and_public_permissions_are_refused() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let mut fixture = Fixture::new();
         fixture.register();
         let root = fixture.store.root.clone();

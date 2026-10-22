@@ -437,7 +437,16 @@ pub(crate) fn write_frame<T: Serialize>(
         .map_err(|error| NativeError::io("Veranda could not write to Yard", error))
 }
 
+#[cfg(test)]
 pub(crate) fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, NativeError> {
+    read_frame_captured(reader, false).map(|(frame, _)| frame)
+}
+
+/// Reuse the original bounded frame allocation; retain bytes only for explicit local tagging.
+pub(crate) fn read_frame_captured<T: DeserializeOwned>(
+    reader: &mut impl Read,
+    capture: bool,
+) -> Result<(T, Option<Vec<u8>>), NativeError> {
     let mut header = [0_u8; 4];
     reader
         .read_exact(&mut header)
@@ -453,8 +462,10 @@ pub(crate) fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<
     reader.read_exact(&mut payload).map_err(|error| {
         NativeError::io("Veranda could not read a complete Yard response", error)
     })?;
-    serde_json::from_slice(&payload)
-        .map_err(|_| NativeError::new("invalid_frame", "Yard returned a malformed RPC response."))
+    let frame = serde_json::from_slice(&payload).map_err(|_| {
+        NativeError::new("invalid_frame", "Yard returned a malformed RPC response.")
+    })?;
+    Ok((frame, capture.then_some(payload)))
 }
 
 fn invalid_response(message: &'static str) -> NativeError {

@@ -1,3 +1,4 @@
+mod navigation;
 mod pages;
 use gtk::glib;
 use gtk::prelude::*;
@@ -9,11 +10,20 @@ use subyard_veranda::model::{Model, ReadAction};
 use subyard_veranda::operation::{Operation, Phase as OperationPhase};
 use subyard_veranda::remote::{Flow, Phase};
 use subyard_veranda::state::{AppState, OperationNote, Scope};
+use subyard_veranda::trace_sink::{
+    CORRELATION_ENV, ENV_NAME, OBSERVATION_ENV, TraceRun, TraceView,
+};
 use subyard_veranda::worker::{Details, OwnerCommand};
 use subyard_veranda::worker::{Update, Worker};
+use subyard_veranda::{
+    paint,
+    view_observation::{Parts, ViewObservation},
+};
 use veranda_lib::client::product_version;
 
 struct View {
+    observation: Option<RefCell<ViewObservation>>,
+    paint: Option<paint::PaintHandle>,
     pages: pages::Pages,
     weak: RefCell<Weak<View>>,
     details: RefCell<Option<(u64, Scope, u64, Details)>>,
@@ -24,6 +34,7 @@ struct View {
     next_request: Cell<u64>,
     window: ApplicationWindow,
     navigation: gtk::ListBox,
+    navigation_visibility: navigation::Visibility,
     heading: gtk::Label,
     status: gtk::Label,
     detail: gtk::Label,
@@ -99,7 +110,20 @@ impl View {
             }
         })
     }
-    fn render_details(&self) {
+    fn observation_rendered(&self, details_rendered: bool) {
+        let Some(observation) = &self.observation else {
+            return;
+        };
+        if let Some(application) = observation
+            .borrow_mut()
+            .rendered(&self.model.borrow(), details_rendered)
+        {
+            if let Some(paint) = &self.paint {
+                paint.applied(application.revision, &application.batch);
+            }
+        }
+    }
+    fn render_details(&self) -> bool {
         let scope = self.scope();
         let generation = self.model.borrow().generation;
         let details = self.details.borrow();
@@ -163,6 +187,7 @@ impl View {
                     }
                 }
             }
+            true
         } else {
             self.pages.unavailable(
                 &self.stack,
@@ -180,6 +205,7 @@ impl View {
                     &self.callback(),
                 );
             }
+            false
         }
     }
     fn action(&self, action: pages::Action) {
@@ -411,6 +437,7 @@ impl View {
 
     fn render(&self) {
         self.rendering.set(true);
+        self.navigation_visibility.cancel();
         let focused = self.navigation.has_focus() || self.navigation.focus_child().is_some();
         while let Some(child) = self.navigation.first_child() {
             self.navigation.remove(&child);
@@ -463,6 +490,7 @@ impl View {
             self.navigation.select_row(Some(&row));
             if focused {
                 row.grab_focus();
+                self.navigation_visibility.reveal(&row);
             }
         }
         self.status.set_text(&model.host().status);
@@ -516,9 +544,10 @@ impl View {
         self.stack.set_visible_child_name(&model.selection.tab);
         drop(rows);
         drop(model);
-        self.render_details();
+        let details_rendered = self.render_details();
         self.render_operation();
         self.rendering.set(false);
+        self.observation_rendered(details_rendered);
     }
 
     fn open_remote(&self, repair: bool) {
@@ -556,6 +585,9 @@ impl View {
         self.assess.set_sensitive(true);
         self.accept.set_visible(false);
         self.cancel.set_sensitive(true);
+        if let Some(observation) = &self.observation {
+            observation.borrow_mut().close();
+        }
         self.remote_panel.set_visible(true);
         self.workspace_content.set_visible(false);
         self.navigation.set_sensitive(false);
@@ -635,13 +667,26 @@ impl View {
     }
 
     fn read(&self, explicit: bool) {
+        self.read_observed(explicit, false);
+    }
+    fn read_observed(&self, explicit: bool, retry: bool) {
         let model = self.model.borrow();
-        if self.worker.borrow().read(
+        let start = self
+            .observation
+            .as_ref()
+            .map(|observation| observation.borrow_mut().request(&model, retry));
+        let admitted = self.worker.borrow().read(
             model.generation,
             model.selection.connection_id.clone(),
             model.selection.yard_name.clone(),
             explicit,
-        ) {
+        );
+        if !admitted {
+            if let (Some(observation), Some(start)) = (&self.observation, start) {
+                observation.borrow_mut().refused(&start);
+            }
+        }
+        if admitted {
             self.status.set_text("Refreshing…");
             self.worker.borrow().details(
                 model.generation,
@@ -712,19 +757,37 @@ fn store_root() -> Result<PathBuf, &'static str> {
     Ok(root.join("subyard/veranda"))
 }
 
-fn activate(app: &Application, root: PathBuf) {
+fn activate(app: &Application, root: PathBuf, trace: Option<TraceView>) {
+    build_ui(app, root, trace);
+}
+fn build_ui(app: &Application, root: PathBuf, trace: Option<TraceView>) {
+    let observation = trace.as_ref().map(|trace| trace.observation.clone());
+    if let Some(observation) = &observation {
+        observation.activation();
+    }
     if let Some(window) = app.active_window() {
         window.present();
         return;
     }
-    let (worker, updates) = Worker::start(root);
+    let worker_trace = observation.as_ref().and_then(|observation| {
+        observation
+            .worker_started()
+            .map(|token| (observation.clone(), token))
+    });
+    let (worker, updates) = match &observation {
+        Some(observation) => Worker::observed(root, observation.clone()),
+        None => Worker::start(root),
+    };
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Subyard Veranda")
         .default_width(1000)
         .default_height(680)
         .build();
-    let shell = gtk::Box::new(Orientation::Vertical, 0);
+    if let Some(trace) = &trace {
+        trace.observe_native(&window);
+    }
+    let (shell, paint) = paint::shell(Orientation::Vertical, 0, observation.clone());
     let bar = gtk::Box::new(Orientation::Horizontal, 12);
     bar.set_margin_start(12);
     bar.set_margin_end(12);
@@ -837,6 +900,8 @@ fn activate(app: &Application, root: PathBuf) {
     shell.append(&body);
     window.set_child(Some(&shell));
     let view = Rc::new(View {
+        observation: trace.map(|trace| RefCell::new(trace.coordinator())),
+        paint,
         pages,
         weak: RefCell::new(Weak::new()),
         details: RefCell::new(None),
@@ -846,6 +911,7 @@ fn activate(app: &Application, root: PathBuf) {
         operation: RefCell::new(None),
         next_request: Cell::new(0),
         window: window.clone(),
+        navigation_visibility: navigation::Visibility::new(&navigation, &scroll),
         navigation,
         heading,
         status,
@@ -875,6 +941,19 @@ fn activate(app: &Application, root: PathBuf) {
         closed: Cell::new(false),
     });
     *view.weak.borrow_mut() = Rc::downgrade(&view);
+    if let Some(paint) = &view.paint {
+        let weak = Rc::downgrade(&view);
+        paint.snapshot_ready(Rc::new(move || {
+            weak.upgrade().is_some_and(|view| {
+                !view.closing.get()
+                    && view.navigation_visibility.snapshot_ready()
+                    && view
+                        .observation
+                        .as_ref()
+                        .is_some_and(|observation| observation.borrow().snapshot_ready())
+            })
+        }));
+    }
     let weak = Rc::downgrade(&view);
     view.pages.execute.connect_clicked(move |_| {
         if let Some(view) = weak.upgrade() {
@@ -942,7 +1021,21 @@ fn activate(app: &Application, root: PathBuf) {
         else {
             return;
         };
+        let selection_start = view.observation.as_ref().map(|observation| {
+            observation.borrow_mut().selection_start(
+                &view.model.borrow(),
+                Scope {
+                    connection: connection.clone(),
+                    yard: yard.clone(),
+                },
+            )
+        });
         let needs_read = view.model.borrow_mut().select(connection, yard);
+        if let (Some(observation), Some(start)) = (&view.observation, selection_start) {
+            observation
+                .borrow_mut()
+                .selected(&view.model.borrow(), start);
+        }
         view.worker
             .borrow()
             .save(view.model.borrow().selection.clone());
@@ -968,6 +1061,9 @@ fn activate(app: &Application, root: PathBuf) {
         };
         if let Some(tab) = stack.visible_child_name() {
             if view.model.borrow_mut().select_tab(tab.to_string()) {
+                if let Some(observation) = &view.observation {
+                    observation.borrow_mut().changed(&view.model.borrow());
+                }
                 view.worker
                     .borrow()
                     .save(view.model.borrow().selection.clone());
@@ -983,6 +1079,10 @@ fn activate(app: &Application, root: PathBuf) {
             return glib::Propagation::Proceed;
         }
         if !view.closing.replace(true) {
+            if let Some(observation) = &view.observation {
+                observation.borrow_mut().close();
+            }
+            view.navigation_visibility.cancel();
             view.refresh.set_sensitive(false);
             view.add_remote.set_sensitive(false);
             view.repair.set_sensitive(false);
@@ -999,11 +1099,22 @@ fn activate(app: &Application, root: PathBuf) {
     glib::spawn_future_local(async move {
         while let Ok(update) = updates.recv().await {
             if matches!(update, Update::Closed) {
+                if let Some((observation, token)) = &worker_trace {
+                    observation.worker_closed(*token);
+                }
                 view.closed.set(true);
                 view.window.close();
                 break;
             }
             if view.closing.get() {
+                if let Some(coordinator) = &view.observation {
+                    match update {
+                        Update::Fleet { observation, .. } | Update::Details { observation, .. } => {
+                            coordinator.borrow().discard(observation)
+                        }
+                        _ => {}
+                    }
+                }
                 continue;
             }
             // A full notification channel can contain command replies. Drain
@@ -1058,7 +1169,14 @@ fn activate(app: &Application, root: PathBuf) {
                     connection,
                     invalidation,
                     result,
+                    observation,
                 } => {
+                    let success = result.is_ok();
+                    let returned_owner = view
+                        .observation
+                        .as_ref()
+                        .filter(|coordinator| coordinator.borrow().collects_sources())
+                        .and_then(|_| result.as_ref().ok().map(|fleet| fleet.owner.id.clone()));
                     let current = view
                         .worker
                         .borrow()
@@ -1069,12 +1187,25 @@ fn activate(app: &Application, root: PathBuf) {
                         current,
                         result,
                     );
+                    if let Some(coordinator) = &view.observation {
+                        coordinator.borrow_mut().fleet_identified(
+                            &view.model.borrow(),
+                            generation,
+                            &connection,
+                            invalidation,
+                            current,
+                            success,
+                            &action,
+                            returned_owner.as_deref(),
+                            observation,
+                        );
+                    }
                     match action {
                         ReadAction::Applied => {
                             view.render();
                             view.request_details();
                         }
-                        ReadAction::Retry => view.read(false),
+                        ReadAction::Retry => view.read_observed(false, true),
                         ReadAction::Ignored => {}
                     }
                 }
@@ -1189,6 +1320,7 @@ fn activate(app: &Application, root: PathBuf) {
                     scope,
                     invalidation,
                     result,
+                    observation,
                 } => {
                     if view.current(generation, &scope) {
                         match result {
@@ -1198,18 +1330,41 @@ fn activate(app: &Application, root: PathBuf) {
                                     .borrow()
                                     .read_is_current(&scope.connection, invalidation) =>
                             {
+                                if let Some(coordinator) = &view.observation {
+                                    coordinator.borrow_mut().details(
+                                        &view.model.borrow(),
+                                        generation,
+                                        &scope,
+                                        invalidation,
+                                        Parts::details(&details),
+                                        observation,
+                                    );
+                                }
                                 *view.details.borrow_mut() =
                                     Some((generation, scope, invalidation, details));
                                 view.render();
                             }
-                            Ok(_) => view.request_details(),
+                            Ok(_) => {
+                                if let Some(coordinator) = &view.observation {
+                                    coordinator.borrow_mut().deferred(observation);
+                                }
+                                view.request_details();
+                            }
                             Err(error) => {
+                                if let Some(coordinator) = &view.observation {
+                                    coordinator
+                                        .borrow_mut()
+                                        .details_failed(&view.model.borrow(), observation);
+                                }
                                 *view.details.borrow_mut() = None;
-                                view.render_details();
+                                let details_rendered = view.render_details();
                                 view.status
                                     .set_text(&format!("{}: {}", error.code, error.message));
+                                view.observation_rendered(details_rendered);
                             }
                         }
+                    } else if let Some(coordinator) = &view.observation {
+                        coordinator.borrow().discard(observation);
                     }
                 }
                 Update::StateSaved {
@@ -1346,15 +1501,70 @@ fn activate(app: &Application, root: PathBuf) {
     window.present();
 }
 
+enum Startup {
+    Version,
+    Run(Option<TraceRun>),
+    Unknown,
+}
+#[cfg(test)]
+fn startup(
+    args: impl Iterator<Item = std::ffi::OsString>,
+    output: impl FnOnce() -> Option<std::ffi::OsString>,
+) -> Startup {
+    startup_with_config(args, output, || None)
+}
+#[cfg(test)]
+fn startup_with_config(
+    args: impl Iterator<Item = std::ffi::OsString>,
+    output: impl FnOnce() -> Option<std::ffi::OsString>,
+    config: impl FnOnce() -> Option<std::ffi::OsString>,
+) -> Startup {
+    startup_with_options(args, output, config, || None)
+}
+fn startup_with_options(
+    args: impl Iterator<Item = std::ffi::OsString>,
+    output: impl FnOnce() -> Option<std::ffi::OsString>,
+    config: impl FnOnce() -> Option<std::ffi::OsString>,
+    resources: impl FnOnce() -> Option<std::ffi::OsString>,
+) -> Startup {
+    if args.eq([std::ffi::OsString::from("--version")]) {
+        Startup::Version
+    } else {
+        match output() {
+            None => Startup::Run(None),
+            Some(output) => match (config(), resources()) {
+                (None, None) => Startup::Run(TraceRun::configured(Some(output))),
+                (Some(_), Some(_)) => Startup::Unknown,
+                (None, Some(config)) => match TraceRun::configured_observation(output, config) {
+                    Ok(run) => Startup::Run(Some(run)),
+                    Err(_) => Startup::Unknown,
+                },
+                (Some(config), None) => match TraceRun::configured_runtime(output, config) {
+                    Ok(run) => Startup::Run(Some(run)),
+                    Err(_) => Startup::Unknown,
+                },
+            },
+        }
+    }
+}
 fn main() -> glib::ExitCode {
     // Package verification must not initialize GTK, owner I/O or app-local state.
-    if std::env::args_os()
-        .skip(1)
-        .eq([std::ffi::OsString::from("--version")])
-    {
-        println!("Subyard Veranda {}", product_version());
-        return glib::ExitCode::SUCCESS;
-    }
+    let trace = match startup_with_options(
+        std::env::args_os().skip(1),
+        || std::env::var_os(ENV_NAME),
+        || std::env::var_os(CORRELATION_ENV),
+        || std::env::var_os(OBSERVATION_ENV),
+    ) {
+        Startup::Version => {
+            println!("Subyard Veranda {}", product_version());
+            return glib::ExitCode::SUCCESS;
+        }
+        Startup::Run(trace) => trace,
+        Startup::Unknown => {
+            eprintln!("Veranda trace: UNKNOWN");
+            None
+        }
+    };
     let root = match store_root() {
         Ok(root) => root,
         Err(message) => {
@@ -1365,6 +1575,105 @@ fn main() -> glib::ExitCode {
     let app = Application::builder()
         .application_id("org.subyard.Veranda")
         .build();
-    app.connect_activate(move |app| activate(app, root.clone()));
-    app.run()
+    let observation = trace.as_ref().map(TraceRun::view);
+    app.connect_activate(move |app| activate(app, root.clone(), observation.clone()));
+    let code = app.run();
+    if let Some(trace) = trace {
+        if trace.finish(code == glib::ExitCode::SUCCESS).is_err() {
+            eprintln!("Veranda trace: UNKNOWN");
+        }
+    }
+    code
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    #[test]
+    fn version_returns_before_opt_in_lookup_or_any_ui_store_or_owner_work() {
+        assert!(matches!(
+            startup(
+                [std::ffi::OsString::from("--version")].into_iter(),
+                || panic!("version must not read trace environment")
+            ),
+            Startup::Version
+        ));
+    }
+    #[test]
+    fn unset_opt_in_keeps_the_existing_unobserved_startup() {
+        let reads = Cell::new(0);
+        assert!(matches!(
+            startup(std::iter::empty(), || {
+                reads.set(reads.get() + 1);
+                None
+            }),
+            Startup::Run(None)
+        ));
+        assert_eq!(reads.get(), 1);
+        assert!(matches!(
+            startup(["--version".into(), "other".into()].into_iter(), || None),
+            Startup::Run(None)
+        ));
+    }
+    #[test]
+    fn runtime_config_lookup_is_lazy_and_version_precedes_both_lookups() {
+        assert!(matches!(
+            startup_with_config(
+                ["--version".into()].into_iter(),
+                || panic!("trace lookup"),
+                || panic!("config lookup")
+            ),
+            Startup::Version
+        ));
+        assert!(matches!(
+            startup_with_config(
+                std::iter::empty(),
+                || None,
+                || panic!("no config lookup without trace")
+            ),
+            Startup::Run(None)
+        ));
+        assert!(matches!(
+            startup_with_config(
+                std::iter::empty(),
+                || Some("/missing/trace".into()),
+                || Some("/missing/config".into())
+            ),
+            Startup::Unknown
+        ));
+    }
+    #[test]
+    fn usage_options_preserve_version_default_and_refuse_ambiguous_requests() {
+        assert!(matches!(
+            startup_with_options(
+                ["--version".into()].into_iter(),
+                || panic!(),
+                || panic!(),
+                || panic!()
+            ),
+            Startup::Version
+        ));
+        assert!(matches!(
+            startup_with_options(std::iter::empty(), || None, || panic!(), || panic!()),
+            Startup::Run(None)
+        ));
+        assert!(matches!(
+            startup_with_options(
+                std::iter::empty(),
+                || Some("/unused".into()),
+                || Some("/legacy".into()),
+                || Some("/usage".into())
+            ),
+            Startup::Unknown
+        ));
+        assert!(matches!(
+            startup_with_options(
+                std::iter::empty(),
+                || Some("/unused".into()),
+                || None,
+                || Some("/absent".into())
+            ),
+            Startup::Unknown
+        ));
+    }
 }

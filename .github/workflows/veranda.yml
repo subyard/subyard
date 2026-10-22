@@ -59,10 +59,26 @@ jobs:
         with:
           persist-credentials: false
       - name: Install system GTK SDK
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-4-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Test GTK desktop models
         run: cargo test --manifest-path veranda/desktop/Cargo.toml --locked
+      - name: Test GTK widgets on private displays
+        run: |
+          fixture_root="$(mktemp -d /tmp/veranda-gtk-widgets.XXXXXX)"
+          chmod 0700 "$fixture_root"
+          trap 'rm -rf -- "$fixture_root"' EXIT
+          install -d -m 0700 "$fixture_root/runtime"
+          GDK_BACKEND=x11 GSK_RENDERER=cairo TMPDIR="$fixture_root" \
+            XDG_RUNTIME_DIR="$fixture_root/runtime" xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+            cargo test --manifest-path veranda/desktop/Cargo.toml --locked --bin veranda \
+            navigation::tests::rebuilt_selection_is_visible_without_stealing_or_stale_callbacks \
+            -- --ignored --exact --test-threads=1
+          GDK_BACKEND=x11 GSK_RENDERER=cairo TMPDIR="$fixture_root" \
+            XDG_RUNTIME_DIR="$fixture_root/runtime" xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+            cargo test --manifest-path veranda/desktop/Cargo.toml --locked --lib \
+            paint::tests::adapter_tracks_real_child_frames_and_cancels_owned_lifetimes \
+            -- --ignored --exact --test-threads=1
       - name: Build GTK desktop
         run: cargo build --manifest-path veranda/desktop/Cargo.toml --locked

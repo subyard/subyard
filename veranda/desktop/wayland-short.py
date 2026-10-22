@@ -16,6 +16,7 @@ import pwd
 import re
 import selectors
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -31,6 +32,24 @@ spec = importlib.util.spec_from_file_location("gtk_short_input", ROOT / "veranda
 input_driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(input_driver)
 
+_observation_spec = importlib.util.spec_from_file_location("veranda_observations", ROOT / "dev/veranda_observations.py")
+_observations = importlib.util.module_from_spec(_observation_spec)
+_observation_spec.loader.exec_module(_observations)
+TRACE_ENV = _observations.TRACE_ENV
+CORRELATION_ENV = _observations.CORRELATION_ENV
+OBSERVATION_ENV = _observations.OBSERVATION_ENV
+TRACE_LIMIT = _observations.TRACE_LIMIT
+TRACE_SCENARIOS = _observations.TRACE_SCENARIOS
+TRACE_COUNTS = _observations.TRACE_COUNTS
+validate_trace = _observations.validate_trace
+strict_json = _observations.strict_json
+scalar_number = _observations.scalar_number
+validate_ready = _observations.validate_ready
+validate_correlation_trace = _observations.validate_correlation_trace
+validate_correlation_template = _observations.validate_correlation_template
+validate_usage_trace = _observations.validate_usage_trace
+TraceObservations = _observations.TraceObservations
+
 
 def run(command, env, log, timeout=30):
     with fixture.private_log(log) as output:
@@ -38,6 +57,22 @@ def run(command, env, log, timeout=30):
     if result.returncode:
         raise RuntimeError("owned_command_failed")
     return result.returncode
+
+
+def launch_gui(command, env, app_log, lifetime, usage_capacity=None):
+    ledger = None
+    if usage_capacity is not None:
+        name = 'veranda_child_usage'
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, ROOT/'dev/veranda_child_usage.py')
+            module = importlib.util.module_from_spec(spec); sys.modules[name] = module; spec.loader.exec_module(module)
+        module = sys.modules[name]; ledger = module.UsageLedger(capacity=usage_capacity)
+    try:
+        options = dict(env=env, stdout=app_log, stderr=subprocess.STDOUT, start_new_session=True)
+        app = subprocess.Popen(command, **options) if ledger is None else module.popen(command, usage=ledger, **options)
+        return app, ledger
+    finally:
+        if ledger is not None: lifetime['gui_child_usage'] = ledger.snapshot()
 
 
 def wait_x11_ready(display, manager, env, deadline, log):
@@ -82,9 +117,14 @@ def retain_lifetime_snapshot(lifetime, tree, app):
         lifetime['process_snapshot_failure_type'] = type(error).__name__
 
 
-def capture_input_watchdog(lifetime, app, identity, backend, env, capture, workload_seconds):
+def capture_input_watchdog(lifetime, app, identity, backend, env, capture, workload_seconds, checkpoint=None):
     started = time.monotonic()
     created = None
+    if checkpoint is not None:
+        try:
+            lifetime['input_checkpoint'] = input_driver.read_input_checkpoint(checkpoint)
+        except BaseException as error:
+            lifetime['input_checkpoint_failure_type'] = type(error).__name__
     stage = 'process-before'
     try:
         def owned():
@@ -93,7 +133,7 @@ def capture_input_watchdog(lifetime, app, identity, backend, env, capture, workl
         owned()
         stage = 'window-before'
         if backend == 'x11':
-            window = probe.X11Toplevel(app.pid, env, owned)
+            window = probe.X11Toplevel(app.pid, env, owned, visible_only=True)
             binding = {'window': window.window, 'pid': app.pid}
         else:
             window = probe.WlrToplevel(env['WAYLAND_DISPLAY'], 'org.subyard.Veranda')
@@ -122,12 +162,63 @@ def capture_input_watchdog(lifetime, app, identity, backend, env, capture, workl
         lifetime['watchdog_capture_seconds'] = time.monotonic() - started
 
 
-def short_scenarios(remote, owner_focus, ime=False):
+def capture_ime_failure(lifetime, app, identity, backend, env, capture, deadline, images):
+    """Capture the original failed lifetime within its existing input deadline."""
+    receipt = {'status': 'UNKNOWN', 'stage': 'deadline-before'}
+    lifetime['ime_failure_capture'] = receipt
+    created = None
+    try:
+        assert time.monotonic() < deadline
+        receipt['stage'] = 'private-display'
+        parent = capture.parent.lstat()
+        assert backend == 'wayland' and capture.name == 'ime-failure.png'
+        assert capture.parent.resolve() == capture.parent and stat.S_ISDIR(parent.st_mode)
+        assert parent.st_uid == os.getuid() and stat.S_IMODE(parent.st_mode) == 0o700
+        display = Path(env['WAYLAND_DISPLAY'])
+        assert display.parent == capture.parent / 'runtime' and display.parent.resolve() == display.parent
+        runtime = display.parent.lstat()
+        assert stat.S_ISDIR(runtime.st_mode) and runtime.st_uid == os.getuid() and stat.S_IMODE(runtime.st_mode) == 0o700
+        assert stat.S_ISSOCK(display.lstat().st_mode)
+        def owned():
+            assert app.poll() is None and identity[0] == os.getuid()
+            assert input_driver.process_identity(app.pid) == identity
+        receipt['stage'] = 'process-before'
+        owned()
+        receipt['stage'] = 'capture'
+        input_driver.capture_view(backend, capture, env, deadline=deadline)
+        created = capture.lstat()
+        receipt['stage'] = 'validate'
+        fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(source.fileno())
+            assert os.path.samestat(created, before) and stat.S_ISREG(before.st_mode)
+            assert before.st_uid == os.getuid() and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600
+            data = source.read(2 * 1024 * 1024 + 1)
+            after = os.fstat(source.fileno())
+            assert len(data) == before.st_size <= 2 * 1024 * 1024 and data.startswith(b'\x89PNG\r\n\x1a\n')
+            assert (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        receipt['stage'] = 'process-after'
+        owned()
+        assert time.monotonic() < deadline
+        images[capture.name] = base64.b64encode(data).decode('ascii')
+        receipt.update(status='CAPTURED', stage='completed', bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                       same_owned_gui_alive=True, private_wayland_display=True)
+    except BaseException as error:
+        receipt['failure_type'] = type(error).__name__
+        if created is not None:
+            with contextlib.suppress(OSError):
+                if os.path.samestat(created, capture.lstat()): capture.unlink()
+
+
+def short_scenarios(remote, owner_focus, ime=False, profile_diagnostic=False):
+    if profile_diagnostic:
+        if remote or owner_focus or ime: raise ValueError('profile diagnostic is one local lifetime')
+        return ['profile-diagnostic']
     if ime:
         if remote or owner_focus: raise ValueError("IME probe is local only")
         return ['ime', 'ime-restore']
     if remote and owner_focus:
-        raise ValueError('owner focus diagnostic is local only')
+        return ['owner-focus-connect', 'owner-focus-restore']
     return ['owner-focus'] if owner_focus else ['connect', 'remote-restore', 'local-restore'] if remote else ['local']
 
 
@@ -140,10 +231,11 @@ def keyboard_lifetime_ms(scenarios, workload_seconds):
 
 
 def verify_persisted_selection(selected, connection_id, scenario):
-    assert scenario in ('connect', 'remote-restore', 'local-restore')
-    assert selected['tab'] == ('Overview' if scenario == 'local-restore' else 'Projects')
-    assert selected['connectionId'] == (None if scenario == 'remote-restore' else connection_id)
-    assert selected['yardName'] == (None if scenario == 'local-restore' else 'default')
+    assert scenario in ('connect', 'remote-restore', 'local-restore', 'owner-focus-connect', 'owner-focus-restore')
+    restored_owner = scenario in ('local-restore', 'owner-focus-restore')
+    assert selected['tab'] == ('Overview' if restored_owner else 'Projects')
+    assert selected['connectionId'] == (None if scenario in ('remote-restore', 'owner-focus-connect') else connection_id)
+    assert selected['yardName'] == (None if restored_owner else 'default')
 
 
 
@@ -171,21 +263,51 @@ def prepare_ime(state, env, service, evidence):
             evidence['settings'][key] = value
         evidence['stage'] = 'installed-inputs'
         evidence['packages'] = query(['dpkg-query', '-W', '-f=${binary:Package} ${Version}\n',
-                                      'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk']).splitlines()
+                                      'libglib2.0-bin', 'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk']).splitlines()
         evidence['installed_files'] = []
-        for package, basename in [('ibus-gtk4', 'libim-ibus.so'), ('ibus-hangul', 'ibus-engine-hangul'),
+        for package, basename in [('libglib2.0-bin', 'gsettings'), ('libglib2.0-bin', 'gdbus'), ('ibus', 'ibus-dconf'), ('ibus-gtk4', 'libim-ibus.so'), ('ibus-hangul', 'ibus-engine-hangul'),
                                   ('ibus-hangul', schema + '.gschema.xml')]:
             paths = [Path(name) for name in query(['dpkg-query', '-L', package]).splitlines() if Path(name).name == basename]
+            if basename in ('gsettings', 'gdbus'):
+                command = shutil.which(basename, path=env['PATH'])
+                assert command is not None, 'ime_installed_input_missing'
+                actual = Path(command).resolve(strict=True)
+                assert actual in {path.resolve(strict=True) for path in paths}, 'ime_installed_input_missing'
+                info = actual.lstat()
+                assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and not info.st_mode & 0o022, 'ime_installed_input_missing'
+                paths = [actual]
             assert len(paths) == 1 and paths[0].is_file(), 'ime_installed_input_missing'
+            if basename == 'ibus-dconf':
+                info = paths[0].lstat()
+                assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and not info.st_mode & 0o022, 'ime_installed_input_missing'
+                config_program = str(paths[0])
             evidence['installed_files'].append({'package': package, 'basename': basename,
                 'sha256': hashlib.sha256(paths[0].read_bytes()).hexdigest()})
         evidence['stage'] = 'private-daemon'
-        daemon, _ = service('ibus', ['ibus-daemon', '--single', '--emoji-extension=disable', '--cache=none',
+        daemon, _ = service('ibus', ['ibus-daemon', '--config=' + shlex.quote(config_program), '--panel=disable', '--emoji-extension=disable', '--cache=none',
                                     '--timeout=5000', '--address=' + env['IBUS_ADDRESS']])
         deadline = time.monotonic() + 10
-        while not (state / 'ibus-bus').is_socket():
+        evidence['stage'] = 'config-readiness'
+        while True:
             assert daemon.poll() is None and time.monotonic() < deadline, 'ime_daemon_unavailable'
-            time.sleep(.05)
+            if (state / 'ibus-bus').is_socket():
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'ime_config_unavailable'
+                try:
+                    value = subprocess.check_output(['gdbus', 'call', '--address', env['IBUS_ADDRESS'],
+                        '--dest', 'org.freedesktop.DBus', '--object-path', '/org/freedesktop/DBus',
+                        '--method', 'org.freedesktop.DBus.GetNameOwner', 'org.freedesktop.IBus.Config'],
+                        env=env, stderr=log, text=True, timeout=min(1, remaining))
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    value = ''
+                assert daemon.poll() is None and time.monotonic() < deadline, 'ime_config_unavailable'
+                assert len(value.encode()) <= 65536, 'ime_prerequisite_output_limit'
+                if re.fullmatch(r"\(':[0-9]+\.[0-9]+',\)\s*", value):
+                    evidence['config_ready_on_private_bus'] = True
+                    break
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, 'ime_config_unavailable'
+            time.sleep(min(.05, remaining))
         evidence['stage'] = 'engine-selection'
         subprocess.run(['ibus', 'engine', 'hangul'], env=env, stdout=log, stderr=log, check=True, timeout=5)
         assert query(['ibus', 'engine']) == 'hangul', 'ime_engine_readback_mismatch'
@@ -200,13 +322,21 @@ def main():
     parser.add_argument("--remote", action="store_true", help="include real loopback SSH onboarding, cancellation and saved selection lifetimes")
     parser.add_argument("--ui", action="store_true", help="include focused typed GTK pages, plan/discard and Unicode draft restoration")
     parser.add_argument("--ime", action="store_true", help="two local lifetimes: physical IBus Hangul composition and committed draft restart")
-    parser.add_argument("--owner-focus", action="store_true", help="diagnose one local owner-row physical focus lifetime")
+    parser.add_argument("--owner-focus", action="store_true", help="diagnose local owner-row focus; with --remote, real onboarding and one restored remote-owner focus lifetime")
+    parser.add_argument("--profile-diagnostic", action="store_true", help="diagnostic only: one local configured-fleet Profiles/Review/Discard lifetime; no acceptance")
     parser.add_argument("--prepared-assets", type=Path, help="validated staged runtime and exact Debian container image assets")
+    parser.add_argument("--trace-observations", action="store_true", help="collect a sealed per-lifecycle scalar trace after natural GUI exit; not a resource benchmark")
+    parser.add_argument("--correlation-config", type=Path, help="private schema2 offers/cohorts template; requires trace observations; no producer or resource claim")
+    parser.add_argument("--child-usage", action="store_true", help="explicit schema3 raw owning-child records; requires trace observations; not family/resource acceptance")
     args = parser.parse_args()
+    if args.correlation_config and not args.trace_observations: parser.error('--correlation-config requires --trace-observations')
+    if args.child_usage and not args.trace_observations: parser.error('--child-usage requires --trace-observations')
+    if args.profile_diagnostic and (args.remote or args.ui or args.owner_focus or args.ime):
+        parser.error('--profile-diagnostic requires one standalone local lifetime')
     if args.ime and (args.remote or args.ui or args.owner_focus):
         parser.error("--ime requires standalone local lifetimes without --remote, --ui or --owner-focus")
-    if args.owner_focus and (args.remote or args.ui):
-        parser.error("--owner-focus requires a local lifetime without --remote or --ui")
+    if args.owner_focus and args.ui:
+        parser.error("--owner-focus is diagnostic only, without --ui")
     if args.ui and not args.remote:
         parser.error("--ui currently requires the three --remote lifetimes")
     if os.environ.get("SUBYARD_E2E_VM") != "1" or os.getuid() == 0:
@@ -222,30 +352,39 @@ def main():
               "scope": "GTK IBus Hangul local app-draft composition/restart; no resource or visual acceptance" if args.ime else "GTK Linux local/SSH connection SHORT; no resource acceptance" if args.remote else "GTK Linux read-only shell SHORT; no resource acceptance",
               "gui_sha256": hashlib.sha256(args.gui.read_bytes()).hexdigest(),
               "engine_sha256": hashlib.sha256(args.engine.read_bytes()).hexdigest()}
+    if args.profile_diagnostic:
+        result['scope'] = 'DIAGNOSTIC ONLY: local configured-fleet physical profile plan/discard; no acceptance'
+        result['diagnostic_only'] = True
+    if args.owner_focus:
+        result['diagnostic_only'] = True
+        result['scope'] = 'DIAGNOSTIC ONLY: physical owner navigation; no full platform acceptance'
     try:
         with fixture.recorded_state() as state, contextlib.ExitStack() as stack:
             state_info = state.stat()
             result['fixture_state_identity'] = {'name': state.name, 'device': state_info.st_dev,
                                                 'inode': state_info.st_ino}
+            ime_failure_images = {} if args.ime else None
             def retain_evidence():
                 result['private_logs'] = {}
-                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'ssh-preflight.log', 'sshd.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log', 'ibus.log', 'ime-setup.log', 'app-ime-restore.log', 'input-ime-restore.log'):
+                for name in ('app.log', 'input.log', 'app-remote-restore.log', 'input-remote-restore.log', 'app-local-restore.log', 'input-local-restore.log', 'app-owner-focus-connect.log', 'input-owner-focus-connect.log', 'app-owner-focus-restore.log', 'input-owner-focus-restore.log', 'ssh-preflight.log', 'sshd.log', 'listener.log', 'platform-prepare.log', 'platform-cleanup.log', 'xvfb.log', 'window-manager.log', 'x11-display-ready.log', 'x11-wm-ready.log', 'session-bus.log', 'accessibility.log', 'fleet.log', 'ibus.log', 'ime-setup.log', 'app-ime-restore.log', 'input-ime-restore.log', 'app-profile-diagnostic.log', 'input-profile-diagnostic.log'):
                     path = state / name
                     if path.exists():
                         assert path.stat().st_nlink == 1 and path.stat().st_size <= 2 * 1024 * 1024
                         result['private_logs'][name] = base64.b64encode(path.read_bytes()).decode('ascii')
                 result['screenshots'] = {}
-                for name in ('useful.png', 'failure.png', 'trust.png', 'remote-restore.png', 'local-restore.png', 'ime-preedit-consonant.png', 'ime-preedit-syllable.png', 'ime-committed.png', 'ime-restore.png'):
+                for name in ('useful.png', 'failure.png', 'trust.png', 'remote-restore.png', 'local-restore.png', 'owner-focus-connect.png', 'owner-focus-restore.png', 'ime-preedit-consonant.png', 'ime-preedit-syllable.png', 'ime-committed.png', 'ime-restore.png', 'profile-diagnostic.png'):
                     capture = state / name
                     if capture.exists():
                         assert capture.stat().st_size <= 2 * 1024 * 1024
                         result['screenshots'][name] = base64.b64encode(capture.read_bytes()).decode('ascii')
+                if ime_failure_images:
+                    result['screenshots'].update(ime_failure_images)
             stack.callback(retain_evidence)
             env = dict(os.environ, DEBIAN_FRONTEND= "noninteractive")
             run(["sudo", "-n", "apt-get", "update", "-qq"], env, state / "apt-update.log", 180)
             display_packages = ["xvfb", "openbox", "xdotool", "libx11-6"] if args.x11 else ["labwc", "wlrctl", "wlr-randr", "wayland-utils", "wtype", "grim"]
             run(["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", *display_packages,
-                 *(["ibus", "ibus-hangul", "ibus-gtk4", "fonts-noto-cjk"] if args.ime else []),
+                 *(["libglib2.0-bin", "ibus", "ibus-hangul", "ibus-gtk4", "fonts-noto-cjk"] if args.ime else []),
                  "libgtk-4-1",
                  "dbus", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0", "openssh-server"], env, state / "apt-install.log", 300)
             result["stage"] = "platform"
@@ -399,7 +538,9 @@ def main():
                 result['stage'] = 'ime-prerequisites'
                 result['ime'] = {}
                 prepare_ime(state, env, service, result['ime'])
-            scenarios = short_scenarios(args.remote, args.owner_focus, args.ime)
+            scenarios = short_scenarios(args.remote, args.owner_focus, args.ime, args.profile_diagnostic)
+            observations = TraceObservations(state, scenarios, args.correlation_config, 8192 if args.child_usage else None) if args.trace_observations else None
+            if observations is not None: result['traces'] = observations.payloads
             workload_seconds = workload_budget(args.remote, args.ui)
             keeper_ms = keyboard_lifetime_ms(scenarios, workload_seconds)
             if args.x11:
@@ -417,16 +558,22 @@ def main():
                 if args.ime:
                     assert subprocess.check_output(['ibus', 'engine'], env=env, stderr=subprocess.DEVNULL, text=True, timeout=5).strip() == 'hangul', 'ime_engine_readback_mismatch'
                 app_log = stack.enter_context(fixture.private_log(state / ('app' + suffix + '.log')))
-                app = subprocess.Popen([str(args.gui.resolve())], env=env, stdout=app_log, stderr=subprocess.STDOUT, start_new_session=True)
-                tree = probe.Tree(app.pid, engine=args.engine.resolve())
-                stack.enter_context(fixture.cleanup_on_exit(lambda app=app, tree=tree: tree.stop(app), "app-" + scenario))
+                app_env = observations.app_env(env, scenario) if observations is not None else env
                 lifetime = {'scenario': scenario, 'input_workload_budget_seconds': workload_seconds}
                 result['lifetimes'].append(lifetime)
+                app, gui_usage = launch_gui([str(args.gui.resolve())], app_env, app_log, lifetime, 1 if args.child_usage else None)
+                if gui_usage is not None:
+                    stack.callback(lambda ledger=gui_usage, lifetime=lifetime: lifetime.update(gui_child_usage=ledger.snapshot()))
+                tree = probe.Tree(app.pid, engine=args.engine.resolve())
+                stack.enter_context(fixture.cleanup_on_exit(lambda app=app, tree=tree: tree.stop(app), "app-" + scenario))
                 try:
                     gui_identity = input_driver.process_identity(app.pid)
                     driver = ROOT / "veranda/desktop/wayland-input.py"
                     capture = state / ('useful.png' if not suffix else scenario + '.png')
                     driver_env = dict(env, VERANDA_GTK_PID=str(app.pid), VERANDA_GTK_CAPTURE=str(capture), VERANDA_GTK_SCENARIO=scenario, VERANDA_GTK_UI="1" if args.ui else "0", VERANDA_GTK_BACKEND=result['backend'])
+                    checkpoint = state / ('last-input' + suffix + '.json')
+                    driver_env['VERANDA_GTK_CHECKPOINT'] = str(checkpoint)
+                    if args.ime and scenario == 'ime': driver_env['VERANDA_GTK_IME_OBSERVE'] = '1'
                     if args.remote:
                         driver_env.update(VERANDA_GTK_DESTINATION=destination, VERANDA_GTK_FINGERPRINT=fingerprints[0],
                                           VERANDA_GTK_REPLACEMENT=fingerprints[1], VERANDA_GTK_BLOCK=str(state / 'block'))
@@ -438,14 +585,20 @@ def main():
                         deadline = time.monotonic() + workload_seconds
                         while action.poll() is None:
                             tree.sample()
+                            if observations is not None:
+                                ready = observations.poll_ready(scenario, app, deadline)
+                                if ready is not None: lifetime['live_readiness'] = ready
                             if time.monotonic() >= deadline:
-                                capture_input_watchdog(lifetime, app, gui_identity, result['backend'], env, state / 'failure.png', workload_seconds)
+                                capture_input_watchdog(lifetime, app, gui_identity, result['backend'], env, state / 'failure.png', workload_seconds, checkpoint)
                                 raise AssertionError('physical_input_watchdog')
                             time.sleep(.05)
                     lifetime['input_exit_code'] = action.returncode
                     frames = [line[len("VERANDA_GTK_INPUT "):] for line in (state / ('input' + suffix + '.log')).read_text().splitlines() if line.startswith("VERANDA_GTK_INPUT ")]
                     assert len(frames) == 1
                     lifetime.update(input_exit_code=action.returncode, input=json.loads(frames[0]))
+                    if args.ime and scenario == 'ime' and result['backend'] == 'wayland' and action.returncode != 0:
+                        capture_ime_failure(lifetime, app, gui_identity, result['backend'], env,
+                                            state / 'ime-failure.png', deadline, ime_failure_images)
                     assert action.returncode == 0
                     result["stage"] = "natural-close-" + scenario
                     lifetime['gui_original_exit_code'] = app.wait(timeout=15)
@@ -460,15 +613,27 @@ def main():
                         store = state / 'xdg-data/subyard/veranda'
                         record = json.loads((store / 'connections.json').read_bytes())
                         assert len(record['connections']) == 1
+                        if args.owner_focus:
+                            saved_hash = hashlib.sha256((store / 'connections.json').read_bytes()).hexdigest()
+                            if scenario == 'owner-focus-connect':
+                                result['diagnostic_saved_pins_sha256'] = saved_hash
+                            else:
+                                assert saved_hash == result['diagnostic_saved_pins_sha256'], 'diagnostic_changed_saved_pins'
+                                lifetime['diagnostic_saved_pins_unchanged'] = True
                         for path in store.iterdir():
                             info = path.lstat()
                             assert info.st_uid == os.getuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
                         selected = json.loads((store / 'navigation.json').read_bytes())
                         verify_persisted_selection(selected, record['connections'][0]['id'], scenario)
                         lifetime['private_metadata_and_selection_verified'] = True
+                    if observations is not None:
+                        lifetime['trace'] = observations.collect(scenario, lifetime, app, state / ('app' + suffix + '.log'))
+                        assert lifetime['trace']['status'] == 'passed', 'trace_evidence_unknown'
                 finally:
+                    if gui_usage is not None: lifetime['gui_child_usage'] = gui_usage.snapshot()
                     retain_lifetime_snapshot(lifetime, tree, app)
-            result['shutdown_scope'] = 'observed GUI/local engine/owned SSH PID+start identities; child wait status is not retained by client'
+            result['shutdown_scope'] = ('observed identities and opt-in raw owning-child records; producer quiescence/family coverage UNKNOWN' if args.child_usage else
+                                        'observed GUI/local engine/owned SSH PID+start identities; child wait status is not retained by client')
             result["stage"] = "cleanup"
         result.update(original_exit_code=0, fixture_cleanup="passed", stage="completed")
     except BaseException as error:

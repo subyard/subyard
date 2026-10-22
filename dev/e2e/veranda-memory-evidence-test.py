@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -26,6 +27,595 @@ fixture = memory.fixture
 
 
 class EvidenceChecks(unittest.TestCase):
+    def test_measure_main_collects_each_owned_launch_and_preserves_failures(self):
+        spec = importlib.util.spec_from_file_location('measure_ingestion', ROOT/'dev/measure-veranda.py')
+        measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
+        original_temporary = tempfile.TemporaryDirectory
+        for fault in ('none', 'unknown', 'refused', 'timeout', 'wait-timeout', 'launch', 'body-cleanup', 'default'):
+            with self.subTest(fault=fault), original_temporary(prefix='veranda-measure-ingestion-', dir='/tmp') as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                document = self.trace_document(); document['schema_version'] = 3; document['correlation_run'] = None
+                document['snapshot']['child_usage'] = {'attempts': 0, 'dropped': 0, 'overflow': None, 'records': []}
+                if fault == 'unknown': document['snapshot']['child_usage'].update(attempts=1, dropped=1, overflow='Overflow')
+                payload = root/'payload'; payload.write_text(json.dumps(document)); payload.chmod(0o600)
+                child = root/'child'; child.write_text('#!'+sys.executable+'\nimport os,signal,time,pathlib\n'
+                    'def finish(*args):\n p=pathlib.Path(os.environ["SUBYARD_VERANDA_TRACE"]); p.write_bytes(pathlib.Path(os.environ["FIXTURE_PAYLOAD"]).read_bytes()); p.chmod(0o600); raise SystemExit(0)\n'
+                    'signal.signal(signal.SIGUSR1,finish)\nsignal.signal(signal.SIGUSR2,signal.SIG_IGN)\nwhile True: time.sleep(.02)\n'); child.chmod(0o700)
+                output = root/'metrics.json'; events = []; children = []; destinations = []; original_error = RuntimeError('fixture_body')
+                class Tree:
+                    peak_rss = peak_pss = max_count = 1
+                    peak_processes = []; names = set(); readiness_kind = 'synthetic-owning-child'
+                    gtk_startup_partial = False
+                    def __init__(self, process):
+                        self.gtk_observer = SimpleNamespace(owned=lambda: events.append(('identity', process.pid)))
+                    def sample(self, **kwargs): return {}
+                    def process_history(self): return []
+                    def stop(self, process, *, wait_deadline=None):
+                        events.append(('stop', process.pid, wait_deadline))
+                        if process.poll() is None: process.terminate()
+                        process.wait(timeout=3)
+                class Control:
+                    def require_empty(self):
+                        if fault == 'body-cleanup': raise RuntimeError('fixture_cleanup')
+                    def set(self, state): return state
+                def launch(binary, env, timeout, **kwargs):
+                    self.assertNotIn('GSK_RENDERER', env)
+                    self.assertEqual('SUBYARD_VERANDA_TRACE' in env,fault != 'default')
+                    if fault != 'default':destinations.append(env['SUBYARD_VERANDA_TRACE'])
+                    ledger = kwargs.get('child_usage'); events.append(('birth', len(ledger.snapshot()['records']) if ledger is not None else None))
+                    from veranda_child_usage import popen
+                    process = popen([str(root/'missing' if fault == 'launch' else child)], usage=ledger, env=dict(env, FIXTURE_PAYLOAD=str(payload)), stdout=subprocess.DEVNULL, stderr=kwargs['stderr'])
+                    children.append(process); return process, Tree(process), .001
+                def close(control, observer, deadline):
+                    observer.owned(); events.append(('close', children[-1].pid, deadline))
+                    if fault == 'refused': raise RuntimeError('fixture_refusal')
+                    if fault == 'timeout': raise subprocess.TimeoutExpired('fixture-owned-close', 3)
+                    children[-1].send_signal(__import__('signal').SIGUSR2 if fault == 'wait-timeout' else __import__('signal').SIGUSR1)
+                def idle(*args, **kwargs):
+                    self.assertEqual(args[2:4], (120., 30.))
+                    if fault == 'body-cleanup': raise original_error
+                    return {'statistics_partial': False}
+                real_path = Path
+                osfile = root/'os'; osfile.write_text('PRETTY_NAME=fixture\n'); cpufile = root/'cpu'; cpufile.write_text('model name: fixture\n')
+                def paths(value): return osfile if str(value) == '/etc/os-release' else cpufile if str(value) == '/proc/cpuinfo' else real_path(value)
+                argv = ['measure', '--binary', str(child), '--engine', str(payload), '--output', str(output), '--gtk', '--configured-fleet', '--x11-display', ':fixture', '--starts', '2' if fault == 'none' else '1', *([] if fault == 'default' else ['--child-usage'])]
+                caught = None
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(sys, 'path', [str(ROOT/'dev'), *sys.path]))
+                    for name, value in [('environment', lambda *a, **k: {'PATH': os.defpath}), ('configured_fleet', lambda *a: measure.FLEET_COUNTS), ('launch', launch), ('request_owned_close', close), ('X11Toplevel', lambda *a: Control()), ('measure_idle', idle), ('command_output', lambda *a: None), ('desktop_packages', lambda: {}), ('assess_gtk_baseline', lambda result: {'status': 'incomplete'}), ('Path', paths)]: stack.enter_context(patch.object(measure, name, value))
+                    stack.enter_context(patch.object(measure.tempfile, 'TemporaryDirectory', lambda **kw: original_temporary(prefix='veranda-measure-inner-', dir='/tmp')))
+                    stack.enter_context(patch.object(sys, 'argv', argv))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO())); stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    try: measure.main()
+                    except BaseException as error: caught = error
+                    finally:
+                        for process in children:
+                            if process.poll() is None: process.kill(); process.wait(timeout=3)
+                result = json.loads(output.read_text())
+                if fault == 'default':
+                    self.assertIsNone(caught);self.assertNotIn('observations',result);self.assertNotIn('observation_status',result)
+                    self.assertFalse(any(event[0]=='close' for event in events));self.assertTrue(all(event[2] is None for event in events if event[0]=='stop'))
+                    self.assertTrue(all(process.returncode is not None for process in children));continue
+                rows = result['observations']
+                if rows[0]['gui_child_usage'] is None: self.fail('prebirth_fixture_exception: '+repr(caught))
+                self.assertEqual(len(rows), 2 if fault == 'none' else 1)
+                self.assertTrue(all(process.returncode is not None for process in children))
+                self.assertTrue(all(row['gui_child_usage'] is not None for row in rows))
+                if fault == 'none':
+                    self.assertIsNone(caught); self.assertEqual(result['observation_status'], 'passed')
+                    self.assertEqual(len({process.pid for process in children}), 2)
+                    self.assertEqual(len(set(destinations)), 2)
+                    self.assertTrue(all(set(row['traces']['local']) == {'sha256','bytes','base64'} for row in rows))
+                    for row in rows: self.assertEqual(row['trace']['status'], 'passed'); self.assertEqual(row['gui_child_usage_status'], 'recorded'); self.assertEqual(row['gui_original_exit_code'], 0)
+                    for broken_kind in ('coverage','pid','interval','unfinished','drop'):
+                        broken=json.loads(json.dumps(rows[0]['gui_child_usage'])); child_row=broken['records'][0]
+                        if broken_kind=='coverage':broken['coverage']='UNKNOWN'
+                        if broken_kind=='pid':child_row['terminal_pid']+=1
+                        if broken_kind=='interval':child_row['interval_end_micros']=-1
+                        if broken_kind=='unfinished':child_row['state']='UNKNOWN'
+                        if broken_kind=='drop':broken['overflow']=1
+                        self.assertEqual(measure.observation_module().python_usage_status(broken),'UNKNOWN')
+                    broken=json.loads(json.dumps(rows[0]['gui_child_usage']));broken['records'][0]['private']='PRIVATE'
+                    with self.assertRaises(AssertionError):measure.observation_module().python_usage_status(broken)
+                else:
+                    self.assertIsNotNone(caught); self.assertEqual(result['observation_status'], 'UNKNOWN')
+                    if fault == 'body-cleanup': self.assertIs(caught, original_error)
+                    if fault == 'launch': self.assertIsInstance(caught, FileNotFoundError)
+                    if fault == 'unknown': self.assertEqual(rows[0]['trace']['status'], 'UNKNOWN'); self.assertIn('local', rows[0]['traces'])
+                    if fault in ('refused', 'timeout', 'wait-timeout'): self.assertEqual(rows[0]['natural_close'], 'UNKNOWN'); self.assertEqual(rows[0]['trace']['status'], 'UNKNOWN'); self.assertEqual(rows[0]['app_outcome'],'UNKNOWN'); self.assertLess(rows[0]['gui_original_exit_code'],0)
+                for index, event in enumerate(events):
+                    if event[0] == 'close':
+                        stop = next(item for item in events[index+1:] if item[0] == 'stop')
+                        self.assertEqual(event[1:], stop[1:])  # same originally owned PID and deadline
+
+    def test_measure_owned_close_refuses_foreign_or_ambiguous_windows_and_expiry(self):
+        spec = importlib.util.spec_from_file_location('measure_owned_close', ROOT/'dev/measure-veranda.py')
+        measure = importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
+        control = object.__new__(measure.X11Toplevel); control.pid = 123; control.window = '77'; control.env = {'DISPLAY': ':private'}
+        for fault in ('none', 'multiple', 'foreign', 'inactive', 'expired', 'identity'):
+            with self.subTest(fault=fault):
+                observer = SimpleNamespace(owned=lambda: (_ for _ in ()).throw(RuntimeError('identity')) if fault == 'identity' else None)
+                values = ['77\n88' if fault == 'multiple' else '77', '999' if fault == 'foreign' else '123', '88' if fault == 'inactive' else '77']
+                deadline = time.monotonic() + (-1 if fault == 'expired' else 1)
+                with patch.object(measure.subprocess, 'check_output', side_effect=values) as query, patch.object(measure.subprocess, 'run') as run:
+                    if fault == 'none': measure.request_owned_close(control, observer, deadline)
+                    else:
+                        with self.assertRaises((RuntimeError, TimeoutError)): measure.request_owned_close(control, observer, deadline)
+                    self.assertEqual(run.call_count, int(fault == 'none'))
+                    for call in query.call_args_list: self.assertGreater(call.kwargs['timeout'], 0); self.assertLessEqual(call.kwargs['timeout'], 1)
+                    if fault == 'none': self.assertEqual(run.call_args.args[0], ['xdotool', 'key', '--clearmodifiers', 'alt+F4'])
+        control = object.__new__(measure.WlrToplevel); control.app_id = 'org.subyard.Veranda'
+        for lines in ('org.subyard.Veranda: owned', 'org.subyard.Veranda: one\norg.subyard.Veranda: two', 'foreign: owned'):
+            with self.subTest(wayland=lines):
+                control.command = __import__('unittest.mock',fromlist=['Mock']).Mock(return_value=lines)
+                observer = SimpleNamespace(owned=__import__('unittest.mock',fromlist=['Mock']).Mock())
+                if lines == 'org.subyard.Veranda: owned':
+                    measure.request_owned_close(control,observer,time.monotonic()+1)
+                    self.assertEqual(control.command.call_args.args,('close','app_id:org.subyard.Veranda'));self.assertEqual(observer.owned.call_count,2)
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'ambiguous'):measure.request_owned_close(control,observer,time.monotonic()+1)
+                    self.assertEqual(control.command.call_count,1)
+
+    def test_resource_environment_never_inherits_forced_renderer_or_trace(self):
+        spec=importlib.util.spec_from_file_location('measure_default_renderer',ROOT/'dev/measure-veranda.py')
+        measure=importlib.util.module_from_spec(spec);spec.loader.exec_module(measure)
+        with tempfile.TemporaryDirectory(prefix='veranda-default-renderer-',dir='/tmp') as temporary:
+            root=Path(temporary);root.chmod(0o700)
+            with patch.dict(os.environ,{'GSK_RENDERER':'cairo','SUBYARD_VERANDA_TRACE':'PRIVATE','SUBYARD_VERANDA_OBSERVATIONS':'PRIVATE','DBUS_SESSION_BUS_ADDRESS':'fixture','STORAGE_PATH':str(root/'external')}):
+                env=measure.environment(root,':private',root/'engine',gtk=True)
+            self.assertNotIn('GSK_RENDERER',env);self.assertNotIn('SUBYARD_VERANDA_TRACE',env);self.assertNotIn('SUBYARD_VERANDA_OBSERVATIONS',env)
+            self.assertEqual(env['GSK_DEBUG'],'renderer')
+            with patch.object(sys,'path',[str(ROOT/'dev'),*sys.path]):observed=measure.MeasureObservation(root,[],0)
+            with self.assertRaisesRegex(AssertionError,'resource_renderer'):observed.environment(dict(env,GSK_RENDERER='cairo'))
+            self.assertNotIn('GSK_RENDERER',observed.environment(env))
+
+    def test_resource_observation_forwarding_ingestion_and_live_warmup(self):
+        spec = importlib.util.spec_from_file_location('resource_ingestion', ROOT/'dev/e2e/veranda-wayland-resources.py')
+        resource = importlib.util.module_from_spec(spec); spec.loader.exec_module(resource)
+        tree = ast.parse((ROOT/'dev/e2e/veranda-wayland-resources.py').read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'measure_gtk')
+        launch = next(node for node in ast.walk(function) if isinstance(node, ast.With) and any(isinstance(call,ast.Call) and isinstance(call.func,ast.Name) and call.func.id == 'run_probe' for call in ast.walk(node)) and isinstance(node.body[0],ast.Assign) and isinstance(node.body[0].value,ast.Call) and isinstance(node.body[0].value.func,ast.Name) and node.body[0].value.func.id == 'run_probe')
+        block = next(node.body for node in ast.walk(function) if hasattr(node,'body') and isinstance(node.body,list) and launch in node.body)
+        statements = block[block.index(launch):]
+        return_index = next(i for i,node in enumerate(statements) if isinstance(node,ast.Return))
+        statements = statements[:return_index]
+        for requested in (False, True):
+            for status in ('passed', 'UNKNOWN'):
+                with self.subTest(requested=requested,status=status), tempfile.TemporaryDirectory(prefix='veranda-resource-route-',dir='/tmp') as temporary:
+                    state = Path(temporary); state.chmod(0o700); output=state/'metrics'; output.write_text(json.dumps({'observation_status':status})); calls=[]
+                    def run(argv, env, log, **kwargs): calls.append((argv,env,kwargs)); return 0
+                    namespace=dict(vars(resource),state=state,output=output,args=SimpleNamespace(short=False,child_usage=requested,correlation_config=None,engine=state/'engine'),flags=['--wayland'],env={},run_probe=run)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        if requested and status == 'UNKNOWN':
+                            with self.assertRaisesRegex(RuntimeError,'requested raw'): exec(compile(ast.Module(body=statements,type_ignores=[]),'actual-resource-ingestion','exec'),namespace)
+                        else: exec(compile(ast.Module(body=statements,type_ignores=[]),'actual-resource-ingestion','exec'),namespace)
+                    argv=calls[0][0]; self.assertEqual('--child-usage' in argv,requested)
+                    for flag,value in [('--starts','30'),('--idle-seconds','120'),('--idle-settle-seconds','30')]: self.assertEqual(argv[argv.index(flag)+1],value)
+                    self.assertNotIn('GSK_RENDERER',calls[0][1]); self.assertEqual(calls[0][2]['timeout_seconds'],1200)
+        spec = importlib.util.spec_from_file_location('measure_warm',ROOT/'dev/measure-veranda.py')
+        measure=importlib.util.module_from_spec(spec); spec.loader.exec_module(measure)
+        with tempfile.TemporaryDirectory(prefix='veranda-measure-live-',dir='/tmp') as temporary, patch.object(sys,'path',[str(ROOT/'dev'),*sys.path]):
+            root=Path(temporary); root.chmod(0o700); config=root/'config'; config.write_text(json.dumps({'schema':2,'offers':[{'offer':1,'action':'instance-log-retrieved','source':'/1.0/instances/probe/backups/a'}],'cohorts':[{'ordinal':1,'owner':'PRIVATE','connection':None,'yard':None}]}));config.chmod(0o600)
+            observed=measure.MeasureObservation(root,[],0,config)
+            ready={'schema_version':1,'context':1,'freeze_micros':20,'source_frontier':1,'bindings':[{'cohort':1,'context':1,'source':1,'role':'Fleet'}]}
+            path=observed.collector.ready_destinations['local'];path.write_text(json.dumps(ready));path.chmod(0o600)
+            deadline=time.monotonic()+.2; observed.warm(SimpleNamespace(poll=lambda:None),deadline)
+            self.assertEqual(observed.record['live_readiness']['status'],'ready');self.assertLess(time.monotonic(),deadline)
+            observed.warm(SimpleNamespace(poll=lambda:None),deadline);self.assertEqual(observed.record['live_readiness']['status'],'UNKNOWN')
+
+    def test_v3_renderer_shape_is_closed_and_does_not_claim_acceleration(self):
+        spec=importlib.util.spec_from_file_location('renderer_schema',ROOT/'dev/veranda_observations.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        value=self.trace_document();value.update(schema_version=3,correlation_run=None)
+        value['snapshot']['child_usage']={'attempts':0,'dropped':0,'overflow':None,'records':[]}
+        value['renderer_observation']={'records':[{'ordinal':1,'renderer':'GL','backend':'Wayland'}],'dropped':0}
+        summary=module.validate_usage_trace(value)
+        self.assertEqual(summary['renderer_observation_status'],'observed');self.assertEqual(summary['hardware_acceleration'],'unmeasured')
+        for fault in ('field','class','duplicate','backend'):
+            broken=json.loads(json.dumps(value));row=broken['renderer_observation']['records'][0]
+            if fault=='field':row['private']='PRIVATE'
+            if fault=='class':row['renderer']='PRIVATE'
+            if fault=='duplicate':broken['renderer_observation']['records'].append(dict(row))
+            if fault=='backend':row['backend']='PRIVATE'
+            with self.assertRaises((AssertionError,ValueError,TypeError,KeyError)):module.validate_usage_trace(broken)
+
+    def trace_document(self):
+        # Synthetic R74 schema fixture only; never native paint evidence.
+        counts = {name: 0 for name in ('session_sources received eligible inventory_eligible operation_eligible '
+                  'view_starts gui_start_attempts ignored retired unknown rpc_admission_attempts cache_reads overflow '
+                  'duplicate unknown_retirement rejected_batch_tickets dropped_records completed duplicate_completion '
+                  'dropped_terminals pending').split()}
+        counts.update(view_starts=2, gui_start_attempts=2, retired=1, unknown=1, completed=1)
+        terminal = {'context': 1, 'source': 0, 'source_kind': None, 'origin': 'Gui', 'gui_view': 1,
+                    'gui_remote': False, 'coverage': {'view': 1, 'scope': 1, 'generation': 1,
+                    'invalidation': 1, 'parts': 1, 'whole': True, 'cached': False, 'remote': False},
+                    'ticket': 1, 'kind': 'LocalRequest', 'effect': 'View', 'elapsed_micros': 40,
+                    'started_micros': 10, 'outcome': {'Paint': {'revision': 1, 'clock': 1, 'frame': 3}}}
+        unknown = dict(terminal, ticket=2, kind='LoadedSelection', coverage=None, elapsed_micros=None,
+                       started_micros=11, outcome={'Retired': 'Unknown'})
+        return {'schema_version': 1, 'app_run_returned': True, 'exit_success': True,
+                'run_lifecycle': 'ObservedClosed', 'snapshot': {'schema_version': 1, 'context': 1,
+                'trace_window': 'Sealed', 'lifecycle': {'activations': 1, 'workers_started': 1, 'workers_closed': 1,
+                'unmatched_closed': 0, 'untracked_workers': 0}, 'worker_cleanup': 'ObservedClosed',
+                'producer_quiescence': 'Unknown', 'counts': counts, 'records': [], 'terminals': [terminal, unknown]}}
+
+    def test_short_trace_env_is_per_gui_lifecycle_and_default_driver_services_stay_unobserved(self):
+        spec = importlib.util.spec_from_file_location('trace_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        source = ast.parse((ROOT / 'veranda/desktop/wayland-short.py').read_text())
+        assignments = [node for node in ast.walk(source) if isinstance(node, ast.Assign)]
+        def assignment(name, predicate=lambda node: True):
+            return next(node for node in assignments if any(isinstance(target, ast.Name) and target.id == name for target in node.targets) and predicate(node))
+        whitelist = assignment('env', lambda node: isinstance(node.value, ast.Dict))
+        app_env = assignment('app_env')
+        launch = next(node for node in assignments if any(isinstance(target, ast.Tuple) and isinstance(target.elts[0], ast.Name) and target.elts[0].id == 'app' for target in node.targets))
+        driver = assignment('driver_env'); remote = assignment('remote_env')
+        action = assignment('action')
+        service = next(node for node in ast.walk(source) if isinstance(node, ast.FunctionDef) and node.name == 'service')
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory(prefix='veranda-trace-env-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700)
+                observations = short.TraceObservations(state, ['local', 'ime-restore']) if enabled else None
+                namespace = dict(vars(short), state=state, args=SimpleNamespace(x11=False, ui=False, child_usage=False, engine=state/'engine', gui=state/'gui'), lifetime={},
+                                 operator=state/'operator', observations=observations, scenario='local', app_log=io.StringIO(),
+                                 result={'backend': 'wayland'}, capture=state/'capture')
+                with patch.dict(os.environ, {short.TRACE_ENV: 'PRIVATE_OUTER_VALUE', short.CORRELATION_ENV: 'PRIVATE_OUTER_CONFIG', short.OBSERVATION_ENV: 'PRIVATE_OUTER_CONFIG'}), patch.object(short.subprocess, 'Popen', return_value=SimpleNamespace(pid=77)) as popen:
+                    for statement in (whitelist, app_env, launch, driver, remote):
+                        exec(compile(ast.Module(body=[statement], type_ignores=[]), 'actual-trace-env-path', 'exec'), namespace)
+                    gui_env = popen.call_args.kwargs['env']
+                    namespace.update(driver=ROOT/'veranda/desktop/wayland-input.py', output=io.StringIO())
+                    exec(compile(ast.Module(body=[action], type_ignores=[]), 'actual-driver-launch', 'exec'), namespace)
+                    self.assertNotIn(short.TRACE_ENV, popen.call_args.kwargs['env'])
+                    with contextlib.ExitStack() as stack, patch.object(short.probe, 'Tree', return_value=SimpleNamespace(stop=lambda process: None)):
+                        namespace['stack'] = stack
+                        exec(compile(ast.Module(body=[service], type_ignores=[]), 'actual-service-launch', 'exec'), namespace)
+                        namespace['service']('owned-service', ['owned-service'])
+                        self.assertNotIn(short.TRACE_ENV, popen.call_args.kwargs['env'])
+                self.assertNotIn(short.TRACE_ENV, namespace['env'])
+                self.assertNotIn(short.TRACE_ENV, namespace['driver_env'])
+                self.assertNotIn(short.TRACE_ENV, namespace['remote_env'])
+                for child_env in (namespace['env'], namespace['driver_env'], namespace['remote_env']):
+                    self.assertNotIn(short.CORRELATION_ENV, child_env)
+                    self.assertNotIn(short.OBSERVATION_ENV, child_env)
+                if enabled:
+                    path = Path(gui_env[short.TRACE_ENV]); self.assertFalse(path.exists())
+                    self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                    other = observations.app_env(namespace['env'], 'ime-restore')
+                    self.assertNotEqual(gui_env[short.TRACE_ENV], other[short.TRACE_ENV])
+                    with self.assertRaises(AssertionError): observations.app_env(namespace['env'], 'local')
+                    with self.assertRaises(AssertionError): observations.app_env(namespace['env'], 'undeclared')
+                else:
+                    self.assertIs(gui_env, namespace['env']); self.assertNotIn(short.TRACE_ENV, gui_env)
+                    self.assertFalse((state/'observations').exists())
+
+    def test_correlation_handshake_and_final_envelope_are_private_exact_and_fail_closed(self):
+        spec = importlib.util.spec_from_file_location('correlation_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        template = {'schema': 2, 'offers': [{'offer': 17, 'action': 'instance-log-retrieved', 'source': '/1.0/instances/probe/backups/migration_probe.log'}],
+                    'cohorts': [{'ordinal': 1, 'owner': 'PRIVATE_OWNER', 'connection': None, 'yard': 'default'}]}
+        ready = {'schema_version': 1, 'context': 1, 'freeze_micros': 20, 'source_frontier': 1,
+                 'bindings': [{'cohort': 1, 'context': 1, 'source': 1, 'role': role} for role in ('Fleet', 'Details')]}
+        for fault in ('none', 'missing', 'mode', 'symlink', 'duplicate', 'extra', 'wrong-context', 'writer-failed', 'replacement', 'new-source', 'different-final', 'unknown-marker', 'dead-app'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-correlation-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); config = state/'template.json'
+                config.write_text(json.dumps(template)); config.chmod(0o600)
+                collector = short.TraceObservations(state, ['local'], config)
+                env = collector.app_env({}, 'local'); runtime = json.loads(Path(env[short.CORRELATION_ENV]).read_text())
+                self.assertEqual(set(runtime), {'schema', 'offers', 'cohorts', 'ready'})
+                self.assertEqual(Path(env[short.CORRELATION_ENV]).stat().st_mode & 0o777, 0o600)
+                path = Path(runtime['ready']); self.assertFalse(path.exists())
+                payload = json.loads(json.dumps(ready))
+                if fault == 'duplicate': payload['bindings'].append(dict(payload['bindings'][0]))
+                if fault == 'extra': payload['bindings'][0]['private'] = 'PRIVATE_PAYLOAD'
+                if fault == 'wrong-context': payload['bindings'][0]['context'] = 2
+                if fault != 'missing': path.write_text(json.dumps(payload)); path.chmod(0o600)
+                if fault == 'mode': path.chmod(0o644)
+                if fault == 'symlink': path.unlink(); path.symlink_to(config)
+                release = []
+                app = SimpleNamespace(poll=lambda: 0 if fault == 'dead-app' else None)
+                handshake = collector.wait_ready('local', app, time.monotonic() + 0.03)
+                if handshake['status'] == 'ready': release.append('future-producer')
+                self.assertEqual(bool(release), fault not in ('missing', 'mode', 'symlink', 'duplicate', 'extra', 'wrong-context', 'dead-app'))
+                value = self.trace_document(); value['schema_version'] = 2
+                value['snapshot']['counts']['session_sources'] = 1
+                if fault == 'new-source': value['snapshot']['counts']['session_sources'] = 2
+                value['snapshot']['correlation'] = {'counts': {key: 0 for key in ('valid_raw', 'tagged', 'other', 'unclassifiable', 'duplicate', 'admitted', 'admission_drops', 'index_drops', 'classification_pending', 'classification_unknown')}, 'index': []}
+                value['correlation_run'] = {'schema_version': 1, 'phase': 'Frozen', 'bindings': ready['bindings'], 'writer': 'Failed' if fault == 'writer-failed' else 'Written', 'ready': ready,
+                                            'cohorts_complete': True, 'replacement_unknown': fault == 'replacement'}
+                if fault == 'different-final': value['correlation_run']['ready'] = dict(ready, freeze_micros=21)
+                destination = Path(env[short.TRACE_ENV]); destination.write_text(json.dumps(value)); destination.chmod(0o600)
+                log = state/'app.log'; log.write_bytes(b'Veranda trace: UNKNOWN\n' if fault == 'unknown-marker' else b''); log.chmod(0o600)
+                result = collector.collect('local', {'gui_original_exit_code': 0, 'input_exit_code': 0}, SimpleNamespace(returncode=0), log)
+                self.assertEqual(result['status'], 'passed' if fault == 'none' else 'UNKNOWN')
+                self.assertNotIn('PRIVATE', json.dumps(result)); self.assertFalse(result.get('event_latency_claimed', False))
+
+    def test_short_watchdog_obtains_one_live_ack_on_original_remaining_deadline(self):
+        spec = importlib.util.spec_from_file_location('usage_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        source = ast.parse((ROOT/'veranda/desktop/wayland-short.py').read_text())
+        loop = next(node for node in ast.walk(source) if isinstance(node, ast.While) and ast.unparse(node.test) == 'action.poll() is None')
+        with tempfile.TemporaryDirectory(prefix='veranda-live-caller-', dir='/tmp') as temporary:
+            state = Path(temporary); state.chmod(0o700); config = state/'template'
+            config.write_text(json.dumps({'schema':2,'offers':[{'offer':1,'action':'synthetic','source':'/synthetic'}],
+                'cohorts':[{'ordinal':1,'owner':'owner','connection':None,'yard':None}]})); config.chmod(0o600)
+            observations = short.TraceObservations(state,['local'],config); observations.app_env({},'local')
+            ready = {'schema_version':1,'context':1,'freeze_micros':20,'source_frontier':1,
+                     'bindings':[{'cohort':1,'context':1,'source':1,'role':'Fleet'}]}
+            path=observations.ready_destinations['local'];path.write_text(json.dumps(ready));path.chmod(0o600)
+            polls=iter([None,None,0]);samples=[];app=SimpleNamespace(poll=lambda:None);deadline=time.monotonic()+1;lifetime={}
+            namespace=dict(vars(short),action=SimpleNamespace(poll=lambda:next(polls)),tree=SimpleNamespace(sample=lambda:samples.append(1)),
+                           app=app,deadline=deadline,observations=observations,scenario='local',lifetime=lifetime)
+            with patch.object(observations,'wait_ready',wraps=observations.wait_ready) as wait, patch.object(short.time,'sleep'):
+                exec(compile(ast.Module(body=[loop],type_ignores=[]),'actual-watchdog-live-ack','exec'),namespace)
+            self.assertEqual(lifetime['live_readiness']['status'],'ready');self.assertEqual(len(samples),2)
+            self.assertEqual(wait.call_count,1);self.assertEqual(wait.call_args.args,('local',app,deadline));self.assertEqual(namespace['deadline'],deadline)
+            self.assertEqual(observations.ready_payloads['local'],ready)
+
+    def test_short_actual_gui_popen_owns_optional_raw_usage_before_wait(self):
+        spec = importlib.util.spec_from_file_location('usage_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for enabled in (False,True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory(prefix='veranda-gui-usage-',dir='/tmp') as temporary:
+                log=Path(temporary)/'app.log';lifetime={}
+                with log.open('wb') as output:
+                    app,ledger=short.launch_gui([sys.executable,'-c','pass'],dict(os.environ),output,lifetime,1 if enabled else None)
+                    try:self.assertEqual(app.wait(timeout=3),0)
+                    finally:
+                        if app.poll() is None:app.kill();app.wait(timeout=3)
+                if enabled:
+                    value=ledger.snapshot();row=value['records'][0]
+                    self.assertEqual(value['attempts'],1);self.assertEqual(row['state'],'CAPTURED');self.assertEqual(row['capture_count'],1);self.assertEqual(row['reap_count'],1)
+                    self.assertEqual(row['owned_pid'],row['terminal_pid']);self.assertGreater(row['ru_maxrss_kib'],0)
+                    self.assertLessEqual(value['origin_ns']+1000*row['interval_start_micros'],row['pre_spawn_ns'])
+                    self.assertGreaterEqual(value['origin_ns']+1000*row['interval_end_micros'],row['post_owning_wait_ns'])
+                else:self.assertIsNone(ledger);self.assertNotIn('gui_child_usage',lifetime)
+        with tempfile.TemporaryDirectory(prefix='veranda-gui-spawn-failure-',dir='/tmp') as temporary:
+            lifetime={};missing=Path(temporary)/'missing'
+            with (Path(temporary)/'app.log').open('wb') as output:
+                with self.assertRaises(FileNotFoundError) as caught:short.launch_gui([str(missing)],dict(os.environ),output,lifetime,1)
+            self.assertEqual(caught.exception.filename,str(missing));self.assertEqual(lifetime['gui_child_usage']['attempts'],1)
+            self.assertEqual(lifetime['gui_child_usage']['records'][0]['state'],'UNKNOWN')
+
+    def test_usage_trace_requested_shape_unknown_and_private_field_controls(self):
+        spec = importlib.util.spec_from_file_location('usage_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none','missing','private','bool','pid','interval','unknown','dropped','downgrade','source','context','kernel-private'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix='veranda-usage-schema-',dir='/tmp') as temporary:
+                state=Path(temporary);state.chmod(0o700);collector=short.TraceObservations(state,['local'],usage_capacity=4)
+                env=collector.app_env({},'local');self.assertNotIn(short.CORRELATION_ENV,env)
+                runtime=json.loads(Path(env[short.OBSERVATION_ENV]).read_text());self.assertEqual(runtime,{'schema':3,'child_usage':{'capacity':4},'correlation':None})
+                value=self.trace_document();value.update(schema_version=3,correlation_run=None)
+                row=dict.fromkeys('source source_kind post_owning_wait_micros interval_start_micros interval_end_micros terminal_code terminal_status raw_wait_status returncode signal unknown error_number'.split())
+                row.update(context=1,provenance=1,kind='ShortTool',attempt=1,pre_spawn_micros=10,post_owning_wait_micros=20,interval_start_micros=10,interval_end_micros=21,
+                           owned_pid=7,terminal_pid=7,terminal_code=1,terminal_status=0,raw_wait_status=0,returncode=0,captures=1,reaps=1,state='Captured',
+                           usage={key:0 for key in 'utime_sec utime_usec stime_sec stime_usec maxrss_kib ixrss idrss isrss minflt majflt nswap inblock oublock msgsnd msgrcv nsignals nvcsw nivcsw'.split()})
+                usage={'attempts':1,'dropped':0,'overflow':None,'records':[row]};value['snapshot']['child_usage']=usage
+                if fault=='missing':del value['snapshot']['child_usage']
+                if fault=='private':row['path']='PRIVATE'
+                if fault=='bool':row['captures']=True
+                if fault=='pid':row['terminal_pid']=8
+                if fault=='interval':row['interval_end_micros']=None
+                if fault=='unknown':row.update(state='Unknown',unknown='WaitFailed')
+                if fault=='dropped':usage.update(attempts=2,dropped=1,overflow='Overflow')
+                if fault=='source':row['source']=1
+                if fault=='context':row['context']=2
+                if fault=='kernel-private':row['usage']['private']='PRIVATE'
+                if fault=='downgrade':value=self.trace_document()
+                path=Path(env[short.TRACE_ENV]);path.write_text(json.dumps(value));path.chmod(0o600)
+                log=state/'app.log';log.write_bytes(b'');log.chmod(0o600)
+                lifetime={'gui_original_exit_code':0,'input_exit_code':0}
+                result=collector.collect('local',lifetime,SimpleNamespace(returncode=0),log)
+                safe_shape = fault in ('none','pid','interval','unknown','dropped')
+                self.assertEqual(bool(collector.payloads),safe_shape)
+                self.assertEqual(result['status'],'passed' if fault=='none' else 'UNKNOWN');self.assertNotIn('PRIVATE',json.dumps(result))
+                self.assertEqual(lifetime,{'gui_original_exit_code':0,'input_exit_code':0})
+                if safe_shape:
+                    self.assertEqual(result['family_coverage'],'UNKNOWN')
+                    self.assertEqual(result['child_usage_status'],'recorded' if fault=='none' else 'UNKNOWN')
+                    if fault!='none':
+                        self.assertEqual(result['app_lifecycle_status'],'passed')
+                        self.assertIs(result['raw_retained'],True)
+
+    def test_usage_combined_correlation_requires_actual_live_ack_and_v3(self):
+        spec=importlib.util.spec_from_file_location('usage_short',ROOT/'veranda/desktop/wayland-short.py')
+        short=importlib.util.module_from_spec(spec);spec.loader.exec_module(short)
+        for fault in ('none','final-only','v2','changed-final'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix='veranda-combined-usage-',dir='/tmp') as temporary:
+                state=Path(temporary);state.chmod(0o700);config=state/'template'
+                config.write_text(json.dumps({'schema':2,'offers':[{'offer':1,'action':'synthetic','source':'/synthetic'}],
+                    'cohorts':[{'ordinal':1,'owner':'owner','connection':None,'yard':None}]}));config.chmod(0o600)
+                collector=short.TraceObservations(state,['local'],config,usage_capacity=4);env=collector.app_env({},'local')
+                runtime=json.loads(Path(env[short.OBSERVATION_ENV]).read_text());self.assertEqual(runtime['schema'],3)
+                ready={'schema_version':1,'context':1,'freeze_micros':20,'source_frontier':1,'bindings':[{'cohort':1,'context':1,'source':1,'role':'Fleet'}]}
+                path=collector.ready_destinations['local'];path.write_text(json.dumps(ready));path.chmod(0o600)
+                if fault!='final-only':self.assertEqual(collector.wait_ready('local',SimpleNamespace(poll=lambda:None),time.monotonic()+1)['status'],'ready')
+                value=self.trace_document();value.update(schema_version=3,correlation_run={'schema_version':1,'phase':'Frozen','bindings':ready['bindings'],'writer':'Written','ready':ready,'cohorts_complete':True,'replacement_unknown':False})
+                value['snapshot']['counts']['session_sources']=1
+                value['snapshot']['correlation']={'counts':{key:0 for key in 'valid_raw tagged other unclassifiable duplicate admitted admission_drops index_drops classification_pending classification_unknown'.split()},'index':[]}
+                value['snapshot']['child_usage']={'attempts':0,'dropped':0,'overflow':None,'records':[]}
+                if fault=='v2':value['schema_version']=2;del value['snapshot']['child_usage']
+                if fault=='changed-final':value['correlation_run']['ready']=dict(ready,freeze_micros=21)
+                trace=Path(env[short.TRACE_ENV]);trace.write_text(json.dumps(value));trace.chmod(0o600)
+                log=state/'app.log';log.write_bytes(b'');log.chmod(0o600)
+                outcome=collector.collect('local',{'gui_original_exit_code':0,'input_exit_code':0},SimpleNamespace(returncode=0),log)
+                self.assertEqual(outcome['status'],'passed' if fault=='none' else 'UNKNOWN')
+
+    def test_correlation_collection_requires_requested_schema_and_live_acknowledgment(self):
+        spec = importlib.util.spec_from_file_location('correlation_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        template = {'schema': 2, 'offers': [{'offer': 1, 'action': 'synthetic', 'source': '/synthetic'}],
+                    'cohorts': [{'ordinal': 1, 'owner': 'owner', 'connection': None, 'yard': None}]}
+        ready = {'schema_version': 1, 'context': 1, 'freeze_micros': 20, 'source_frontier': 1,
+                 'bindings': [{'cohort': 1, 'context': 1, 'source': 1, 'role': 'Fleet'}]}
+        cases = ((True, 1, 'none'), (True, 1, 'failed'), (True, 1, 'live'),
+                 (True, 2, 'none'), (True, 2, 'failed'), (True, 2, 'live'),
+                 (False, 1, 'none'), (False, 2, 'none'))
+        for requested, returned, handshake in cases:
+            with self.subTest(requested=requested, returned=returned, handshake=handshake), tempfile.TemporaryDirectory(prefix='veranda-requested-schema-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); config = state/'template.json'
+                config.write_text(json.dumps(template)); config.chmod(0o600)
+                collector = short.TraceObservations(state, ['local'], config if requested else None)
+                env = collector.app_env({}, 'local')
+                if requested and (returned == 2 or handshake == 'live'):
+                    ready_path = collector.ready_destinations['local']
+                    ready_path.write_text(json.dumps(ready)); ready_path.chmod(0o600)
+                if handshake != 'none':
+                    app = SimpleNamespace(poll=lambda: 0 if handshake == 'failed' else None)
+                    observed = collector.wait_ready('local', app, time.monotonic() + 0.03)
+                    self.assertEqual(observed['status'], 'ready' if handshake == 'live' else 'UNKNOWN')
+                value = self.trace_document()
+                if returned == 2:
+                    value['schema_version'] = 2; value['snapshot']['counts']['session_sources'] = 1
+                    value['snapshot']['correlation'] = {'counts': {key: 0 for key in ('valid_raw', 'tagged', 'other', 'unclassifiable', 'duplicate', 'admitted', 'admission_drops', 'index_drops', 'classification_pending', 'classification_unknown')}, 'index': []}
+                    value['correlation_run'] = {'schema_version': 1, 'phase': 'Frozen', 'bindings': ready['bindings'],
+                                                'writer': 'Written', 'ready': ready, 'cohorts_complete': True, 'replacement_unknown': False}
+                destination = Path(env[short.TRACE_ENV]); destination.write_text(json.dumps(value)); destination.chmod(0o600)
+                log = state/'app.log'; log.write_bytes(b''); log.chmod(0o600)
+                result = collector.collect('local', {'gui_original_exit_code': 0, 'input_exit_code': 0}, SimpleNamespace(returncode=0), log)
+                passed = (requested and returned == 2 and handshake == 'live') or (not requested and returned == 1)
+                self.assertEqual(result['status'], 'passed' if passed else 'UNKNOWN')
+                self.assertEqual(bool(collector.payloads), passed)
+
+    def test_correlation_config_schema_and_stale_ready_refuse_without_replacement(self):
+        spec = importlib.util.spec_from_file_location('correlation_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        template = {'schema': 2, 'offers': [{'offer': 1, 'action': 'synthetic', 'source': '/synthetic'}], 'cohorts': [{'ordinal': 1, 'owner': 'owner', 'connection': None, 'yard': None}]}
+        for fault in ('extra', 'duplicate-offer', 'duplicate-target', 'bool', 'empty', 'private-mode', 'stale-ready'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-correlation-config-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); path = state/'template.json'; value = json.loads(json.dumps(template))
+                if fault == 'extra': value['private'] = 'PRIVATE'
+                if fault == 'duplicate-offer': value['offers'].append(dict(value['offers'][0]))
+                if fault == 'duplicate-target': value['cohorts'].append(dict(value['cohorts'][0]))
+                if fault == 'bool': value['cohorts'][0]['ordinal'] = True
+                if fault == 'empty': value['offers'] = []
+                path.write_text(json.dumps(value)); path.chmod(0o644 if fault == 'private-mode' else 0o600)
+                if fault == 'stale-ready':
+                    collector = short.TraceObservations(state, ['local'], path); ready = collector.parent/'ready-local.json'
+                    ready.write_bytes(b'previous'); ready.chmod(0o600)
+                    with self.assertRaises(AssertionError): collector.app_env({}, 'local')
+                    self.assertEqual(ready.read_bytes(), b'previous')
+                else:
+                    with self.assertRaises((AssertionError, ValueError, OSError)): short.TraceObservations(state, ['local'], path)
+
+    def test_correlation_scalar_index_preserves_exact_terminal_joins_and_closed_shapes(self):
+        spec = importlib.util.spec_from_file_location('correlation_short', ROOT/'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none', 'private', 'bool', 'source', 'context', 'ticket', 'kind', 'pending', 'extra-count', 'tag', 'overflow-ticket'):
+            with self.subTest(fault=fault):
+                value = self.trace_document(); value['schema_version'] = 2; core = value['snapshot']; core['counts']['session_sources'] = 1
+                terminal = dict(core['terminals'][1], ticket=3, origin='RpcSession', source=1, source_kind='Local', gui_view=None, gui_remote=None, kind='RpcEvent', effect='Inventory')
+                core['terminals'].append(terminal)
+                row = {'context': 1, 'source': 1, 'source_kind': 'Local', 'sequence': 1, 'started_micros': 30, 'ticket': 3, 'tag': {'Matched': 17}, 'admission': 'Admitted', 'classification': 'Complete'}
+                counts = {key: 0 for key in ('valid_raw', 'tagged', 'other', 'unclassifiable', 'duplicate', 'admitted', 'admission_drops', 'index_drops', 'classification_pending', 'classification_unknown')}; counts.update(valid_raw=1, tagged=1, admitted=1)
+                core['correlation'] = {'counts': counts, 'index': [row]}
+                value['correlation_run'] = {'schema_version': 1, 'phase': 'Frozen', 'bindings': [{'cohort': 1, 'context': 1, 'source': 1, 'role': 'Fleet'}], 'writer': 'Written', 'cohorts_complete': True, 'replacement_unknown': False,
+                    'ready': {'schema_version': 1, 'context': 1, 'freeze_micros': 20, 'source_frontier': 1, 'bindings': [{'cohort': 1, 'context': 1, 'source': 1, 'role': 'Fleet'}]}}
+                if fault == 'private': row['private_payload'] = 'PRIVATE'
+                if fault == 'bool': row['sequence'] = True
+                if fault == 'source': row['source'] = 2
+                if fault == 'context': row['context'] = 2
+                if fault == 'ticket': row['ticket'] = 1
+                if fault == 'kind': row['source_kind'] = 'Remote'
+                if fault == 'pending': row['classification'] = 'Pending'
+                if fault == 'extra-count': counts['private'] = 1
+                if fault == 'tag': row['tag'] = {'PRIVATE': 17}
+                if fault == 'overflow-ticket': row['admission'] = 'Overflow'
+                if fault == 'none':
+                    result = short.validate_trace(value); self.assertTrue(result['correlation_readiness']); self.assertFalse(result['event_latency_claimed'])
+                else:
+                    with self.assertRaises((AssertionError, ValueError, TypeError)): short.validate_trace(value)
+
+    def test_short_trace_collection_is_safe_bounded_unique_and_rejects_unknown_marker(self):
+        spec = importlib.util.spec_from_file_location('trace_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none', 'missing', 'symlink', 'hardlink', 'mode', 'parent', 'oversize', 'marker', 'duplicate', 'not-closed'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-trace-collect-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); collector = short.TraceObservations(state, ['local'])
+                destination = Path(collector.app_env({}, 'local')[short.TRACE_ENV]); log = state/'app.log'
+                log.write_bytes(b'Veranda trace: UNKNOWN\n' if fault == 'marker' else b''); log.chmod(0o600)
+                if fault != 'missing': destination.write_text(json.dumps(self.trace_document())); destination.chmod(0o600)
+                if fault == 'symlink': destination.unlink(); destination.symlink_to(log)
+                if fault == 'hardlink': os.link(destination, state/'extra')
+                if fault == 'mode': destination.chmod(0o644)
+                if fault == 'parent': destination.parent.chmod(0o755)
+                if fault == 'oversize':
+                    with destination.open('ab') as output: output.truncate(short.TRACE_LIMIT + 1)
+                lifetime = {'input_exit_code': 0, 'gui_original_exit_code': 0}
+                observed = collector.collect('local', lifetime, SimpleNamespace(returncode=None if fault == 'not-closed' else 0), log)
+                if fault in ('none', 'duplicate'):
+                    self.assertEqual(observed['status'], 'passed'); self.assertEqual(observed['painted_gui_requests'], 1)
+                    self.assertEqual(observed['producer_quiescence'], 'Unknown'); self.assertEqual(observed['retired_unknown'], 1)
+                    self.assertFalse(observed['event_latency_claimed']); self.assertEqual(observed['event_paint_samples'], 0)
+                    import base64
+                    payload = collector.payloads['local']; raw = base64.b64decode(payload['base64'])
+                    self.assertEqual(hashlib.sha256(raw).hexdigest(), payload['sha256'])
+                    if fault == 'duplicate': self.assertEqual(collector.collect('local', lifetime, SimpleNamespace(returncode=0), log)['status'], 'UNKNOWN')
+                else:
+                    self.assertEqual(observed['status'], 'UNKNOWN'); self.assertEqual(collector.payloads, {})
+                    self.assertNotIn('PRIVATE', json.dumps(observed))
+
+    def test_short_trace_schema_requires_actual_gui_whole_paint_and_only_scalar_shapes(self):
+        spec = importlib.util.spec_from_file_location('trace_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none', 'extra', 'bool-number', 'float', 'unknown-enum', 'no-paint', 'cached', 'not-whole',
+                      'wrong-view', 'context', 'clock', 'duplicate-ticket', 'worker', 'initial-cache', 'nan', 'duplicate-key'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-trace-schema-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); collector = short.TraceObservations(state, ['local'])
+                path = Path(collector.app_env({}, 'local')[short.TRACE_ENV]); value = self.trace_document(); row = value['snapshot']['terminals'][0]
+                if fault == 'extra': row['private_text'] = 'PRIVATE_PAYLOAD'
+                if fault == 'bool-number': row['ticket'] = True
+                if fault == 'float': row['started_micros'] = 1.25
+                if fault == 'unknown-enum': row['kind'] = 'PRIVATE_PAYLOAD'
+                if fault == 'no-paint': row.update(outcome={'Retired': 'Unknown'}, elapsed_micros=None)
+                if fault == 'cached': row['coverage']['cached'] = True
+                if fault == 'not-whole': row['coverage']['whole'] = False
+                if fault == 'wrong-view': row['coverage']['view'] = 99
+                if fault == 'context': row['context'] = 2
+                if fault == 'clock': row['outcome']['Paint']['clock'] = 0
+                if fault == 'duplicate-ticket': value['snapshot']['terminals'][1]['ticket'] = 1
+                if fault == 'worker': value['snapshot']['lifecycle']['workers_closed'] = 0
+                if fault == 'initial-cache': row.update(origin='RpcSession', source=1, source_kind='Local', gui_view=None, gui_remote=None)
+                raw = json.dumps(value)
+                if fault == 'nan': raw = raw.replace('"started_micros": 10', '"started_micros": NaN')
+                if fault == 'duplicate-key': raw = raw.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1)
+                path.write_text(raw); path.chmod(0o600); log = state/'app.log'; log.write_bytes(b''); log.chmod(0o600)
+                result = collector.collect('local', {'input_exit_code': 0, 'gui_original_exit_code': 0}, SimpleNamespace(returncode=0), log)
+                self.assertEqual(result['status'], 'passed' if fault == 'none' else 'UNKNOWN')
+                self.assertNotIn('PRIVATE', json.dumps(result))
+
+    def test_short_actual_close_path_collects_after_wait_without_replacing_original_failure(self):
+        spec = importlib.util.spec_from_file_location('trace_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        source = ast.parse((ROOT/'veranda/desktop/wayland-short.py').read_text())
+        wait = next(node for node in ast.walk(source) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute) and ast.unparse(node.value.func) == 'app.wait')
+        check = next(node for node in ast.walk(source) if isinstance(node, ast.Assert) and ast.unparse(node.test) == 'app.returncode == 0')
+        collect = next(node for node in ast.walk(source) if isinstance(node, ast.If) and ast.unparse(node.test) == 'observations is not None'
+                       and any(isinstance(child, ast.Call) and ast.unparse(child.func) == 'observations.collect' for child in ast.walk(node)))
+        for mode in ('enabled', 'default', 'timeout', 'exit'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='veranda-trace-close-', dir='/tmp') as temporary:
+                state = Path(temporary); state.chmod(0o700); events=[]; observations=short.TraceObservations(state,['local']) if mode != 'default' else None
+                if observations: destination=Path(observations.app_env({},'local')[short.TRACE_ENV])
+                log=state/'app.log';log.write_bytes(b'');log.chmod(0o600)
+                app=SimpleNamespace(returncode=None)
+                def wait_app(timeout):
+                    self.assertEqual(timeout,15);events.append('wait')
+                    if mode=='timeout':raise subprocess.TimeoutExpired('owned-app',15)
+                    app.returncode=1 if mode=='exit' else 0
+                    if observations:destination.write_text(json.dumps(self.trace_document()));destination.chmod(0o600)
+                    return app.returncode
+                app.wait=wait_app; lifetime={'input_exit_code':0}
+                namespace=dict(vars(short),lifetime=lifetime,app=app,observations=observations,scenario='local',state=state,suffix='')
+                if mode in ('timeout','exit'):
+                    with self.assertRaises(subprocess.TimeoutExpired if mode=='timeout' else AssertionError):
+                        exec(compile(ast.Module(body=[wait,check,collect],type_ignores=[]),'actual-trace-close-path','exec'),namespace)
+                    self.assertNotIn('trace',lifetime);self.assertEqual(observations.collected,set())
+                else:
+                    exec(compile(ast.Module(body=[wait,check,collect],type_ignores=[]),'actual-trace-close-path','exec'),namespace)
+                    self.assertEqual(lifetime['gui_original_exit_code'],0)
+                    self.assertEqual(lifetime['trace']['status'],'passed') if observations else self.assertNotIn('trace',lifetime)
+                self.assertEqual(events,['wait'])
+
     @contextlib.contextmanager
     def prepared_assets_fixture(self):
         with tempfile.TemporaryDirectory(prefix='veranda-prepared-contract-', dir='/tmp') as temporary:
@@ -78,6 +668,121 @@ class EvidenceChecks(unittest.TestCase):
                 if driver.remote_editor_ready(items, 77, atspi):
                     physical(77, ['type', '--', '庭院 مرحبا α'])
                 self.assertEqual(physical.call_count, int(allowed))
+
+    def test_ime_observation_keeps_original_read_order_result_and_bounded_values(self):
+        spec = importlib.util.spec_from_file_location('ime_observed_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        proof = dict(scope=True, owned=True, unique_editor=True, focused=True, same_editor=True)
+        for count, text, kind in [(0, '', 'empty'), (1, 'r', 'nonempty'), (0, 'r', 'none'),
+                                  (1, None, 'none'), (20, 'x' * 20, 'nonempty')]:
+            with self.subTest(count=count, kind=kind):
+                calls = []; interface = object()
+                api = SimpleNamespace(get_character_count=lambda current: calls.append(('count', current)) or count,
+                    get_text=lambda current, start, end: calls.append(('text', current, start, end)) or text)
+                plain = driver.interface_text(interface, api); expected = list(calls); calls.clear()
+                observation = {'reads': [], 'dropped': 0}
+                self.assertEqual(driver.interface_text(interface, api, observation, proof), plain)
+                self.assertEqual(calls, expected)
+                row = observation['reads'][0]
+                self.assertEqual(row['character_count'], count); self.assertEqual(row['normalized_kind'], kind)
+                self.assertEqual(row['raw_type'], type(text).__name__)
+                self.assertEqual(row['raw_length'], len(text) if isinstance(text, str) else None)
+                self.assertEqual(row['codepoints'], [ord(value) for value in text[:16]] if isinstance(text, str) else [])
+                self.assertEqual(row['truncated'], isinstance(text, str) and len(text) > 16)
+                self.assertEqual(row['proof'], proof)
+                with patch.object(driver, 'record_ime_read', side_effect=RuntimeError('PRIVATE_DIAGNOSTIC')):
+                    self.assertEqual(driver.interface_text(interface, api, observation, proof), plain)
+                self.assertEqual(observation['failure_type'], 'RuntimeError')
+                self.assertNotIn('PRIVATE_DIAGNOSTIC', json.dumps(observation))
+        observation = {'reads': [], 'dropped': 0}
+        for _ in range(20): driver.record_ime_read(observation, 1, 'r', 'r', proof)
+        self.assertEqual(len(observation['reads']), 16); self.assertEqual(observation['dropped'], 4)
+
+    def test_ime_observation_preserves_original_composition_failure_and_keys(self):
+        spec = importlib.util.spec_from_file_location('ime_observed_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                values = iter(['', 'r']); observation = {'reads': [], 'dropped': 0} if enabled else None
+                api = SimpleNamespace(get_character_count=lambda _: 0, get_text=lambda *_: next(values))
+                keys, captures = [], []
+                with self.assertRaisesRegex(AssertionError, '^ime_preedit_committed_early$'):
+                    driver.compose_ime(lambda *args: keys.append(args),
+                        lambda: driver.interface_text(None, api, observation,
+                            dict(scope=True, owned=True, unique_editor=True, focused=True, same_editor=True)),
+                        lambda _: self.fail('wait must not run'), lambda *args: captures.append(args),
+                        lambda: self.fail('persist must not run'))
+                self.assertEqual(keys, [('-M', 'shift', '-k', 'space', '-m', 'shift'), ('-k', 'r')])
+                self.assertEqual(captures, [])
+                if enabled: self.assertEqual(observation['reads'][-1]['normalized_kind'], 'none')
+
+    def test_ime_failure_png_uses_original_deadline_identity_and_private_capture(self):
+        import socket
+        spec = importlib.util.spec_from_file_location('ime_observed_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for fault in ('none', 'expired', 'identity', 'private-root', 'capture', 'late', 'header', 'symlink'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-ime-failure-', dir='/tmp') as name:
+                root = Path(name); root.chmod(0o700); runtime = root / 'runtime'; runtime.mkdir(mode=0o700)
+                with socket.socket(socket.AF_UNIX) as bus:
+                    bus.bind(str(runtime / 'wayland-0'))
+                    capture = root / 'ime-failure.png'; canary = root / 'canary'; canary.write_bytes(b'preserve')
+                    if fault == 'private-root': root.chmod(0o755)
+                    if fault == 'symlink': capture.symlink_to(canary)
+                    now = [20 if fault == 'expired' else 1]; identity = (os.getuid(), 123, 4, 5)
+                    images = {}; lifetime = {'input_exit_code': 1, 'input': {'original_exit_code': 1}}
+                    def screenshot(command, **options):
+                        self.assertEqual(command, ['grim', '-']); self.assertLessEqual(options['timeout'], 5)
+                        if fault == 'capture': raise subprocess.TimeoutExpired(['PRIVATE'], 5)
+                        options['stdout'].write(b'bad' if fault == 'header' else b'\x89PNG\r\n\x1a\nowned')
+                        if fault == 'late': now[0] = 20
+                    with patch.object(short.time, 'monotonic', side_effect=lambda: now[0]), \
+                            patch.object(short.input_driver, 'process_identity', return_value=(999, 123, 4, 5) if fault == 'identity' else identity), \
+                            patch.object(short.input_driver.subprocess, 'run', side_effect=screenshot) as physical:
+                        short.capture_ime_failure(lifetime, SimpleNamespace(pid=77, poll=lambda: None), identity,
+                            'wayland', {'WAYLAND_DISPLAY': str(runtime / 'wayland-0')}, capture, 10, images)
+                    self.assertEqual(lifetime['input_exit_code'], 1); self.assertEqual(lifetime['input']['original_exit_code'], 1)
+                    if fault == 'none':
+                        self.assertEqual(lifetime['ime_failure_capture']['status'], 'CAPTURED')
+                        self.assertEqual(set(images), {'ime-failure.png'})
+                        self.assertEqual(capture.stat().st_mode & 0o777, 0o600)
+                    else:
+                        self.assertEqual(lifetime['ime_failure_capture']['status'], 'UNKNOWN'); self.assertEqual(images, {})
+                        if fault in ('expired', 'identity', 'private-root', 'symlink'): physical.assert_not_called()
+                        if fault != 'symlink': self.assertFalse(capture.exists())
+                    self.assertEqual(canary.read_bytes(), b'preserve')
+                    self.assertNotIn('PRIVATE', json.dumps(lifetime))
+
+    def test_ime_failure_capture_precedes_original_assert_and_survives_retention(self):
+        spec = importlib.util.spec_from_file_location('ime_observed_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-short.py').read_text())
+        candidates = [n for n in ast.walk(tree) if isinstance(n, ast.If) and len(n.body) == 1
+            and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Call)
+            and isinstance(n.body[0].value.func, ast.Name) and n.body[0].value.func.id == 'capture_ime_failure']
+        self.assertEqual(len(candidates), 1); call = candidates[0]
+        body = next(n.body for n in ast.walk(tree) if isinstance(n, ast.Try) and call in n.body)
+        original_assert = body[body.index(call) + 1]
+        self.assertEqual(ast.dump(original_assert, include_attributes=False),
+                         ast.dump(ast.parse('assert action.returncode == 0').body[0], include_attributes=False))
+        for enabled, code in ((True, 1), (False, 1), (True, 0)):
+            events = []; namespace = dict(vars(short), args=SimpleNamespace(ime=enabled), scenario='ime',
+                result={'backend': 'wayland'}, action=SimpleNamespace(returncode=code), lifetime={}, app=None,
+                gui_identity=None, env={}, state=Path('/unused'), deadline=90, ime_failure_images={},
+                capture_ime_failure=lambda *args: events.append('capture'))
+            actual = compile(ast.Module(body=[call, original_assert], type_ignores=[]), 'actual-ime-capture-admission', 'exec')
+            if code:
+                with self.assertRaises(AssertionError): exec(actual, namespace)
+            else: exec(actual, namespace)
+            self.assertEqual(events, ['capture'] if enabled and code else [])
+        retain = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'retain_evidence')
+        with tempfile.TemporaryDirectory(prefix='veranda-ime-retain-', dir='/tmp') as name:
+            state = Path(name); state.chmod(0o700); result = {'original_exit_code': 1}
+            images = {'ime-failure.png': 'iVBORw0KGgo='}
+            namespace = dict(vars(short), state=state, result=result, ime_failure_images=images)
+            exec(compile(ast.Module(body=[retain], type_ignores=[]), 'actual-ime-retention', 'exec'), namespace)
+            namespace['retain_evidence']()
+            self.assertEqual(result['screenshots']['ime-failure.png'], images['ime-failure.png'])
+            self.assertEqual(result['original_exit_code'], 1)
 
     def test_text_content_uses_explicit_interface_despite_accessible_method_collision(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
@@ -303,6 +1008,92 @@ class EvidenceChecks(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError,'GUI identity changed'):
             driver.retained_observed(detail,77,atspi,lambda:(_ for _ in ()).throw(AssertionError('GUI identity changed')))
 
+    def test_resource_prepared_assets_requires_gtk_before_native_work(self):
+        for flags in ([], ['--configured-fleet'], ['--x11'], ['--short'], ['--diagnostic-gdk-gl']):
+            with self.subTest(flags=flags), \
+                    patch.object(sys, 'argv', ['resources', '/unused/package.deb', '/unused/engine',
+                                              '--prepared-assets', '/unused/assets', *flags]), \
+                    patch.object(fixture.subprocess, 'run') as native, \
+                    patch.object(fixture.probe, 'command_output') as query, \
+                    patch.object(fixture, 'prepared_platform') as platform, \
+                    contextlib.redirect_stderr(io.StringIO()) as error:
+                with self.assertRaises(SystemExit) as caught: fixture.main()
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn('--prepared-assets requires --gtk', error.getvalue())
+                native.assert_not_called(); query.assert_not_called(); platform.assert_not_called()
+        with patch.object(sys, 'argv', ['resources', '/unused/package.deb', '/unused/engine',
+                                       '--gtk', '--diagnostic-gdk-gl', '--prepared-assets', '/unused/assets']), \
+                patch.object(fixture.subprocess, 'run') as native, \
+                patch.object(fixture.probe, 'command_output') as query, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught: fixture.main()
+            self.assertEqual(caught.exception.code, 2)
+            native.assert_not_called(); query.assert_not_called()
+
+    def test_resource_prepared_assets_forwards_exact_path_and_preserves_unset_and_legacy(self):
+        cases = [(['--gtk'], True), (['--gtk', '--short'], True), (['--gtk'], False),
+                 ([], False), (['--configured-fleet'], False)]
+        for flags, enabled in cases:
+            with self.subTest(flags=flags, prepared=enabled), \
+                    tempfile.TemporaryDirectory(prefix='veranda-resource-assets-main-', dir='/tmp') as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                state = root / 'state'; state.mkdir(mode=0o700)
+                deb, engine, assets = root / 'candidate.deb', root / 'engine', root / 'assets'
+                assets.mkdir(mode=0o700)
+                for path in (deb, engine):
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    os.fchmod(fd, 0o600); os.close(fd)
+                events, seen_args, commands = [], [], []
+                @contextlib.contextmanager
+                def platform(current_state, current_engine, **options):
+                    self.assertEqual((current_state, current_engine), (state, engine))
+                    events.append('platform-enter')
+                    yield
+                    events.append('platform-exit')
+                def measure(current_state, args, env):
+                    self.assertEqual(current_state, state); seen_args.append(args)
+                    events.append('gtk' if args.gtk else 'legacy')
+                    return {}
+                def command(argv, **options):
+                    commands.append(argv); return SimpleNamespace(returncode=0)
+                def output(argv):
+                    if argv[0] == 'dpkg-deb':
+                        return 'Package: subyard-veranda\nVersion: 0.99.1\nArchitecture: amd64'
+                    if argv[0] == '/usr/bin/subyard-veranda': return 'Subyard Veranda 0.99.1'
+                    self.assertEqual(argv, [str(engine), '--version']); return 'yard 0.99.1'
+                argv = ['resources', str(deb), str(engine), *flags]
+                if enabled: argv += ['--prepared-assets', str(assets)]
+                with patch.object(sys, 'argv', argv), \
+                        patch.dict(os.environ, {'SUBYARD_E2E_VM': '1', 'SUBYARD_E2E_TYPE': 'android-test'}, clear=True), \
+                        patch.object(fixture.os, 'getuid', return_value=1001), \
+                        patch.object(fixture, 'recorded_state', return_value=contextlib.nullcontext(state)), \
+                        patch.object(fixture.subprocess, 'run', side_effect=command), \
+                        patch.object(fixture.probe, 'command_output', side_effect=output), \
+                        patch.object(fixture.probe, 'webkit_version') as webkit, \
+                        patch.object(fixture, 'prepared_platform', side_effect=platform) as preparation, \
+                        patch.object(fixture, 'measure_gtk', side_effect=measure), \
+                        patch.object(fixture, 'measure', side_effect=measure), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    fixture.main()
+                self.assertEqual(len(seen_args), 1)
+                configured = '--gtk' in flags or '--configured-fleet' in flags
+                if configured:
+                    preparation.assert_called_once()
+                    self.assertEqual(preparation.call_args.args, (state, engine))
+                    if enabled:
+                        self.assertEqual(preparation.call_args.kwargs, {'prepared_assets': assets})
+                        self.assertIs(preparation.call_args.kwargs['prepared_assets'], seen_args[0].prepared_assets)
+                    else: self.assertEqual(preparation.call_args.kwargs, {})
+                    self.assertEqual(events, ['platform-enter', 'gtk' if '--gtk' in flags else 'legacy', 'platform-exit'])
+                else:
+                    preparation.assert_not_called(); self.assertEqual(events, ['legacy'])
+                self.assertEqual(webkit.call_count, 0 if '--gtk' in flags else 1)
+                installs = [command for command in commands if 'install' in command]
+                self.assertEqual(len(installs), 1)
+                self.assertEqual(installs[0][:8], ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive',
+                                                 'apt-get', 'install', '-y', '--no-install-recommends'])
+                self.assertEqual(installs[0][-1], str(deb))
+
     def test_prepared_assets_reject_missing_symlink_digest_engine_and_version(self):
         for fault in ('valid', 'missing', 'symlink', 'digest', 'engine', 'version', 'mode', 'extra'):
             with self.subTest(fault=fault), self.prepared_assets_fixture() as (root, assets, engine, data):
@@ -370,12 +1161,14 @@ class EvidenceChecks(unittest.TestCase):
             release.assert_called_once_with(state, engine, env, assets)
             self.assertEqual(events, ['image-open', ['init'], ['teardown', '--keep-data'], 'gui', ['teardown'], 'image-close'])
 
-    def test_prepared_image_public_remote_is_pinned_and_owned_cleanup_runs_on_failure(self):
-        for fault in ('none', 'consumer', 'type', 'preexisting', 'listener', 'tls', 'certificate-missing', 'certificate-malformed'):
+    def test_prepared_image_public_remote_is_pinned_and_owned_cleanup_runs_on_failure(
+            self, state_name='veranda-wayland-owned', expected_remote='veranda-assets-owned-image',
+            faults=('none', 'consumer', 'type', 'preexisting', 'listener', 'tls', 'certificate-missing', 'certificate-malformed')):
+        for fault in faults:
             with self.subTest(fault=fault), self.prepared_assets_fixture() as (root, assets, engine, data):
-                state = root / 'veranda-wayland-owned'; state.mkdir(mode=0o700)
+                state = root / state_name; state.mkdir(mode=0o700)
                 home = root / 'home'; home.mkdir(mode=0o700)
-                remote = 'veranda-assets-owned'; certificate = '-----BEGIN CERTIFICATE-----\ndGVzdA==\n-----END CERTIFICATE-----\n'
+                remote = expected_remote; certificate = '-----BEGIN CERTIFICATE-----\ndGVzdA==\n-----END CERTIFICATE-----\n'
                 image = dict(data['image'], public=True, aliases=[{'name': remote}])
                 images = [image] if fault == 'preexisting' else []
                 remotes = {'local': {'Addr': 'unix://', 'Public': False}}
@@ -396,7 +1189,13 @@ class EvidenceChecks(unittest.TestCase):
                         if fault == 'certificate-malformed': environment['certificate'] = 'invalid PEM'
                         return json.dumps({'api_version': '1.0', 'environment': environment})
                     if words[:2] == ['image', 'import']:
-                        images.append(dict(image, type='virtual-machine') if fault == 'type' else image)
+                        alias = words[words.index('--alias') + 1]
+                        imported = dict(image, aliases=[{'name': alias}])
+                        # Incus can retain the imported fingerprint when alias creation fails.
+                        if not (alias[0].isascii() and alias[0].isalnum() and alias[-1].isascii() and alias[-1].isalnum()):
+                            images.append(dict(imported, aliases=[]))
+                            raise subprocess.CalledProcessError(1, argv, stderr='Invalid image alias name: Names must start and end with an alphanumeric character')
+                        images.append(dict(imported, type='virtual-machine') if fault == 'type' else imported)
                     elif words[:2] == ['image', 'delete']: images.clear()
                     elif words[:2] == ['config', 'set']: listener[0] = words[3]
                     elif words[:2] == ['config', 'unset']: listener[0] = ''
@@ -413,14 +1212,16 @@ class EvidenceChecks(unittest.TestCase):
                 with patch.object(fixture.prepared.socket, 'socket', return_value=contextlib.nullcontext(reservation)), \
                      patch.object(fixture.prepared.socket, 'create_connection', return_value=contextlib.nullcontext(None)), \
                      patch.object(fixture.prepared.ssl, 'SSLContext', return_value=context):
+                    consumer_failure = RuntimeError('consumer failed')
                     def consume():
                         with fixture.prepared.image_remote(assets, data, state, {'HOME': str(home)}, command) as reference:
                             self.assertEqual(reference, remote + ':' + image['fingerprint'])
-                            if fault == 'consumer': raise RuntimeError('consumer failed')
+                            if fault == 'consumer': raise consumer_failure
                     if fault == 'none': consume()
                     else:
                         expected = {'certificate-missing': KeyError, 'certificate-malformed': ValueError}.get(fault, (AssertionError, RuntimeError))
-                        with self.assertRaises(expected): consume()
+                        with self.assertRaises(expected) as caught: consume()
+                        if fault == 'consumer': self.assertIs(caught.exception, consumer_failure)
                 self.assertEqual(remotes, {'local': {'Addr': 'unix://', 'Public': False}})
                 self.assertFalse((home / '.config/incus/servercerts' / (remote + '.crt')).exists())
                 if fault in ('preexisting', 'listener'):
@@ -432,6 +1233,17 @@ class EvidenceChecks(unittest.TestCase):
                     self.assertFalse((home / '.config').exists())
                     self.assertFalse(any(words[:2] in (['image', 'import'], ['config', 'set'], ['remote', 'add'])
                                          and '--help' not in words for words in commands))
+
+
+    def test_prepared_image_alias_handles_captured_trailing_and_all_underscore_state_names(self):
+        for state_name,remote in (
+                ('veranda-wayland-jf3hrcp_', 'veranda-assets-jf3hrcp--image'),
+                ('veranda-wayland-_edge_', 'veranda-assets--edge--image'),
+                ('veranda-wayland-_edge', 'veranda-assets--edge-image'),
+                ('veranda-wayland-________', 'veranda-assets----------image')):
+            with self.subTest(state_name=state_name):
+                self.test_prepared_image_public_remote_is_pinned_and_owned_cleanup_runs_on_failure(
+                    state_name, remote, faults=('none', 'consumer'))
 
     def test_named_focus_and_button_reads_recover_before_single_physical_input(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
@@ -533,6 +1345,57 @@ class EvidenceChecks(unittest.TestCase):
         self.assertEqual(diagnostics['last_diagnostic_read_error']['category'], 'diagnostic')
         self.assertGreater(diagnostics['last_diagnostic_read_error']['line'], 0)
         self.assertNotIn('unsafe diagnostic payload', json.dumps(diagnostics))
+
+    def test_local_restore_draft_inspection_returns_to_overview_before_saved_context(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        tree = ast.parse((ROOT / 'veranda/desktop/wayland-input.py').read_text())
+        def boundary(stage):
+            return next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                        and any(isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant)
+                                and item.value.value == stage for item in node.body))
+        actual = compile(ast.Module(body=[*boundary('host-draft-rendered-after-owner-reselection').body,
+                                         boundary('saved-navigation-context')], type_ignores=[]),
+                         'actual-local-restore-sequence', 'exec')
+        for stale_persistence in (False, True):
+            with self.subTest(stale_persistence=stale_persistence), tempfile.TemporaryDirectory(prefix='veranda-local-tab-', dir='/tmp') as temporary:
+                root = Path(temporary) / 'subyard/veranda'; root.mkdir(parents=True, mode=0o700)
+                connection = 'synthetic-remote-owner'; destination = 'Synthetic remote'
+                (root / 'connections.json').write_text(json.dumps({'connections': [{'id': connection}]}))
+                selected = {'connectionId': connection, 'yardName': None, 'tab': 'Overview'}
+                def persist():
+                    (root / 'navigation.json').write_text(json.dumps(selected))
+                    (root / 'navigation.json').chmod(0o600)
+                persist(); physical_tabs = []; visible = {'tab': 'Overview'}
+                def tab(name, scope):
+                    self.assertEqual(scope, destination)
+                    physical_tabs.append(name); visible['tab'] = name
+                    if not stale_persistence or name != 'Overview':
+                        selected['tab'] = name; persist()
+                text = '庭院 مرحبا α'
+                editor = SimpleNamespace(get_name=lambda: 'Yard name',
+                    get_state_set=lambda: SimpleNamespace(contains=lambda state: state == 'focused'),
+                    get_text_iface=lambda: SimpleNamespace(value=text))
+                def focus(name):
+                    self.assertEqual((name, visible['tab']), ('Yard name', 'Yards'))
+                def wait(predicate):
+                    if not predicate(): raise TimeoutError(namespace['stage'])
+                atspi = SimpleNamespace(StateType=SimpleNamespace(FOCUSED='focused'),
+                    Text=SimpleNamespace(get_character_count=lambda value: len(value.value),
+                                         get_text=lambda value, start, end: value.value[start:end]))
+                result = {}; namespace = dict(vars(driver), scenario='local-restore', destination=destination,
+                    unicode_draft=text, result=result, tab=tab, wait=wait, names=lambda: {'Yard name'},
+                    focus=focus, nodes=lambda: [editor], Atspi=atspi)
+                with patch.dict(os.environ, XDG_DATA_HOME=temporary):
+                    if stale_persistence:
+                        with self.assertRaisesRegex(TimeoutError, 'saved-navigation-context'):
+                            exec(actual, namespace)
+                    else:
+                        exec(actual, namespace)
+                        self.assertTrue(result['saved_owner_yard_tab_verified'])
+                self.assertTrue(result['draft_restart_rendered'])
+                self.assertEqual(physical_tabs, ['Yards', 'Overview'])
+                self.assertEqual(visible['tab'], 'Overview')
 
     def test_postclose_persisted_selection_rejects_wrong_yard_in_every_lifetime(self):
         spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
@@ -874,6 +1737,71 @@ class EvidenceChecks(unittest.TestCase):
             exec(compile(ast.Module(body=[host],type_ignores=[]),'actual-ui-host','exec'),namespace)
             namespace['host']();self.assertEqual(observed,[selected_host])
 
+    def test_navigation_relationship_replacement_recollects_before_another_key(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct', SELECTED='selected'))
+        class Node:
+            def __init__(self, role, name='', states=('showing',)):
+                self.role, self.name, self.states = role, name, set(states)
+                self.parent, self.children = None, []
+            def get_role(self): return self.role
+            def get_name(self): return self.name
+            def get_process_id(self): return 7
+            def get_parent(self): return self.parent
+            def get_child_count(self): return len(self.children)
+            def get_child_at_index(self, index): return self.children[index]
+            def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
+        for fault in ('null-row', 'null-label', 'nonmember-row', 'nonmember-label'):
+            reads, commands, diagnostics = [], [], {}
+            deadline = driver.time.monotonic() + 20
+            def read(end):
+                self.assertEqual(end, deadline)
+                self.assertEqual(commands, [] if not reads else ['Home'])
+                reads.append(True)
+                nav = Node(31, 'Owner hosts and yards'); items = [nav]
+                for index, name in enumerate(('Local owner', 'Remote owner')):
+                    row = Node(32, states=('showing', 'focused') if index == (1 if len(reads) == 1 else 0) else ('showing',))
+                    label = Node(29, name); row.parent = nav; label.parent = row
+                    row.children = [label]; nav.children.append(row); items.extend((row, label))
+                if len(reads) == 2:
+                    row = nav.children[0]; label = row.children[0]
+                    if fault == 'null-row': nav.children[0] = None
+                    elif fault == 'null-label': row.children[0] = None
+                    elif fault == 'nonmember-row': items.remove(row)
+                    else: items.remove(label)
+                return items
+            def send(key):
+                self.assertEqual(len(reads), 1)
+                commands.append(key)
+            with self.subTest(fault=fault), patch.object(driver.time, 'sleep'):
+                driver.navigate_owner(lambda: driver.coherent_observation(read,
+                    lambda items: driver.navigation_snapshot(items, 7, atspi), deadline,
+                    diagnostics, RuntimeError, 'navigation'), send, 'Local owner')
+            self.assertEqual((len(reads), commands, diagnostics), (3, ['Home'], {'incomplete_tree_retries': 1}))
+
+    def test_navigation_missing_relationship_expires_supplied_deadline_without_input(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, LIST_ITEM=32, LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing', DEFUNCT='defunct'))
+        nav = SimpleNamespace(get_role=lambda: 31, get_name=lambda: 'Owner hosts and yards',
+            get_process_id=lambda: 7, get_state_set=lambda: SimpleNamespace(contains=lambda state: state == 'showing'),
+            get_child_count=lambda: 1, get_child_at_index=lambda index: None)
+        now, deadlines, commands, diagnostics = [0.0], [], [], {}
+        def read(end): deadlines.append(end); return [nav]
+        with patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(driver.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            with self.assertRaisesRegex(TimeoutError, 'accessible_tree_unavailable'):
+                driver.navigate_owner(lambda: driver.coherent_observation(read,
+                    lambda items: driver.navigation_snapshot(items, 7, atspi), .12,
+                    diagnostics, RuntimeError, 'navigation'), commands.append, 'Local owner')
+        self.assertEqual(deadlines, [.12, .12, .12])
+        self.assertEqual(now[0], .12)
+        self.assertEqual(commands, [])
+        self.assertEqual(diagnostics, {'incomplete_tree_retries': 3})
+
     def test_navigation_snapshot_rejects_unowned_or_ambiguous_lists_before_input(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
@@ -890,7 +1818,9 @@ class EvidenceChecks(unittest.TestCase):
             def get_child_count(self): return len(self.children)
             def get_child_at_index(self, index): return self.children[index]
             def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
-        for fault in ('valid', 'list-role', 'list-name', 'list-pid', 'row-pid', 'row-parent',
+        for fault in ('valid', 'list-role', 'list-name', 'list-pid', 'row-pid', 'label-pid', 'row-role', 'label-role',
+                      'foreign-nonmember-row', 'wrong-role-nonmember-row', 'hidden-nonmember-row',
+                      'defunct-nonmember-row', 'row-parent',
                       'label-parent', 'hidden', 'defunct', 'duplicate-list', 'duplicate-row', 'multiple-focus',
                       'foreign-focus', 'hidden-focus', 'defunct-focus'):
             nav = Node(31, 'Owner hosts and yards'); row = Node(32, states=('showing', 'focused'))
@@ -900,6 +1830,15 @@ class EvidenceChecks(unittest.TestCase):
             elif fault == 'list-name': nav.name = 'Other list'
             elif fault == 'list-pid': nav.pid = 8
             elif fault == 'row-pid': row.pid = 8
+            elif fault == 'label-pid': label.pid = 8
+            elif fault == 'row-role': row.role = 39
+            elif fault == 'label-role': label.role = 39
+            elif fault.endswith('-nonmember-row'):
+                items.remove(row)
+                if fault == 'foreign-nonmember-row': row.pid = 8
+                elif fault == 'wrong-role-nonmember-row': row.role = 39
+                elif fault == 'hidden-nonmember-row': row.states.remove('showing')
+                else: row.states.add('defunct')
             elif fault == 'row-parent': row.parent = Node(31)
             elif fault == 'label-parent': label.parent = nav
             elif fault == 'hidden': row.states.discard('showing')
@@ -919,8 +1858,14 @@ class EvidenceChecks(unittest.TestCase):
                 if fault == 'valid':
                     self.assertEqual(driver.navigation_snapshot(items, 7, atspi)['focused'], 0)
                 else:
+                    reads, diagnostics = [], {}
+                    def read(end): reads.append(end); return items
                     with self.assertRaises(AssertionError):
-                        driver.navigate_owner(lambda: driver.navigation_snapshot(items, 7, atspi), commands.append, 'Local owner')
+                        driver.navigate_owner(lambda: driver.coherent_observation(read,
+                            lambda items: driver.navigation_snapshot(items, 7, atspi), driver.time.monotonic() + 20,
+                            diagnostics, RuntimeError, 'navigation'), commands.append, 'Local owner')
+                    self.assertEqual(len(reads), 1)
+                    self.assertEqual(diagnostics, {})
                     self.assertEqual(commands, [])
 
     def test_owner_focus_mode_is_one_local_lifetime(self):
@@ -929,7 +1874,277 @@ class EvidenceChecks(unittest.TestCase):
         self.assertEqual(short.short_scenarios(False, True), ['owner-focus'])
         self.assertEqual(short.short_scenarios(False, False), ['local'])
         self.assertEqual(short.short_scenarios(True, False), ['connect', 'remote-restore', 'local-restore'])
-        with self.assertRaises(ValueError): short.short_scenarios(True, True)
+        self.assertEqual(short.short_scenarios(True, True), ['owner-focus-connect', 'owner-focus-restore'])
+        self.assertEqual(short.workload_budget(True, False), 360)
+
+    def test_remote_focus_rejection_keeps_original_verdict_deadline_and_input_count(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        for case in ('stable', 'converged', 'expired', 'incomplete'):
+            with self.subTest(case=case):
+                calls, commands, trace, evidence = [], [], [], {}; clock = [0.0]
+                views = [0, 0, None, 1 if case == 'converged' else None]
+                def read(deadline):
+                    calls.append(deadline)
+                    if len(calls) == 4 and case == 'incomplete':
+                        def missing(end): clock[0] += .04; raise driver.IncompleteTree()
+                        return driver.coherent_observation(missing, lambda items: items, deadline, {}, RuntimeError, 'navigation')
+                    if len(calls) == 3 and case == 'expired': clock[0] = deadline
+                    return {'order': ['Local', 'Remote'], 'owners': [True, True], 'selected_indices': [1],
+                            'focused': views[len(calls) - 1], 'focus_probe': {'observation': len(calls)}}
+                with patch.object(driver.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(driver.time, 'sleep'):
+                    with self.assertRaisesRegex(AssertionError, 'focus_target_unavailable'):
+                        driver.diagnostic_navigate_owner(read, commands.append, 'Remote', trace, evidence,
+                            lambda: .12, now=lambda: clock[0])
+                self.assertEqual(commands, ['Home', 'Down'])
+                self.assertEqual([row.get('physical_key') for row in trace], ['Home', 'Down', None])
+                self.assertEqual(calls, [.12] * (3 if case == 'expired' else 4))
+                self.assertEqual(evidence['original']['focused'], None)
+                if case == 'converged': self.assertEqual(evidence['fresh']['focused'], 1)
+                if case == 'incomplete': self.assertEqual(evidence['fresh_failure_type'], 'TimeoutError')
+                if case == 'expired': self.assertFalse(evidence['convergence_attempted'])
+        # The ordinary Interface still fails at its original third read, with no diagnostic read.
+        readings = iter((0, 0, None)); commands = []; calls = []
+        def ordinary():
+            calls.append(True); return {'order': ['Local', 'Remote'], 'owners': [True, True], 'focused': next(readings)}
+        with self.assertRaisesRegex(AssertionError, 'focus_target_unavailable'):
+            driver.navigate_owner(ordinary, commands.append, 'Remote')
+        self.assertEqual((len(calls), commands), (3, ['Home', 'Down']))
+
+    def test_remote_focus_relations_use_only_actual_owned_parent_links(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi = SimpleNamespace(Role=SimpleNamespace(LIST=31, FRAME=23),
+            StateType=SimpleNamespace(SHOWING='showing', FOCUSED='focused', DEFUNCT='defunct'))
+        class Node:
+            def __init__(self, role, name='', focused=False):
+                self.role,self.name,self.pid,self.states=role,name,7,{'showing'} | ({'focused'} if focused else set())
+                self.parent,self.children=None,[]
+            def get_role(self): return self.role
+            def get_name(self): return self.name
+            def get_process_id(self): return self.pid
+            def get_state_set(self): return SimpleNamespace(contains=lambda value: value in self.states)
+            def get_parent(self): return self.parent
+            def get_child_count(self): return len(self.children)
+            def get_child_at_index(self,index): return self.children[index]
+        for fault in ('none','foreign','hidden','defunct','duplicate','disjoint','broken-parent'):
+            with self.subTest(fault=fault):
+                frame=Node(23); scroll=Node(49, 'PRIVATE_TEXT', True); nav=Node(31,'Owner hosts and yards')
+                frame.children=[scroll];scroll.parent=frame;scroll.children=[nav];nav.parent=scroll
+                items=[nav,frame,scroll]  # Deliberately unrelated flat order.
+                if fault=='foreign':scroll.pid=8
+                if fault=='hidden':scroll.states.clear()
+                if fault=='defunct':scroll.states.add('defunct')
+                if fault=='duplicate':items.append(scroll)
+                if fault=='disjoint':scroll.parent=Node(23)
+                if fault=='broken-parent':frame.children=[nav]
+                if fault=='none':
+                    result=driver.opaque_focus_relations(items,7,atspi,driver.time.monotonic()+20)
+                    self.assertEqual(result['focused_role'],49)
+                    self.assertTrue(result['focus_contains_navigation'])
+                    self.assertFalse(result['navigation_contains_focus'])
+                    self.assertEqual(result['focused_ancestors'],[3,2])
+                    self.assertNotIn('PRIVATE_TEXT',json.dumps(result))
+                else:
+                    with self.assertRaises(AssertionError):driver.opaque_focus_relations(items,7,atspi,driver.time.monotonic()+20)
+
+    def test_remote_focus_uses_actual_shared_accept_and_scoped_saved_context(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        for scenario,connection,yard,tab in [('owner-focus-connect',None,'default','Projects'),
+                                            ('owner-focus-restore','peer',None,'Overview')]:
+            selected={'connectionId':connection,'yardName':yard,'tab':tab}
+            short.verify_persisted_selection(selected,'peer',scenario)
+            for field,value in [('connectionId','wrong'),('yardName','wrong'),('tab','wrong')]:
+                with self.assertRaises(AssertionError):short.verify_persisted_selection(dict(selected,**{field:value}),'peer',scenario)
+        source=ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text())
+        accept=next(node for node in ast.walk(source) if isinstance(node,ast.FunctionDef) and node.name=='authenticate_owner')
+        with tempfile.TemporaryDirectory(prefix='veranda-focus-connect-',dir='/tmp') as temporary:
+            root=Path(temporary);root.chmod(0o700);store=root/'subyard/veranda';store.mkdir(parents=True,mode=0o700)
+            events=[];result={}
+            def activate(name):
+                self.assertEqual(name,'Accept and connect');events.append('accept')
+                p=store/'connections.json';p.write_text('{"connections":[{"id":"peer"}]}');p.chmod(0o600)
+            def connected():events.append('authenticated-discovery');return True
+            namespace={'review':lambda:events.append('review'),'activate':activate,'wait':lambda predicate:self.assertTrue(predicate()),
+                       'connected_owner':connected,'result':result,'Path':Path,'hashlib':hashlib,'os':SimpleNamespace(environ={'XDG_DATA_HOME':str(root)})}
+            exec(compile(ast.Module(body=[accept],type_ignores=[]),'actual shared product accept path','exec'),namespace)
+            actual,saved=namespace['authenticate_owner']()
+            self.assertEqual(events,['review','accept','authenticated-discovery'])
+            self.assertEqual(actual,store);self.assertEqual(saved,(store/'connections.json').read_bytes())
+            self.assertEqual(result['saved_store_sha256'],hashlib.sha256(saved).hexdigest())
+            setup=next(node for node in ast.walk(source) if isinstance(node,ast.If)
+                       and isinstance(node.test,ast.Compare) and isinstance(node.test.left,ast.Name)
+                       and node.test.left.id=='scenario' and isinstance(node.test.comparators[0],ast.Constant)
+                       and node.test.comparators[0].value=='owner-focus-connect')
+            events.clear()
+            namespace.update(scenario='owner-focus-connect',names=lambda:{'Connected'},
+                wait_scope=lambda expected,site:self.assertEqual(expected,'Local owner / default'),
+                select_default=lambda owner,site:events.append(('select-default',owner)),
+                projects=lambda scope,site:events.append(('projects',scope)))
+            exec(compile(ast.Module(body=setup.body,type_ignores=[]),'actual two-lifetime setup branch','exec'),namespace)
+            self.assertEqual(events,['review','accept','authenticated-discovery',('select-default','Local owner'),('projects','Local owner / default')])
+            restore=next(node for node in ast.walk(source) if isinstance(node,ast.If)
+                         and isinstance(node.test,ast.Compare) and isinstance(node.test.left,ast.Name)
+                         and node.test.left.id=='scenario' and isinstance(node.test.comparators[0],ast.Tuple)
+                         and [item.value for item in node.test.comparators[0].elts]==['local-restore','owner-focus-restore'])
+            for rows in (42,41):
+                current_scope=['Local owner / default']
+                def select_owner(name,owner_row=False):
+                    events.append(('focus',name,owner_row));current_scope[0]=name
+                events.clear();namespace.update(scenario='owner-focus-restore',destination='Remote',
+                    names=lambda:{'Connected',*(f'project-00-{index:02}' for index in range(10))},
+                    focus=select_owner,wait_scope=lambda expected,site:self.assertEqual(expected,current_scope[0]),
+                    scope_snapshot=lambda site:{'order':list(range(rows)),'owners':[True,True]+[False]*(rows-2)})
+                code=compile(ast.Module(body=restore.body,type_ignores=[]),'actual restored remote-owner branch','exec')
+                if rows==42:exec(code,namespace)
+                else:
+                    with self.assertRaisesRegex(AssertionError,'local_scope_changed'):exec(code,namespace)
+                self.assertIn(('focus','Remote',True),events)
+            short_tree=ast.parse((ROOT/'veranda/desktop/wayland-short.py').read_text())
+            pins=next(node for node in ast.walk(short_tree) if isinstance(node,ast.If)
+                      and isinstance(node.test,ast.Attribute) and node.test.attr=='owner_focus'
+                      and any(isinstance(item,ast.Assign) and isinstance(item.value,ast.Call)
+                              and isinstance(item.value.func,ast.Attribute) and item.value.func.attr=='hexdigest' for item in node.body))
+            context={'scenario':'owner-focus-connect','result':{},'store':store,'hashlib':hashlib,'lifetime':{}}
+            code=compile(ast.Module(body=pins.body,type_ignores=[]),'actual saved product pins guard','exec')
+            exec(code,context);context['scenario']='owner-focus-restore';exec(code,context)
+            self.assertTrue(context['lifetime']['diagnostic_saved_pins_unchanged'])
+            (store/'connections.json').write_text('{"connections":[{"id":"changed"}]}')
+            with self.assertRaisesRegex(AssertionError,'diagnostic_changed_saved_pins'):exec(code,context)
+
+    def test_remote_focus_auxiliary_refusal_preserves_actual_original_assertion(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        atspi=SimpleNamespace(Role=SimpleNamespace(LIST=31,FRAME=23,LIST_ITEM=32,LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing',FOCUSED='focused',SELECTED='selected',DEFUNCT='defunct'))
+        class Node:
+            def __init__(self,role,name=''):
+                self.role,self.name,self.states,self.parent,self.children=role,name,{'showing'},None,[]
+            def get_role(self):return self.role
+            def get_name(self):return self.name
+            def get_process_id(self):return 7
+            def get_state_set(self):return SimpleNamespace(contains=lambda value:value in self.states)
+            def get_parent(self):return self.parent
+            def get_child_count(self):return len(self.children)
+            def get_child_at_index(self,index):return self.children[index]
+        frame=Node(23);nav=Node(31,'Owner hosts and yards');nav.parent=frame
+        rows=[Node(32),Node(32)];button=Node(61,'PRIVATE_OUTSIDE_CONTROL');button.parent=Node(23)
+        frame.children=[nav,button];nav.children=rows
+        for row,name in zip(rows,['Local','Remote']):
+            row.parent=nav;label=Node(29,name);label.parent=row;row.children=[label]
+        items=[frame,nav,*rows,*(row.children[0] for row in rows),button]
+        result={};reads=[];commands=[];trace=[];evidence={};original=[]
+        def nodes(observe,site='navigation',deadline=None):
+            reads.append(deadline)
+            for node in [*rows,button]:node.states.discard('focused');node.states.discard('selected')
+            (rows[0] if len(reads)<3 else button).states.add('focused')
+            (rows[0] if len(reads)<3 else rows[1]).states.add('selected')
+            return driver.coherent_observation(lambda end:items,observe,deadline,{},RuntimeError,site)
+        tree=ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text())
+        actual=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='read_navigation')
+        namespace=dict(driver.__dict__,nodes=nodes,pid=7,Atspi=atspi,name='Remote',scenario='owner-focus-restore',
+                       diagnostic=True,observation=[0],result=result)
+        exec(compile(ast.Module(body=[actual],type_ignores=[]),'actual diagnostic owner read','exec'),namespace)
+        strict=driver.navigate_owner
+        def retain(*args):
+            try:return strict(*args)
+            except AssertionError as error:original.append(error);raise
+        with patch.object(driver,'navigate_owner',side_effect=retain):
+            with self.assertRaisesRegex(AssertionError,'focus_target_unavailable') as caught:
+                driver.diagnostic_navigate_owner(namespace['read_navigation'],commands.append,'Remote',trace,evidence,
+                    lambda:driver.time.monotonic()+20,
+                    capture=lambda end:namespace['read_navigation'](end,auxiliary=True))
+        self.assertIs(caught.exception,original[0])
+        self.assertEqual(commands,['Home','Down']);self.assertEqual(len(reads),4)
+        self.assertEqual(reads[-1],reads[-2])
+        self.assertIsNone(evidence['original']['focus_probe'])
+        self.assertEqual(evidence['original_provenance'],'NOT_COLLECTED')
+        self.assertEqual(evidence['fresh_provenance'],'fresh-post-rejection')
+        self.assertEqual(evidence['fresh']['focus_probe']['status'],'UNKNOWN')
+        self.assertNotIn('PRIVATE_OUTSIDE_CONTROL',json.dumps(evidence))
+
+    def test_remote_focus_slow_auxiliary_cannot_preempt_actual_coherent_navigation_verdict(self):
+        spec=importlib.util.spec_from_file_location('gtk_input',ROOT/'veranda/desktop/wayland-input.py')
+        driver=importlib.util.module_from_spec(spec);spec.loader.exec_module(driver)
+        atspi=SimpleNamespace(Role=SimpleNamespace(LIST=31,FRAME=23,LIST_ITEM=32,LABEL=29),
+            StateType=SimpleNamespace(SHOWING='showing',FOCUSED='focused',SELECTED='selected',DEFUNCT='defunct'))
+        class Node:
+            def __init__(self,role,name=''):
+                self.role,self.name,self.states,self.parent,self.children=role,name,{'showing'},None,[]
+            def get_role(self):return self.role
+            def get_name(self):return self.name
+            def get_process_id(self):return 7
+            def get_state_set(self):return SimpleNamespace(contains=lambda value:value in self.states)
+            def get_parent(self):return self.parent
+            def get_child_count(self):return len(self.children)
+            def get_child_at_index(self,index):return self.children[index]
+        frame=Node(23);nav=Node(31,'Owner hosts and yards');nav.parent=frame
+        rows=[Node(32),Node(32)];control=Node(61,'PRIVATE_OUTSIDE_CONTROL');control.parent=frame
+        frame.children=[nav,control];nav.children=rows
+        for row,name in zip(rows,['Local','Remote']):
+            row.parent=nav;label=Node(29,name);label.parent=row;row.children=[label]
+        items=[frame,nav,*rows,*(row.children[0] for row in rows),control]
+        for scenario,mode in ((scenario,mode) for scenario in ('owner-focus-restore','connect','remote-restore','local-restore')
+                              for mode in ('slow','stable','converged','incomplete-original','expired-original','success')):
+            clock=[0.0];reads=[];keys=[];result={};original=[];auxiliary=[];final_getters=[];timeouts=[]
+            def nodes(observe,site='navigation',deadline=None):
+                deadline=deadline if deadline is not None else driver.time.monotonic()+20
+                reads.append(deadline)
+                for node in [*rows,control]:node.states.discard('focused');node.states.discard('selected')
+                (rows[1] if mode=='success' or mode=='converged' and len(reads)==4 else rows[0] if len(reads)<3 else control).states.add('focused')
+                (rows[1] if mode=='success' else rows[0] if len(reads)<3 else rows[1]).states.add('selected')
+                def original_read(end):
+                    if mode=='incomplete-original' and len(reads)==3:
+                        clock[0]+=.04;raise driver.IncompleteTree()
+                    if mode=='expired-original' and len(reads)==3:clock[0]=deadline
+                    return items
+                try:return driver.coherent_observation(original_read,observe,deadline,{},RuntimeError,site)
+                except TimeoutError as error:timeouts.append(error);raise
+            collector=driver.opaque_focus_relations
+            def slow(*args):
+                auxiliary.append(len(reads))
+                if mode=='slow' and len(reads)>=3:clock[0]=args[-1]
+                return collector(*args)
+            final_predicate=driver.focus_matches
+            def final(*args):
+                final_getters.append(len(reads));return final_predicate(*args)
+            strict=driver.navigate_owner
+            def retain(*args):
+                try:return strict(*args)
+                except AssertionError as error:original.append(error);raise
+            diagnostic=driver.diagnostic_navigate_owner
+            def timed(*args,**kwargs):return diagnostic(*args,**kwargs,now=lambda:clock[0])
+            source=ast.parse((ROOT/'veranda/desktop/wayland-input.py').read_text())
+            actual=next(node for node in ast.walk(source) if isinstance(node,ast.FunctionDef) and node.name=='focus')
+            namespace=dict(driver.__dict__,nodes=nodes,pid=7,Atspi=atspi,scenario=scenario,result=result,
+                           read_deadline=None,keys=lambda *args:keys.append(args),diagnostic_navigate_owner=timed,focus_matches=final,navigate_owner=retain)
+            exec(compile(ast.Module(body=[actual],type_ignores=[]),'actual owner-focus callsite','exec'),namespace)
+            with self.subTest(scenario=scenario,mode=mode),patch.object(driver.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(driver.time,'sleep'),patch.object(driver,'opaque_focus_relations',side_effect=slow), \
+                 patch.dict(namespace,{'opaque_focus_relations':slow}),patch.object(driver,'navigate_owner',side_effect=retain):
+                if mode=='success':namespace['focus']('Remote',owner_row=True)
+                elif mode in ('incomplete-original','expired-original'):
+                    with self.assertRaises(TimeoutError) as caught:namespace['focus']('Remote',owner_row=True)
+                    self.assertIs(caught.exception,timeouts[0])
+                else:
+                    with self.assertRaisesRegex(AssertionError,'focus_target_unavailable') as caught:
+                        namespace['focus']('Remote',owner_row=True)
+                    self.assertIs(caught.exception,original[0])
+            if mode=='success':
+                self.assertEqual(keys,[]);self.assertEqual(len(reads),2)
+                self.assertEqual(final_getters,[2]);self.assertEqual(auxiliary,[])
+            else:
+                self.assertEqual(keys,[('-k','Home'),('-k','Down')]);self.assertEqual(final_getters,[])
+                if mode in ('incomplete-original','expired-original'):
+                    self.assertEqual(len(reads),3);self.assertEqual(auxiliary,[])
+                    self.assertEqual(result['focus_rejection'],{})
+                else:
+                    self.assertEqual(len(reads),4);self.assertEqual(reads[-1],reads[-2]);self.assertEqual(auxiliary,[4])
+                    if mode=='slow':self.assertEqual(result['focus_rejection']['fresh_failure_type'],'TimeoutError')
+                    else:
+                        self.assertEqual(result['focus_rejection']['fresh']['focused'],1 if mode=='converged' else None)
+                        self.assertEqual(result['focus_rejection']['fresh_provenance'],'fresh-post-rejection')
 
     def test_owner_focus_uses_unique_visible_owned_row_child_relation(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
@@ -1269,6 +2484,94 @@ class EvidenceChecks(unittest.TestCase):
             self.assertTrue(namespace['connected_owner']())
             self.assertEqual(len(reads),3)
 
+    def test_profile_diagnostic_reuses_exact_plan_discard_and_one_local_lifetime(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        self.assertEqual(short.short_scenarios(False, False, False, True), ['profile-diagnostic'])
+        for remote, owner, ime in ((True, False, False), (False, True, False), (False, False, True)):
+            with self.assertRaises(ValueError): short.short_scenarios(remote, owner, ime, True)
+        events = []; visible = {'Effective profile selection:'}
+        def keys(*args):
+            events.append(('keys', args)); visible.clear(); visible.add('Confirmation: exact Expires: finite')
+        def activate(name):
+            events.append(('activate', name)); visible.clear(); visible.add('Plan discarded.')
+        result = {}
+        short.input_driver.profile_plan_discard(lambda name, scope: events.append(('tab', name, scope)),
+            lambda predicate: self.assertTrue(predicate()), lambda: visible,
+            lambda name: events.append(('focus', name)), keys, activate, 'Local owner / default', result)
+        self.assertEqual(events, [('tab', 'Profiles', 'Local owner / default'),
+            ('focus', 'Review profile selection'), ('keys', ('-k', 'space')), ('activate', 'Discard plan')])
+        self.assertTrue(result['typed_profile_exact_plan_discard'])
+        for flag in ('--remote', '--ui', '--owner-focus', '--ime'):
+            run = subprocess.run([sys.executable, str(ROOT / 'veranda/desktop/wayland-short.py'),
+                '/not-executed-gui', '/not-executed-engine', '--profile-diagnostic', flag], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 2); self.assertIn('standalone local lifetime', run.stderr)
+
+    def test_capped_progress_keeps_safe_private_last_checkpoint(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        with tempfile.TemporaryDirectory(prefix='veranda-checkpoint-', dir='/tmp') as temporary:
+            root = Path(temporary); root.chmod(0o700); path = root / 'last.json'
+            result = {}; state = {'checkpoint': path}
+            with patch('builtins.print') as output, patch.object(driver, 'owned_tree') as read:
+                for index in range(530):
+                    result['physical_key_commands'] = index
+                    driver.input_progress(result, 'yard-profiles-exact-plan-discard', 'key-start',
+                                          'named-focus:PRIVATE', 'Tab', {}, [], state)
+                self.assertEqual(output.call_count, 512); read.assert_not_called()
+            value = driver.read_input_checkpoint(path)
+            self.assertEqual(value['key_commands'], 529)
+            self.assertEqual(value['sequence'], 530)
+            self.assertLessEqual(path.stat().st_size, 1024)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('PRIVATE', json.dumps(value))
+            for invalid in ({'stage': 'PRIVATE'}, dict(value, key='PRIVATE'), dict(value, extra='PRIVATE')):
+                driver.ssh_fixture.replace_private_json(path, invalid)
+                with self.assertRaises((AssertionError, ValueError)): driver.read_input_checkpoint(path)
+            driver.ssh_fixture.replace_private_json(path, value)
+            path.chmod(0o644)
+            with self.assertRaises(AssertionError): driver.read_input_checkpoint(path)
+            with self.assertRaises(AssertionError): driver.ssh_fixture.replace_private_json(path, value)
+            path.chmod(0o600); path.unlink(); path.symlink_to(root / 'absent')
+            with self.assertRaises(OSError): driver.read_input_checkpoint(path)
+            with self.assertRaises(OSError): driver.ssh_fixture.replace_private_json(path, value)
+            path.unlink(); root.chmod(0o755)
+            with self.assertRaises(AssertionError): driver.ssh_fixture.replace_private_json(path, value)
+
+    def test_watchdog_retains_checkpoint_when_window_capture_fails(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        with tempfile.TemporaryDirectory(prefix='veranda-watchdog-checkpoint-', dir='/tmp') as temporary:
+            root = Path(temporary); root.chmod(0o700); capture = root / 'failure.png'; path = root / 'last.json'
+            with patch('builtins.print'):
+                short.input_driver.input_progress({'physical_key_commands': 700}, 'yard-profiles-exact-plan-discard',
+                    'read-start', 'named-focus:PRIVATE', 'none', {}, [], {'checkpoint': path})
+            identity = (os.getuid(), 123, 4, 5); lifetime = {}
+            with patch.object(short.input_driver, 'process_identity', return_value=identity), \
+                 patch.object(short.probe, 'X11Toplevel', side_effect=RuntimeError('PRIVATE')):
+                short.capture_input_watchdog(lifetime, SimpleNamespace(pid=77, poll=lambda: None), identity,
+                                             'x11', {}, capture, 600, path)
+            self.assertEqual(lifetime['input_checkpoint']['key_commands'], 700)
+            self.assertEqual(lifetime['watchdog_capture_failure_stage'], 'window-before')
+            self.assertNotIn('PRIVATE', json.dumps(lifetime))
+
+    def test_x11_watchdog_uses_unique_visible_owned_window(self):
+        probe = fixture.probe
+        for values, status, pid, accepted in ((['12'], 0, '77', True), ([], 1, '77', False),
+                (['12', '13'], 0, '77', False), (['bad'], 0, '77', False), (['12'], 2, '77', False),
+                (['12'], 0, '88', False), (['12'], 1, '77', False), (['١٢'], 0, '77', False)):
+            with self.subTest(values=values, status=status, pid=pid):
+                def query(argv, **options):
+                    self.assertIn('--onlyvisible', argv)
+                    return SimpleNamespace(returncode=status, stdout='\n'.join(values))
+                with patch.object(probe.subprocess, 'run', side_effect=query), \
+                     patch.object(probe.subprocess, 'check_output', return_value=pid), patch('builtins.print'):
+                    if accepted:
+                        window = probe.X11Toplevel(77, {}, lambda: None, visible_only=True)
+                        self.assertEqual(window.window, '12')
+                    else:
+                        with self.assertRaises(RuntimeError): probe.X11Toplevel(77, {}, lambda: None, visible_only=True)
+
     def test_input_progress_is_bounded_deduplicated_cached_and_excludes_text(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
@@ -1495,39 +2798,143 @@ class EvidenceChecks(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'ime_draft_unavailable'):
                 driver.local_ime_draft(root, '')
 
+    def test_ime_install_argv_declares_gsettings_provider_only_for_ime(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        class InstallBoundary(Exception): pass
+        for x11 in (False, True):
+            observed = {}
+            for ime in (False, True):
+                with self.subTest(x11=x11, ime=ime), tempfile.TemporaryDirectory(prefix='veranda-ime-packages-', dir='/tmp') as temporary:
+                    state = Path(temporary); state.chmod(0o700)
+                    for name in ('gui', 'engine'): (state / name).write_bytes(b'host-free input')
+                    commands = []
+                    def run(command, *args):
+                        commands.append(command)
+                        if command[3] == 'install': raise InstallBoundary()
+                    argv = ['short', str(state / 'gui'), str(state / 'engine')]
+                    argv += (['--x11'] if x11 else []) + (['--ime'] if ime else [])
+                    with patch.object(short.sys, 'argv', argv), patch.dict(short.os.environ, {'SUBYARD_E2E_VM': '1'}), \
+                         patch.object(short.fixture, 'recorded_state', return_value=contextlib.nullcontext(state)), \
+                         patch.object(short, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(short.main(), 1)
+                    self.assertEqual(len(commands), 2)
+                    self.assertEqual(commands[0], ['sudo', '-n', 'apt-get', 'update', '-qq'])
+                    display = ['xvfb', 'openbox', 'xdotool', 'libx11-6'] if x11 else ['labwc', 'wlrctl', 'wlr-randr', 'wayland-utils', 'wtype', 'grim']
+                    base = ['sudo', '-n', 'apt-get', 'install', '-y', '--no-install-recommends', *display,
+                            'libgtk-4-1', 'dbus', 'at-spi2-core', 'python3-gi', 'gir1.2-atspi-2.0', 'openssh-server']
+                    observed[ime] = commands[1]
+                    if not ime: self.assertEqual(commands[1], base)
+                    else:
+                        self.assertEqual(commands[1][6 + len(display):11 + len(display)],
+                                         ['libglib2.0-bin', 'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk'])
+                        self.assertEqual([part for part in commands[1] if part not in
+                                          ('libglib2.0-bin', 'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk')], base)
+            self.assertNotIn('libglib2.0-bin', observed[False])
+
+    def test_ime_settings_provenance_matches_executed_package_tool_not_completion_basename(self):
+        spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
+        short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
+        # Execute the actual command-provider loop bodies, without settings/IBus prerequisites.
+        function = next(node for node in ast.parse((ROOT / 'veranda/desktop/wayland-short.py').read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'prepare_ime')
+        loop = next(node for node in ast.walk(function) if isinstance(node, ast.For)
+                    and isinstance(node.target, ast.Tuple) and [item.id for item in node.target.elts] == ['package', 'basename'])
+        for tool_name, fault in ((name, fault) for name in ('gsettings', 'gdbus')
+                                for fault in ('none', 'alias', 'foreign', 'missing', 'wrong-package', 'writable', 'not-executable')):
+            literal = next(item for item in loop.iter.elts if ast.literal_eval(item) == ('libglib2.0-bin', tool_name))
+            first = ast.For(target=loop.target, iter=ast.List(elts=[literal], ctx=ast.Load()), body=loop.body, orelse=[])
+            code = compile(ast.fix_missing_locations(ast.Module(body=[first], type_ignores=[])), 'actual IME installed tool', 'exec')
+            with self.subTest(tool=tool_name, fault=fault), tempfile.TemporaryDirectory(prefix='veranda-ime-tool-', dir='/tmp') as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                for name in ('bin', 'completions', 'foreign'): (root / name).mkdir(mode=0o700)
+                tool = root / 'bin' / tool_name; tool.write_bytes(b'#!/bin/sh\nexit 0\n'); tool.chmod(0o755)
+                metadata = root / 'completions' / tool_name; metadata.write_bytes(b'completion metadata'); metadata.chmod(0o644)
+                foreign = root / 'foreign' / tool_name; foreign.write_bytes(tool.read_bytes()); foreign.chmod(0o755)
+                (root / 'bin-alias').symlink_to(root / 'bin', target_is_directory=True)
+                path = str(root / ('bin-alias' if fault == 'alias' else 'foreign' if fault == 'foreign' else 'bin'))
+                if fault == 'missing': path = ''
+                if fault == 'writable': tool.chmod(0o777)
+                if fault == 'not-executable': tool.chmod(0o644)
+                declared = [metadata] if fault == 'wrong-package' else [tool, metadata]
+                def query(command):
+                    self.assertEqual(command, ['dpkg-query', '-L', 'libglib2.0-bin'])
+                    return '\n'.join(str(item) for item in declared)
+                evidence = {'installed_files': []}
+                namespace = dict(short.__dict__, query=query, env={'PATH': path}, evidence=evidence)
+                if fault in ('none', 'alias'):
+                    exec(code, namespace)
+                    self.assertEqual(evidence['installed_files'], [{'package': 'libglib2.0-bin', 'basename': tool_name,
+                        'sha256': hashlib.sha256(tool.read_bytes()).hexdigest()}])
+                else:
+                    with self.assertRaisesRegex(AssertionError, 'ime_installed_input_missing'): exec(code, namespace)
+                    self.assertEqual(evidence['installed_files'], [])
+
     def test_ime_setup_checks_real_script_readback_and_owns_a_foreground_private_daemon(self):
         spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
         short = importlib.util.module_from_spec(spec); spec.loader.exec_module(short)
-        for fault in ('none', 'settings', 'engine'):
+        for fault in ('none', 'settings', 'engine', 'config-unavailable', 'config-probe-timeout', 'daemon-dead', 'config-late'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-ime-setup-', dir='/tmp') as temporary:
-                state = Path(temporary); state.chmod(0o700); settings = {}; services = []; env = {}; evidence = {}
-                names = ('libim-ibus.so', 'ibus-engine-hangul', 'org.freedesktop.ibus.engine.hangul.gschema.xml')
+                state = Path(temporary); state.chmod(0o700); settings = {}; services = []; env = {'PATH': str(state)}; evidence = {}
+                names = ('gsettings', 'gdbus', 'ibus-dconf', 'libim-ibus.so', 'ibus-engine-hangul', 'org.freedesktop.ibus.engine.hangul.gschema.xml')
                 for name in names: (state / name).write_bytes(b'host-free metadata fixture')
+                (state / 'gsettings').chmod(0o755)
+                (state / 'gdbus').chmod(0o755)
+                (state / 'ibus-dconf').chmod(0o755)
+                clock = [0.0]; config_queries = []; engine_started = []; order = []
+                def sleep(seconds): clock[0] += seconds
                 def run(command, **kwargs):
                     if command[0] == 'gsettings': settings[tuple(command[2:4])] = command[4]
-                    else: self.assertEqual(command, ['ibus', 'engine', 'hangul'])
+                    else:
+                        self.assertEqual(command, ['ibus', 'engine', 'hangul'])
+                        self.assertIn('config-ready', order)
+                        engine_started.append(True)
                     return SimpleNamespace(returncode=0)
                 def query(command, **kwargs):
+                    if command[0] == 'gdbus':
+                        self.assertEqual(command, ['gdbus', 'call', '--address', env['IBUS_ADDRESS'],
+                            '--dest', 'org.freedesktop.DBus', '--object-path', '/org/freedesktop/DBus',
+                            '--method', 'org.freedesktop.DBus.GetNameOwner', 'org.freedesktop.IBus.Config'])
+                        self.assertGreater(kwargs['timeout'], 0)
+                        self.assertLessEqual(kwargs['timeout'], min(1, 10 - clock[0]))
+                        config_queries.append((clock[0], kwargs['timeout']))
+                        if fault == 'config-probe-timeout':
+                            clock[0] += kwargs['timeout']
+                            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+                        if fault == 'config-unavailable' or len(config_queries) == 1:
+                            raise subprocess.CalledProcessError(1, command)
+                        if fault == 'config-late': clock[0] = 10.1
+                        order.append('config-ready')
+                        return "(':1.1',)"
                     if command[:2] == ['gsettings', 'get']:
                         return "'wrong'" if fault == 'settings' else settings[tuple(command[2:4])]
                     if command[:2] == ['ibus', 'engine']: return 'wrong' if fault == 'engine' else 'hangul'
-                    if command[:2] == ['dpkg-query', '-W']: return 'ibus fixture-version'
+                    if command[:2] == ['dpkg-query', '-W']:
+                        self.assertEqual(command[3:], ['libglib2.0-bin', 'ibus', 'ibus-hangul', 'ibus-gtk4', 'fonts-noto-cjk'])
+                        return 'libglib2.0-bin fixture-version\nibus fixture-version'
                     self.assertEqual(command[:2], ['dpkg-query', '-L'])
                     return '\n'.join(str(state / name) for name in names)
                 def service(name, command):
                     services.append((name, command))
-                    return SimpleNamespace(poll=lambda: None), None
+                    return SimpleNamespace(poll=lambda: 1 if fault == 'daemon-dead' else None), None
                 with patch.object(short.subprocess, 'run', side_effect=run), \
-                     patch.object(short.subprocess, 'check_output', side_effect=query), patch.object(Path, 'is_socket', return_value=True):
+                     patch.object(short.subprocess, 'check_output', side_effect=query), patch.object(Path, 'is_socket', return_value=True), \
+                     patch.object(short.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(short.time, 'sleep', side_effect=sleep):
                     if fault == 'none': short.prepare_ime(state, env, service, evidence)
                     else:
-                        with self.assertRaisesRegex(AssertionError, 'ime_.*readback_mismatch'):
+                        expected = 'ime_.*readback_mismatch' if fault in ('settings', 'engine') else 'ime_(daemon|config)_unavailable'
+                        with self.assertRaisesRegex(AssertionError, expected):
                             short.prepare_ime(state, env, service, evidence)
+                if fault in ('config-unavailable', 'config-probe-timeout', 'daemon-dead', 'config-late'):
+                    self.assertEqual(engine_started, [])
+                if fault == 'config-unavailable': self.assertLess(clock[0], 10.051)
+                if fault == 'config-late': self.assertEqual(clock[0], 10.1)
                 if fault == 'settings': self.assertEqual(services, [])
                 else:
                     self.assertEqual(len(services), 1)
                     name, command = services[0]
-                    self.assertEqual(name, 'ibus'); self.assertIn('--single', command)
+                    self.assertEqual(name, 'ibus'); self.assertNotIn('--single', command)
+                    self.assertIn('--config=' + shlex.quote(str(state / 'ibus-dconf')), command); self.assertIn('--panel=disable', command)
                     self.assertNotIn('--daemonize', command); self.assertNotIn('--replace', command)
                     self.assertIn('--address=unix:path=' + str(state / 'ibus-bus'), command)
                 if fault == 'none':
@@ -1535,6 +2942,12 @@ class EvidenceChecks(unittest.TestCase):
                     self.assertEqual(env['GTK_IM_MODULE'], 'ibus')
                     self.assertEqual(env['GSETTINGS_BACKEND'], 'keyfile')
                     self.assertEqual(evidence['settings']['use-system-keyboard-layout'], 'true')
+                    self.assertTrue(evidence['config_ready_on_private_bus'])
+                    self.assertGreaterEqual(len(config_queries), 2)
+                    self.assertIn('libglib2.0-bin fixture-version', evidence['packages'])
+                    self.assertIn({'package': 'libglib2.0-bin', 'basename': 'gsettings',
+                                   'sha256': hashlib.sha256((state / 'gsettings').read_bytes()).hexdigest()},
+                                  evidence['installed_files'])
 
     def test_functional_workload_budgets_distinguish_expanded_remote_ui(self):
         spec = importlib.util.spec_from_file_location('gtk_short', ROOT / 'veranda/desktop/wayland-short.py')
@@ -1710,9 +3123,14 @@ class EvidenceChecks(unittest.TestCase):
                   if isinstance(node,ast.While) and ast.unparse(node.test)=='action.poll() is None')
         for fault in ('none','capture','process','window','window-before'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='veranda-watchdog-',dir='/tmp') as temporary:
-                state=Path(temporary);events=[];lifetime={};identity=(os.getuid(),123,4,5)
+                state=Path(temporary);state.chmod(0o700);events=[];lifetime={};identity=(os.getuid(),123,4,5)
+                checkpoint=state/'last.json'
+                with patch('builtins.print'):
+                    short.input_driver.input_progress({'physical_key_commands':700},'yard-profiles-exact-plan-discard',
+                        'read-start','named-focus:PRIVATE','none',{},[],{'checkpoint':checkpoint})
                 window=SimpleNamespace(window='12',singleton=lambda:'13' if fault=='window' else '12')
-                def window_probe(*args):
+                def window_probe(*args, **options):
+                    self.assertEqual(options, {'visible_only': True})
                     if fault=='window-before':raise RuntimeError('private diagnostic detail')
                     return window
                 def capture(argv,**options):
@@ -1724,7 +3142,7 @@ class EvidenceChecks(unittest.TestCase):
                     'time':short.time,'deadline':0,'capture_input_watchdog':short.capture_input_watchdog,
                     'lifetime':lifetime,'app':SimpleNamespace(pid=77,poll=lambda:None),'gui_identity':identity,
                     'result':{'backend':'x11'},'env':{'DISPLAY':':99'},'state':state,'args':SimpleNamespace(remote=True),
-                    'workload_seconds':600}
+                    'workload_seconds':600,'checkpoint':checkpoint}
                 with patch.object(short.time,'monotonic',return_value=1), \
                      patch.object(short.input_driver,'process_identity',return_value=(999,123,4,5) if fault=='process' else identity), \
                      patch.object(short.probe,'X11Toplevel',side_effect=window_probe), \
@@ -1734,6 +3152,7 @@ class EvidenceChecks(unittest.TestCase):
                             exec(compile(ast.Module(body=[loop],type_ignores=[]),'actual-watchdog','exec'),namespace)
                 self.assertEqual(events,['sample','cleanup'] if fault in ('process','window-before') else ['sample','capture','cleanup'])
                 self.assertIn('watchdog_capture_seconds',lifetime)
+                self.assertEqual(lifetime['input_checkpoint']['key_commands'],700)
                 if fault=='none':
                     self.assertEqual(lifetime['watchdog_capture']['workload_deadline_seconds'],600)
                     self.assertEqual((state/'failure.png').stat().st_mode & 0o777,0o600)
@@ -1757,7 +3176,7 @@ class EvidenceChecks(unittest.TestCase):
         for deeper_foreign in (False, True):
             with self.subTest(deeper_foreign=deeper_foreign):
                 result = {'original_exit_code': 1}; collectors = []
-                namespace = dict(vars(driver), result=result, stage='synthetic-stage', deeper_foreign=deeper_foreign,
+                namespace = dict(vars(driver), result=result, stage='synthetic-stage', deeper_foreign=deeper_foreign, ime_observation=None,
                                  retain_failure_diagnostics=lambda value, collect: collectors.append(collect))
                 private = 'PRIVATE_TRACE_MARKER'
                 exec(compile("def foreign_private_frame():\n    raise RuntimeError('" + private + "')\n",
@@ -1826,6 +3245,33 @@ class EvidenceChecks(unittest.TestCase):
             self.assertEqual(physical.call_args_list[-1].args[0],
                              ['xdotool', 'key', '--clearmodifiers', 'F6'])
 
+    def test_x11_unicode_survives_queued_input_after_temporary_keymap_reset(self):
+        spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
+        driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+        queued = []
+        with patch.object(driver, 'x11_input', side_effect=lambda pid, args: queued.append(args)):
+            driver.x11_keys(77, ('-M', 'ctrl', '-k', 'a', '-m', 'ctrl', '庭院 مرحبا α'), lambda: None)
+        # A busy GTK consumer handles these after xdotool has restored its
+        # temporary Unicode mappings. Ordinary ASCII keycodes remain available;
+        # GTK's native Unicode entry uses only those stable physical keys.
+        text, composing = '', None
+        for args in queued:
+            if args[0] == 'type':
+                text += ''.join(char for char in args[-1] if 32 <= ord(char) < 127)
+                continue
+            for key in args[4:] if len(args) > 3 else args[2:]:
+                if key == 'ctrl+a': text = ''
+                elif key == 'ctrl+shift+u': composing = ''
+                elif key == 'Return':
+                    self.assertIsNotNone(composing)
+                    text += chr(int(composing, 16)); composing = None
+                else:
+                    self.assertIsNotNone(composing)
+                    self.assertIn(key, '0123456789abcdef')
+                    composing += key
+        self.assertIsNone(composing)
+        self.assertEqual(text, '庭院 مرحبا α')
+
     def test_x11_translation_preserves_shortcuts_text_and_per_event_guards(self):
         spec = importlib.util.spec_from_file_location('gtk_input', ROOT / 'veranda/desktop/wayland-input.py')
         driver = importlib.util.module_from_spec(spec)
@@ -1836,8 +3282,12 @@ class EvidenceChecks(unittest.TestCase):
                                  '-k', 'Return', '-k', 'Down', '-k', 'F6'), owned)
             self.assertEqual([call.args for call in key.call_args_list],
                              [(77, 'ctrl+a'), (77, 'Return'), (77, 'Down'), (77, 'F6')])
-            text.assert_called_once_with(77, ['type', '--clearmodifiers', '--delay', '25', '--', '庭院 مرحبا α'])
-            self.assertEqual(owned.call_count, 5)
+            self.assertEqual(text.call_count, 10)
+            self.assertEqual(text.call_args_list[0].args,
+                             (77, ['key', '--clearmodifiers', '--delay', '25', 'ctrl+shift+u', '5', 'e', 'a', 'd', 'Return']))
+            self.assertEqual(text.call_args_list[-1].args,
+                             (77, ['key', '--clearmodifiers', '--delay', '25', 'ctrl+shift+u', '3', 'b', '1', 'Return']))
+            self.assertEqual(owned.call_count, 14)
             key.reset_mock(); text.reset_mock(); owned.reset_mock()
             for arguments in (('-k', 'Tab', '-k'), ('-M', 'alt', '-k', 'r'), ('-k', 'Delete'),
                               ('-k', 'F5'), ('-M', 'alt', '-k', 'F6'),
@@ -2009,6 +3459,90 @@ class EvidenceChecks(unittest.TestCase):
                     self.assertEqual((platform / '.subyard-e2e-platform-marker').read_text(),
                                      'subyard-e2e-platform-v1\n')
                     self.assertEqual(events, [('start', 'platform', None, 'started'), ('end', 'platform', 0, 'passed')])
+
+    def test_platform_key_units_are_private_per_state_through_release_and_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix='veranda-platform-units-', dir='/tmp') as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            home = root / 'home'
+            states = [root / ('veranda-wayland-' + name) for name in ('first', 'second')]
+            for directory in (home, home / '.cache', *states):
+                fixture.probe.private_dir(directory)
+            shared = home / '.config/systemd/user'
+            shared.mkdir(parents=True, mode=0o700)
+            shared.chmod(0o700)
+            canary = shared / 'subyard-keys-sync.service'
+            fixture.probe.private_file(canary, 'unrelated fixture unit\n')
+            for state in states:
+                fixture.probe.private_file(state / 'canary', state.name)
+            platform = home / '.cache/subyard-e2e-platform'
+            engine = root / 'yard'
+            fixture.probe.private_file(engine, 'not executed')
+            releases, commands = [], []
+            original = subprocess.CalledProcessError(17, ['fixed-body'])
+
+            def host_command(argv, **options):
+                self.assertEqual(argv[:2], ['sudo', '-n'])
+                if argv[2:4] == ['install', '-d']:
+                    self.assertEqual(Path(argv[-1]), platform)
+                    platform.mkdir(mode=0o711, exist_ok=True)
+                    platform.chmod(0o711)
+                elif argv[2] == 'install':
+                    self.assertEqual(argv[-4:-2], ['-m', '0600'])
+                    fixture.probe.private_file(Path(argv[-1]), Path(argv[-2]).read_text())
+                else:
+                    self.assertEqual(argv[2:4], ['mv', '-fT'])
+                    Path(argv[-2]).replace(argv[-1])
+                return SimpleNamespace(returncode=0)
+
+            def release(state, candidate, env):
+                self.assertEqual(candidate, engine)
+                releases.append((state, dict(env)))
+
+            def product(argv, env, log, **options):
+                self.assertEqual(argv[0], str(engine))
+                self.assertIs(options['privileged'], True)
+                commands.append((argv, dict(env)))
+                if argv[3] == 'init':
+                    (platform / 'incus').mkdir(mode=0o700, exist_ok=True)
+                return 0
+
+            with patch.object(fixture.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(home))), \
+                    patch.object(fixture.subprocess, 'run', side_effect=host_command), \
+                    patch.object(fixture, 'run_probe', side_effect=product), \
+                    patch.object(fixture, 'product_stop_check'), \
+                    patch.object(fixture, 'prepare_release', side_effect=release), \
+                    patch.object(fixture.probe, 'isolated_defaults'):
+                for index, state in enumerate(states):
+                    try:
+                        with fixture.prepared_platform(state, engine):
+                            if index == 1:
+                                raise original
+                    except subprocess.CalledProcessError as caught:
+                        self.assertEqual(index, 1)
+                        self.assertIs(caught, original)
+            self.assertEqual([state for state, _ in releases], states)
+            roots = [Path(env.get('SUBYARD_KEYS_SYSTEMD_DIR', str(shared))) for _, env in releases]
+            self.assertNotEqual(roots[0], roots[1], 'two private states share the operator key-unit directory')
+            for index, (state, env) in enumerate(releases):
+                unit_root = roots[index]
+                self.assertEqual(unit_root.parent, state)
+                self.assertFalse(unit_root.is_symlink())
+                self.assertTrue(unit_root.is_dir())
+                self.assertEqual(unit_root.stat().st_uid, os.getuid())
+                self.assertEqual(unit_root.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(env['HOME'], str(home))
+                self.assertEqual(env['SUBYARD_OPERATOR_HOME'], str(home))
+                self.assertEqual(env['STORAGE_PATH'], str(platform / 'incus/incus/storage'))
+                self.assertEqual(env['SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE'], '1')
+                lifecycle = commands[index * 3:(index + 1) * 3]
+                self.assertEqual([argv[3:-1] for argv, _ in lifecycle],
+                                 [['init'], ['teardown', '--keep-data'], ['teardown']])
+                self.assertTrue(all(current == env for _, current in lifecycle))
+            self.assertEqual(canary.read_text(), 'unrelated fixture unit\n')
+            self.assertEqual(canary.stat().st_mode & 0o777, 0o600)
+            for state in states:
+                self.assertEqual((state / 'canary').read_text(), state.name)
 
     def test_installer17_survives_end_phase_reporting_failure(self):
         args = SimpleNamespace(active_case='F', active_repeat=1, phase='case-install', child_exit=None)
