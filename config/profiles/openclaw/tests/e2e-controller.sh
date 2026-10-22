@@ -45,12 +45,14 @@ fi
 [ ! -d "$diagnostic_fixture" ]
 grep -Fq 'openclaw_e2e_failure original_rc=42 last_step=first-start step_state=start' "$tmp/failure.out"
 grep -Fq 'native_match=unknown capture_rc=0' "$tmp/failure.out"
+grep -Fq 'original_rc=42 capture_rc=0 cleanup_rc=0' "$tmp/failure.out"
 ! grep -Fq synthetic-secret "$tmp/failure.out"
 install -d -m 0700 "$diagnostic_fixture"
 printf 'openclaw-profile-e2e-v1\n' > "$diagnostic_fixture/.marker"
 sed 's/return 42/return 0/' "$tmp/failure.sh" > "$tmp/success.sh"
 bash "$tmp/success.sh" > "$tmp/success.out" 2>&1
 [ ! -d "$diagnostic_fixture" ]
+grep -Fq 'original_rc=0 capture_rc=0 cleanup_rc=0' "$tmp/success.out"
 ! grep -Fq openclaw_e2e_failure "$tmp/success.out"
 ! grep -Fq synthetic-secret "$tmp/success.out"
 # A capture failure is reported separately and cannot replace the original failure.
@@ -60,10 +62,12 @@ sed '/staging_step first-start/i printf "invalid\\n" > "$STAGING_TRACE_DIR/probe
   "$tmp/failure.sh" > "$tmp/capture-failure.sh"
 if bash "$tmp/capture-failure.sh" > "$tmp/capture-failure.out" 2>&1; then exit 1; else [ "$?" = 42 ]; fi
 [ ! -d "$diagnostic_fixture" ]
+grep -Fq 'original_rc=42 capture_rc=2 cleanup_rc=0' "$tmp/capture-failure.out"
 install -d -m 0700 "$diagnostic_fixture"
 printf 'openclaw-profile-e2e-v1\n' > "$diagnostic_fixture/.marker"
 sed 's/sudo() { shift; "$@"; }/sudo() { return 1; }/' "$tmp/failure.sh" > "$tmp/cleanup-failure.sh"
 if bash "$tmp/cleanup-failure.sh" > "$tmp/cleanup-failure.out" 2>&1; then exit 1; else [ "$?" = 3 ]; fi
+grep -Fq 'original_rc=42 capture_rc=0 cleanup_rc=3' "$tmp/cleanup-failure.out"
 
 # The delegate itself must preserve bytes, exit and process-group cancellation.
 (

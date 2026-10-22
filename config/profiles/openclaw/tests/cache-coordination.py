@@ -37,7 +37,10 @@ with tempfile.TemporaryDirectory(prefix="subyard-cache-", dir="/tmp") as directo
     env.update(SY_CACHE_LOCK=str(lock), SY_CACHE_TOOL=str(HELPER), SY_CACHE_WAIT_SECONDS="2")
     worker = root / "worker.py"
     worker.write_text('''import os, pathlib, sys, time
-pathlib.Path(sys.argv[1]).write_text(str(os.getpid())+" "+os.environ["_SY_CACHE_FD"]+"\\n")
+marker = pathlib.Path(sys.argv[1])
+temporary = marker.with_name(marker.name+"."+str(os.getpid())+".tmp")
+temporary.write_text(str(os.getpid())+" "+os.environ["_SY_CACHE_FD"]+"\\n")
+temporary.replace(marker)
 while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)
 ''')
     children = []

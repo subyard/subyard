@@ -3,7 +3,6 @@
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 import unittest
 
 OWNER = Path(__file__).parent/'e2e/owner.sh'
@@ -52,7 +51,6 @@ wait() { printf 'wait-owned-child\\n'; }
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stdout, 'kill-owned-child\nwait-owned-child\n')
         self.assertEqual(result.stderr, '')
-
 
 
 if __name__ == '__main__':
