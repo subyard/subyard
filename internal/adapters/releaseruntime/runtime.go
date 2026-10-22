@@ -567,6 +567,20 @@ func (runtime *Runtime) PrepareTransition(
 	if !filepath.IsAbs(configHome) {
 		return Prepared{}, errors.New("release transition config home must be absolute")
 	}
+	if !parsed.check && runtime.config.Progress != nil {
+		version := "unknown"
+		if current, err := inspectRuntimeLink(parsed.root, "current"); err == nil && current.present {
+			candidate := publishedCandidate{
+				release: releasetransition.ReleaseID(strings.TrimPrefix(current.target, "releases/")),
+				root:    filepath.Join(parsed.root, current.target),
+			}
+			if verified, err := runtime.verifyPublishedCandidate(ctx, candidate, parsed.root, nil); err == nil {
+				version = verified.version
+				verified.Close()
+			}
+		}
+		runtime.progress(parsed, "Installed version: %s", version)
+	}
 	runtime.progress(parsed, "Inspecting the installed release...")
 	if prepared, selected, err := runtime.prepareMigrationOwnerReplacement(ctx, parsed, configHome, yard, inheritedSettingIDs); selected {
 		return prepared, err

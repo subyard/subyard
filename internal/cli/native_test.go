@@ -773,7 +773,7 @@ func TestUpdateCheckReturnsZeroForBlockedV2Inspection(t *testing.T) {
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
 		Arguments: []string{
-			"update", "--check", "--version", "1.2.3", "--runtime-root", runtimeRoot,
+			"update", "--check", "--json", "--version", "1.2.3", "--runtime-root", runtimeRoot,
 		},
 		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr,
 	})
@@ -1031,17 +1031,20 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				environment = append(environment, "YARD_ENGINE_PATH="+oldDispatcher)
 			}
 
-			var stderr bytes.Buffer
+			var stdout, stderr bytes.Buffer
 			program, err := New(Options{
 				RepositoryRoot: root, DispatcherPath: oldDispatcher, Program: "yard",
 				Arguments: test.arguments(runtimeRoot), Environment: environment, WorkingDir: root,
-				Stderr: &stderr,
+				Stdout: &stdout, Stderr: &stderr,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if code := program.Run(context.Background()); code != 0 {
 				t.Fatalf("update failed: code=%d stderr=%q", code, stderr.String())
+			}
+			if test.sameVersion && !strings.HasPrefix(stdout.String(), "Installed version: 1.2.3\n") {
+				t.Fatalf("same-version update did not start with the installed version: %q", stdout.String())
 			}
 			if finalized, finalizeErr := os.ReadFile(filepath.Join(root, "migration-finalize.log")); !errors.Is(finalizeErr, os.ErrNotExist) {
 				t.Fatalf("update invoked legacy migration finalization: payload=%q err=%v", finalized, finalizeErr)

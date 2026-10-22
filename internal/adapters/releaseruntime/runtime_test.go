@@ -65,6 +65,48 @@ func TestLatestTagReportsGitHubHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestUpdateReportsInstalledVersionBeforeLatestLookup(t *testing.T) {
+	for _, tampered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tampered=%v", tampered), func(t *testing.T) {
+			root := testkit.TempDir(t)
+			candidate := writeVersionedRuntimeCandidate(t, root, "release-old", "1.2.3",
+				"#!/bin/sh\nprintf 'yard-engine 1.2.3\\n'\n")
+			if err := os.Symlink("releases/release-old", filepath.Join(root, "current")); err != nil {
+				t.Fatal(err)
+			}
+			version := "1.2.3"
+			if tampered {
+				testkit.WriteFile(t, filepath.Join(candidate.root, "bin", "yard-engine"),
+					[]byte("#!/bin/sh\nprintf 'yard-engine 9.9.9\\n'\n"), 0o700)
+				version = "unknown"
+			}
+			installer := filepath.Join(root, "installer")
+			testkit.WriteFile(t, installer, []byte("#!/bin/sh\n# --publish-only\nexit 91\n"), 0o700)
+			var progress bytes.Buffer
+			lookedUp := false
+			runtime := New(Config{
+				Inputs:    fixtureCommandInputs(map[string]string{"HOME": root}),
+				Installer: installer, Progress: &progress,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					lookedUp = true
+					if !strings.HasPrefix(progress.String(), "Installed version: "+version+"\nInspecting the installed release...\n") {
+						t.Fatalf("installed version was not reported before lookup: %q", progress.String())
+					}
+					return &http.Response{
+						StatusCode: http.StatusForbidden, Status: "403 Forbidden",
+						Body: io.NopCloser(strings.NewReader(`{"message":"rate limit exceeded"}`)),
+					}, nil
+				})},
+			})
+			defer runtime.Close()
+			_, err := runtime.PrepareTransition(context.Background(), []string{"--runtime-root", root}, root, "default")
+			if !lookedUp || err == nil || err.Error() != "GitHub latest release request returned 403 Forbidden" {
+				t.Fatalf("lookup=%v error=%v progress=%q", lookedUp, err, progress.String())
+			}
+		})
+	}
+}
+
 func TestProductionTransitionPathDoesNotDelegateToLegacyMutation(t *testing.T) {
 	source, err := os.ReadFile("runtime.go")
 	if err != nil {
