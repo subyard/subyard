@@ -44,6 +44,19 @@ ssh yard-<name> -- paseo-pair
 Scan the QR code or paste the printed offer into Paseo Desktop. The SSH command then exits; normal
 Desktop use does not require an SSH tunnel or an open terminal. Pair each yard separately.
 
+## Codex permission modes
+
+The yard's Codex requirements permit the `user` approval reviewer. Paseo's **Auto-review**
+mode requests an automatic reviewer and is rejected before command execution. The native SDK
+has been checked with mode `auto`, labeled **Default Permissions**, and explicit `on-request`
+approval plus `danger-full-access` sandbox settings. Denial leaves Git history unchanged,
+approval permits one commit, a repeat prompts again, and an unresolved request survives reconnect.
+
+The **Default Permissions** preset itself uses `workspace-write`. These local SDK checks do not
+establish that Desktop supplies the full yard sandbox override, or verify its approval controls.
+See [the client evidence table](configuration.md#codex-permissions-across-projects) before
+treating a Desktop session as providing the full yard contract.
+
 ## Projects and network boundary
 
 The daemon listens only on `127.0.0.1:6767` inside the yard. It makes an outbound TLS connection to
