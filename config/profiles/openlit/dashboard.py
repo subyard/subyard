@@ -276,7 +276,8 @@ def route(selected):
         desired = {'type': 'proxy', 'bind': 'host', 'listen': f'tcp:{host}:{port}', 'connect': 'tcp:127.0.0.1:3000'}
         receipt = f'v1:{port}' if host == '127.0.0.1' else f'v2:{host}:{port}'
         # Reserve the exact tuple against every other instance's inherited routes.
-        instances = json.loads(run('incus', 'list', '--all-projects', '--format', 'json'))
+        # Reservation needs configuration, not live state, snapshots or backups.
+        instances = json.loads(run('incus', 'query', '/1.0/instances?recursion=1&all-projects=true'))
         for instance in instances:
             same_instance = (instance.get('project') == ENV['INCUS_PROJECT']
                              and instance.get('name') == ENV['YARD_INSTANCE_NAME'])

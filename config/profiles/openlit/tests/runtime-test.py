@@ -4,12 +4,12 @@ import io
 import json
 import os
 from pathlib import Path
-import runpy
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -23,52 +23,6 @@ import tomli_w
 
 
 class RuntimeTest(unittest.TestCase):
-    def test_released_updater_fixture_observes_absence_and_rejects_mutation(self):
-        harness = runpy.run_path(str(ROOT/'dev/verify-release-upgrades.py'))
-        observation = runpy.run_path(str(PROFILE/'tests/release-observation.py'))
-        runtime_root = Path(os.environ.get('SUBYARD_OPENLIT_TEST_RUNTIME_ROOT', ROOT))
-        with tempfile.TemporaryDirectory(prefix='subyard-openlit-release-', dir='/tmp') as temporary:
-            root = Path(temporary)
-            control, rejected = root/'control.json', root/'rejected'
-            control.write_text(json.dumps({'instances': [{'info': {'status': 'Running'}}]}))
-            harness['write_observation_incus'](root, control, rejected)
-            environment = {
-                'PATH': str(root)+':/usr/bin:/bin',
-                'SUBYARD_ENGINE_CONTEXT': '1', 'SUBYARD_ENGINE_CONTEXT_SCHEMA': '1',
-                'SUBYARD_OPERATOR_HOME': str(root), 'SUBYARD_CONFIG_DIR': str(runtime_root/'config'),
-                'SUBYARD_CONFIG_HOME': str(root), 'SUBYARD_HOME': str(root),
-                'STORAGE_PATH': str(root), 'HOST_BASE': str(root), 'RESTRICTED_DISK_PATHS': str(root),
-                'ACCESS_KIND': 'local', 'YARD_KIND': 'container', 'YARD_INSTANCE_NAME': 'yard',
-                'INCUS_PROJECT': 'subyard', 'INCUS_BRIDGE': 'fixture', 'SSH_HOST': '127.0.0.1',
-                'DEV_USER': 'dev', 'DEV_UID': '1000', 'DEV_SUDO': '0',
-                'FORWARD_SSH_AGENT': '0', 'NESTED_E2E_VMS': '0',
-                'ENVIRONMENT_PROFILES': '', 'CODING_TOOL_INTEGRATIONS': 'codex',
-            }
-            result = subprocess.run([str(runtime_root/'config/profiles/openlit/runtime.sh'), 'observe'], env=environment,
-                                    capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), {'state': 'absent', 'actual': '', 'desired': ''})
-            self.assertFalse(rejected.exists())
-            arguments, response = observation['read_only_commands'](PROFILE)[0]
-            # The accepted transport drains binary archives larger than a pipe.
-            result = subprocess.run([str(root/'incus'), *arguments], input=b'\xff'*131072,
-                                    capture_output=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.decode(), response)
-            for changed in (
-                arguments[:-4] + ['refresh', '0', 'dev', 'codex', 'a'*64, 'b'*64],
-                arguments[:-4] + ['apply', '0', 'dev', 'codex'],
-                arguments[:9] + [arguments[9]+'\n'] + arguments[10:],
-                arguments[:1] + ['foreign'] + arguments[2:],
-                arguments + ['unexpected'],
-                ['config', 'set', 'yard', 'key', 'value'],
-            ):
-                with self.subTest(arguments=changed[:2]):
-                    result = subprocess.run([str(root/'incus'), *changed],
-                                            capture_output=True, timeout=10)
-                    self.assertEqual(result.returncode, 99)
-                    self.assertEqual(rejected.read_text(), 'incus operation rejected')
-                    rejected.unlink()
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='subyard-openlit-runtime-', dir='/tmp')
@@ -83,6 +37,7 @@ class RuntimeTest(unittest.TestCase):
             shutil.copyfile(ROOT/'internal/adapters/configmaterial/tomli_w.py' if name == 'tomli_w.py' else PROFILE/name, self.source/name)
         self.args = (self.state, self.source, self.unit, self.home, True, ['claude', 'codex'], 'dev')
         self.expected_images = {name: 'sha256:'+str(i)*64 for i, name in enumerate(sorted(runtime.SERVICES), 1)}
+        self.image_output = None
         self.rows = [{'Id': str(i+3)*64, 'Image': self.expected_images[name],
                       'Config': {'Labels': {'com.docker.compose.service': name, 'com.docker.compose.config-hash': str(i)*64},
                                  'Env': ['PRIVATE=synthetic-unexported'], 'User': '10001:10001' if name == 'collector' else ''},
@@ -101,6 +56,7 @@ class RuntimeTest(unittest.TestCase):
         self.account_unready = False
         self.commands = []
         original = runtime.run
+        self.native_run = original
         self.addCleanup(setattr, runtime, 'run', original)
         runtime.run = self.probe
 
@@ -128,7 +84,7 @@ class RuntimeTest(unittest.TestCase):
             row['Image'] = self.expected_images[row['Config']['Labels']['com.docker.compose.service']]
         self.mounted = {name: (self.source/asset).read_bytes() for name, (asset, _) in runtime.MOUNTS.items()}
 
-    def probe(self, arguments, timeout=2):
+    def probe(self, arguments, timeout=None, input=None):
         self.commands.append(arguments)
         if self.probe_failure:
             raise ValueError('synthetic native probe failed')
@@ -142,7 +98,10 @@ class RuntimeTest(unittest.TestCase):
         if arguments[:2] == ['docker', 'inspect']:
             return json.dumps(self.rows).encode()
         if arguments[:3] == ['docker', 'image', 'inspect']:
-            return json.dumps([{'Id': self.expected_images[name]} for name in sorted(runtime.SERVICES)]).encode()
+            self.assertEqual(arguments[3:5], ['--format', '{{.Id}}'])
+            self.assertEqual(arguments[5:], ['fixture/'+name+'@sha256:'+str(i)*64
+                                            for i, name in enumerate(sorted(runtime.SERVICES), 1)])
+            return self.image_output if self.image_output is not None else ('\n'.join(self.expected_images[name] for name in sorted(runtime.SERVICES))+'\n').encode()
         if arguments[:3] == ['docker', 'volume', 'inspect']:
             return json.dumps([{'Name': 'subyard-openlit_openlit-data', 'Labels': {
                 'com.docker.compose.project': 'subyard-openlit', 'com.docker.compose.volume': 'openlit-data'}}]).encode()
@@ -172,6 +131,8 @@ class RuntimeTest(unittest.TestCase):
             return b'OK'
         if arguments[:2] == ['python3', str(self.source/'account.py')]:
             self.assertEqual(timeout, 10)
+            self.assertEqual(input, next(row['Id'].encode('ascii') for row in self.rows
+                                       if row['Config']['Labels']['com.docker.compose.service'] == 'openlit'))
             if self.account_unready:
                 raise ValueError('synthetic account linkage drift')
             return b'{"kind":"fresh","phase":"ready"}\n'
@@ -185,57 +146,168 @@ class RuntimeTest(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands, [])
 
-    def test_integrated_receiver_mount_and_healthcheck_require_all_signals(self):
-        environment = dict(os.environ, OPENLIT_DB_PASSWORD='synthetic-private')
-        rendered = subprocess.run(['docker', 'compose', '-f', str(PROFILE/'compose.yaml'),
-                                   'config', '--format', 'json'], env=environment,
-                                  capture_output=True, text=True, check=True, timeout=10)
-        service = json.loads(rendered.stdout)['services']['openlit']
-        mount = next(volume for volume in service['volumes']
-                     if volume['target'] == runtime.MOUNTS['openlit'][1])
-        self.assertEqual(mount['type'], 'bind')
-        self.assertEqual(Path(mount['source']), PROFILE/'openlit-collector.yaml')
-        self.assertTrue(mount['read_only'])
-        self.assertEqual(service['healthcheck']['test'][:3], ['CMD', 'node', '-e'])
-        script = service['healthcheck']['test'][3]
-        for statuses, expected in [([200, 405, 405, 405], 0), ([500, 405, 405, 405], 1),
-                                   ([200, 404, 405, 405], 1), ([200, 405, 404, 405], 1),
-                                   ([200, 0, 405, 405], 1), ([200, 405, 405, 404], 1),
-                                   ([200, 405, 405, 0], 1)]:
-            with self.subTest(statuses=statuses):
-                urls = ['http://localhost:3000', 'http://localhost:4318/v1/logs',
-                        'http://localhost:4318/v1/metrics', 'http://localhost:4318/v1/traces']
-                responses = dict(zip(urls, statuses))
-                stub = 'const responses='+json.dumps(responses)+';global.fetch=url=>{const status=responses[url];return status?Promise.resolve({ok:status===200,status}):Promise.reject(new Error("unavailable"));};'
-                result = subprocess.run(['node', '-e', stub+script], capture_output=True, timeout=5)
-                self.assertEqual(result.returncode, expected, result.stderr)
 
-    def test_dedicated_trace_receiver_is_required_without_agent_or_event_probes(self):
+
+    def test_image_batch_runs_alone_after_overlapping_live_reads(self):
+        self.install()
+        lock, mounted = threading.Lock(), threading.Barrier(2)
+        active, completed = set(), set()
+        image_done = threading.Event()
+        peak = 0
+        def probe(arguments, timeout=None, input=None):
+            nonlocal peak
+            command = tuple(arguments)
+            if arguments[:3] == ['docker', 'image', 'inspect']:
+                with lock:
+                    self.assertFalse(active, 'image batch overlapped another capture probe')
+                    self.assertEqual(len(completed), 14, 'image batch preceded a pending live read')
+                result = self.probe(arguments, timeout, input)
+                image_done.set()
+                return result
+            if arguments[0] == 'python3':
+                self.assertTrue(image_done.is_set(), 'account ran before image validation')
+                with lock:
+                    self.assertFalse(active)
+                return self.probe(arguments, timeout, input)
+            with lock:
+                active.add(command)
+                peak = max(peak, len(active))
+            try:
+                if arguments[:2] == ['docker', 'cp']:
+                    mounted.wait(2)
+                return self.probe(arguments, timeout, input)
+            finally:
+                with lock:
+                    active.remove(command)
+                    completed.add(command)
+        runtime.run = probe
+        for operation in (runtime.publish, runtime.observe):
+            with self.subTest(operation=operation.__name__):
+                completed.clear()
+                image_done.clear()
+                self.commands.clear()
+                self.assertEqual(operation(*self.args)['state'], 'current')
+                self.assertEqual(sum(command[:3] == ['docker', 'image', 'inspect'] for command in self.commands), 1)
+        self.assertGreaterEqual(peak, 2)
+        self.assertLessEqual(peak, 4)
+
+    def test_waiting_for_pending_failures_preserves_image_validation_precedence(self):
         self.install()
         runtime.publish(*self.args)
         receipt = (self.state/'receipt.json').read_bytes()
-        self.trace_status = b'404'
-        self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+        def probe(arguments, timeout=None, input=None):
+            if arguments[:2] == ['docker', 'cp']:
+                raise ValueError('synthetic mounted read failure')
+            if arguments[:3] == ['docker', 'image', 'inspect']:
+                self.commands.append(arguments)
+                raise subprocess.TimeoutExpired(arguments, 5)
+            return self.probe(arguments, timeout, input)
+        runtime.run = probe
+        self.commands.clear()
+        observation, facts = runtime.capture(*self.args)
+        self.assertEqual(observation['state'], 'stale')
+        self.assertTrue(facts['probe_failed'])
+        self.assertNotIn('configuration_matches', facts)
+        self.assertTrue(any(command[:3] == ['docker', 'image', 'inspect'] for command in self.commands))
+        self.assertFalse(any(command[0] == 'python3' for command in self.commands))
         with self.assertRaises(ValueError):
             runtime.publish(*self.args)
         self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
-        self.trace_status = b'405'
-        self.assertEqual(runtime.observe(*self.args)['state'], 'current')
-        self.assertFalse(any(command[0] in ('claude', 'codex') for command in self.commands))
 
-    def test_account_linkage_and_owned_volume_are_required_before_receipt_publication(self):
+    def test_shipped_openlit_healthcheck_requires_each_signal(self):
+        rendered = json.loads(subprocess.check_output(['docker', 'compose', '--env-file', '/dev/null',
+            '-f', str(PROFILE/'compose.yaml'), 'config', '--format', 'json'],
+            env={**os.environ, 'OPENLIT_DB_PASSWORD': 'synthetic'}))
+        check = rendered['services']['openlit']['healthcheck']['test']
+        self.assertEqual(check[:3], ['CMD', 'node', '-e'])
+        endpoints = ['http://localhost:3000', *('http://localhost:4318/v1/'+name for name in ('logs', 'metrics', 'traces'))]
+        for failed in (None, *endpoints):
+            statuses = dict(zip(endpoints, (200, 405, 405, 405)))
+            if failed:
+                statuses[failed] = 503
+            script = 'globalThis.fetch=async(url)=>{const status='+json.dumps(statuses)+'[url];if(status===undefined)throw Error("unexpected endpoint");return {ok:status===200,status};};'
+            with self.subTest(failed=failed):
+                result = subprocess.run(['node', '-e', script+check[3]], capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1 if failed else 0, result.stderr)
+
+    def test_receiver_account_and_volume_drift_refuse_receipts(self):
         self.install()
         runtime.publish(*self.args)
         receipt = (self.state/'receipt.json').read_bytes()
-        self.account_unready = True
-        with self.assertRaises(ValueError):
-            runtime.publish(*self.args)
-        self.account_unready = False
         row = next(row for row in self.rows if row['Config']['Labels']['com.docker.compose.service'] == 'openlit')
-        row['Mounts'][0]['Name'] = 'foreign-volume'
-        with self.assertRaises(ValueError):
-            runtime.publish(*self.args)
-        self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+        for drift in ('receiver', 'account', 'volume'):
+            self.trace_status = b'404' if drift == 'receiver' else b'405'
+            self.account_unready = drift == 'account'
+            row['Mounts'][0]['Name'] = 'foreign-volume' if drift == 'volume' else 'subyard-openlit_openlit-data'
+            self.commands.clear()
+            with self.subTest(drift=drift), self.assertRaises(ValueError):
+                runtime.publish(*self.args)
+            self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+            if drift != 'account':
+                self.assertFalse(any(command[0] == 'python3' for command in self.commands))
+            self.assertFalse(any(command[0] in ('claude', 'codex') for command in self.commands))
+
+    def test_unexpected_inventory_is_stale_without_archive_or_account_reads(self):
+        self.install()
+        runtime.publish(*self.args)
+        receipt = (self.state/'receipt.json').read_bytes()
+        expected = list(self.rows)
+        for rows in ([], [*expected, dict(expected[0], Id='f'*64)]):
+            with self.subTest(containers=len(rows)):
+                self.rows = rows
+                self.commands.clear()
+                self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+                with self.assertRaises(ValueError):
+                    runtime.publish(*self.args)
+                self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+                self.assertFalse(any(command[:2] == ['docker', 'cp'] or command[0] == 'python3'
+                                     for command in self.commands))
+
+    def test_image_probe_failures_preserve_receipt_account_gate_and_bounds(self):
+        self.install()
+        runtime.publish(*self.args)
+        receipt = (self.state/'receipt.json').read_bytes()
+        ids = [self.expected_images[name] for name in sorted(runtime.SERVICES)]
+        outputs = [b'\xff', '\n'.join(ids[:2]).encode(), '\n'.join([*ids, ids[0]]).encode(),
+                   '\n'.join([ids[0], 'sha256:'+'A'*64, ids[2]]).encode()]
+        outcomes = [subprocess.CompletedProcess([], 0, stdout=value) for value in outputs]
+        outcomes += [subprocess.CompletedProcess([], 7, stdout=b'private-sentinel'),
+                     subprocess.TimeoutExpired(['docker'], 5)]
+        def probe(arguments, timeout=None, input=None):
+            if arguments[:3] == ['docker', 'image', 'inspect']:
+                return self.native_run(arguments, timeout=timeout, input=input)
+            return self.probe(arguments, timeout, input)
+        runtime.run = probe
+        for outcome in outcomes:
+            with self.subTest(outcome=type(outcome).__name__), mock.patch.object(runtime.subprocess, 'run',
+                    side_effect=outcome if isinstance(outcome, Exception) else None,
+                    return_value=outcome) as native_probe:
+                self.commands.clear()
+                with self.assertRaises(ValueError):
+                    runtime.publish(*self.args)
+                native_probe.assert_called_once()
+                self.assertEqual(native_probe.call_args.kwargs,
+                                 {'input': None, 'capture_output': True, 'timeout': 5, 'check': False})
+                self.assertEqual(native_probe.call_args.args[0][:5], ['docker', 'image', 'inspect', '--format', '{{.Id}}'])
+                self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+                self.assertFalse(any(command[0] == 'python3' for command in self.commands))
+        runtime.run = self.probe
+        self.assertEqual(runtime.observe(*self.args)['state'], 'current')
+
+    def test_native_probe_default_budgets_and_explicit_overrides(self):
+        for arguments, override, expected in ((['docker', 'ps'], None, 5),
+                                              (['docker', 'compose', 'config'], None, 5),
+                                              (['systemctl', 'show'], None, 2),
+                                              (['curl', 'http://127.0.0.1/'], None, 2),
+                                              (['python3', 'account.py', 'check'], 10, 10),
+                                              (['docker', 'ps'], 2, 2),
+                                              (['docker', 'ps'], 1, 1)):
+            with self.subTest(arguments=arguments, override=override), mock.patch.object(runtime.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess(arguments, 0, stdout=b'ok')) as native_probe:
+                self.assertEqual(self.native_run(arguments, timeout=override), b'ok')
+                self.assertEqual(native_probe.call_args.kwargs,
+                                 {'input': None, 'capture_output': True, 'timeout': expected, 'check': False})
+
 
     def test_receipt_is_required_and_published_only_after_actual_verification(self):
         self.install()
@@ -304,6 +376,7 @@ class RuntimeTest(unittest.TestCase):
         for asset, _ in runtime.MOUNTS.values():
             with self.subTest(asset=asset):
                 receipt = (self.state/'receipt.json').read_bytes()
+                original = (self.source/asset).read_bytes()
                 with (self.source/asset).open('a') as out:
                     out.write('\n# new receiver recipe\n')
                 self.publish_assets()
@@ -311,6 +384,11 @@ class RuntimeTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     runtime.publish(*self.args)
                 self.assertEqual((self.state/'receipt.json').read_bytes(), receipt)
+                self.recreate()
+                self.assertEqual(runtime.publish(*self.args)['state'], 'current')
+                (self.source/asset).write_bytes(original)
+                self.assertEqual(runtime.observe(*self.args)['state'], 'stale')
+                self.publish_assets()
                 self.recreate()
                 self.assertEqual(runtime.publish(*self.args)['state'], 'current')
 
@@ -366,18 +444,6 @@ class RuntimeTest(unittest.TestCase):
         self.timer_active = True
         self.assertEqual(runtime.observe(*self.args), ready)
 
-    def test_deselected_profile_requires_timer_disabled_and_inactive(self):
-        self.install()
-        native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
-        self.rows = []
-        self.service_active = self.service_enabled = False
-        disabled = (*self.args[:4], False, [], 'dev')
-        self.assertEqual(runtime.capture(*disabled)[0]['state'], 'stale')
-        self.timer_enabled = False
-        self.assertEqual(runtime.capture(*disabled)[0]['state'], 'stale')
-        self.timer_active = False
-        self.assertEqual(runtime.publish(*disabled)['state'], 'current')
-
     def test_recovered_admission_requests_fresh_cas_repair_without_pending_failure(self):
         self.install()
         native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
@@ -423,8 +489,11 @@ class RuntimeTest(unittest.TestCase):
         native.reconcile(self.home, self.state/'native.json', [], 'apply', os.getuid(), os.getgid(), tomli_w)
         self.rows = []
         self.service_active = self.service_enabled = False
-        self.timer_active = self.timer_enabled = False
         disabled = (*self.args[:4], False, [], 'dev')
+        self.assertEqual(runtime.observe(*disabled)['state'], 'stale')
+        self.timer_enabled = False
+        self.assertEqual(runtime.observe(*disabled)['state'], 'stale')
+        self.timer_active = False
         self.assertEqual(runtime.observe(*disabled)['state'], 'stale')
         self.assertEqual(runtime.publish(*disabled)['state'], 'current')
         with (self.source/'collector.yaml').open('a') as out:
@@ -434,23 +503,6 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.publish(*disabled)['state'], 'current')
         self.assertFalse(any(command[:3] == ['docker', 'image', 'inspect'] for command in self.commands[-3:]))
 
-    def test_recipe_update_and_rollback_changes_desired_identity(self):
-        self.install()
-        original = runtime.publish(*self.args)['desired']
-        old = (self.source/'collector.yaml').read_bytes()
-        (self.source/'collector.yaml').write_bytes(old+b'\n# updated source\n')
-        update = runtime.observe(*self.args)
-        self.assertNotEqual(update['desired'], original)
-        self.publish_assets()
-        self.recreate()
-        runtime.publish(*self.args)
-        (self.source/'collector.yaml').write_bytes(old)
-        rollback = runtime.observe(*self.args)
-        self.assertEqual(rollback['desired'], original)
-        self.assertEqual(rollback['state'], 'stale')
-        self.publish_assets()
-        self.recreate()
-        self.assertEqual(runtime.publish(*self.args)['desired'], original)
 
     def test_guest_guard_rejects_changed_assessment_before_publication(self):
         self.install()

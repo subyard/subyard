@@ -93,7 +93,57 @@ ensure_owner_incus() {
 candidate() {
   openlit_candidate_command "${CANDIDATE_ENGINE:-$ROOT/.build/yard}" "$@"
 }
-yard() { candidate -Y "$YARD_NAME" "$@"; }
+yard() {
+  local started=$SECONDS rc=0
+  printf 'E2E_PHASE phase=fixture/openlit-%s state=start duration_seconds=0 exit_code=0\n' "$1" >&2 || true
+  candidate -Y "$YARD_NAME" "$@" || rc=$?
+  printf 'E2E_PHASE phase=fixture/openlit-%s state=end duration_seconds=%s exit_code=%s\n' \
+    "$1" "$((SECONDS-started))" "$rc" >&2 || true
+  return "$rc"
+}
+
+claude_pin() {
+  case "$1" in
+    amd64) printf '%s\n' 'linux-x64 3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0' ;;
+    arm64) printf '%s\n' 'linux-arm64 e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03' ;;
+    *) return 2 ;;
+  esac
+}
+prepare_late_claude() {
+  local directory="$1" architecture pin platform checksum
+  architecture="$(dpkg --print-architecture)" || return
+  pin="$(claude_pin "$architecture")" || return
+  read -r platform checksum <<< "$pin"
+  install -d -m 0700 "$directory" || return
+  install -m 0600 /dev/null "$directory/claude.partial" || return
+  install -m 0600 /dev/null "$directory/claude.tgz" || return
+  curl --proto "=https" --proto-redir "=https" --tlsv1.2 --fail --silent --show-error --location \
+    --connect-timeout 10 --max-time 180 \
+    "https://registry.npmjs.org/@anthropic-ai/claude-code-$platform/-/claude-code-$platform-2.1.287.tgz" -o "$directory/claude.tgz" || return
+  python3 - "$directory/claude.tgz" > "$directory/claude.partial" <<'CLAUDE_ARCHIVE' || return
+import shutil, sys, tarfile
+with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    members = [member for member in archive if member.name == 'package/claude']
+    if len(members) != 1 or not members[0].isfile():
+        raise SystemExit(2)
+    with archive.extractfile(members[0]) as source:
+        shutil.copyfileobj(source, sys.stdout.buffer)
+CLAUDE_ARCHIVE
+  printf '%s  %s\n' "$checksum" "$directory/claude.partial" | sha256sum --check --status || return
+  mv "$directory/claude.partial" "$directory/claude" || return
+  install -m 0600 /dev/null "$directory/architecture" || return
+  printf '%s\n' "$architecture" > "$directory/architecture"
+}
+verify_late_claude() {
+  local directory="$1" architecture pin _platform checksum
+  [ -f "$directory/claude" ] && [ ! -L "$directory/claude" ] \
+    && [ -f "$directory/architecture" ] && [ ! -L "$directory/architecture" ] || return 2
+  read -r architecture < "$directory/architecture" || return
+  [ "$architecture" = "$(dpkg --print-architecture)" ] || return 2
+  pin="$(claude_pin "$architecture")" || return
+  read -r _platform checksum <<< "$pin"
+  printf '%s  %s\n' "$checksum" "$directory/claude" | sha256sum --check --status
+}
 
 retained_data() {
   incus exec "$instance" --project "$project" -- python3 - <<'PYCODE'
@@ -135,9 +185,6 @@ cleanup() {
   fi
   if [ -n "$occupied_pid" ]; then kill "$occupied_pid" 2>/dev/null; wait "$occupied_pid" 2>/dev/null; fi
   if [ -n "$tunnel_pid" ]; then kill "$tunnel_pid" 2>/dev/null; wait "$tunnel_pid" 2>/dev/null; fi
-  if [ -n "$synthetic_address" ] && [ "$synthetic_address_active" = 1 ]; then
-    sudo -n ip address del "$synthetic_address/32" dev lo || rc=3
-  fi
   if [ -n "$YARD_NAME" ] && [ -f "${SUBYARD_CONFIG_HOME:-}/yards/$YARD_NAME/config.env" ]; then
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
     printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
@@ -151,6 +198,10 @@ cleanup() {
       tail -30 "$STATE/primary-cleanup.log" >&2
     fi
   fi
+  # Keep the assessed owner address available until its yard has been removed.
+  if [ -n "$synthetic_address" ] && [ "$synthetic_address_active" = 1 ]; then
+    sudo -n ip address del "$synthetic_address/32" dev lo || rc=3
+  fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-openlit.* ]] \
     && [ -f "$STATE/.marker" ] \
     && [ "$(<"$STATE/.marker")" = openlit-profile-e2e-v1 ]; then
@@ -161,8 +212,8 @@ cleanup() {
       rc=3
     fi
   fi
-  # Diagnostic recovery and cleanup cannot replace the ordinary enable failure.
-  if [ "$auth_only" = pull-diagnostic ] && [ "$original_rc" -ne 0 ]; then rc=$original_rc; fi
+  # Cleanup cannot replace the original workload failure.
+  if [ "$original_rc" -ne 0 ]; then rc=$original_rc; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -172,6 +223,11 @@ trap 'cleanup TERM' TERM
 ensure_owner_incus
 STATE="$(mktemp -d /var/tmp/subyard-openlit.XXXXXX)"
 printf '%s\n' openlit-profile-e2e-v1 > "$STATE/.marker"
+# Acquire the late-only dependency before any expensive nested-yard setup.
+if [ -z "$auth_only" ] && [ -z "$native_loss" ]; then
+  printf 'openlit_e2e_stage=prepare-late-native-cli elapsed_seconds=%s\n' "$SECONDS"
+  prepare_late_claude "$STATE/late-claude"
+fi
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 YARD_NAME="dev-e2e-$token"
 export SUBYARD_OPERATOR_HOME="$HOME"
@@ -383,7 +439,7 @@ sudo -n ip address add "$synthetic_address/32" dev lo
 synthetic_address_active=1
 candidate _publications "$project" "$instance" > "$STATE/restored-publications"
 yard init --yes
-yard status | grep -Fq "$private_origin/" || die 'exact dashboard restoration did not publish its original URL'
+yard status | grep -F "$private_origin/" >/dev/null || die 'exact dashboard restoration did not publish its original URL'
 python3 "$ROOT/config/profiles/openlit/tests/e2e/ui-origin.py" --origin "$private_origin" --state "$STATE/private-ui-cookies" --identity "$token-private" --resume
 # Explicit owning cancellation revokes restoration before choosing a different
 # origin. A valid deferred recipe is never silently replaced by loopback.
@@ -396,13 +452,13 @@ yard profile disable openlit --yes
 synthetic_address=''
 yard profile enable openlit --yes
 yard init --yes
-yard status | grep -Fq "$origin/" || die 'loopback fallback drift was not reconciled'
+yard status | grep -F "$origin/" >/dev/null || die 'loopback fallback drift was not reconciled'
 printf 'openlit_e2e_stage=port-drift-and-refusal elapsed_seconds=%s\n' "$SECONDS"
 native_before="$(incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json)"
 alternate_port=$((1024 + (dashboard_port+2-1024)%64512))
 yard config set OPENLIT_HOST_PORT "$alternate_port" --scope yard --local --yes
 yard init --yes
-yard status | grep -Fq "http://127.0.0.1:$alternate_port/" || die 'explicit dashboard port drift was not reconciled'
+yard status | grep -F "http://127.0.0.1:$alternate_port/" >/dev/null || die 'explicit dashboard port drift was not reconciled'
 [ "$(incus exec "$instance" --project "$project" -- sha256sum /var/lib/subyard/openlit/receipt.json)" = "$native_before" ] || die 'route-only drift recreated the native stack'
 yard config unset OPENLIT_HOST_PORT --scope yard --local --yes
 yard init --yes
@@ -432,7 +488,7 @@ if yard init --yes > "$STATE/occupied-route.log" 2>&1; then die 'occupied dashbo
 kill "$occupied_pid"; wait "$occupied_pid" 2>/dev/null || true
 occupied_pid=''
 yard init --yes
-yard status | grep -Fq "$origin/" || die 'owned missing-device recovery did not converge'
+yard status | grep -F "$origin/" >/dev/null || die 'owned missing-device recovery did not converge'
 
 fi
 if [ "$kind" = container ]; then
@@ -591,21 +647,20 @@ printf 'openlit_e2e_stage=late-native-cli-appearance elapsed_seconds=%s\n' "$SEC
 # First accept no-Claude readiness and real user-local Codex data. Only then
 # install a user-local Claude to retain the independent native exporter contract
 # and prove late appearance uses the configuration prepared at enable.
-tar -C "$ROOT/config/profiles/openlit/tests/e2e" -cf - native-signals.py | \
-  incus exec "$instance" --project "$project" -- bash -euo pipefail -c '
+claude_payload=()
+claude_prepared=0
+if [ -z "$auth_only" ] && [ -z "$native_loss" ]; then
+  claude_payload=(-C "$STATE/late-claude" claude architecture)
+  claude_prepared=1
+fi
+late_claude_script="$(declare -f claude_pin prepare_late_claude verify_late_claude)"$'\n'"prepared=$claude_prepared"$'\n''
     stage="$(mktemp -d /tmp/subyard-openlit-late-cli.XXXXXX)"
     trap '\''rm -rf -- "$stage"'\'' EXIT
     tar -xf - -C "$stage"
-    version=2.1.287
-    case "$(dpkg --print-architecture)" in
-      amd64) platform=linux-x64; checksum=3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0 ;;
-      arm64) platform=linux-arm64; checksum=e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03 ;;
-      *) exit 2 ;;
-    esac
-    curl --proto "=https" --proto-redir "=https" --tlsv1.2 --fail --silent --show-error --location \
-      --connect-timeout 10 --max-time 180 \
-      "https://downloads.claude.ai/claude-code-releases/$version/$platform/claude" -o "$stage/claude"
-    printf "%s  %s\n" "$checksum" "$stage/claude" | sha256sum --check --status
+    # Other modes retain their original late acquisition; normal FULL uses only
+    # the private owner artifact and binds it to this guest architecture.
+    if [ "$prepared" = 0 ]; then prepare_late_claude "$stage"; fi
+    verify_late_claude "$stage"
     install -m 0755 -o dev -g dev "$stage/claude" /home/dev/.local/bin/claude
     if command -v claude >/dev/null; then
       printf "openlit-e2e: user-local Claude appeared in root PATH\n" >&2
@@ -613,6 +668,8 @@ tar -C "$ROOT/config/profiles/openlit/tests/e2e" -cf - native-signals.py | \
     fi
     python3 "$stage/native-signals.py" --agents claude
   '
+tar -C "$ROOT/config/profiles/openlit/tests/e2e" -cf - native-signals.py "${claude_payload[@]}" | \
+  incus exec "$instance" --project "$project" -- bash -euo pipefail -c "$late_claude_script"
 printf 'openlit_e2e_stage=repeat-init-and-configs elapsed_seconds=%s\n' "$SECONDS"
 yard init --yes
 yard config apply --yes

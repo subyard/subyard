@@ -37,8 +37,7 @@ class DashboardTest(unittest.TestCase):
 
     def run_native(self,*args,**options):
         if args[0]=='bash': return (self.owner_host+'\n').encode()
-        if args[:2]==('incus','list'):
-            self.assertEqual(args[2:],('--all-projects','--format','json'))
+        if args==('incus','query','/1.0/instances?recursion=1&all-projects=true'):
             return json.dumps(self.instances).encode()
         if args[:2]==('incus','query'):
             return json.dumps([] if 'recursion=1' in args[2] else self.snapshot).encode()
@@ -437,7 +436,8 @@ class ColdTransportTest(unittest.TestCase):
         timer.start()
         started=time.monotonic()
         try:
-            with self.assertRaises(SystemExit) as caught:
+            # Manual cancellation must win before the unrelated guest watchdog.
+            with patch.dict(dashboard.GUEST_TIMEOUTS, {'apply':5}), self.assertRaises(SystemExit) as caught:
                 dashboard.guest('apply',True,'dev','claude codex','')
             self.assertEqual(caught.exception.code,143)
         finally:
@@ -496,15 +496,18 @@ class ColdTransportTest(unittest.TestCase):
         self.assertFalse(self.published.exists())
 
     def test_cold_budget_is_not_reset_for_host_publication(self):
+        self.write(self.bin/'docker','#!/bin/bash\nexit 0\n',0o700)
         def observe(*args):
             ORIGINAL_RUN(sys.executable,'-c','import time; time.sleep(0.1)')
             return {},{'state':'stale','actual':'a','desired':'b'},{},{},''
         def fresh_route(*args):
+            self.assertTrue(self.published.exists())
             ORIGINAL_RUN(sys.executable,'-c','import time; time.sleep(0.8)')
             return {},{},''
         started=time.monotonic()
-        with patch.object(dashboard,'observe',side_effect=observe),patch.object(dashboard,'route',side_effect=fresh_route),patch.object(dashboard,'publish') as publish,patch.object(sys,'argv',['dashboard.py','apply','1','dev','claude codex']):
+        with patch.object(dashboard,'observe',side_effect=observe),patch.object(dashboard,'route',side_effect=fresh_route) as route_mock,patch.object(dashboard,'publish') as publish,patch.object(sys,'argv',['dashboard.py','apply','1','dev','claude codex']):
             with self.assertRaises(subprocess.TimeoutExpired): dashboard.main()
+            route_mock.assert_called_once_with(True)
             publish.assert_not_called()
         self.assertLess(time.monotonic()-started,1.3)
         self.assertIsNone(dashboard.COLD_DEADLINE)

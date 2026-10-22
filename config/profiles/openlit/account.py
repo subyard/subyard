@@ -175,11 +175,17 @@ def inspect(state, source):
     return linkage(state, source)
 
 
-def linkage(state, source):
+def linkage(state, source, identity=None):
     # Runtime readiness already verifies container/volume ownership. Its account
     # projection uses one bounded process instead of repeating Docker inventory.
     private(state/'database.env', 0o600)
-    value = json.loads(run(['docker', 'compose', '--project-directory', str(state), '--env-file', str(state/'database.env'), '-f', str(source/'compose.yaml'), 'exec', '-T', 'openlit', 'node', '-e', PROBE], timeout=8))
+    if identity is None:
+        command = ['docker', 'compose', '--project-directory', str(state), '--env-file', str(state/'database.env'), '-f', str(source/'compose.yaml'), 'exec', '-T', 'openlit']
+    else:
+        if not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{64}', identity):
+            raise ValueError('invalid verified account container')
+        command = ['docker', 'exec', identity]
+    value = json.loads(run([*command, 'node', '-e', PROBE], timeout=8))
     if not isinstance(value, dict) or set(value) != {'ids', 'stock', 'fresh'} or type(value['stock']) is not bool or type(value['fresh']) is not bool:
         raise ValueError('invalid native account observation')
     ids = value['ids']
@@ -269,7 +275,15 @@ def main():
     try:
         if os.getuid() != 0:
             raise ValueError('guest root required')
-        value = prepare(args.state) if args.mode == 'prepare' else globals()[args.mode](args.state, args.source)
+        if args.mode == 'check':
+            # Only runtime readiness calls this mode, after checking the exact
+            # container's ownership, image, configuration, mounts and health.
+            identity = sys.stdin.buffer.read(65)
+            if not re.fullmatch(b'[a-f0-9]{64}', identity):
+                raise ValueError('invalid verified account container')
+            value = check(args.state, args.source, lambda state, source: linkage(state, source, identity.decode('ascii')))
+        else:
+            value = prepare(args.state) if args.mode == 'prepare' else apply(args.state, args.source)
         print(json.dumps({'kind': value['kind'], 'phase': value['phase']}))
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired):
         print('openlit: unsafe or incomplete account bootstrap; retain private state and retry', file=sys.stderr)

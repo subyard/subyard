@@ -8,15 +8,12 @@ import os
 from pathlib import Path
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import urllib.error
-import urllib.request
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('browser', Path(__file__).parent/'e2e/ui-browser.py')
 browser = importlib.util.module_from_spec(spec)
@@ -34,70 +31,8 @@ def select_browser():
 
 
 BINARY = select_browser()
-CAPTURE_ROOT = Path(__file__).resolve().parents[4]/'.build/test-runs'
 
 
-def preserve_startup_failure(process, log, profile, binary, failure):
-    status = process.poll()
-    info = os.fstat(log.fileno())
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError('startup-log-not-regular')
-    limit = 256*1024
-    payload = os.pread(log.fileno(), limit, 0)
-    CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
-    output = Path(tempfile.mkdtemp(prefix='openlit-chromium.', dir=CAPTURE_ROOT))
-    output.chmod(0o700)
-    facts = {'category': 'chromium-startup', 'process_poll': status,
-             'process_running': status is None, 'log_bytes': len(payload),
-             'log_truncated': info.st_size > len(payload),
-             'browser_executable': binary, 'setup_exception_class': type(failure).__name__}
-    port_file = None
-    try:
-        with (profile/'DevToolsActivePort').open('rb') as stream:
-            port_file = stream.read(4097)
-        facts['devtools_active_port'] = {'state': 'present', 'bytes': min(len(port_file), 4096),
-                                        'truncated': len(port_file) > 4096}
-        port = int(port_file.splitlines()[0])
-        if len(port_file) > 4096 or not 1 <= port <= 65535:
-            raise ValueError('invalid-port')
-        facts['devtools_active_port']['port'] = port
-    except FileNotFoundError:
-        facts['devtools_active_port'] = {'state': 'missing'}
-    except (OSError, ValueError, IndexError) as error:
-        facts['devtools_active_port'] = {**facts.get('devtools_active_port', {}),
-                                        'error_class': type(error).__name__}
-    else:
-        facts['devtools_http'] = {}
-        for endpoint in ('version', 'list'):
-            observation = {}
-            try:
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/{endpoint}', timeout=1) as response:
-                    observation['http_status'] = response.status
-                    body = response.read(65537)
-                observation['body_truncated'] = len(body) > 65536
-                if len(body) > 65536:
-                    raise ValueError('response-too-large')
-                value = json.loads(body)
-                observation['json_kind'] = 'object' if isinstance(value, dict) else 'array' if isinstance(value, list) else 'other'
-                if endpoint == 'list' and isinstance(value, list):
-                    observation['target_count'] = len(value)
-                    observation['page_count'] = sum(isinstance(item, dict) and item.get('type') == 'page' for item in value)
-                elif endpoint == 'version' and isinstance(value, dict):
-                    observation['browser_field_present'] = isinstance(value.get('Browser'), str)
-                    observation['websocket_present'] = isinstance(value.get('webSocketDebuggerUrl'), str)
-            except (OSError, ValueError) as error:
-                observation['error_class'] = type(error).__name__
-                if isinstance(error, urllib.error.HTTPError):
-                    observation['http_status'] = error.code
-            facts['devtools_http'][endpoint] = observation
-    if port_file is not None:
-        browser.write_private(output/'DevToolsActivePort', port_file[:4096])
-    for name, data in (('chromium.log', payload),
-                       ('startup.json', (json.dumps(facts)+'\n').encode())):
-        with (output/name).open('xb') as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(data)
-    return output, status
 
 
 @unittest.skipUnless(BINARY, 'rendered DOM prerequisite: Chromium')
@@ -105,36 +40,25 @@ class BrowserDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix='openlit-dom-', dir='/tmp')
+        cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)
         cls.root.chmod(0o700)
         cls.profile = cls.root/'profile'
         cls.profile.mkdir(mode=0o700)
         cls.log = (cls.root/'chromium.log').open('w+b')
+        cls.addClassCleanup(cls.log.close)
         os.chmod(cls.root/'chromium.log', 0o600)
         argv = [BINARY, '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir='+str(cls.profile), '--disable-background-networking', '--disable-dev-shm-usage', '--no-first-run', 'about:blank']
         if os.getuid() == 0:
             argv.insert(1, '--no-sandbox')
         cls.process = subprocess.Popen(argv, stdout=cls.log, stderr=cls.log, start_new_session=True)
-        try:
-            cls.cdp = browser.CDP(browser.discover(cls.profile, time.monotonic()+15), time.monotonic()+90)
-            cls.cdp.call('Page.enable')
-        except Exception as failure:
-            try:
-                output, status = preserve_startup_failure(cls.process, cls.log, cls.profile, BINARY, failure)
-                print(f'openlit_chromium_startup capture=saved process_poll={status} path={output}', file=sys.stderr)
-            except Exception as failure:
-                print('openlit_chromium_startup capture=failed category='+type(failure).__name__, file=sys.stderr)
-            try:
-                cls.tearDownClass()
-                print('openlit_chromium_startup cleanup=complete', file=sys.stderr)
-            except Exception as failure:
-                print('openlit_chromium_startup cleanup=failed category='+type(failure).__name__, file=sys.stderr)
-            raise
+        cls.addClassCleanup(cls.stop_browser)
+        cls.cdp = browser.CDP(browser.discover(cls.profile, time.monotonic()+15), time.monotonic()+90)
+        cls.addClassCleanup(cls.cdp.socket.close)
+        cls.cdp.call('Page.enable')
 
     @classmethod
-    def tearDownClass(cls):
-        if hasattr(cls, 'cdp'):
-            cls.cdp.socket.close()
+    def stop_browser(cls):
         if cls.process.poll() is None:
             os.killpg(cls.process.pid, signal.SIGTERM)
             try:
@@ -142,8 +66,6 @@ class BrowserDOMTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 os.killpg(cls.process.pid, signal.SIGKILL)
                 cls.process.wait(timeout=5)
-        cls.log.close()
-        cls.temporary.cleanup()
 
     def render(self, service='codex_cli_rs', hidden=False, tab='logs'):
         # LogRecord's actual service field and body are distinct elements in
@@ -255,104 +177,26 @@ class BrowserSelectionTest(unittest.TestCase):
                     select_browser()
 
 
-class StartupCaptureTest(unittest.TestCase):
-    def test_failed_child_evidence_survives_cleanup_and_failure_is_preserved(self):
-        # Exercise the real setup failure boundary without launching a browser.
+class StartupCleanupTest(unittest.TestCase):
+    def test_startup_failure_reaps_child_and_keeps_original_failure(self):
         class FailedBrowser(BrowserDOMTest):
-            pass
+            __unittest_skip__ = False
         native_popen = subprocess.Popen
-        sentinel = b'controlled Chromium startup stderr\n'
         failure = browser.Failure('chromium-startup')
         def launch(argv, **options):
-            return native_popen([sys.executable, '-c',
-                                 'import sys; sys.stderr.buffer.write('+repr(sentinel)+'); sys.exit(23)'], **options)
+            return native_popen([sys.executable, '-c', 'raise SystemExit(23)'], **options)
         def discover(*args):
             FailedBrowser.process.wait(timeout=5)
             raise failure
-        with tempfile.TemporaryDirectory(prefix='openlit-startup-capture-', dir='/tmp') as name:
-            output = Path(name)/'captures'
-            diagnostics = io.StringIO()
-            with patch(__name__+'.CAPTURE_ROOT', output), patch(__name__+'.BINARY', sys.executable), \
-                 patch.object(subprocess, 'Popen', side_effect=launch), \
-                 patch.object(browser, 'discover', side_effect=discover), contextlib.redirect_stderr(diagnostics):
-                with self.assertRaises(browser.Failure) as raised:
-                    FailedBrowser.setUpClass()
-            self.assertIs(raised.exception, failure)
-            self.assertFalse(FailedBrowser.root.exists())
-            self.assertEqual(FailedBrowser.process.poll(), 23)
-            capture, = output.iterdir()
-            self.assertEqual((capture/'chromium.log').read_bytes(), sentinel)
-            facts = json.loads((capture/'startup.json').read_text())
-            self.assertEqual(facts['browser_executable'], sys.executable)
-            self.assertEqual(facts['devtools_active_port'], {'state': 'missing'})
-            self.assertEqual(facts['setup_exception_class'], 'Failure')
-            self.assertEqual(facts, {'category': 'chromium-startup', 'process_poll': 23,
-                                    'process_running': False, 'log_bytes': len(sentinel), 'log_truncated': False,
-                                    'browser_executable': sys.executable, 'devtools_active_port': {'state': 'missing'},
-                                    'setup_exception_class': 'Failure'})
-            self.assertEqual(stat.S_IMODE(capture.stat().st_mode), 0o700)
-            for path in capture.iterdir():
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertNotIn(sentinel.decode().strip(), diagnostics.getvalue())
-            cleanup = FailedBrowser.tearDownClass
-            def failed_cleanup():
-                cleanup()
-                raise RuntimeError('PRIVATE_CLEANUP_SENTINEL')
-            diagnostics = io.StringIO()
-            with patch(__name__+'.BINARY', sys.executable), \
-                 patch.object(subprocess, 'Popen', side_effect=launch), \
-                 patch.object(browser, 'discover', side_effect=discover), \
-                 patch(__name__+'.preserve_startup_failure', side_effect=OSError('PRIVATE_CAPTURE_SENTINEL')), \
-                 patch.object(FailedBrowser, 'tearDownClass', side_effect=failed_cleanup), \
-                 contextlib.redirect_stderr(diagnostics):
-                with self.assertRaises(browser.Failure) as raised:
-                    FailedBrowser.setUpClass()
-            self.assertIs(raised.exception, failure)
-            self.assertFalse(FailedBrowser.root.exists())
-            self.assertIn('capture=failed category=OSError', diagnostics.getvalue())
-            self.assertIn('cleanup=failed category=RuntimeError', diagnostics.getvalue())
-            self.assertNotIn('PRIVATE_', diagnostics.getvalue())
+        with patch(__name__+'.BINARY', sys.executable), patch.object(subprocess, 'Popen', side_effect=launch), \
+                patch.object(browser, 'discover', side_effect=discover):
+            result = unittest.TestResult()
+            unittest.TestSuite([FailedBrowser('test_rendered_service_field_and_range_have_closed_facts')]).run(result)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn('chromium-startup', result.errors[0][1])
+        self.assertFalse(FailedBrowser.root.exists())
+        self.assertEqual(FailedBrowser.process.poll(), 23)
 
-    def test_devtools_capture_is_bounded_and_excludes_page_fields(self):
-        with tempfile.TemporaryDirectory(prefix='openlit-devtools-capture-', dir='/tmp') as name:
-            root = Path(name)
-            profile = root/'profile'
-            profile.mkdir(mode=0o700)
-            port_file = b'12345\n/devtools/browser/synthetic-browser\n'
-            (profile/'DevToolsActivePort').write_bytes(port_file)
-            version = io.BytesIO(json.dumps({'Browser': 'Chromium', 'webSocketDebuggerUrl': 'PRIVATE_URL_SENTINEL'}).encode())
-            targets = io.BytesIO(json.dumps([{'type': 'page', 'url': 'PRIVATE_URL_SENTINEL', 'title': 'PRIVATE_TITLE_SENTINEL'}]).encode())
-            version.status = targets.status = 200
-            process = Mock()
-            process.poll.return_value = None
-            with (root/'chromium.log').open('w+b') as log, patch(__name__+'.CAPTURE_ROOT', root/'captures'):
-                with patch.object(urllib.request, 'urlopen', side_effect=[version, targets]) as request:
-                    output, status = preserve_startup_failure(process, log, profile, '/synthetic/chromium', browser.Failure('chromium-startup'))
-                self.assertIsNone(status)
-                self.assertEqual(request.call_count, 2)
-                self.assertEqual((output/'DevToolsActivePort').read_bytes(), port_file)
-                facts = json.loads((output/'startup.json').read_text())
-                self.assertTrue(facts['process_running'])
-                self.assertEqual(facts['devtools_active_port'], {'state': 'present', 'bytes': len(port_file), 'truncated': False, 'port': 12345})
-                self.assertEqual(facts['devtools_http']['list'], {'http_status': 200, 'body_truncated': False, 'json_kind': 'array', 'target_count': 1, 'page_count': 1})
-                self.assertTrue(facts['devtools_http']['version']['websocket_present'])
-                self.assertNotIn('PRIVATE_', json.dumps(facts))
-                errors = [urllib.error.HTTPError('PRIVATE_URL_SENTINEL', 503, 'PRIVATE_BODY_SENTINEL', {}, None), TimeoutError('PRIVATE_ERROR_SENTINEL')]
-                with patch.object(urllib.request, 'urlopen', side_effect=errors):
-                    output, _ = preserve_startup_failure(process, log, profile, '/synthetic/chromium', browser.Failure('chromium-startup'))
-                facts = json.loads((output/'startup.json').read_text())
-                self.assertEqual(facts['devtools_http'], {'version': {'http_status': 503, 'error_class': 'HTTPError'}, 'list': {'error_class': 'TimeoutError'}})
-                self.assertNotIn('PRIVATE_', json.dumps(facts))
-                (profile/'DevToolsActivePort').write_bytes(port_file+b'x'*4096)
-                with patch.object(urllib.request, 'urlopen') as request:
-                    output, _ = preserve_startup_failure(process, log, profile, '/synthetic/chromium', browser.Failure('chromium-startup'))
-                request.assert_not_called()
-                self.assertEqual((output/'DevToolsActivePort').stat().st_size, 4096)
-                self.assertTrue(json.loads((output/'startup.json').read_text())['devtools_active_port']['truncated'])
-                for capture in (root/'captures').iterdir():
-                    self.assertEqual(stat.S_IMODE(capture.stat().st_mode), 0o700)
-                    for path in capture.iterdir():
-                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == '__main__':

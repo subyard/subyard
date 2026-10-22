@@ -30,6 +30,15 @@ PY
 incus() { openlit_candidate_command /usr/bin/incus "$@"; }
 candidate() { openlit_candidate_command "$STATE/runtime/current/bin/yard" "$@"; }
 yard() { candidate -Y "$YARD_NAME" "$@"; }
+migration_update() {
+  local phase="$1" started=$SECONDS rc=0
+  shift
+  printf 'E2E_PHASE phase=fixture/openlit-migration-%s state=start duration_seconds=0 exit_code=0\n' "$phase" >&2 || true
+  candidate update "$@" || rc=$?
+  printf 'E2E_PHASE phase=fixture/openlit-migration-%s state=end duration_seconds=%s exit_code=%s\n' \
+    "$phase" "$((SECONDS-started))" "$rc" >&2 || true
+  return "$rc"
+}
 driver() {
   local action="$1" reply
   printf '{"action":"%s"}\n' "$action" >&"$driver_input"
@@ -38,33 +47,36 @@ driver() {
   jq -e '.ok == true' <<< "$reply" >/dev/null || die "native proof failed at $action"
 }
 cleanup() {
-  local rc=$?
+  local rc=$? cleanup_rc result
   trap - EXIT INT TERM
   set +e
   if [ -n "$driver_pid" ]; then
     # EOF closes the control stream; the driver's finally block owns its exact
     # process handles and foreign fixture container. No process-name killing.
     if [ -n "$driver_input" ]; then exec {driver_input}>&-; fi
-    if ! wait "$driver_pid"; then rc=3; fi
+    if wait "$driver_pid"; then cleanup_rc=0; result=passed; else cleanup_rc=$?; result=failed; fi
+    printf 'openlit_migration_cleanup=driver result=%s exit_code=%s\n' "$result" "$cleanup_rc" >&2 || true
+    if [ "$cleanup_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=3; fi
   fi
   if [ -n "$YARD_NAME" ] && [ -f "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" ]; then
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
     printf 'SSH_PORT=64998\n' > "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
     chmod 0600 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel/config.env"
     if yard teardown --yes > "$STATE/cleanup.log" 2>&1; then
-      printf 'openlit_migration_cleanup=yard-teardown result=passed\n' >&2
+      cleanup_rc=0; result=passed
     else
-      printf 'openlit_migration_cleanup=yard-teardown result=failed\n' >&2
-      rc=3
+      cleanup_rc=$?; result=failed
     fi
+    printf 'openlit_migration_cleanup=yard-teardown result=%s exit_code=%s\n' "$result" "$cleanup_rc" >&2 || true
+    if [ "$cleanup_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=3; fi
   fi
   if [ -n "$SOURCE" ] && [[ "$SOURCE" = /tmp/subyard-openlit-predecessor.* ]] \
     && [ -f "$SOURCE/.fixture-marker" ] && [ "$(<"$SOURCE/.fixture-marker")" = openlit-migration-source-v1 ]; then
-    rm -rf -- "$SOURCE" || rc=3
+    rm -rf -- "$SOURCE" || { [ "$rc" -ne 0 ] || rc=3; }
   fi
   if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-openlit-migration.* ]] \
     && [ -f "$STATE/.marker" ] && [ "$(<"$STATE/.marker")" = openlit-profile-e2e-v1 ]; then
-    sudo -n find "$STATE" -depth -delete || rc=3
+    sudo -n find "$STATE" -depth -delete || { [ "$rc" -ne 0 ] || rc=3; }
   fi
   exit "$rc"
 }
@@ -155,7 +167,7 @@ printf 'openlit_migration_stage=stage-exact-final-cache\n'
 openlit_candidate_command env YARD_RELEASE_BASE_URL="file://$final_release" \
   bash "$final_release/subyard-install.sh" --version "$final_version" --publish-only --yes
 printf 'openlit_migration_stage=normal-offline-update\n'
-candidate update --version "$final_version" --offline --yes
+migration_update normal-offline-update --version "$final_version" --offline --yes
 driver adoption
 driver old-turn
 driver fresh-turn
@@ -163,7 +175,7 @@ driver retain
 driver retire
 printf 'openlit_migration_stage=fixed-point-update\n'
 driver before-repeat
-candidate update --version "$final_version" --offline --yes
+migration_update fixed-point-update --version "$final_version" --offline --yes
 driver after-repeat
 candidate migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
 yard profile disable openlit --yes

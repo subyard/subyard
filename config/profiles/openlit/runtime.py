@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observe verified installed stack identity without exporting private configuration."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor, wait
 import hashlib
 import io
 import json
@@ -21,8 +22,11 @@ SERVICES = {'clickhouse', 'openlit', 'collector'}
 MARKER = 'subyard-openlit-v1'
 
 
-def run(arguments, timeout=2):
-    result = subprocess.run(arguments, capture_output=True, timeout=timeout, check=False)
+def run(arguments, timeout=None, input=None):
+    if timeout is None:
+        # Fresh Docker reads can exceed two seconds on a nested VM.
+        timeout = 5 if arguments[0] == 'docker' else 2
+    result = subprocess.run(arguments, input=input, capture_output=True, timeout=timeout, check=False)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
         raise ValueError('native runtime probe failed')
     return result.stdout
@@ -105,91 +109,118 @@ def capture(state, source, unit, home, selected, agents, user):
         native.reconcile(home, state/'native.json', agents if selected else [], 'check', None, None, None)
     except (ValueError, OSError, KeyError, TypeError):
         ready = False
-    try:
-        for name, key in (('subyard-openlit.service', 'service'), ('subyard-openlit-trace-cutover.timer', 'timer')):
-            manager = run(['systemctl', 'show', name, '--property=ActiveState,UnitFileState']).decode()
-            values = dict(line.split('=', 1) for line in manager.splitlines() if '=' in line)
-            statuses = {field: values.get(field) for field in ('ActiveState', 'UnitFileState')}
-            if statuses['ActiveState'] not in ('active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading') or statuses['UnitFileState'] not in ('enabled', 'disabled', 'static', 'masked', 'not-found', 'indirect', 'enabled-runtime'):
-                raise ValueError('unexpected service state')
-            facts[key] = statuses
-            if selected:
-                ready = ready and statuses['ActiveState'] == 'active' and statuses['UnitFileState'] == 'enabled'
-            elif key == 'timer':
-                ready = ready and statuses['ActiveState'] == 'inactive' and statuses['UnitFileState'] == 'disabled'
-            else:
-                ready = ready and statuses['ActiveState'] != 'active' and statuses['UnitFileState'] != 'enabled'
-        ids = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=subyard-openlit']).decode().split()
-        rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
-        for row in rows:
-            identity = {'id': row['Id'], 'image': row['Image'],
-                'service': row['Config']['Labels'].get('com.docker.compose.service'),
-                'state': row['State']['Status'], 'health': row['State'].get('Health', {}).get('Status', '')}
-            if not valid_receipt({'schema': 1, 'desired': desired, 'containers': [identity]}):
-                raise ValueError('unexpected container identity')
-            facts['containers'].append(identity)
-        facts['containers'].sort(key=lambda row: row['id'])
-        if selected:
-            if not owned_file(state/'database.env', 0o600):
+    # Every capture owns and joins its bounded probes. Only independent live
+    # reads overlap; no observation or receipt supplies cached native results.
+    with ThreadPoolExecutor(max_workers=4) as probes:
+        try:
+            if selected and not owned_file(state/'database.env', 0o600):
                 raise ValueError('unsafe private database environment')
-            config = json.loads(run(compose(state, source, 'config', '--format', 'json')))
-            definitions = config['services']
-            if set(definitions) != SERVICES:
-                raise ValueError('unexpected Compose service inventory')
-            volumes = json.loads(run(['docker', 'volume', 'inspect', 'subyard-openlit_openlit-data']))
-            if not isinstance(volumes, list) or len(volumes) != 1 or not isinstance(volumes[0], dict):
-                raise ValueError('unexpected account volume')
-            labels = volumes[0].get('Labels') or {}
-            facts['account_volume_owned'] = (volumes[0].get('Name') == 'subyard-openlit_openlit-data'
-                                            and labels.get('com.docker.compose.project') == 'subyard-openlit'
-                                            and labels.get('com.docker.compose.volume') == 'openlit-data')
-            ready = ready and facts['account_volume_owned']
-            # Compose hashes can depend on the private database environment. Compare locally;
-            # never put them, environment fields or raw inspect JSON in fingerprints/receipts.
-            hashes = dict(line.split() for line in run(compose(state, source, 'config', '--hash', '*')).decode().splitlines())
-            images = json.loads(run(['docker', 'image', 'inspect', *[definitions[name]['image'] for name in sorted(SERVICES)]]))
-            expected_images = {name: image['Id'] for name, image in zip(sorted(SERVICES), images)}
-            ready = ready and len(rows) == 3 and {r['Config']['Labels'].get('com.docker.compose.service') for r in rows} == SERVICES
+            managers = {name: probes.submit(run, ['systemctl', 'show', name, '--property=ActiveState,UnitFileState'])
+                        for name in ('subyard-openlit.service', 'subyard-openlit-trace-cutover.timer')}
+            inventory = probes.submit(run, ['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=subyard-openlit'])
+            if selected:
+                rendered = probes.submit(run, compose(state, source, 'config', '--format', 'json'))
+                config = json.loads(rendered.result())
+                definitions = config['services']
+                if set(definitions) != SERVICES:
+                    raise ValueError('unexpected Compose service inventory')
+                hash_probe = probes.submit(run, compose(state, source, 'config', '--hash', '*'))
+                volume_probe = probes.submit(run, ['docker', 'volume', 'inspect', 'subyard-openlit_openlit-data'])
+                health_probes = [probes.submit(run, ['curl', '-fsS', '--max-time', '1', endpoint])
+                                 for endpoint in ('http://127.0.0.1:13133/', 'http://127.0.0.1:3000/')]
+                receiver_probes = {signal: probes.submit(run, ['curl', '-sS', '--max-time', '1', '-o', '/dev/null', '-w', '%{http_code}',
+                                                             'http://127.0.0.1:4318/v1/'+signal])
+                                   for signal in ('logs', 'metrics', 'traces')}
+            for name, key in (('subyard-openlit.service', 'service'), ('subyard-openlit-trace-cutover.timer', 'timer')):
+                manager = managers[name].result().decode()
+                values = dict(line.split('=', 1) for line in manager.splitlines() if '=' in line)
+                statuses = {field: values.get(field) for field in ('ActiveState', 'UnitFileState')}
+                if statuses['ActiveState'] not in ('active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading') or statuses['UnitFileState'] not in ('enabled', 'disabled', 'static', 'masked', 'not-found', 'indirect', 'enabled-runtime'):
+                    raise ValueError('unexpected service state')
+                facts[key] = statuses
+                if selected:
+                    ready = ready and statuses['ActiveState'] == 'active' and statuses['UnitFileState'] == 'enabled'
+                elif key == 'timer':
+                    ready = ready and statuses['ActiveState'] == 'inactive' and statuses['UnitFileState'] == 'disabled'
+                else:
+                    ready = ready and statuses['ActiveState'] != 'active' and statuses['UnitFileState'] != 'enabled'
+            ids = inventory.result().decode().split()
+            rows = json.loads(probes.submit(run, ['docker', 'inspect', *ids]).result()) if ids else []
+            # Bound retained archive results before scheduling any mounted reads.
+            if selected and len(rows) != len(SERVICES):
+                raise ValueError('unexpected runtime container inventory')
             for row in rows:
-                name = row['Config']['Labels'].get('com.docker.compose.service')
-                matches = name in SERVICES and row['Image'] == expected_images.get(name) and row['Config']['Labels'].get('com.docker.compose.config-hash') == hashes.get(name)
-                facts.setdefault('configuration_matches', {})[row['Id']] = matches
-                ready = ready and matches and row['State']['Status'] == 'running'
-                if name != 'collector':
-                    ready = ready and row['State'].get('Health', {}).get('Status') == 'healthy'
-                if name == 'openlit':
-                    mounts = [mount for mount in row.get('Mounts', []) if mount.get('Destination') == '/app/client/data']
-                    account_mount = len(mounts) == 1 and mounts[0].get('Type') == 'volume' and mounts[0].get('Name') == 'subyard-openlit_openlit-data'
-                    facts['account_mount_matches'] = account_mount
-                    ready = ready and account_mount
-                if name in MOUNTS:
-                    # Docker reads the mounted inode inside the container, detecting an old bind
-                    # after atomic host publication even when the host path has desired bytes.
-                    asset, destination = MOUNTS[name]
-                    archive = run(['docker', 'cp', row['Id']+':'+destination, '-'])
-                    with tarfile.open(fileobj=io.BytesIO(archive), mode='r:*') as tar:
-                        members = tar.getmembers()
-                        if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
-                            raise ValueError('unexpected mounted receiver asset')
-                        mounted_matches = tar.extractfile(members[0]).read() == (source/asset).read_bytes()
-                    facts[name+'_mount_matches'] = mounted_matches
-                    ready = ready and mounted_matches
-            for endpoint in ('http://127.0.0.1:13133/', 'http://127.0.0.1:3000/'):
-                run(['curl', '-fsS', '--max-time', '1', endpoint])
-            for signal in ('logs', 'metrics', 'traces'):
-                status = run(['curl', '-sS', '--max-time', '1', '-o', '/dev/null', '-w', '%{http_code}',
-                              'http://127.0.0.1:4318/v1/'+signal])
-                facts[signal+'_receiver_ready'] = status == b'405'
-                ready = ready and facts[signal+'_receiver_ready']
-            # One read-only account projection verifies the saved default DB links
-            # and private first-run password without creating a login session.
-            if ready:
-                run(['python3', str(source/'account.py'), 'check', '--state', str(state), '--source', str(source)], timeout=10)
-        else:
-            ready = ready and not rows
-    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired):
-        ready = False
-        facts['probe_failed'] = True
+                identity = {'id': row['Id'], 'image': row['Image'],
+                    'service': row['Config']['Labels'].get('com.docker.compose.service'),
+                    'state': row['State']['Status'], 'health': row['State'].get('Health', {}).get('Status', '')}
+                if not valid_receipt({'schema': 1, 'desired': desired, 'containers': [identity]}):
+                    raise ValueError('unexpected container identity')
+                facts['containers'].append(identity)
+            facts['containers'].sort(key=lambda row: row['id'])
+            mounted_probes = {row['Id']: probes.submit(run, ['docker', 'cp', row['Id']+':'+MOUNTS[row['Config']['Labels'].get('com.docker.compose.service')][1], '-'])
+                              for row in rows if selected and row['Config']['Labels'].get('com.docker.compose.service') in MOUNTS}
+            if selected:
+                volumes = json.loads(volume_probe.result())
+                if not isinstance(volumes, list) or len(volumes) != 1 or not isinstance(volumes[0], dict):
+                    raise ValueError('unexpected account volume')
+                labels = volumes[0].get('Labels') or {}
+                facts['account_volume_owned'] = (volumes[0].get('Name') == 'subyard-openlit_openlit-data'
+                                                and labels.get('com.docker.compose.project') == 'subyard-openlit'
+                                                and labels.get('com.docker.compose.volume') == 'openlit-data')
+                ready = ready and facts['account_volume_owned']
+                # Compose hashes can depend on the private database environment. Compare locally;
+                # never put them, environment fields or raw inspect JSON in fingerprints/receipts.
+                hashes = dict(line.split() for line in hash_probe.result().decode().splitlines())
+                # Isolate image inspection without consuming other
+                # results early or changing their validation/failure order.
+                wait([*mounted_probes.values(), *health_probes, *receiver_probes.values()])
+                images = run(['docker', 'image', 'inspect', '--format', '{{.Id}}',
+                              *[definitions[name]['image'] for name in sorted(SERVICES)]]).decode('ascii').splitlines()
+                if len(images) != len(SERVICES) or any(not re.fullmatch('sha256:[a-f0-9]{64}', image) for image in images):
+                    raise ValueError('unexpected runtime image identities')
+                expected_images = dict(zip(sorted(SERVICES), images))
+                ready = ready and len(rows) == 3 and {r['Config']['Labels'].get('com.docker.compose.service') for r in rows} == SERVICES
+                for row in rows:
+                    name = row['Config']['Labels'].get('com.docker.compose.service')
+                    matches = name in SERVICES and row['Image'] == expected_images.get(name) and row['Config']['Labels'].get('com.docker.compose.config-hash') == hashes.get(name)
+                    facts.setdefault('configuration_matches', {})[row['Id']] = matches
+                    ready = ready and matches and row['State']['Status'] == 'running'
+                    if name != 'collector':
+                        ready = ready and row['State'].get('Health', {}).get('Status') == 'healthy'
+                    if name == 'openlit':
+                        mounts = [mount for mount in row.get('Mounts', []) if mount.get('Destination') == '/app/client/data']
+                        account_mount = len(mounts) == 1 and mounts[0].get('Type') == 'volume' and mounts[0].get('Name') == 'subyard-openlit_openlit-data'
+                        facts['account_mount_matches'] = account_mount
+                        ready = ready and account_mount
+                    if name in MOUNTS:
+                        # Docker reads the mounted inode inside the container, detecting an old bind
+                        # after atomic host publication even when the host path has desired bytes.
+                        asset, _ = MOUNTS[name]
+                        archive = mounted_probes[row['Id']].result()
+                        with tarfile.open(fileobj=io.BytesIO(archive), mode='r:*') as tar:
+                            members = tar.getmembers()
+                            if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
+                                raise ValueError('unexpected mounted receiver asset')
+                            mounted_matches = tar.extractfile(members[0]).read() == (source/asset).read_bytes()
+                        facts[name+'_mount_matches'] = mounted_matches
+                        ready = ready and mounted_matches
+                for probe in health_probes:
+                    probe.result()
+                for signal, probe in receiver_probes.items():
+                    status = probe.result()
+                    facts[signal+'_receiver_ready'] = status == b'405'
+                    ready = ready and facts[signal+'_receiver_ready']
+                # One read-only account projection verifies the saved default DB links
+                # and private first-run password without creating a login session.
+                if ready:
+                    identity = next(row['Id'] for row in rows if row['Config']['Labels'].get('com.docker.compose.service') == 'openlit')
+                    run(['python3', str(source/'account.py'), 'check', '--state', str(state), '--source', str(source)], timeout=10,
+                        input=identity.encode('ascii'))
+            else:
+                ready = ready and not rows
+        except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired):
+            ready = False
+            facts['probe_failed'] = True
     # This result is independent of the durable receipt, allowing verified publication.
     return {'state': 'current' if ready else 'stale', 'actual': desired if ready else digest(facts), 'desired': desired}, facts
 

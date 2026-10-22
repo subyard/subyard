@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Host-free private bootstrap, identity preservation and retry contracts."""
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -180,6 +183,29 @@ class AccountTest(unittest.TestCase):
         native.assert_called_once()
         self.assertEqual(native.call_args.kwargs, {'timeout': 8})
         self.assertEqual(native.call_args.args[0][-5:-2], ['-T', 'openlit', 'node'])
+
+    def test_cli_readiness_uses_only_the_exact_verified_container_and_rejects_bad_input(self):
+        self.prepare()
+        self.apply()
+        account.write(self.state/'database.env', {})
+        argv = [str(SCRIPT), 'check', '--state', str(self.state), '--source', str(self.state)]
+        identity = b'a'*64
+        with patch.object(sys, 'argv', argv), patch.object(os, 'getuid', return_value=0):
+            for binding in (b'', b'a'*63, b'a'*65, b'A'*64, identity+b'\n', b'foreign'):
+                with self.subTest(binding=binding), patch.object(sys, 'stdin') as stdin, patch.object(account, 'run') as native:
+                    stdin.buffer = io.BytesIO(binding)
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        account.main()
+                    native.assert_not_called()
+            with patch.object(sys, 'stdin') as stdin, patch.object(account, 'check', return_value={'kind': 'fresh', 'phase': 'ready'}) as check:
+                stdin.buffer = io.BytesIO(identity)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    account.main()
+                check.assert_called_once()
+                probe = check.call_args.args[2]
+        with patch.object(account, 'run', return_value=json.dumps(self.actual).encode()) as native:
+            self.assertEqual(probe(self.state, self.state), self.actual)
+        native.assert_called_once_with(['docker', 'exec', identity.decode(), 'node', '-e', account.PROBE], timeout=8)
 
     def test_foreign_volume_refused(self):
         def run(argv):

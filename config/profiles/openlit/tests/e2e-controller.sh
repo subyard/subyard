@@ -15,17 +15,10 @@ grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native
 assert_controller_failure --slot 7
 printf 'ok: acceptance dispatch, slot requirement and failure propagation\n'
 
-bash "$tmp/$controller" --slot 7 --kind container --auth-only > "$tmp/auth-calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container auth-only' "$tmp/auth-calls"
-
-bash "$tmp/$controller" --slot 7 --teardown-only > "$tmp/teardown-calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container teardown-only' "$tmp/teardown-calls"
-
-bash "$tmp/$controller" --slot 7 --dependency-only > "$tmp/dependency-calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container dependency-only' "$tmp/dependency-calls"
-
-bash "$tmp/$controller" --slot 7 --network-only > "$tmp/network-calls"
-grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container network-only' "$tmp/network-calls"
+for mode in auth-only teardown-only dependency-only network-only; do
+  bash "$tmp/$controller" --slot 7 --"$mode" > "$tmp/$mode-calls"
+  grep -Fxq -- "--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=30 3600 bash config/profiles/openlit/tests/e2e/owner.sh container $mode" "$tmp/$mode-calls"
+done
 assert_controller_rejects 2 --slot 7 --kind vm --network-only
 assert_controller_rejects 2 --slot 7 --network-only --dependency-only
 
@@ -58,4 +51,3 @@ SUBYARD_E2E_CANDIDATE_BUNDLE=/frozen/bundle SUBYARD_E2E_CANDIDATE_SHA256="$(prin
   bash "$tmp/$controller" --slot 7 --native-loss group > "$tmp/loss-calls"
 [ -f "$tmp/preflight-checked" ]
 grep -Fxq -- '--slot 7 --type android-test --vm-count 1 --purpose openlit-native-telemetry --vm 1 -- timeout --signal=TERM --kill-after=180 4500 bash config/profiles/openlit/tests/e2e/owner.sh container  group' "$tmp/loss-calls"
-python3 -B "$ROOT/config/profiles/openlit/tests/migration-process-test.py"

@@ -488,6 +488,57 @@ func (fixture *retryableIntegrationExecutor) Exec(_ context.Context, _, _ string
 	return ports.InstanceExecResult{}, nil
 }
 
+type packageReadinessExecutor struct {
+	*retryableIntegrationExecutor
+	path string
+}
+
+func (fixture packageReadinessExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	args := request.Command
+	if len(args) != 1 && !(len(args) == 5 && args[0] == "sh" && args[1] == "-c") {
+		return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+	}
+	executable := args[0]
+	if executable == "fixture-check" {
+		executable = filepath.Join(fixture.path, executable)
+	}
+	command := exec.CommandContext(ctx, executable, args[1:]...)
+	command.Env = []string{"PATH=" + fixture.path}
+	output, err := command.Output()
+	result := ports.InstanceExecResult{Stdout: output}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		result.ExitCode = exit.ExitCode()
+	}
+	return result, err
+}
+
+func TestIntegrationPlanRequiresDeclaredPackageReadiness(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	testkit.WriteFile(t, filepath.Join(root, "provision.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "fixture-check"), []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	runtime := Runtime{RepositoryRoot: root, Executor: packageReadinessExecutor{&retryableIntegrationExecutor{}, root},
+		Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+		Yard:  domain.Context{IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: os.Getuid()}}
+	for _, scenario := range []struct {
+		command, check string
+		changed        bool
+	}{{"fixture-missing-command", "true", true}, {"true", "fixture-check", true}, {"true", "true", false}} {
+		t.Run(scenario.command+"/"+scenario.check, func(t *testing.T) {
+			runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION=" + filepath.Join(root, "provision.sh"),
+				"AGENT_sample_COMMAND=" + scenario.command, "AGENT_sample_CHECK=" + scenario.check}
+			plan, err := runtime.IntegrationPlan(context.Background())
+			if err != nil || plan.Changed != scenario.changed {
+				t.Fatalf("package readiness changed=%t, want %t, err=%v", plan.Changed, scenario.changed, err)
+			}
+		})
+	}
+}
+
 func TestIntegrationConvergenceNeverExecutesHealthProbes(t *testing.T) {
 	root := testkit.TempDir(t)
 	for _, path := range []string{"config", "scripts"} {

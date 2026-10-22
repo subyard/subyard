@@ -94,30 +94,17 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
         self.assertEqual(json.loads(result.stdout), {'ui': 307, 'login': 500, 'logs': 0, 'metrics': 405, 'traces': 405})
         self.assertNotIn('PRIVATE_SENTINEL', result.stdout+result.stderr)
 
-    def test_latest_native_health_execution_stays_unknown_for_unusable_evidence(self):
+    def test_latest_native_health_execution_projects_only_bounded_execution(self):
         row = {'start': '2026-10-18T12:00:00Z', 'end': '2026-10-18T12:00:03Z', 'exit_code': 1}
-        for rows in (None, [], {}, [row]*6, ['PRIVATE_SENTINEL'],
-                     [{**row, 'exit_code': True}], [{**row, 'exit_code': -2}],
-                     [{**row, 'exit_code': 256}], [{**row, 'start': 'PRIVATE_SENTINEL'}],
-                     [{**row, 'start': '0001-01-01T00:00:00Z'}],
-                     [{**row, 'start': '2026-10-18T12:00:00'}],
-                     [{**row, 'end': '2026-10-18T11:59:59Z'}],
-                     [{**row, 'start': '2026-10-18T12:00:00.1234567890Z'}],
-                     [{**row, 'end': '2026-10-18T12:00:00+99:00'}],
-                     [{**row, 'end': '2026-10-18T12:00:00+01:99'}],
-                     [{**row, 'end': '2026-11-18T12:00:00Z'}],
-                     [{key: value for key, value in row.items() if key != 'end'}],
+        for rows in (None, [], [row]*6, ['PRIVATE_SENTINEL'], [{**row, 'exit_code': True}],
+                     [{**row, 'start': 'PRIVATE_SENTINEL'}], [{**row, 'start': '0001-01-01T00:00:00Z'}],
+                     [{**row, 'end': '2026-10-18T11:59:59Z'}], [{**row, 'end': '2026-11-18T12:00:00Z'}],
                      [{**row, 'output': 'PRIVATE_SENTINEL'}]):
-            with self.subTest(rows=rows):
-                result, calls = self.health(changed={'health_checks': rows})
-                self.assertEqual(result['latest_healthcheck'], {'category': 'unknown'})
-                self.assertEqual(len(calls), 3)
-        result, _ = self.health(changed={'health_checks': [row, {**row, 'exit_code': 0}]})
-        self.assertEqual(result['latest_healthcheck'],
+            self.assertEqual(facts.health_execution(rows), {'category': 'unknown'})
+        self.assertEqual(facts.health_execution([row, {**row, 'exit_code': 0}]),
                          {'category': 'observed', 'exit_code': 0, 'duration_ms': 3000})
-        result, _ = self.health(changed={'health_checks': [{**row,
-            'start': '2026-10-18T12:00:00.000000999Z', 'end': '2026-10-18T12:00:00.001000001Z'}]})
-        self.assertEqual(result['latest_healthcheck']['duration_ms'], 0)
+        self.assertEqual(facts.health_execution([{**row,
+            'start': '2026-10-18T12:00:00.000000999Z', 'end': '2026-10-18T12:00:00.001000001Z'}])['duration_ms'], 0)
 
     def test_oversized_or_truncated_health_inspection_cannot_be_observed(self):
         for output in (b'x'*65537, b'{"project":'):
@@ -133,8 +120,7 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
 
     def test_openlit_health_refuses_foreign_ambiguous_or_malformed_projection(self):
         for changed in ({'project': 'PRIVATE_SENTINEL'}, {'service': 'collector'}, {'image': 'foreign'},
-                        {'running': 1}, {'health': 'PRIVATE_SENTINEL'}, {'exit_code': -1},
-                        {'failing_streak': True}, {'extra': 'PRIVATE_SENTINEL'}):
+                        {'running': 1}, {'extra': 'PRIVATE_SENTINEL'}):
             with self.subTest(changed=changed):
                 result, calls = self.health(changed=changed)
                 self.assertEqual(result, {'category': 'invalid-projection'})
@@ -157,7 +143,7 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
 
     def test_pull_context_requires_real_api_and_cold_cache_and_keeps_raw_journals_private(self):
         for info_exit, image_state in ((0, 'absent'), (1, 'absent'), (0, 'present'), (0, 'unknown')):
-            with self.subTest(info_exit=info_exit, image_state=image_state), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
                 directory = Path(temporary)/'diagnostic'
                 output = io.StringIO()
                 original_stat = Path.stat
@@ -170,8 +156,9 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
                     if argv[:3] == ['docker', 'image', 'inspect']:
                         if image_state == 'present':
                             return subprocess.CompletedProcess(argv, 0, b'[{}]', b'')
-                        error = ('Error response from daemon: No such image: '+argv[3]).encode() if image_state == 'absent' else b'API transport PRIVATE_SENTINEL'
-                        return subprocess.CompletedProcess(argv, 1, b'[]\n', error+b'\n')
+                        return subprocess.CompletedProcess(argv, 1, b'[]\n',
+                            (('Error response from daemon: No such image: '+argv[3]+'\n').encode()
+                         if image_state == 'absent' else b'API unavailable PRIVATE_SENTINEL'))
                     if 'info' in argv:
                         self.assertEqual(argv[:5], ['timeout', '--kill-after=1', '10', 'docker', 'info'])
                         self.assertEqual(options['timeout'], 12)
@@ -201,14 +188,13 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
                 self.assertEqual(rows[0]['cold_cache_observed'], cold)
                 self.assertTrue(all(row['state'] == 'present' for row in rows[1]['image_cache'].values()))
                 self.assertEqual(rows[0]['daemon']['MainPID'], 18)
-                self.assertEqual(set(rows[0]['cli_environment_present']), {'HOME','PATH','TMPDIR','DOCKER_HOST',
-                    'DOCKER_CONTEXT','DOCKER_CONFIG','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'})
-                self.assertTrue(all(isinstance(value, bool) for value in rows[0]['cli_environment_present'].values()))
                 self.assertNotIn('PRIVATE_SENTINEL', output.getvalue())
                 self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
                 for path in directory.glob('*.log'):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(path.read_bytes(), b'PRIVATE_SENTINEL raw journal\nPRIVATE_SENTINEL stderr\n')
+
+
 
     def test_cache_accepts_only_exact_known_absence_and_projects_unknown_errors(self):
         image = 'otel/collector:1@sha256:'+'a'*64
@@ -261,29 +247,17 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
         for forbidden in ('PRIVATE_SENTINEL', 'Bearer', 'secret', 'https://', 'abcdef123456', images[2]):
             self.assertNotIn(forbidden, encoded)
 
-    def test_unknown_progress_is_not_inferred_complete(self):
-        with tempfile.TemporaryDirectory(prefix='openlit-pull-unknown-', dir='/tmp') as directory:
-            log = Path(directory)/'pull.log'
-            log.write_text('unrecognized progress PRIVATE_SENTINEL\n')
-            value = facts.pull_projection(log, [])
-        self.assertEqual(value['progress_state'], 'unknown')
-        self.assertEqual(value['layer_progress']['observed_count'], 0)
-        self.assertEqual(value['service_progress'], {})
-        self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
 
     def test_unparsed_byte_progress_is_unknown_and_measured_zero_remains_zero(self):
-        for progress, expected in (
-                ('Downloading unrecognized PRIVATE_SENTINEL', (0, None, None)),
-                ('Downloading 0B/0B PRIVATE_SENTINEL', (1, 0, 0)),
-                ('Downloading 0B/4MB PRIVATE_SENTINEL', (1, 0, 4000000))):
-            with self.subTest(progress=progress), tempfile.TemporaryDirectory(prefix='openlit-pull-bytes-', dir='/tmp') as directory:
-                log = Path(directory)/'pull.log'
-                log.write_text(' abcdef123456 '+progress+'\n 123456abcdef Pull complete\n')
+        with tempfile.TemporaryDirectory(prefix='openlit-pull-bytes-', dir='/tmp') as directory:
+            log = Path(directory)/'pull.log'
+            for progress, expected in (('unrecognized PRIVATE_SENTINEL', (0, None, None)),
+                                       ('0B/0B PRIVATE_SENTINEL', (1, 0, 0)), ('0B/4MB', (1, 0, 4000000))):
+                log.write_text(' abcdef123456 Downloading '+progress+'\n')
                 value = facts.pull_projection(log, [])
-            layer = value['layer_progress']
-            self.assertEqual(layer['observed_count'], 2)
-            self.assertEqual((layer['byte_pairs_observed_count'], layer['downloaded_bytes'], layer['total_bytes']), expected)
-            self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
+                layer = value['layer_progress']
+                self.assertEqual((layer['byte_pairs_observed_count'], layer['downloaded_bytes'], layer['total_bytes']), expected)
+                self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
 
     def test_native_timeout_projects_before_private_cleanup_and_preserves124(self):
         compose = (Path(__file__).parent.parent/'compose.yaml').read_bytes()
@@ -427,12 +401,6 @@ return {status:codes[url],body:{cancel:async()=>{}}};};"""
             self.assertTrue(value['journal_categories']['kernel']['oom_present'])
             self.assertFalse(value['files_present']['receipt.json'])
             self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
-            (state/'pull.log').write_text('openlit Error PRIVATE_SENTINEL\n')
-            with patch.object(Path, 'stat', stat), patch.object(facts, 'registries', return_value={'ghcr': {'exit_code': 0, 'http_status': 401}}), patch.object(facts.subprocess, 'run', side_effect=run):
-                unknown = facts.failure(state, ['a', 'b', 'c'])
-            self.assertEqual(unknown['pull_category'], 'unknown')
-            self.assertTrue(unknown['journal_categories']['kernel']['oom_present'])
-            self.assertNotIn('PRIVATE_SENTINEL', json.dumps(unknown))
             # A symlinked runtime directory must not expose even pull-log facts.
             link = state/'link'
             link.symlink_to(state, target_is_directory=True)

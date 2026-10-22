@@ -227,6 +227,12 @@ disable with custom settings preserved. Model responses come from local syntheti
 it uses no live model account or external model calls. A passing host-free runner alone does not
 establish service startup, native telemetry ingestion or release acceptance.
 
+The container route reservation check reads metadata across all projects, including stopped
+yards and their deferred receipts; it does not request live instance state, snapshots or backups.
+The lifecycle fixture emits `E2E_PHASE` timings for each yard command, preserving its original
+exit code. Compare repeat-init timings separately from cold provisioning and image delivery,
+using the same candidate version, VM base and full scenario assertions.
+
 The separate migration lane uses one fresh 8 GiB owner VM and a nested container yard. It installs
 the authentic public logs/metrics-only predecessor, provisions genuine Codex through the standard
 package path, and creates a declared direct-ClickHouse compatibility receiver. An ordinary offline
