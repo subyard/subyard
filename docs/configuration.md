@@ -349,11 +349,18 @@ The default yard configuration permits local edits, builds, tests and network ac
 approval. Canonical direct `git commit` (including `--amend`) and `git push` require user approval.
 The same policy applies to every project in the yard:
 
-| Client | Yard mode |
-| --- | --- |
-| Terminal | Run `codex` without permission overrides. |
-| VS Code Codex extension | Select **Custom (config.toml)**. |
-| Orca | Use **Manual** with empty Codex arguments; Subyard also removes the stock YOLO argument. |
+| Client | Yard mode | Approval evidence |
+| --- | --- | --- |
+| Terminal | Run `codex` without permission overrides. | The owning VM scenario checks local work, denial and repeated commit/amend/push prompts. |
+| VS Code Codex extension | Select **Custom (config.toml)**. | Loads the yard defaults; client-specific denial and repeated single-use approval still need acceptance. |
+| Orca terminal | Use **Manual** with empty Codex arguments; Subyard also removes the stock YOLO argument. | The owning VM scenario exercises the paired terminal, including denial and repeated Git prompts. |
+| Orca built-in Codex chat | Use **Manual**; the Subyard adapter reads the effective Codex configuration for the chat directory. | Start/resume policy propagation is covered; approval response choices and reconnect behavior need separate acceptance. |
+| Paseo Codex session | No verified single-use approval mode is published. | Daemon/provider readiness does not establish Desktop approval behavior. |
+
+The terminal and Orca checks belong to the profile's
+[`codex-permissions` VM scenario](test-vms.md).
+Its coverage does not certify every installed client version or active session. In particular,
+the Orca terminal and built-in chat are separate approval surfaces.
 
 Codex provisioning installs root-owned `/etc/codex/requirements.toml` using Codex's native
 [managed requirements](https://learn.chatgpt.com/docs/enterprise/managed-configuration).
@@ -403,11 +410,24 @@ active sessions or prove that a client displays approval requests. Other Git spe
 `git -C` and `git -c` are outside this check; matching raw `bash -lc` input also does not model
 Codex's runtime shell decomposition. Single-use approval and denial require runtime acceptance.
 
+### Other agent permission modes
+
 For Claude, OpenCode and pi, status states the missing evidence without parsing their configs
-or launching diagnostics. In particular, Claude's shipped `bypassPermissions` mode skips prompts
-according to its [CLI documentation](https://code.claude.com/docs/en/permissions#permission-modes);
-ask entries alone do not establish enforcement. These diagnostics do not restrict direct use
-of any agent or make its approval settings a security boundary.
+or launching diagnostics. No Subyard-verified CLI or UI mode for repeated single-use Git approval
+is published for these backends:
+
+| Backend | Shipped yard setting | Limit of the evidence |
+| --- | --- | --- |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and commit/push ask entries. | Bypass mode skips permission prompts; the ask entries do not establish the required gate. |
+| OpenCode | Global allow, with commit/push ask patterns under `permission.bash`. | Template checks establish the configured rules, not their runtime enforcement or single-use responses. |
+| pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
+
+Claude's [permission modes](https://code.claude.com/docs/en/permissions#permission-modes)
+document the bypass behavior. OpenCode's [permissions](https://opencode.ai/docs/permissions/)
+include automatic approval and an `always` response; an ask rule alone does not prove a new prompt
+for the next operation. These limitations also apply when Orca launches those backends.
+Direct use remains available. Unsupported approval guarantees do not mean an agent cannot run,
+and none of these settings creates an OS security boundary.
 
 ## Applying changes
 

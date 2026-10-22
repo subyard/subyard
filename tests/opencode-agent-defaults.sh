@@ -43,13 +43,13 @@ case "$AGENT_opencode_PERSIST" in
   *) fail "OpenCode SQLite session database is not persisted" ;;
 esac
 
-# All public agent defaults gate commit and push.
+# Shipped templates retain commit/push rules; runtime enforcement needs separate acceptance.
 jq -e '
   (.permissions.ask | index("Bash(git commit)")) != null and
   (.permissions.ask | index("Bash(git commit:*)")) != null and
   (.permissions.ask | index("Bash(git push)")) != null and
   (.permissions.ask | index("Bash(git push:*)")) != null
-' "$ROOT/config/agents/claude/settings.json" >/dev/null || fail "Claude commit/push gates drifted"
+' "$ROOT/config/agents/claude/settings.json" >/dev/null || fail "Claude commit/push ask entries drifted"
 for command in commit push; do
   grep -Fq "pattern = [\"git\", \"$command\"]" "$ROOT/config/agents/codex/rules/repo.rules" \
     || fail "Codex $command gate missing"
