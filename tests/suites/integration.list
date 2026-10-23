@@ -1,6 +1,7 @@
 # Host-free process integrations using temporary roots and fake external commands.
 agent-selection.sh
 ccusage-provision.sh
+claude-agent-policy.sh
 codex-agent-defaults.sh
 codex-agent-provision.sh
 codex-legacy-config.sh

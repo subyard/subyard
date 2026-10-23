@@ -78,6 +78,10 @@ The Orca observer uses captured shipped sources even while installed helpers awa
 
 `AGENT_<name>_CHECK` is a package-owned installation/convergence probe; release activation
 may require it to succeed. Long-running service initialization belongs outside that gate.
+A configuration-only `PROVISION` hook may omit `COMMAND` when it declares a safe mandatory
+`CHECK`; the check then supplies convergence without requiring a CLI installation. A hook
+with a nonempty `COMMAND` still requires a valid executable name. These rules are shared by
+init, prepared integration changes and activation; shell output describes integration readiness.
 Optional `AGENT_<name>_HEALTH` probes report advisory service health for `yard status` and
 `yard integration status`: one JSON object with only `state`, one of `ready`, `starting`,
 `failed`, or `unknown`. Queries bound execution to five seconds and accept at most 1024 bytes;

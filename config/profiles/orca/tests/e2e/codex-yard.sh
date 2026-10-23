@@ -18,6 +18,47 @@ workspace_two=/srv/workspaces/codex-policy-two/src
 
 [ -f "$helper" ] || die 'Codex permissions helper is unavailable'
 
+# The narrow lane rechecks approvals without repeating independently owned delivery/drift checks.
+if [ "${CODEX_APPROVALS_ONLY:-0}" = 0 ]; then
+stage 'checking installed Claude policy delivery and repeat reconciliation'
+claude_policy=/etc/claude-code/managed-settings.d/50-subyard-git-approval.json
+guest_root claude-policy-check >/dev/null || die 'installed Claude managed policy is unavailable'
+guest_root sh -c 'printf "{\"permissions\":{\"deny\":[\"Bash(foreign-private-fixture *)\"]}}\\n" > /etc/claude-code/managed-settings.d/10-foreign-fixture.json'
+claude_foreign_before="$(guest_root sha256sum /etc/claude-code/managed-settings.d/10-foreign-fixture.json)"
+yard init --yes >/dev/null || die 'Claude policy repeat init failed'
+guest_root python3 - "$claude_policy" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value['allowManagedPermissionRulesOnly'] = True
+path.write_text(json.dumps(value))
+PY
+if guest_root claude-policy-check >/dev/null 2>&1; then die 'Claude policy top-level drift was accepted'; fi
+yard init --yes >/dev/null || die 'Claude policy top-level drift repair failed'
+guest_root chmod 0666 "$claude_policy"
+if guest_root claude-policy-check >/dev/null 2>&1; then die 'Claude policy mode drift was accepted'; fi
+yard init --yes >/dev/null || die 'Claude policy drift repair failed'
+guest_root claude-policy-check >/dev/null || die 'Claude policy drift remained'
+[ "$claude_foreign_before" = "$(guest_root sha256sum /etc/claude-code/managed-settings.d/10-foreign-fixture.json)" ] \
+  || die 'Claude policy reconciliation replaced a foreign managed drop-in'
+guest_root cp "$claude_policy" /tmp/subyard-claude-policy.saved
+guest_root sh -c 'printf "{}\\n" > /etc/claude-code/managed-settings.d/50-subyard-git-approval.json'
+if yard init --yes >/dev/null 2>&1; then die 'Claude policy init overwrote a foreign policy'; fi
+guest_root mv /tmp/subyard-claude-policy.saved "$claude_policy"
+yard init --yes >/dev/null || die 'Claude policy restore did not reconcile'
+
+stage 'running native Claude approval with installed root-managed policy'
+guest_root install -d -m 0755 /tmp/subyard-claude-policy/config/agents
+incus --project "$PROJECT" file push -r "$ROOT/config/agents/claude" \
+  "$INSTANCE/tmp/subyard-claude-policy/config/agents/"
+guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 \
+  bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
+  || die 'native Claude installed policy acceptance failed'
+
+fi
+
 stage 'creating two registered workspaces for Codex policy coverage'
 for name in codex-policy-one codex-policy-two; do
   mkdir -p "$STATE/$name"
@@ -27,6 +68,7 @@ done
 yard orca sync --yes >/dev/null
 
 incus --project "$PROJECT" file push "$helper" "$INSTANCE$guest_helper" --mode 0644
+if [ "${CODEX_APPROVALS_ONLY:-0}" = 0 ]; then
 stage 'repairing a legacy Codex chat launch environment through yard init'
 codex_orca_pid="$(guest_root systemctl show -p MainPID --value subyard-orca.service)"
 guest_root python3 - <<'PY'
@@ -48,6 +90,8 @@ guest_root grep -Fq 'export PATH=/usr/local/libexec/subyard/orca-codex:' /etc/pr
 [ "$(guest_root systemctl show -p MainPID --value subyard-orca.service)" = "$codex_orca_pid" ] \
   || die 'Codex launcher repair restarted Orca'
 
+fi
+
 stage 'running stock Orca native Codex chat start and resume'
 chat_helper="$ROOT/config/profiles/orca/tests/e2e/codex-chat.py"
 incus --project "$PROJECT" file push "$chat_helper" "$INSTANCE/tmp/subyard-codex-chat.py" --mode 0644
@@ -56,9 +100,10 @@ guest_root runuser -u dev -- env HOME=/home/dev \
   || die 'stock Orca native Codex chat permissions failed'
 
 stage 'running Codex permission and Orca terminal coverage as the developer'
-for surface in appserver terminal; do
+for surface in appserver terminal managed-relay; do
   helper_args=()
   [ "$surface" != terminal ] || helper_args+=(--terminal)
+  [ "$surface" != managed-relay ] || helper_args+=(--managed-relay --codex /usr/local/libexec/subyard/orca-codex/codex)
   guest_root runuser -u dev -- env \
     HOME=/home/dev CODEX_HOME=/home/dev/.codex \
     PATH=/home/dev/.local/bin:/home/dev/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
@@ -131,6 +176,9 @@ done
 codex_terminal_close
 guest_root rm -f -- "$guest_helper"
 
+if [ "${CODEX_APPROVALS_ONLY:-0}" = 1 ]; then
+  printf 'ok: focused stock Codex chat approval/reconnect, native relay and paired terminal coverage\n'
+else
 stage 'checking native requirements drift denial and authorized release repair'
 home_config_before="$(guest_root sha256sum /home/dev/.codex/config.toml | cut -d' ' -f1)" \
   || die 'Codex user configuration is unavailable before requirements repair'
@@ -150,3 +198,4 @@ guest_root /usr/local/bin/codex-policy-check >/dev/null \
   || die 'native requirements repair changed the Codex user configuration'
 
 printf 'ok: native Codex drift denied and repaired through release migration, init verified policy, user config preserved, and two workspaces passed direct and Orca coverage\n'
+fi

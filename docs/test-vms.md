@@ -1033,6 +1033,18 @@ yard sandbox default. It uses no real agent credentials
 or external model APIs. These checks do not replace interactive VS Code/Desktop acceptance or
 establish a security boundary against alternative Git commands.
 
+For a focused recheck of stock native-chat approval/reconnect, the managed relay and
+native/paired terminals, use:
+
+```sh
+bash config/profiles/orca/tests/e2e/acceptance.sh --slot "$slot" --lane codex-approvals
+```
+
+It uses a fresh installed yard with Codex and the stock client, and skips Claude policy delivery and the Codex legacy-launcher/requirements drift
+repair loops. The default full acceptance retains those checks. Reconnect here means a fresh
+runtime RPC connection that reads and answers the same pending card; it does not certify the
+graphical Desktop UI or transport-loss subscription recovery.
+
 For temporary SSH-key access, run the focused current-candidate fixture:
 
 ```sh

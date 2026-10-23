@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 
 TIMEOUT = 30
 FIXTURE_CONFIG = ['-c', 'model="subyard-fixture"', '-c', 'model_provider="fixture"',
@@ -38,6 +39,8 @@ class Provider(http.server.BaseHTTPRequestHandler):
         try:
             request = json.loads(body)
             fixture = self.server
+            fixture.request_count = getattr(fixture, 'request_count', 0) + 1
+            response_id = uuid.uuid4().hex
             if fixture.command is not None and request.get('tools'):
                 command, fixture.command = fixture.command, None
                 tools = request.get('tools', [])
@@ -56,16 +59,16 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     name, arguments = 'exec_command', {'cmd': command, 'workdir': str(fixture.workspace), 'yield_time_ms': 1000}
                 else:
                     raise RuntimeError('no shell tool: ' + repr(names))
-                item = {'type': 'function_call', 'id': 'fc_fixture', 'call_id': 'call_fixture', 'name': name, 'arguments': json.dumps(arguments)}
+                item = {'type': 'function_call', 'id': 'fc_' + response_id, 'call_id': 'call_' + response_id, 'name': name, 'arguments': json.dumps(arguments)}
             else:
-                item = {'type': 'message', 'id': 'msg_fixture', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Fixture complete.' if request.get('tools') else 'Subyard fixture'}]}
+                item = {'type': 'message', 'id': 'msg_' + response_id, 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Fixture complete.' if request.get('tools') else 'Subyard fixture'}]}
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
             for event in [
-                {'type': 'response.created', 'response': {'id': 'resp_fixture'}},
+                {'type': 'response.created', 'response': {'id': 'resp_' + response_id}},
                 {'type': 'response.output_item.done', 'output_index': 0, 'item': item},
-                {'type': 'response.completed', 'response': {'id': 'resp_fixture', 'status': 'completed', 'output': [item], 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}},
+                {'type': 'response.completed', 'response': {'id': 'resp_' + response_id, 'status': 'completed', 'output': [item], 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}},
             ]:
                 self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
             self.wfile.flush()
@@ -116,7 +119,8 @@ class App:
                 raise RuntimeError(method + ': ' + json.dumps(frame['error']))
             return frame['result']
 
-    def turn(self, provider, thread, workspace, command, decision=None, unchanged=None):
+    def turn(self, provider, thread, workspace, command, decision=None, unchanged=None,
+             allow_interrupted=False):
         provider.workspace, provider.command = workspace, command
         self.request('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': 'Run the fixture command.'}]})
         approvals = 0
@@ -132,7 +136,8 @@ class App:
                 self.send({'id': frame['id'], 'result': {'decision': decision}})
             elif method == 'turn/completed':
                 assert not provider.failure, provider.failure
-                assert frame['params']['turn']['status'] == 'completed', 'turn failed: ' + json.dumps(frame['params']['turn'].get('error'))
+                statuses = ('completed', 'interrupted') if allow_interrupted else ('completed',)
+                assert frame['params']['turn']['status'] in statuses, 'turn failed: ' + json.dumps(frame['params']['turn'].get('error'))
                 assert approvals == (0 if decision is None else 1), 'protected command did not request approval'
                 return
 
@@ -276,6 +281,7 @@ def main():
     parser.add_argument('workspace', nargs=2, type=Path)
     parser.add_argument('--terminal', action='store_true')
     parser.add_argument('--orca', action='store_true')
+    parser.add_argument('--managed-relay', action='store_true')
     parser.add_argument('--codex', default='codex')
     parser.add_argument('--template', type=Path, default=Path('/home/dev/.codex/config.toml'))
     parser.add_argument('--home-rules', type=Path)
@@ -300,10 +306,12 @@ def main():
             (codex_home / 'rules').mkdir()
             shutil.copyfile(args.home_rules, codex_home / 'rules/repo.rules')
         env = {'HOME': str(home), 'CODEX_HOME': str(codex_home), 'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8'}
+        if args.managed_relay:
+            env['ORCA_AGENT_SESSION_SPAWN_TOKEN'] = 'subyard-fixture'
         try:
             for base in map(Path.resolve, args.workspace):
                 assert base.is_dir(), 'missing fixture workspace'
-                workspace = base / ('codex-orca' if args.orca else 'codex-terminal' if args.terminal else 'codex-appserver')
+                workspace = base / ('codex-managed-relay' if args.managed_relay else 'codex-orca' if args.orca else 'codex-terminal' if args.terminal else 'codex-appserver')
                 workspace.mkdir()
                 assert not (workspace / '.git').exists(), 'refusing existing Git metadata'
                 run(['git', 'init', '-q', str(workspace)])
@@ -332,7 +340,16 @@ def main():
                         result = subprocess.run(['git', '-C', str(workspace), 'rev-parse', '--verify', 'HEAD'], capture_output=True, timeout=10)
                         assert result.returncode != 0, 'commit ran before approval'
                     command = 'git commit --allow-empty -m fixture'
-                    app.turn(provider, thread, workspace, command, 'decline', no_commit)
+                    if args.managed_relay:
+                        for unsafe in ('acceptForSession', {'acceptWithExecpolicyAmendment': {
+                                'execpolicy_amendment': ['git', 'commit']}}):
+                            app.turn(provider, thread, workspace, command, unsafe, no_commit,
+                                     allow_interrupted=True)
+                            no_commit()
+                        print('ok: native managed relay refused session and permanent rule approval', flush=True)
+                    refusal = 'cancel' if args.managed_relay else 'decline'
+                    app.turn(provider, thread, workspace, command, refusal, no_commit,
+                             allow_interrupted=args.managed_relay)
                     no_commit()
                     app.turn(provider, thread, workspace, command, 'accept', no_commit)
                     first = run(['git', '-C', str(workspace), 'rev-parse', 'HEAD'])
@@ -341,12 +358,14 @@ def main():
                     app.turn(provider, thread, workspace, command, 'accept', same_commit)
                     assert run(['git', '-C', str(workspace), 'rev-list', '--count', 'HEAD']) == '2'
                     first = run(['git', '-C', str(workspace), 'rev-parse', 'HEAD'])
-                    app.turn(provider, thread, workspace, 'git commit --amend --allow-empty -m amended', 'decline', same_commit)
+                    app.turn(provider, thread, workspace, 'git commit --amend --allow-empty -m amended', refusal, same_commit,
+                             allow_interrupted=args.managed_relay)
                     same_commit()
                     # No remote is configured: push approval must precede even the failing Git command.
                     for _ in range(2):
-                        app.turn(provider, thread, workspace, 'git push', 'decline', same_commit)
-                    if not args.home_rules:
+                        app.turn(provider, thread, workspace, 'git push', refusal, same_commit,
+                                 allow_interrupted=args.managed_relay)
+                    if not args.home_rules and not args.managed_relay:
                         for overrides in ({'approvalPolicy': 'never'}, {'approvalsReviewer': 'auto_review'}):
                             app.request('turn/start', {'threadId': thread, **overrides, 'input': [{'type': 'text', 'text': 'Unsafe policy fixture.'}]}, reject=True)
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)

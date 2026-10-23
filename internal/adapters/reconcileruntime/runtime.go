@@ -1971,6 +1971,11 @@ func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 			return nil, fmt.Errorf("agent %s provision hook is missing", agent)
 		}
 		command := runtime.environmentValue("AGENT_" + agent + "_COMMAND")
+		if command == "" && safeCommand(runtime.environmentValue("AGENT_"+agent+"_CHECK")) {
+			// Configuration-only hooks publish no executable. Their explicit package
+			// check supplies convergence in init, prepared integration and activation.
+			continue
+		}
 		if !safeCommand(command) {
 			return nil, fmt.Errorf("agent %s command is invalid", agent)
 		}

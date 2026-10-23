@@ -16,6 +16,7 @@ YARD_BIN="$ROOT/.build/yard"
 EXISTING_YARD="${SUBYARD_E2E_ORCA_EXISTING_YARD:-0}"
 CODEX_CONFIG="${SUBYARD_E2E_ORCA_CODEX_CONFIG:-0}"
 CODEX_PERMISSIONS="${SUBYARD_E2E_ORCA_CODEX_PERMISSIONS:-0}"
+CODEX_APPROVALS_ONLY="${SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY:-0}"
 SSH_AGENT="${SUBYARD_E2E_ORCA_SSH_AGENT:-0}"
 KEEP_FAILED="${SUBYARD_E2E_ORCA_KEEP_FAILED:-0}"
 RESUME_STATE="${SUBYARD_E2E_ORCA_RESUME:-}"
@@ -54,6 +55,11 @@ case "$CODEX_PERMISSIONS" in
       || die 'Codex permissions acceptance is separate from config and upgrade modes'
     ;;
   *) die 'SUBYARD_E2E_ORCA_CODEX_PERMISSIONS must be 0 or 1' ;;
+esac
+case "$CODEX_APPROVALS_ONLY" in
+  0) ;;
+  1) [ "$CODEX_PERMISSIONS" = 1 ] || die 'approval-only coverage requires Codex permissions mode' ;;
+  *) die 'SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY must be 0 or 1' ;;
 esac
 case "$SSH_AGENT" in
   0) ;;
@@ -1087,7 +1093,8 @@ coding_integrations=''
 yard_profiles=subyard-dev
 [ "$SSH_AGENT" = 0 ] || yard_profiles=orca
 if [ "$CODEX_PERMISSIONS" = 1 ]; then
-  coding_integrations=codex
+  coding_integrations='codex'
+  [ "$CODEX_APPROVALS_ONLY" = 1 ] || coding_integrations+=' claude'
   yard_profiles=orca
 fi
 if [ "$EXISTING_YARD" = 1 ]; then

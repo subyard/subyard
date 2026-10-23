@@ -24,6 +24,14 @@ mkdir -p "$HOME/.opencode/bin"
 cat > "$HOME/.opencode/bin/opencode" <<'BIN'
 #!/usr/bin/env bash
 [ "$HOME" = "$OPENCODE_EXPECT_HOME" ] || exit 42
+if [ "${1:-}" = debug ]; then
+  if [ "${OPENCODE_TEST_BAD_SCHEMA:-}" = 1 ]; then
+    printf '%s\n' '{"permission":{"bash":"private-sentinel"}}'
+    exit 0
+  fi
+  printf '%s\n' '{"provider":{"synthetic":"private-sentinel"},"permission":{"*":"allow","bash":{"*":"allow","git commit*":"ask","git push*":"ask"}}}'
+  exit 0
+fi
 printf 'test-version\n'
 BIN
 chmod +x "$HOME/.opencode/bin/opencode"
@@ -51,6 +59,29 @@ env PATH="$tmp/fake-bin:$PATH" "${common_env[@]}" bash "$HOOK" >/dev/null
   || fail "installed CLI is not runnable in the dev user context"
 [ "$(cat "$OPENCODE_TEST_ARGS")" = --no-modify-path ] \
   || fail "provision allowed the upstream installer to edit shell rc files"
+diagnostic_status=0
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$tmp/bin/opencode-permission-check" > "$tmp/diagnostic.json" || diagnostic_status=$?
+[ "$diagnostic_status" = 3 ] || fail 'native always persistence was advertised as compatible'
+python3 - "$tmp/diagnostic.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+result = json.loads(text)
+assert result['state'] == 'unsupported-single-use'
+assert result['configured_protected'] == ['ask'] * 5
+assert result['configured_ordinary'] == 'allow'
+assert 'private-sentinel' not in text
+PY
+HOME="$tmp/home" PATH="$tmp/bin:$PATH" OPENCODE_TEST_BAD_SCHEMA=1 \
+  "$tmp/bin/opencode-permission-check" > "$tmp/unknown.json" || diagnostic_status=$?
+[ "$diagnostic_status" = 3 ] || fail 'unexpected diagnostic status for unknown decision'
+python3 - "$tmp/unknown.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+result = json.loads(text)
+assert result['configured_protected'] == ['unknown'] * 5
+assert result['configured_ordinary'] == 'unknown'
+assert 'private-sentinel' not in text
+PY
 
 # Re-provision is idempotent.
 env PATH="$tmp/fake-bin:$PATH" "${common_env[@]}" bash "$HOOK" >/dev/null

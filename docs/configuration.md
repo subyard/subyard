@@ -355,7 +355,7 @@ on the client's response behavior:
 | Terminal | Run `codex` without permission overrides. | The owning VM scenario checks local work, denial and repeated commit/amend/push prompts. |
 | VS Code Codex extension | Select **Custom (config.toml)**. | Loads the yard defaults; client-specific denial and repeated single-use approval still need acceptance. |
 | Orca terminal | Use **Manual** with empty Codex arguments; Subyard also removes the stock YOLO argument. | The owning VM scenario exercises the paired terminal, including denial and repeated Git prompts. |
-| Orca built-in Codex chat | Use **Manual**; the Subyard adapter reads the effective Codex configuration for the chat directory. | Start/resume policy propagation is covered; approval response choices and reconnect behavior need separate acceptance. |
+| Orca built-in Codex chat | Use **Manual**; the Subyard adapter reads the effective Codex configuration for the chat directory. | The managed relay exposes only single-use choices and cancels session or rule-amendment responses. The owning fixture exercises the stock native-chat approval RPC and reconnect; the graphical Desktop UI is not separately certified. |
 | Paseo local SDK | Mode `auto` (**Default Permissions**) with explicit `on-request` and `danger-full-access`. | Native daemon checks cover denial, one approved commit, a new prompt for the repeat, and pending approval after reconnect. |
 | Paseo Desktop | No fully verified Desktop selection is published. | The preset alone uses `workspace-write`; Desktop delivery of the SDK overrides needs acceptance. **Auto-review** conflicts with the user-only requirements. |
 
@@ -385,7 +385,11 @@ The native terminal UI offers single-use approval for these managed rules. A raw
 client can submit `acceptForSession` even when the request advertises only `accept` and `cancel`;
 a native probe confirmed that the next matching commit then runs without another prompt.
 This is protocol behavior, not evidence that a terminal or IDE offers that choice. Managed
-clients must preserve single-use responses; VS Code and other interactive clients need their own acceptance.
+clients must preserve single-use responses. The Orca managed relay filters both offered decisions
+and responses, cancels unsupported responses, rejects duplicate/stale approval IDs, and terminates
+the native child when its client disconnects with an unresolved approval. It does not save approval
+rules. Unknown approval protocols fail closed. VS Code's actual approval UI remains unverified;
+**Custom** alone does not establish its single-use guarantee.
 
 `yard status` runs the installed policy check and one offline Codex rule check in a running yard:
 
@@ -415,22 +419,48 @@ Codex's runtime shell decomposition. Single-use approval and denial require runt
 
 ### Other agent permission modes
 
-For Claude, OpenCode and pi, status states the missing evidence without parsing their configs
-or launching diagnostics. No Subyard-verified CLI or UI mode for repeated single-use Git approval
-is published for these backends:
+For Claude, OpenCode and pi, status states the missing active-client evidence without launching
+sessions. Installation checks do not certify an interactive approval UI:
 
 | Backend | Shipped yard setting | Limit of the evidence |
 | --- | --- | --- |
-| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and commit/push ask entries. | Native SDK probes confirm that explicit ask rules still prompt in both bypass and default modes. Interactive client persistence and override handling need separate acceptance. |
-| OpenCode | Global allow, with commit/push ask patterns under `permission.bash`. | Native probes confirm denial and repeated approval after `once`; choosing `always` permits a later matching command without a new prompt. |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and mandatory native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. Actual IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
+| OpenCode V1 | Global allow, with commit/push ask patterns under `permission.bash`. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
 | pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
 
+Claude provisioning installs its own root-owned drop-in at
+`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds only ask rules;
+it preserves other managed files and user/project denies, and refuses foreign files at its own
+managed path. It does not enable `allowManagedPermissionRulesOnly`, which would discard those
+user/project restrictions. `claude-policy-check` verifies installation and permissions only.
+In a new client, inspect `/status` for the managed file/drop-ins source and `/permissions` for
+the effective rules. A higher-priority enterprise policy or a CLI without native drop-in support
+needs its own native acceptance; file presence does not prove that the client loaded it.
+Use `claude --permission-mode default` and one-time approval when inspecting native terminal behavior; the yard's
+existing bypass default is also covered by the SDK fixture. A native CLI terminal check using
+`--permission-mode default --settings <fixture>` offered only Yes/No, approved two separate
+commits only after two Yes responses, and retained the original HEAD after two No responses.
+This terminal check used explicit ask settings; the installed managed-drop-in precedence and
+session-update checks use the SDK. No actual Claude IDE selection has completed client
+acceptance, including when launched from Orca, so Subyard publishes no single-use guarantee
+for those clients.
+
 Claude's [SDK permission evaluation](https://code.claude.com/docs/en/agent-sdk/permissions)
-checks explicit ask rules before permission-mode defaults. The native SDK evidence does not
-establish which choices a separate terminal or IDE offers. OpenCode's
+checks explicit ask rules before permission-mode defaults. Native managed rules still prompt after
+the SDK submits session allow updates; that evidence does not establish the layout or choices of
+another terminal configuration or an IDE. See [managed settings](https://code.claude.com/docs/en/managed-settings)
+for drop-in precedence and `/status` inspection. OpenCode's
 [permissions](https://opencode.ai/docs/permissions/) include automatic approval and an `always`
 response; a client that permits persistent approval does not provide the single-use contract.
-These limitations also apply when Orca launches those backends.
+Run `opencode-permission-check` in the intended project to inspect its native resolved V1 defaults
+without printing configuration. It reports configured protected/ordinary decisions and the count
+of agent permission overrides, then exits 3 with `unsupported-single-use` even when all checked
+Git commands ask. An unavailable native config/schema exits 2 with `unverified`. This diagnostic
+uses `opencode debug config --pure` (external plugins disabled), bounds native output to 1 MiB
+and ten seconds, and emits only fixed decisions (`allow`, `ask`, `deny`, `unknown`). It does not inspect saved session
+approvals, enforce rules, or certify an active client. In direct OpenCode, choose `once` or reject
+each request; `always` and auto approval are outside the contract. Experimental V2 plugins are
+not a managed Subyard surface. These limits also apply when Orca launches OpenCode.
 Direct use remains available. Unsupported approval guarantees do not mean an agent cannot run,
 and none of these settings creates an OS security boundary.
 

@@ -15,6 +15,8 @@ MAX_FRAME = 16 * 1024 * 1024
 CONFIG_TIMEOUT = 5
 PERMISSION_FIELDS = ('approvalPolicy', 'approvalsReviewer', 'sandbox', 'sandboxPolicy',
                      'permissions')
+COMMAND_APPROVAL = 'item/commandExecution/requestApproval'
+SINGLE_USE_DECISIONS = ('accept', 'decline', 'cancel')
 
 
 def configured_request(request, response):
@@ -45,6 +47,8 @@ def relay(native, arguments):
     buffers = {'client': b'', 'server': b''}
     pending = {}
     internal_ids = set()
+    approvals = {}
+    approval_ids = set()
     queued = deque()
     queued_bytes = 0
     client_closed = False
@@ -58,6 +62,18 @@ def relay(native, arguments):
             'code': -32603, 'message': 'Yard Codex permissions unavailable; run yard init'}})
 
     def forward(request):
+        if 'method' not in request and 'id' in request:
+            request_id = request['id']
+            if request_id in approvals:
+                decisions = approvals.pop(request_id)
+                result = request.get('result')
+                decision = result.get('decision') if isinstance(result, dict) else None
+                # The native server accepts unadvertised session/policy amendments.
+                # This managed client owns the single-operation response boundary.
+                if not isinstance(decision, str) or decision not in decisions:
+                    request = {'id': request_id, 'result': {'decision': 'cancel'}}
+            elif isinstance(request.get('result'), dict) and 'decision' in request['result']:
+                raise ValueError('unsolicited approval response')
         if request.get('method') in ('thread/start', 'thread/resume'):
             params = request.get('params')
             if 'id' not in request or not isinstance(params, dict):
@@ -96,6 +112,10 @@ def relay(native, arguments):
                         raise ValueError('incomplete frame')
                     if side == 'client':
                         client_closed = True
+                        if approvals:
+                            for request_id in approvals:
+                                send(child.stdin, {'id': request_id, 'result': {'decision': 'cancel'}})
+                            return 1
                     else:
                         if pending:
                             for request, _ in pending.values():
@@ -122,9 +142,36 @@ def relay(native, arguments):
                                 except (ValueError, TypeError, AttributeError):
                                     refuse(request)
                             continue
+                        if message.get('method') == COMMAND_APPROVAL:
+                            request_id = message.get('id')
+                            params = message.get('params')
+                            if request_id is None or not isinstance(params, dict) or request_id in approval_ids:
+                                raise ValueError('invalid approval request')
+                            approval_ids.add(request_id)
+                            if client_closed:
+                                send(child.stdin, {'id': request_id, 'result': {'decision': 'cancel'}})
+                                return 1
+                            offered = params.get('availableDecisions', SINGLE_USE_DECISIONS)
+                            if not isinstance(offered, (list, tuple)):
+                                raise ValueError('invalid approval choices')
+                            decisions = [choice for choice in offered
+                                         if isinstance(choice, str) and choice in SINGLE_USE_DECISIONS]
+                            if not decisions:
+                                raise ValueError('single-use approval unavailable')
+                            approvals[request_id] = decisions
+                            message = {**message, 'params': {**params, 'availableDecisions': decisions}}
+                            frame = json.dumps(message, separators=(',', ':')).encode()
+                        elif str(message.get('method', '')).endswith('/requestApproval'):
+                            # A new native approval protocol needs explicit support.
+                            raise ValueError('unsupported approval request')
                         sys.stdout.buffer.write(frame + b'\n')
                         sys.stdout.buffer.flush()
                     else:
+                        # Validate causality when the response arrives, before config
+                        # reads can queue it until a future approval reuses its ID.
+                        if ('method' not in message and isinstance(message.get('result'), dict)
+                                and 'decision' in message['result'] and message.get('id') not in approvals):
+                            raise ValueError('unsolicited approval response')
                         if pending or queued:
                             queued_bytes += len(frame)
                             if queued_bytes > MAX_FRAME:

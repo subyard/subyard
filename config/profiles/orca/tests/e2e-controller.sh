@@ -64,6 +64,12 @@ while IFS= read -r lane; do
   diff -u "$tmp/expected-lane" "$PROFILE_CONTROLLER_CALLS"
 done < "$tmp/lanes"
 
+# Focused approval repair does not change the full acceptance manifest/default dispatch.
+: > "$PROFILE_CONTROLLER_CALLS"
+bash "$tmp/$controller" --lane codex-approvals --slot 7
+printf '%s\n' '--slot 7 --vm-count 1 --purpose codex-approvals --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh' > "$tmp/expected-approvals"
+diff -u "$tmp/expected-approvals" "$PROFILE_CONTROLLER_CALLS"
+
 rc=0
 : > "$PROFILE_CONTROLLER_CALLS"
 PROFILE_CONTROLLER_EXIT=23 bash "$tmp/$controller" --slot 7 > "$tmp/failure" 2>&1 || rc=$?
@@ -107,6 +113,45 @@ for name, argv, accepted in (
     assert helper.valid_yard_action(command, "fixture") is accepted, name
 print("ok: owner role check preserves exact arity and selected yard")
 PY
+# Native chat journals key prompts by tool-call identity across turns.
+python3 -B - "$ROOT/config/profiles/orca/tests/e2e/codex-permissions.py" <<'PYTEST'
+import http.server
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import threading
+import urllib.request
+
+spec = importlib.util.spec_from_file_location('provider_fixture', sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), helper.Provider)
+provider.workspace, provider.failure = Path('/tmp'), None
+thread = threading.Thread(target=provider.serve_forever, daemon=True)
+thread.start()
+try:
+    responses = []
+    for _ in range(2):
+        provider.command = 'true'
+        request = urllib.request.Request(
+            'http://127.0.0.1:' + str(provider.server_port) + '/v1/responses',
+            data=json.dumps({'tools': [{'name': 'shell'}]}).encode(),
+            headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            events = [json.loads(line[6:]) for line in response.read().decode().splitlines()
+                      if line.startswith('data: ')]
+        assert events[0]['response']['id'] == events[-1]['response']['id']
+        responses.append((events[0]['response']['id'], events[1]['item']['id'],
+                          events[1]['item']['call_id']))
+    assert all(responses[0][index] != responses[1][index] for index in range(3)), responses
+    assert provider.failure is None
+finally:
+    provider.shutdown()
+    provider.server_close()
+    thread.join(timeout=5)
+print('ok: synthetic native-chat responses keep distinct response/tool/call identities')
+PYTEST
 diagnostic=config/profiles/orca/tests/e2e/load-diagnostic.sh
 cp "$ROOT/$diagnostic" "$tmp/$diagnostic"
 : > "$PROFILE_CONTROLLER_CALLS"

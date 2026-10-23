@@ -5,11 +5,98 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 
 import support
 
 
 class CodexAppserverTests(unittest.TestCase):
+    @contextmanager
+    def approval_adapter(self, ordering=False):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+            native = Path(temporary) / 'native'
+            native.write_text('#!' + sys.executable + '\n' + '''
+import json, os, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'config/read' and os.environ['FIXTURE_ORDERING'] == '1':
+        time.sleep(0.2)
+        print(json.dumps({'id': 'future', 'method': 'item/commandExecution/requestApproval',
+                          'params': {'availableDecisions': ['accept', 'cancel']}}), flush=True)
+        time.sleep(0.2)
+        result = {'id': message['id'], 'result': {'config': {
+            'approval_policy': 'on-request', 'approvals_reviewer': 'user',
+            'sandbox_mode': 'danger-full-access'}}}
+    elif message.get('method') == 'fixture/approval':
+        result = {'id': message['id'], 'method': 'item/commandExecution/requestApproval',
+                  'params': {'command': 'git commit', 'availableDecisions':
+                    ['accept', 'acceptForSession', {'acceptWithExecpolicyAmendment': {}}, 'decline', 'cancel']}}
+    else:
+        result = {'method': 'fixture/received', 'params': message}
+    print(json.dumps(result), flush=True)
+''')
+            native.chmod(0o755)
+            child = subprocess.Popen([sys.executable, '-B', str(support.COMPONENT / 'codex_appserver.py'),
+                                      str(native), 'app-server'], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     env={**os.environ, 'ORCA_AGENT_SESSION_SPAWN_TOKEN': 'fixture',
+                                          'FIXTURE_ORDERING': str(int(ordering))})
+            try:
+                yield child
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                child.communicate(timeout=5)
+
+    def approval_send(self, child, message):
+        child.stdin.write(json.dumps(message) + '\n')
+        child.stdin.flush()
+
+    def approval_request(self, child, request_id):
+        self.approval_send(child, {'id': request_id, 'method': 'fixture/approval'})
+        return json.loads(child.stdout.readline())
+
+    def test_only_single_use_approval_choices_reach_client_and_native_server(self):
+        for decision in ('accept', 'decline', 'cancel', 'acceptForSession',
+                         {'acceptWithExecpolicyAmendment': {'execpolicy_amendment': ['git']}}):
+            with self.subTest(decision=decision), self.approval_adapter() as child:
+                for request_id in ('first', 'repeat'):
+                    request = self.approval_request(child, request_id)
+                    self.assertEqual(['accept', 'decline', 'cancel'], request['params']['availableDecisions'])
+                    self.approval_send(child, {'id': request_id, 'result': {'decision': decision}})
+                    received = json.loads(child.stdout.readline())['params']
+                    self.assertEqual(decision if isinstance(decision, str) and decision in
+                                     ('accept', 'decline', 'cancel') else 'cancel', received['result']['decision'])
+
+    def test_replayed_response_and_reused_native_id_fail_closed(self):
+        for replay in ('response', 'request'):
+            with self.subTest(replay=replay), self.approval_adapter() as child:
+                self.approval_request(child, 'once')
+                response = {'id': 'once', 'result': {'decision': 'accept'}}
+                self.approval_send(child, response)
+                child.stdout.readline()
+                self.approval_send(child, response if replay == 'response' else
+                                   {'id': 'once', 'method': 'fixture/approval'})
+                self.assertEqual(1, child.wait(timeout=5))
+                self.assertEqual('', child.stdout.read())
+
+    def test_response_before_native_request_is_rejected_before_config_queueing(self):
+        with self.approval_adapter(ordering=True) as child:
+            # Keep stdin open: EOF cancellation must not hide the ingress-ordering bug.
+            child.stdin.write(json.dumps({'id': 'start', 'method': 'thread/start',
+                                          'params': {}}) + '\n' + json.dumps(
+                {'id': 'future', 'result': {'decision': 'accept'}}) + '\n')
+            child.stdin.flush()
+            self.assertEqual(1, child.wait(timeout=5))
+            self.assertEqual('', child.stdout.read())
+
+    def test_disconnect_cancels_pending_approval_and_stops_native_server(self):
+        with self.approval_adapter() as child:
+            self.approval_request(child, 'pending')
+            child.stdin.close()
+            child.stdin = None
+            self.assertEqual(1, child.wait(timeout=5))
+
     def run_adapter(self, requests, config=None, error=False, arguments=None, scoped=True, mode='normal'):
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             root = Path(temporary)

@@ -10,13 +10,13 @@ while [ "$#" -gt 0 ]; do
     --slot) [ "$#" -ge 2 ] || { printf 'acceptance: --slot needs a value\n' >&2; exit 2; }; slot="$2"; shift 2 ;;
     --lane) [ "$#" -ge 2 ] || { printf 'acceptance: --lane needs a value\n' >&2; exit 2; }; lane="$2"; shift 2 ;;
     --native-loss) [ "$#" -ge 2 ] && [ -z "$native_loss" ] || exit 2; native_loss="$2"; shift 2 ;;
-    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions] [--native-loss owner|helper|group]\n' >&2; exit 2 ;;
+    *) printf 'usage: acceptance.sh --slot N [--lane full|bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals] [--native-loss owner|helper|group]\n' >&2; exit 2 ;;
   esac
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || { printf 'acceptance: --slot N is required\n' >&2; exit 2; }
 case "$lane" in
   full) lanes=(bootstrap existing-yard resource projects ssh-agent codex-permissions) ;;
-  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions) lanes=("$lane") ;;
+  bootstrap|existing-yard|resource|projects|ssh-agent|codex-permissions|codex-approvals) lanes=("$lane") ;;
   *) printf 'acceptance: invalid lane: %s\n' "$lane" >&2; exit 2 ;;
 esac
 case "$native_loss" in ''|owner|helper|group) ;; *) exit 2 ;; esac
@@ -49,6 +49,10 @@ for lane in "${lanes[@]}"; do
     ssh-agent)
       bash "$runner" --slot "$slot" --vm-count 1 --purpose orca-ssh-agent --vm 1 -- \
         env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_SSH_AGENT=1 bash "$bootstrap" ;;
+    codex-approvals)
+      bash "$runner" --slot "$slot" --vm-count 1 --purpose codex-approvals --vm 1 -- \
+        env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 \
+        SUBYARD_E2E_ORCA_CODEX_APPROVALS_ONLY=1 bash "$bootstrap" ;;
     codex-permissions)
       bash "$runner" --slot "$slot" --vm-count 1 --purpose codex-permissions --vm 1 -- \
         env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_CODEX_PERMISSIONS=1 bash "$bootstrap" ;;

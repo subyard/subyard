@@ -45,14 +45,14 @@ fi
 
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
-echo "Agent CLIs:"
+echo "Coding integrations:"
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   case " ${SUBYARD_INTEGRATION_LIFECYCLES:-} " in *" $_agent "*) continue ;; esac
   _provision_var="AGENT_${_agent}_PROVISION"
   _provision="${!_provision_var:-}"
   [ -n "$_provision" ] || continue
   [ -r "$_provision" ] || die "$_agent provision hook missing: $_provision"
-  info "provisioning $_agent CLI in $YARD_INSTANCE_NAME"
+  info "provisioning $_agent integration in $YARD_INSTANCE_NAME"
   _agent_env=(
     --env DEV_USER="$DEV_USER"
     --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
@@ -72,7 +72,7 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   if [ -n "${!_health_var:-}" ]; then
     ok "$_agent package installed; service health is reported by yard status"
   else
-    ok "$_agent CLI ready"
+    ok "$_agent integration ready"
   fi
 done
 unset _agent _agent_env _check_var _check _health_var _provision_var _provision

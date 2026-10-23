@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import tempfile
 import threading
@@ -48,6 +49,102 @@ def accepted(result, operation):
             'reason': reason if reason in reasons else 'unspecified'}, sort_keys=True), flush=True)
         raise AssertionError(operation + ' was refused')
     return result
+
+
+def approval_checks(rpc, provider, worktree, sessions):
+    """Drive the stock native-chat journal and its revision-fenced approval RPC."""
+    with tempfile.TemporaryDirectory(prefix='subyard-orca-chat-git-', dir='/tmp') as temporary:
+        repo = Path(temporary)
+        def git(*arguments):
+            result = subprocess.run(['git', '-C', str(repo), *arguments], capture_output=True,
+                                    text=True, timeout=10)
+            return result.stdout.strip() if result.returncode == 0 else None
+        git('init', '-q')
+        git('config', 'user.name', 'Fixture')
+        git('config', 'user.email', 'fixture@example.invalid')
+        session = str(uuid.uuid4())
+        fields = {'worktree': worktree, 'agent': 'codex'}
+        accepted(rpc.call('agentSession.create', {
+            **fields, 'envelope': envelope('agentSession.create', session, fields)}), 'create-approvals')
+        sessions.append(session)
+
+        def history():
+            return accepted(rpc.call('agentSession.history', {
+                'sessionId': session, 'direction': 'tail'}), 'approval-history')['page']
+
+        for index, (command, choice) in enumerate([
+                ('git commit --allow-empty -m denied', 'cancel'),
+                ('git commit --allow-empty -m first', 'accept'),
+                ('git commit --allow-empty -m repeated', 'accept'),
+                ('git commit --amend --allow-empty -m amended', 'accept'),
+                ('git commit --amend --allow-empty -m amended-again', 'accept'),
+                ('git push', 'cancel'), ('git push', 'cancel')]):
+            before = git('rev-parse', '--verify', 'HEAD')
+            provider.workspace, provider.command = repo, command
+            body = {'kind': 'message', 'role': 'user', 'blocks': [
+                {'type': 'text', 'text': 'Run the fixture command.'}]}
+            page = history()
+            accepted(rpc.call('agentSession.send', {
+                'envelope': envelope('agentSession.send', session, {'body': body}, page['fence']),
+                'body': body}), 'send-approval')
+            deadline = time.monotonic() + 30
+            prompt = None
+            while time.monotonic() < deadline:
+                page = history()
+                prompts = [item for item in page['items'] if item['body'].get('kind') == 'approval'
+                           and item['body']['resolution']['state'] == 'pending']
+                if prompts:
+                    assert len(prompts) == 1, 'duplicate native chat approval'
+                    prompt = prompts[0]
+                    break
+                time.sleep(0.1)
+            if prompt is None:
+                latest = (page.get('latestTurn') or {}).get('turn', {})
+                state = latest.get('state')
+                print('orca-chat-approval-timeout: ' + json.dumps({
+                    'operation': index + 1, 'model_requests': getattr(provider, 'request_count', 0),
+                    'command_pending': provider.command is not None,
+                    'turn_state': state if state in ('running', 'completed', 'interrupted',
+                                                     'failed', 'unverifiable') else 'unknown',
+                    'approval_items': sum(item['body'].get('kind') == 'approval'
+                                          for item in page['items']),
+                    'history_changed': git('rev-parse', '--verify', 'HEAD') != before,
+                }, sort_keys=True), flush=True)
+                raise AssertionError('native chat did not request a fresh Git approval')
+            approval_turn = (page.get('latestTurn') or {}).get('itemId')
+            assert approval_turn, 'native approval has no current turn'
+            options = [option['id'] for option in prompt['body']['options']]
+            assert options and set(options) <= {'accept', 'decline', 'cancel'}, 'persistent chat choice exposed'
+            assert choice in options, 'required single-use chat choice missing'
+            assert git('rev-parse', '--verify', 'HEAD') == before, 'chat executed Git before approval'
+            # Every RPC opens a new connection. A fresh client must see the same pending card.
+            reconnected = RuntimeRPC('/srv/agents/orca/config/orca/orca-runtime.json', timeout=30)
+            reread = accepted(reconnected.call('agentSession.history', {
+                'sessionId': session, 'direction': 'tail'}), 'reconnect-history')['page']
+            assert any(item['itemId'] == prompt['itemId'] and
+                       item['body'].get('resolution', {}).get('state') == 'pending'
+                       for item in reread['items']), 'pending approval lost on reconnect'
+            fields = {'itemId': prompt['itemId'], 'expectedRevision': prompt['revision'], 'optionId': choice}
+            accepted(reconnected.call('agentSession.respondToApproval', {
+                # Orca promptPlan hashes its canonical approval mutation, not the RPC alias.
+                **fields, 'envelope': envelope('agentSession.respondTo:approval', session, fields,
+                                              reread['fence'])}), 'respond-approval')
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                page = history()
+                latest = page.get('latestTurn') or {}
+                if (latest.get('itemId') == approval_turn and
+                        latest.get('turn', {}).get('state') in ('completed', 'interrupted')):
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError('native chat approval turn did not finish')
+            after = git('rev-parse', '--verify', 'HEAD')
+            assert (after != before) == (choice == 'accept'), 'native chat approval effect mismatch'
+            assert provider.failure is None, 'synthetic chat provider failed'
+            print('ok: native chat single-use approval/reconnect ' + str(index + 1), flush=True)
+        rpc.call('agentSession.close', {'sessionId': session})
+        sessions.remove(session)
 
 
 def main():
@@ -145,6 +242,7 @@ def main():
                 assert context.get('sandbox_policy', {}).get('type') == 'danger-full-access', 'native chat sandbox drift'
                 native_thread, context_count = matches[0], len(contexts)
                 print('ok: stock Orca Codex chat ' + ('start' if number == 1 else 'resume'), flush=True)
+        approval_checks(rpc, provider, worktree, sessions)
     finally:
         for session in sessions:
             rpc.call('agentSession.close', {'sessionId': session})

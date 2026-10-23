@@ -1,5 +1,7 @@
 {
   "schema_version": 2,
+  "provision": "provision.sh",
+  "check": "claude-policy-check",
   "persist": "\n.claude/projects:/mnt/host/agent-sessions/claude/projects\n.claude-memory:/mnt/host/agent-sessions/claude/memory\n",
   "artifacts": [
     {

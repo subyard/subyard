@@ -74,7 +74,11 @@ to materialization planning. Independent observation still verifies resulting st
 | Prepared config and integration execution | Existing captured-source maps, package bindings and recipes |
 
 No Claude/Codex instruction map or four-tool artifact/persistence path inventory
-remains in the common runtime. Claude and pi gain no new installation or probe
-requirements; Codex retains its existing provision/command/check hooks. Credential
+remains in the common runtime. Pi gains no new installation or probe requirements;
+Claude remains configuration-only for CLI distribution and adds a native managed-policy
+provision/check hook. A configuration-only provision hook may omit `command` only with an
+explicit safe `check` that establishes convergence; hooks declaring an executable retain
+their existing command validation. Init, prepared integration and release activation all
+use that same check. Codex retains its existing provision/command/check hooks. Credential
 exclusions and editor recommendations retain their separate
 [compatibility contracts](integration-consumer-compatibility.md).

@@ -1202,6 +1202,36 @@ func TestProvisionAgentChecksAreValidated(t *testing.T) {
 	}
 }
 
+func TestConfigurationOnlyProvisionRequiresExplicitSafeCheck(t *testing.T) {
+	hook := filepath.Join(testkit.TempDir(t), "provision.sh")
+	testkit.WriteFile(t, hook, []byte("fixture\n"), 0o600)
+	for _, test := range []struct {
+		name, command, check string
+		valid                bool
+	}{
+		{name: "policy check", check: "sample-policy-check", valid: true},
+		{name: "no convergence check"},
+		{name: "unsafe check", check: "bad check"},
+		{name: "unsafe command with check", command: "bad command", check: "sample-policy-check"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := Runtime{Environment: []string{"CODING_TOOL_INTEGRATIONS=sample",
+				"AGENT_sample_PROVISION=" + hook, "AGENT_sample_COMMAND=" + test.command,
+				"AGENT_sample_CHECK=" + test.check}}
+			commands, err := runtime.provisionAgentCommands()
+			if (err == nil) != test.valid {
+				t.Fatalf("commands = %v, error = %v", commands, err)
+			}
+			if test.valid {
+				checks, err := runtime.provisionAgentChecks()
+				if len(commands) != 0 || err != nil || len(checks) != 1 || checks[0] != test.check {
+					t.Fatalf("configuration-only convergence = %v, %v, %v", commands, checks, err)
+				}
+			}
+		})
+	}
+}
+
 func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 	incus := &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus"},
