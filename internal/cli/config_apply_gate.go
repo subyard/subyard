@@ -118,6 +118,22 @@ func (cli *CLI) prepareProfileInitRepair(ctx context.Context, yard string, argum
 	return cli.prepareActivationRepair(ctx, yard, false, outcome, true, nil, true, "")
 }
 
+func (cli *CLI) prepareInitAdmission(ctx context.Context, yard string, arguments []string,
+	outcome releasetransition.Outcome,
+) (*releasetransition.Outcome, error) {
+	permit, err := cli.prepareProfileInitRepair(ctx, yard, arguments, outcome)
+	if err != nil {
+		return nil, err
+	}
+	cli.profileInitRepair = permit
+	if permit != nil {
+		return nil, nil
+	}
+	// External convergence can make a repair unnecessary during assessment.
+	// Ordinary init still requires the fresh host-wide admission check.
+	return cli.inspectMutationGate(ctx, yard)
+}
+
 // Teardown grants new destructive authority only for the ordinarily assessed
 // local target. Completed release history remains immutable; reset stays gated.
 func (cli *CLI) prepareTeardownRepair(ctx context.Context, loaded config.Loaded, arguments []string, outcome releasetransition.Outcome) (*configApplyRepairPermit, error) {

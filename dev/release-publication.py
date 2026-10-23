@@ -38,6 +38,11 @@ def identity_hash(identity):
     return hashlib.sha256(canonical(identity).encode()).hexdigest()
 
 
+def same_repository(left, right):
+    return (all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value)
+                for value in (left, right)) and left.lower() == right.lower())
+
+
 def encode_attestation(document):
     original = canonical(document).encode()
     if len(original) > ATTESTATION_BYTE_LIMIT:
@@ -198,7 +203,7 @@ def verify_run(github, candidate):
     workflow = github.api("actions/workflows/release.yml")
     if (run["workflow_id"] != workflow["id"] or run["event"] != "workflow_dispatch"
         or run["status"] != "completed" or run["conclusion"] != "success"
-        or run["run_attempt"] != attempt or run["repository"]["full_name"] != github.repository):
+        or run["run_attempt"] != attempt or not same_repository(run["repository"]["full_name"], github.repository)):
         raise ValueError("preparation run/attempt did not pass")
     jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
     required = {"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"}
@@ -226,7 +231,7 @@ def fetch(github, candidate, destination):
         zipped.extractall(destination)
     archive.unlink()
     identity = checked_identity(destination)
-    if identity["candidate_id"] != candidate or identity["repository"] != github.repository:
+    if identity["candidate_id"] != candidate or not same_repository(identity["repository"], github.repository):
         raise ValueError("preparation artifact belongs to another candidate")
     return identity
 
@@ -712,7 +717,7 @@ def report_unrun_checks(document):
 def publish_remote(github, prepared, document, root):
     document = decode_attestation(document)
     identity = checked_identity(prepared)
-    if identity["repository"] != github.repository or a.source_fingerprint(root) != identity["source_fingerprint"]:
+    if not same_repository(identity["repository"], github.repository) or a.source_fingerprint(root) != identity["source_fingerprint"]:
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
@@ -908,7 +913,7 @@ def main():
             state = json.loads(path.read_text()) if path.exists() else {
                 "request": str(uuid.uuid4()), "version": args.version, "commit": args.commit,
                 "repository": args.repository, "workflow_ref": args.workflow_ref}
-            if state["repository"] != args.repository:
+            if not same_repository(state["repository"], args.repository):
                 raise ValueError("request repository mismatch")
             write_json(path, state)
             run = dispatch(github, "release.yml", {"version": args.version, "commit": args.commit}, state, path)
@@ -924,7 +929,7 @@ def main():
                         raise ValueError("preparation inputs mismatch")
                     staging.rename(prepared)
             identity = checked_identity(prepared)
-            if (identity["candidate_id"] != candidate or identity["repository"] != github.repository
+            if (identity["candidate_id"] != candidate or not same_repository(identity["repository"], github.repository)
                 or identity["version"] != args.version or identity["commit"] != args.commit):
                 raise ValueError("local preparation state mismatch")
             write_json(directory / "identity.json", identity)
@@ -942,7 +947,7 @@ def main():
                 fetch(github, args.candidate, staging)
                 staging.rename(prepared)
         identity = checked_identity(prepared)
-        if identity["candidate_id"] != args.candidate or identity["repository"] != github.repository:
+        if identity["candidate_id"] != args.candidate or not same_repository(identity["repository"], github.repository):
             raise ValueError("local state belongs to another candidate/repository")
         write_json(directory / "identity.json", identity)
         output = directory / "acceptance"

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Real Incus profile boundary in a marker-owned disposable container."""
 import json
+import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -11,6 +13,9 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+spec = importlib.util.spec_from_file_location("producer", ROOT / "scripts/lib/producer-run.py")
+producer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(producer)
 
 
 def call(*args, **kwargs):
@@ -82,7 +87,26 @@ exit "$STATUS"
                    DEV_USER="nobody", DEV_UID="65534", DEV_SUDO="0", FORWARD_SSH_AGENT="0", NESTED_E2E_VMS="0")
         def adapter(status=0, action="status", check=False):
             (profile / "profile.conf").write_text(f"STATUS={status}\nACTION={action}\n")
-            return ["bash", str(runtime / "scripts/provision-profile.sh"), *(["--check"] if check else []), "synthetic"]
+            entries = {}
+            for path in [profile, *sorted(profile.rglob("*"))]:
+                digest = None
+                if path.is_file():
+                    with path.open("rb") as source:
+                        digest = hashlib.file_digest(source, "sha256").hexdigest()
+                entries[str(path.relative_to(profile))] = producer.source_identity(path.lstat(), digest)
+            parents = {}
+            for path in profile.parents:
+                identity = producer.source_identity(path.lstat())
+                identity.update(size=0, modified=0, changed=0, links=0)
+                parents[str(path)] = identity
+            binding = dict(root=str(profile), entries=entries, parents=parents,
+                           environment={"STATUS": str(status), "ACTION": action})
+            with tempfile.NamedTemporaryFile(mode="w", prefix="metadata-", dir=fixture, delete=False) as metadata:
+                os.fchmod(metadata.fileno(), 0o600)
+                json.dump({"input": {"profileBinding": binding}}, metadata)
+            return ["bash", "-c", 'set -e; exec 3<"$1"; shift; export SUBYARD_METADATA_FD=3; exec "$@"',
+                    "producer-fixture", metadata.name, "bash", str(runtime / "scripts/provision-profile.sh"),
+                    *(["--check"] if check else []), "synthetic"]
         for status, expected in ((0, "converged\n"), (10, "changed\n"), (7, "")):
             result = subprocess.run(adapter(status, check=True), env=env, capture_output=True, text=True, timeout=30)
             assert result.returncode == (7 if status == 7 else 0), result
@@ -94,7 +118,7 @@ exit "$STATUS"
         for invalid in ("/tmp/.", "/tmp//", "/var/tmp/.", "/dev/shm/."):
             (profile / "provision-tmp-paths").write_text(invalid + "\n")
             result = subprocess.run(adapter(), env=env, capture_output=True, text=True, timeout=30)
-            assert result.returncode == 125 and not result.stdout and "invalid shared temporary directory" in result.stderr, result
+            assert result.returncode == 125 and not result.stdout and result.stderr == "producer: invalid shared temporary directory\n", result
         (profile / "provision-tmp-paths").write_text("/tmp/producer-legacy\n")
         result = subprocess.run(adapter(7, "noisy"), env=env, capture_output=True, timeout=30)
         assert result.returncode == 7 and len(result.stderr) < 65700 and b"truncated" in result.stderr, result

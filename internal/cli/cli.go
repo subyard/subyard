@@ -610,14 +610,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 			}
 		}
 		if outcome != nil && core && definition.Handler == "@init" {
-			permit, err := cli.prepareProfileInitRepair(ctx, yard, commandArguments, *outcome)
-			if err != nil {
-				cli.errorf("init release repair: %v", err)
+			outcome, gateErr = cli.prepareInitAdmission(ctx, yard, commandArguments, *outcome)
+			if gateErr != nil {
+				cli.errorf("init release repair: %v", gateErr)
 				return 1
-			}
-			cli.profileInitRepair = permit
-			if permit != nil {
-				outcome = nil
 			}
 		}
 		if outcome != nil && core && definition.Handler == "@integration" {
@@ -4258,13 +4254,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 			if outcome != nil {
 				if definition.Handler == "@init" {
-					operationCLI.profileInitRepair, gateErr = operationCLI.prepareProfileInitRepair(
+					outcome, gateErr = operationCLI.prepareInitAdmission(
 						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
 					if gateErr != nil {
 						return nil, operationRPCError("mutation_gate_failed", gateErr)
 					}
 				}
-				if operationCLI.profileInitRepair == nil {
+				if outcome != nil {
 					return nil, mutationGateRPCError(*outcome)
 				}
 			}

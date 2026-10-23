@@ -18,6 +18,12 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 (ROOT / ".build").mkdir(exist_ok=True)
 
+# The normal helper boundary retains its failure status without exposing input.
+result = subprocess.run(["python3", str(HELPER), "capture", "check", "private-secret/path"],
+                        env=dict(os.environ, SUBYARD_METADATA_FD="private-secret/path"), capture_output=True)
+assert result.returncode == 125 and not result.stdout
+assert result.stderr == b"producer: operation failed; inspect preserved storage before retrying\n"
+
 
 def until(predicate):
     deadline = time.monotonic() + 8
@@ -101,8 +107,8 @@ with tempfile.TemporaryDirectory(prefix="producer-test-", dir=ROOT / ".build") a
             receipt.write_bytes(content)
             receipt.chmod(0o600)
         result = subprocess.run(command, capture_output=True, timeout=3)
-        assert result.returncode == 125 and str(operation).encode() in result.stderr
-        assert b"preserved" in result.stderr and b"inspect" in result.stderr
+        assert result.returncode == 125 and result.stderr == b"producer: operation failed; inspect preserved storage before retrying\n"
+        assert str(operation).encode() not in result.stderr
         assert canary.read_text() == "preserve"
         if content is not None:
             assert receipt.read_bytes() == content
@@ -114,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix="producer-test-", dir=ROOT / ".build") a
     receipt.write_bytes(original)
     receipt.chmod(0o600)
     result = subprocess.run(command, capture_output=True, timeout=3)
-    assert result.returncode == 125 and str(operation).encode() in result.stderr and not (operation / "data").exists()
+    assert result.returncode == 125 and result.stderr == b"producer: operation failed; inspect preserved storage before retrying\n" and not (operation / "data").exists()
     # Invoke the real build boundary, faking only its expensive download.
     binary = root / "bin"
     binary.mkdir()

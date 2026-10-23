@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from unittest.mock import patch
 from contextlib import redirect_stdout
@@ -114,6 +115,7 @@ class FakeGitHub:
     repository = m.REPOSITORY
     def __init__(self, identity):
         self.identity = identity
+        self.run_repository = self.repository
         self.ref = None
         self.tag = None
         self.release = None
@@ -132,7 +134,7 @@ class FakeGitHub:
         if path.startswith("actions/runs/") and path.endswith("/attempts/1"):
             return {"workflow_id": 9, "event": "workflow_dispatch", "status": "completed",
                 "conclusion": "success" if self.successful_run else "failure", "run_attempt": 1,
-                "repository": {"full_name": self.repository}}
+                "repository": {"full_name": self.run_repository}}
         if path.startswith("git/ref/tags/"):
             return copy.deepcopy(self.ref)
         if path == "git/tags" and method == "POST":
@@ -210,6 +212,58 @@ class Downloads(unittest.TestCase):
 
 
 class Contracts(unittest.TestCase):
+    def test_repository_case_aliases_preserve_preparation_identity_and_request(self):
+        with tempfile.TemporaryDirectory(prefix="subyard-repository-case-", dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            identity["repository"] = "subyard/subyard"
+            m.write_json(prepared / "identity.json", identity)
+            original_identity = (prepared / "identity.json").read_bytes()
+            archive = directory / "candidate.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for path in prepared.rglob("*"):
+                    if path.is_file():
+                        zipped.write(path, path.relative_to(prepared))
+            github = FakeGitHub(identity)
+            github.run_repository = identity["repository"]
+            pages = github.pages
+            state_dir = directory / "state"
+            argv = ["release-publication", "--state-dir", str(state_dir), "--repository", "Subyard/Subyard",
+                    "prepare", "--version", identity["version"], "--commit", identity["commit"]]
+            with patch.object(m, "GitHub", return_value=github), redirect_stdout(io.StringIO()):
+                github.repository = "Subyard/Subyard"
+                with patch.object(github, "pages", side_effect=lambda path, key=None:
+                        [{"id": 42, "name": "release-candidate-1", "expired": False}]
+                        if path.endswith("/artifacts") else pages(path, key)), \
+                        patch.object(github, "download", side_effect=lambda path, destination: shutil.copyfile(archive, destination)), \
+                        patch.object(m, "dispatch", return_value={"id": 123, "run_attempt": 1}), \
+                        patch.object(sys, "argv", argv):
+                    self.assertEqual(m.main(), 0)
+                    request = state_dir / "requests" / (identity["version"] + "-" + identity["commit"] + ".json")
+                    original_request = request.read_bytes()
+                    argv[4] = github.repository = "subyard/subyard"
+                    self.assertEqual(m.main(), 0)
+                    self.assertEqual(request.read_bytes(), original_request)
+                    argv[4] = github.repository = "foreign/subyard"
+                    with self.assertRaisesRegex(ValueError, "request repository mismatch"):
+                        m.main()
+                local = state_dir / identity["candidate_id"] / "prepared"
+                self.assertEqual((local / "identity.json").read_bytes(), original_identity)
+                github.repository = argv[4] = "SUBYARD/Subyard"
+                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
+                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1):
+                    self.assertEqual(m.main(), 1)
+                    argv[4] = github.repository = "foreign/subyard"
+                    with self.assertRaisesRegex(ValueError, "another candidate/repository"):
+                        m.main()
+                github.repository = "Subyard/Subyard"
+                for repository in ("foreign/subyard", "subyard/foreign", "", "subyard/subyard/", "ſubyard/subyard"):
+                    with self.subTest(repository=repository):
+                        github.run_repository = repository
+                        with self.assertRaisesRegex(ValueError, "run/attempt did not pass"):
+                            m.verify_run(github, identity["candidate_id"])
+            self.assertEqual((local / "identity.json").read_bytes(), original_identity)
+
     def test_v5_deduplicates_manifests_and_rejects_extra_dangling_conflicting_references(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -327,6 +381,19 @@ class Contracts(unittest.TestCase):
 
     def publish(self):
         return m.publish_remote(self.github, self.prepared, self.document, self.frozen)
+
+    def test_repository_case_alias_publishes_without_rewriting_identity(self):
+        original = (self.prepared / "identity.json").read_bytes()
+        self.github.repository = self.identity["repository"].swapcase()
+        self.github.run_repository = self.identity["repository"].lower()
+        self.assertTrue(self.publish()["immutable"])
+        self.assertEqual((self.prepared / "identity.json").read_bytes(), original)
+        self.assertIn(m.identity_hash(self.identity), self.github.release["body"])
+        self.github.repository = "foreign/subyard"
+        self.github.calls.clear()
+        with self.assertRaisesRegex(ValueError, "source/repository mismatch"):
+            self.publish()
+        self.assertEqual(self.github.calls, [])
 
     def test_exact_import_no_rebuild_and_changed_public_inputs_reject(self):
         frozen, receipt = m.a.load_bound(self.output)
