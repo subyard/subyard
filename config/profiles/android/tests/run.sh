@@ -3,6 +3,7 @@
 set -euo pipefail
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+python3 -B "$ROOT/config/profiles/android/tests/skills-test.py"
 bash "$ROOT/tests/helpers/profile-go.sh" android
 bash "$ROOT/config/profiles/android/tests/android-provision-check.sh"
 bash "$ROOT/config/profiles/android/tests/emulator-process-identity.sh"

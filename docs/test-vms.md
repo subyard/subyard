@@ -409,7 +409,7 @@ requirement for Subyard development. `--vm 1` on the default `subyard-pair` only
 the payload runs: the broker still allocates both guests unless `--vm-count 1` is supplied.
 That singleton reserves 4.5 GiB including VM overhead, rather than the pair's 9 GiB.
 OpenClaw, GitHub, Hermes, Orca and subyard-dev acceptance request one standard guest; Amnezia
-retains its owner/client pair. Android retains its larger guest. The generic Android VM base
+retains its owner/client pair. Android uses its larger guest except for the skills lane below. The generic Android VM base
 does not include the SDK; the fixture provisions it.
 The ordinary Android `--lane full` gate initializes and provisions a real yard, builds one
 small launchable APK with the installed SDK tools, verifies APK semantics and its signature,
@@ -417,6 +417,26 @@ then removes the disposable SDK environment through normal marker-owned yard tea
 verifies the SDK's owned `/srv` backing and volume, instance, project and state removal,
 preserving the reusable yard definition and an unrelated user file. It needs no Gradle download or emulator runtime.
 See [Android acceptance](android.md#release-acceptance).
+
+For agent skill delivery and native discovery, use the focused Android lane:
+
+```sh
+config/profiles/android/tests/e2e/acceptance.sh --slot N --lane skills
+```
+
+This lane uses one standard disposable VM, requiring 14 GiB free disk and 2 GiB available
+RAM before setup. It installs the packaged candidate and provisions the Android capability, then checks
+repeat static refresh, missing discovery-link repair through a fresh host-wide
+`yard migrate` assessment followed by ordinary initialization,
+and provider disable while preserving
+the pool process and an unrelated user skill. It installs native Codex, Claude Code and
+OpenCode clients after skill delivery and queries their loaders from a separate disposable
+Git project inside the yard. The skill content comes from the installed runtime; no Subyard
+checkout is mounted there. Codex uses `skills/list`; OpenCode requires its native `debug skill`
+command; Claude's startup stream and outgoing skill metadata use a loopback mock API with a
+synthetic key. These checks establish native metadata discovery, without provider credentials
+or model inference. Description-based model selection and comprehension remain separate
+checks. This lane allocates no emulator and does not replace the ordinary SDK/build gate.
 
 For L2 isolation and project lifecycle changes, use `--lane projects` with
 `config/profiles/android/tests/e2e/acceptance.sh --slot N`. This lane performs fresh yard setup,

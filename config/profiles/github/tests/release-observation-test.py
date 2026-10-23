@@ -25,9 +25,11 @@ class ReleaseObservationTest(unittest.TestCase):
             (package / 'bin').mkdir(parents=True)
             # The broker is fingerprinted but never executed by absence inspection.
             for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh',
-                         'SKILL.md', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py'):
+                         'SKILL.md', 'skills.json', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py'):
                 shutil.copy2(PROFILE / name, package / name)
             (package / 'bin/broker').write_text('unexecuted synthetic broker input\n')
+            (runtime / 'config/skills').mkdir()
+            shutil.copy2(ROOT / 'config/skills/deliver.py', runtime / 'config/skills/deliver.py')
             (runtime / 'scripts/lib').mkdir(parents=True)
             for name in ('engine-context.sh', 'ui.sh', 'host.sh', 'download.sh'):
                 shutil.copy2(ROOT / 'scripts/lib' / name, runtime / 'scripts/lib' / name)

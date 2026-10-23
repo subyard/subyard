@@ -71,6 +71,55 @@ def expected_metadata(entry, home, uid):
     group = entry.get('gid', owner) if entry['kind'] == 'link' else owner
     return [owner, group, mode]
 
+def preview_migration_plan(records, home, uid):
+    paths = {home + '/' + relative for relative in (
+        '.claude/CLAUDE.md', '.codex/AGENTS.md', '.config/opencode/AGENTS.md')}
+    accepted = {'9697d51bbecba09a3865819daf186615bea26a5291013143e1993394603053d0',
+                '2de48bed4c984591e976f396432ff7758f4df3ca24e0b55fc90bf1fb0a5aeb48'}
+    start, end = b'<!-- subyard-preview -->', b'<!-- /subyard-preview -->'
+    result = []
+    for record in records:
+        if record['kind'] != 'file' or record.get('path') not in paths:
+            continue
+        current = actual(record)
+        if current is None:
+            continue
+        if current == 'foreign':
+            raise OwnershipConflict('owned artifact drift', record['path'])
+        with open(record['path'], 'rb') as stream:
+            payload = stream.read()
+        if start not in payload and end not in payload:
+            continue
+        begin, finish = payload.find(start), payload.find(end)
+        if (payload.count(start) != 1 or payload.count(end) != 1 or finish < begin
+                or digest(payload[begin:finish + len(end)]) not in accepted):
+            raise OwnershipConflict('owned artifact drift', record['path'],
+                                    'preview instruction block requires inspection')
+        if (current not in (record['digest'], record.get('pending_digest'), record.get('config_pending_digest'))
+                or actual_metadata(record) != expected_metadata(record, home, uid)):
+            raise OwnershipConflict('owned artifact drift', record['path'])
+        result.append((record, current, payload[:begin] + payload[finish + len(end):]))
+    return result
+
+
+def apply_preview_migrations(migrations, inventory, inventory_path, uid):
+    if not migrations:
+        return
+    # Publish retry identities before replacing any file. This is the same narrow
+    # preview-only operation as guest static refresh, without skill installation.
+    for record, before, payload in migrations:
+        record['config_pending_digest'] = digest(payload)
+        record['preview_migrated'] = True
+    atomic(inventory_path, encode(inventory))
+    for record, before, payload in migrations:
+        if actual(record) != before:
+            raise OwnershipConflict('owned artifact drift', record['path'])
+        atomic(record['path'], payload, 0o644, uid)
+        record['digest'] = digest(payload)
+        record.pop('config_pending_digest', None)
+    atomic(inventory_path, encode(inventory))
+
+
 def adoptable_selected(entry, current, home, uid):
     accepted = {entry['digest']}
     # Instruction composition accepts the exact original host bytes only through
@@ -218,10 +267,27 @@ def main():
     wanted = {key(e): e for e in desired}
     if len(previous) != len(records) or len(wanted) != len(desired):
         raise ValueError('duplicate inventory entry')
+    cutover = request.get('preview_skill_cutover') is True
+    migrations = preview_migration_plan(records, home, uid) if cutover else []
     if mode in ('configs-prepare', 'configs-commit'):
         # Config refresh acknowledges existing ownership only. It cannot adopt,
         # retire or finish a pending package/link/hook reconciliation.
         by_path = {e.get('path'): e for e in records if e.get('path')}
+        # Refuse all unsafe config ownership before the preview-only writes.
+        if migrations and mode == 'configs-prepare':
+            for entry in desired:
+                record = by_path.get(entry.get('path'))
+                current = actual(entry)
+                if record is None:
+                    if current is not None:
+                        raise unowned_selected(entry, current)
+                elif (any(record.get(k) != entry.get(k) for k in ('id','kind','path','format'))
+                      or current not in (None,record['digest'],record.get('pending_digest'),record.get('config_pending_digest'))):
+                    raise OwnershipConflict('owned artifact drift', entry['path'])
+            apply_preview_migrations(migrations, inventory, path, uid)
+        elif migrations:
+            raise ValueError('preview migration requires prepared apply')
+
         for entry in desired:
             if entry['kind'] not in ('file', 'structured') or not entry['path'].startswith(home + '/'):
                 raise ValueError('invalid config inventory entry')
@@ -260,7 +326,8 @@ def main():
         return
     observed = {}
     metadata = {}
-    changed = records != [clean(e) for e in desired]
+    comparable = [{k: v for k, v in entry.items() if k != 'preview_migrated'} for entry in records]
+    changed = comparable != [clean(e) for e in desired] or bool(migrations)
     retired = []
     adopted = []
     for name, entry in previous.items():
@@ -301,9 +368,12 @@ def main():
         if candidate not in released and candidate not in [e.get('path') for e in records + desired] and os.path.lexists(candidate):
             raise OwnershipConflict('legacy integration artifact has no ownership evidence', candidate)
     adoption = [[clean(entry), metadata[key(entry)]] for entry in adopted]
-    fingerprint = digest(encode([home, uid, records, released, observed, metadata,
-                                 [clean(e) for e in desired], not established, adopt, adoption,
-                                 [e.get('source_digest') for e in desired]]))
+    identity = [home, uid, records, released, observed, metadata,
+                [clean(e) for e in desired], not established, adopt, adoption,
+                [e.get('source_digest') for e in desired]]
+    if cutover:
+        identity.append('preview-skill-cutover-v1')
+    fingerprint = digest(encode(identity))
     expected = request.get('expected')
     if expected and fingerprint != expected:
         raise ValueError('integration plan is stale')
@@ -315,7 +385,7 @@ def main():
             facts.append({'key': name, 'desired': digest(encode(clean(wanted[name]))) if name in wanted else 'absent',
                           'observed': digest(encode([previous.get(name), value, metadata.get(name)])),
                           'at_desired': (value is None if name not in wanted else
-                              previous.get(name) == clean(entry) and (
+                              {k: v for k, v in (previous.get(name) or {}).items() if k != 'preview_migrated'} == clean(entry) and (
                                   entry['kind'] in ('structured', 'package') or
                                   value == entry['digest'] and metadata.get(name) == expected_metadata(entry, home, uid)))})
         print(json.dumps({'fingerprint': fingerprint, 'changed': changed, 'retired': retired,
@@ -329,6 +399,12 @@ def main():
         if not (adoptable_core(entry, current)
                 or adopt and not established and adoptable_selected(entry, current, home, uid)):
             raise unowned_selected(entry, current)
+    if migrations:
+        if mode != 'apply':
+            raise ValueError('preview migration requires prepared apply')
+        apply_preview_migrations(migrations, inventory, path, uid)
+        for record, _, _ in migrations:
+            observed[key(record)] = actual(record)
     os.makedirs(ROOT, mode=0o700, exist_ok=True)
     protected(ROOT, True)
     def save(entries):
@@ -336,9 +412,13 @@ def main():
     if mode == 'commit':
         # Structured retirement releases fields, preserving the user's document.
         # Tombstones prove why these known paths are no longer owned.
-        released += [e['path'] for e in retired if e['kind'] == 'structured']
+        released += [e['path'] for e in retired if e['kind'] == 'structured' or e.get('preview_migrated')]
         released = [p for p in released if p not in [e.get('path') for e in desired]]
-        save([clean(e) for e in desired])
+        committed = [clean(e) for e in desired]
+        for entry in committed:
+            if previous.get(key(entry), {}).get('preview_migrated'):
+                entry['preview_migrated'] = True
+        save(committed)
         return
     # Publish intent before file replacement; both old and candidate digests permit retry.
     pending = dict(previous)
@@ -353,6 +433,10 @@ def main():
         pending[name] = candidate
     save(list(pending.values()))
     for entry in retired:
+        # Preview cutover retains unmarked instruction text when its host source
+        # disappears or its client is disabled. The tombstone releases ownership.
+        if entry.get('preview_migrated'):
+            continue
         if entry['kind'] in ('file', 'link') and os.path.lexists(entry['path']):
             parent = open_parent(entry['path'])
             try:

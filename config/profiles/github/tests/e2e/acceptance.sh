@@ -379,7 +379,9 @@ write_config() {
 }
 assert_wiring() {
   local path
-  for path in /home/dev/.claude/skills/subyard-github /home/dev/.codex/skills/subyard-github \
+  guest sh -c '[ ! -e /home/dev/.codex/skills/subyard-github ] && [ ! -L /home/dev/.codex/skills/subyard-github ]' \
+    || die 'duplicate legacy Codex GitHub discovery link survived'
+  for path in /home/dev/.claude/skills/subyard-github /home/dev/.agents/skills/subyard-github \
     /home/dev/.config/opencode/skills/subyard-github /home/dev/.pi/agent/skills/subyard-github \
     /home/dev/.hermes/skills/subyard-github; do
     guest test -L "$path" || die "missing GitHub skill discovery link: $path"
@@ -402,7 +404,8 @@ assert_removed() {
   local path
   for path in /usr/local/bin/subyard-github /usr/local/libexec/subyard/github-client \
     /usr/local/share/subyard/skills/subyard-github /etc/subyard/github.gitconfig \
-    /home/dev/.claude/skills/subyard-github /home/dev/.codex/skills/subyard-github \
+    /home/dev/.claude/skills/subyard-github /home/dev/.agents/skills/subyard-github \
+    /home/dev/.codex/skills/subyard-github \
     /home/dev/.config/opencode/skills/subyard-github /home/dev/.pi/agent/skills/subyard-github \
     /home/dev/.hermes/skills/subyard-github; do
     guest sh -c '[ ! -e "$1" ] && [ ! -L "$1" ]' _ "$path" || die "GitHub artifact survived disable: $path"

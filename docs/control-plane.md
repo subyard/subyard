@@ -863,9 +863,10 @@ preserving historical domains. Its synthetic Incus backend changes
 only observed running/stopped state; settings, ledger and original journal bindings must survive
 recovery. Privileged commands are rejected by fixture shims.
 
-Generated preview instructions come from the bound runtime's
-`config/preview/instructions.md` asset. Runtimes predating that asset use the frozen legacy
-text so that a delegated engine preserves the original authorized observation scope.
+Historical frozen materialization recipes retain preview composition from the bound runtime's
+`config/preview/instructions.md` asset, or the exact legacy fallback for older runtimes. Recovery
+restores those descriptor flags and source guards without rewriting authorized bytes. Current
+materialization stops composing preview instructions; guest capability skills own new delivery.
 The Release workflow retains the compatibility check's output with its other failure diagnostics.
 
 ### Legacy upgrades
@@ -1028,11 +1029,17 @@ listening and prints its URL only after all required listeners bind. A missing f
 source-checkout loopback URL. Direct access requires network reachability and, for Tailscale,
 Tailnet policy access. Private-network endpoints are visible to reachable devices on that network.
 
-Selected supported agent instruction adapters preserve host text and refresh the marked preview
-block through the existing inventory. Agents share the printed URL and provide the operator-machine
-tunnel recipe from `subyard-preview --help` only on request. The operator supplies their SSH alias;
-it cannot be inferred uniquely inside the yard. Initial legacy adoption can accept exact original
-source bytes after consent; that digest is input-only and does not change the stored ownership schema.
+The `subyard-preview` capability skill delivers preview guidance to Codex, Claude Code and OpenCode
+at user scope. Current instruction adapters preserve host text and omit recognized old managed
+preview blocks. Runtime refresh migrates inventory-owned guest blocks only with matching content
+and metadata evidence; it preserves unmarked text, refuses ambiguous/drifted content, and releases
+retained text when its host source disappears. Host instruction sources remain unchanged. Historical
+frozen operations keep their original materialization recipe for recovery.
+
+Agents share the helper's printed URL and provide the operator-machine tunnel recipe from
+`subyard-preview --help` only on request. The operator supplies their SSH alias; it cannot be inferred
+uniquely inside the yard. See the [guest skills contract](../config/skills/README.md) for package
+sources, protected ownership, discovery adapters, refresh and removal.
 
 Remote registration, trust repair, removal and listing are native. Preparation probes the trusted
 owner and scans the yard key without local mutation; old and new fingerprints enter the operation
@@ -1728,8 +1735,10 @@ never constitute a native terminal witness.
 Core also registers `core-guest-runtime` and `key-tools-runtime` for already installed helpers.
 Provisioning's preview/ccusage ownership markers authorize bounded helper refresh; missing
 artifacts with those markers remain drift. Unprovisioned guests without the markers are absent.
-Preview delivery and the pinned ccusage installer are shared with ordinary provisioning;
-release refresh does not rerun base packages or profile provisioning. Existing tool publication
+Preview delivery, capability skills and the pinned ccusage installer are shared with ordinary
+provisioning; release refresh does not rerun base packages or profile provisioning. Skill refresh
+updates static content for successfully registered profile providers, removes disabled providers,
+and checks canonical bytes, permissions and discovery links without restarting profile services. Existing tool publication
 or a durable key-identity file permits age/SOPS repair; activation never initializes credentials.
 The tool installers publish protected receipts binding verified archive pins and installed
 binary SHA-256 values. Missing receipts require a checksum-verified installation, rather than

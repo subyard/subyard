@@ -53,11 +53,14 @@ class RuntimeTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir='/tmp')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.source = self.root/'profile'
+        self.source = self.root/'config/profiles/github'
         (self.source/'bin').mkdir(parents=True)
-        for name in ('owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py', 'bin/broker'):
+        for name in ('owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'skills.json', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py', 'bin/broker'):
             (self.source/name).write_text(name)
         (self.source/'profile.json').write_text('{"default_yards":["default"],"disabled_when":{"NESTED_E2E_VMS":"1"}}')
+        shared = self.root/'config/skills'
+        shared.mkdir()
+        (shared/'deliver.py').write_text('shared skill delivery fixture')
         self.ready = False
         self.guest = 'installed-old'
         self.loaded = {'protocol': 1, 'broker_sha256': 'a'*64, 'client_sha256': 'b'*64}
@@ -165,6 +168,12 @@ class RuntimeTest(unittest.TestCase):
             runtime.main()
         self.assertEqual(self.applies, 1)
         self.assertEqual(protected.read_text(), 'private-fixture-data')
+
+    def test_shared_skill_helper_is_a_desired_runtime_input(self):
+        before, _ = runtime.observe()
+        (self.source.parents[1]/'skills/deliver.py').write_text('updated delivery implementation')
+        after, _ = runtime.observe()
+        self.assertNotEqual(before['desired'],after['desired'])
 
     def test_selection_and_native_recipe_are_desired_inputs(self):
         old, _ = runtime.observe()

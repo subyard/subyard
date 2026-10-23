@@ -90,7 +90,8 @@ if [ "$mode" = pause ] || [ "$mode" = resume ]; then
   exit 0
 fi
 guest_hook() {
-  tar -C "$profile_dir" -cf - provision.sh git_wiring.py SKILL.md bin/subyard-github bin/git-remote-subyard-github | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
+  tar -C "$profile_dir" -cf - provision.sh git_wiring.py SKILL.md skills.json bin/subyard-github bin/git-remote-subyard-github \
+    -C "$root/config/skills" --transform='s,^deliver.py$,agent-skills.py,' deliver.py | incus exec "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" \
     --env DEV_USER="$DEV_USER" --env GITHUB_GIT_MODE="${GITHUB_GIT_MODE:-off}" -- bash -euo pipefail -c '
       bundle="$(mktemp -d /tmp/subyard-github.XXXXXX)"
       trap '\''rm -rf -- "$bundle"'\'' EXIT
@@ -185,6 +186,15 @@ if [ "$mode" = check ]; then
   exit
 fi
 
+# Static skill repair leaves healthy engines and the user manager untouched.
+# Only an existing successful provider registration can be refreshed here.
+if [ "$mode" = apply ] && [ "${SUBYARD_PROFILE_STOPPED:-0}" != 1 ]; then
+  guest_hook --refresh-skills
+  if "$PROFILE_DIR/owner.sh" --check >/dev/null 2>&1; then
+    exit 0
+  fi
+fi
+
 install -d -m 0700 "$state_dir" "$unit_dir"
 install -m 0700 "$engine" "$broker_engine.tmp"
 mv -f -- "$broker_engine.tmp" "$broker_engine"
@@ -220,4 +230,5 @@ for _ in {1..30}; do
   sleep 1
 done
 [ "$ready" = 1 ] || die "GitHub broker did not connect; inspect systemctl --user status $unit"
+guest_hook --register-skills
 printf 'GitHub broker profile configured; App connection stays on the owner host\n'

@@ -380,6 +380,7 @@ func decodeMaterializedMetadata(p *PreparedInstalledRuntime) (materializedRecipe
 }
 
 func (runtime Runtime) restoreMaterializedIntegrations(ctx context.Context, p *PreparedInstalledRuntime) error {
+	runtime.legacyPreviewInstructions = !p.configs.previewSkillCutover
 	original, allowed, err := decodeMaterializedMetadata(p)
 	if err != nil {
 		return err

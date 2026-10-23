@@ -8,6 +8,8 @@ mkdir -p "$tmp/runtime/scripts/lib" "$tmp/runtime/config/profiles/synthetic" "$t
 
 cp "$ROOT/scripts/provision-profile.sh" "$tmp/runtime/scripts/"
 cp "$ROOT/scripts/lib/engine-context.sh" "$ROOT/scripts/lib/producer-run.py" "$tmp/runtime/scripts/lib/"
+mkdir -p "$tmp/runtime/config/skills"
+cp "$ROOT/config/skills/deliver.py" "$tmp/runtime/config/skills/"
 : > "$tmp/runtime/config/profiles/synthetic/profile.conf"
 printf '#!/bin/sh\n# subyard-provision-check-v1\nprintf "hook output\\n"\nprintf "hook error\\n" >&2\nexit "${PROVISION_CHECK_STATUS:?}"\n' > "$tmp/runtime/config/profiles/synthetic/provision.sh"
 
@@ -20,6 +22,7 @@ with open(os.environ["PROFILE_EFFECT_MARKER"], "a") as marker:
 with tempfile.TemporaryDirectory() as target:
     with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
         archive.extractall(target, filter="data")
+    assert open(target+"/agent-skills.py", "rb").read().startswith(b"#!/usr/bin/env python3\n# subyard-agent-skills-v1")
     mode = sys.argv[-1]
     result = subprocess.run(["bash", target + "/provision.sh", *(["--check"] if mode == "check" else [])],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL if mode == "check" else None)
@@ -65,7 +68,9 @@ for path in [root, *sorted(root.rglob("*"))]:
     info = path.lstat()
     digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
     entries[str(path.relative_to(root))] = producer.source_identity(info, digest)
-pathlib.Path(sys.argv[3]).write_text(json.dumps({"input": {"profileBinding": {"root": str(root), "entries": entries, "environment": {}, "parents": {}}}}))
+helper = root.parents[1]/'skills/deliver.py'
+sources = {'agent-skills.py': {'path': str(helper), 'identity': producer.source_identity(helper.stat(), hashlib.sha256(helper.read_bytes()).hexdigest()), 'parents': {}}}
+pathlib.Path(sys.argv[3]).write_text(json.dumps({"input": {"profileBinding": {"root": str(root), "entries": entries, "environment": {}, "parents": {}, "sources": sources}}}))
 BINDING
   env "${engine_env[@]}" "$@" 3<"$tmp/request.json"
 }
@@ -97,6 +102,16 @@ status=0
 bound_provision bash "$tmp/runtime/scripts/provision-profile.sh" synthetic >"$tmp/out" 2>"$tmp/err" || status=$?
 [ "$status" = 7 ] && [ "$(wc -c <"$tmp/err")" -lt 65700 ] && grep -q 'stderr truncated' "$tmp/err"
 # Replacing a bound source must refuse before the external guest command starts.
+before_effects="$(wc -c <"$tmp/effects")"
+# Additional bound sources use the same pre-effect guard as package sources.
+printf changed >> "$tmp/runtime/config/skills/deliver.py"
+status=0
+env "${engine_env[@]}" bash "$tmp/runtime/scripts/provision-profile.sh" synthetic 3<"$tmp/request.json" >"$tmp/out" 2>"$tmp/err" || status=$?
+[ "$status" = 125 ] && [ "$(wc -c <"$tmp/effects")" = "$before_effects" ] \
+  || { printf 'FAIL: stale shared source reached guest effects\n' >&2; exit 1; }
+cp "$ROOT/config/skills/deliver.py" "$tmp/runtime/config/skills/deliver.py"
+# Rebind the source identity before isolating package-only drift.
+bound_provision true
 before_effects="$(wc -c <"$tmp/effects")"
 printf changed >> "$tmp/runtime/config/profiles/synthetic/profile.conf"
 status=0

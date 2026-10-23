@@ -338,7 +338,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected})
+	payload, _ := json.Marshal(map[string]any{"home": home, "uid": uid, "developer": runtime.devUser(), "entries": entries, "legacy": legacy, "adopt": runtime.AdoptLegacyIntegrations, "expected": expected, "preview_skill_cutover": !runtime.legacyPreviewInstructions})
 	program := strings.ReplaceAll(integrationInventoryProgram, "@STATE_ROOT@", "/var/lib/subyard/integrations")
 	program = strings.ReplaceAll(program, "@STATE_UID@", "0")
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", program, mode}, Stdin: payload})
@@ -880,6 +880,7 @@ func (runtime Runtime) ApplyPreparedIntegrations(ctx context.Context, prepared *
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
 	}
+	runtime.legacyPreviewInstructions = !prepared.configs.previewSkillCutover
 	if err := runtime.CheckPreparedConfigs(ctx, prepared.configs); err != nil {
 		return err
 	}

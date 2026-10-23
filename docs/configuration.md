@@ -333,6 +333,29 @@ does not restrict arbitrary software installed or launched by the operator. GitH
 remains an optional environment profile; Orca remains a profile resource. `ccusage`
 is a core utility in ordinary yards, not a selectable integration.
 
+## Capability skills inside the yard
+
+Provisioned capabilities install user-level skills available from any project, including projects
+without a Subyard checkout. Descriptions let agents select relevant guidance: core provides static
+web preview, Android provides toolchain and broker-managed emulator use, and GitHub retains its
+existing temporary authorization workflow. Skill presence records successful provisioning;
+bounded live probes establish current readiness separately.
+
+Codex discovers `~/.agents/skills`, Claude Code `~/.claude/skills`, and OpenCode
+`~/.config/opencode/skills`. These directories link to one canonical installed copy per skill.
+Links are ready before installing a client and persist through client enable/disable. Successful
+profile provisioning registers profile skills. Static refresh updates content and removes disabled
+providers without restarting capability services. In an installed runtime, missing links or other
+skill drift can require a fresh assessed repair: run `yard migrate --check`, then `yard migrate
+--yes` on the owner host without a yard selector. Completed release history does not authorize
+ordinary initialization to repair core runtime drift. Foreign skills and conflicting paths are
+preserved and diagnosed.
+
+Preview guidance has moved out of global instructions. Recognized old inventory-owned blocks are
+removed during refresh while retaining other text; changed/ambiguous content requires inspection.
+Host instruction sources and frozen historical recovery recipes remain intact. See the
+[delivery contract](../config/skills/README.md) for provider integration and ownership details.
+
 ## Coding-agent compatibility
 
 Codex, Claude Code, OpenCode and pi can run directly in the yard. Their versions are not a

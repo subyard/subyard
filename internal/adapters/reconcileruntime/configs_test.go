@@ -108,7 +108,7 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 	if err := os.WriteFile(source, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	effective, err := (guestConfigFile{source: source, previewInstructions: true}).readSource()
+	effective, err := (guestConfigFile{source: source}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 	if len(incus.ExecCalls) != 3 ||
 		incus.ExecCalls[1].Request.Command[5] != "/home/dev/.claude/CLAUDE.md" ||
 		!bytes.HasPrefix(incus.ExecCalls[1].Request.Stdin, payload) ||
-		!bytes.Contains(incus.ExecCalls[1].Request.Stdin, []byte(previewInstructions)) {
+		bytes.Contains(incus.ExecCalls[1].Request.Stdin, []byte(previewInstructions)) {
 		t.Fatalf("symlinked Claude instructions were not copied: %#v", incus.ExecCalls)
 	}
 }
@@ -352,9 +352,8 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 	if err := os.WriteFile(source, []byte("model = \"gpt-5\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	incus := runningIncus(2)
-	incus.ExecSteps[0].Result.Stdout = []byte(fmt.Sprintf("%x  /home/dev/.codex/AGENTS.md\n", sha256.Sum256([]byte(previewInstructions))))
-	incus.ExecSteps[1].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	incus := runningIncus(1)
+	incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
 	runtime := Runtime{
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG=" + source, "AGENT_codex_CONFIG_DEST=.codex/config.toml"},
 		Incus:       incus, Executor: incus,
@@ -365,7 +364,7 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 	if err != nil || !converged {
 		t.Fatalf("owned TOML observation rejected: converged=%v err=%v", converged, err)
 	}
-	request := incus.ExecCalls[1].Request
+	request := incus.ExecCalls[0].Request
 	if len(request.Command) == 0 || request.Command[0] != "python3" || len(request.Stdin) == 0 {
 		t.Fatal("TOML observation did not use the guest ownership adapter")
 	}
@@ -379,7 +378,7 @@ func TestPreviewInstructionsComposeOnlySelectedEffectivePayloads(t *testing.T) {
 	for _, agent := range []string{"claude", "codex", "opencode"} {
 		t.Run(agent, func(t *testing.T) {
 			key := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[agent]
-			runtime := Runtime{Environment: []string{
+			runtime := Runtime{legacyPreviewInstructions: true, Environment: []string{
 				"CODING_TOOL_INTEGRATIONS=" + agent, key + "=" + source,
 				"AGENT_" + agent + "_RULES=" + source, "AGENT_" + agent + "_RULES_DEST=rules",
 			}}
@@ -427,7 +426,7 @@ func TestPreviewInstructionsFollowRuntimeAssets(t *testing.T) {
 	testkit.WriteFile(t, source, host, 0o600)
 	fileForRuntime := func(repository string) guestConfigFile {
 		t.Helper()
-		runtime := Runtime{RepositoryRoot: repository, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}}
+		runtime := Runtime{legacyPreviewInstructions: true, RepositoryRoot: repository, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source}}
 		bindInstructionTestPackage(t, &runtime, root, "codex")
 		files, err := runtime.guestConfigFiles()
 		if err != nil || len(files) != 1 {
@@ -496,7 +495,7 @@ func TestPreviewInstructionAssetRejectsNonregularSources(t *testing.T) {
 			} else if err := os.Symlink("missing.md", asset); err != nil {
 				t.Fatal(err)
 			}
-			runtime := Runtime{RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}
+			runtime := Runtime{legacyPreviewInstructions: true, RepositoryRoot: root, Environment: []string{"CODING_TOOL_INTEGRATIONS=codex"}}
 			bindInstructionTestPackage(t, &runtime, root, "codex")
 			files, err := runtime.guestConfigFiles()
 			if err != nil {
@@ -560,9 +559,9 @@ func bindArtifactTestPackages(t *testing.T, runtime *Runtime, root string) {
 // processes. Reopening a fixture must not rewrite its source identities.
 func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent string) {
 	t.Helper()
-	setting := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD"}[agent]
-	destination := map[string]string{"claude": ".claude/CLAUDE.md", "codex": ".codex/AGENTS.md"}[agent]
-	label := map[string]string{"claude": "Claude instructions", "codex": "Codex instructions"}[agent]
+	setting := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[agent]
+	destination := map[string]string{"claude": ".claude/CLAUDE.md", "codex": ".codex/AGENTS.md", "opencode": ".config/opencode/AGENTS.md"}[agent]
+	label := map[string]string{"claude": "Claude instructions", "codex": "Codex instructions", "opencode": "OpenCode instructions"}[agent]
 	directory := filepath.Join(root, "config/agents", agent)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
@@ -605,4 +604,33 @@ func bindInstructionTestPackage(t *testing.T, runtime *Runtime, root, agent stri
 		runtime.RepositoryRoot = root
 	}
 	runtime.Integrations = loaded
+}
+
+func TestCurrentPreviewDeliveryLeavesInstructionsWithoutInjection(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "instructions")
+	host := []byte("Keep this.\n" + previewInstructions + "And this.\n")
+	testkit.WriteFile(t, source, host, 0o600)
+	for _, client := range []string{"claude", "codex", "opencode"} {
+		key := map[string]string{"claude": "HOST_CLAUDE_MD", "codex": "HOST_CODEX_AGENTS_MD", "opencode": "HOST_OPENCODE_AGENTS_MD"}[client]
+		runtime := Runtime{Environment: []string{"CODING_TOOL_INTEGRATIONS=" + client, key + "=" + source}}
+		bindInstructionTestPackage(t, &runtime, filepath.Join(root, client), client)
+		files, err := runtime.guestConfigFiles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[0].label = "Package-owned guide label"
+		data, err := files[0].readSource()
+		if err != nil || string(data) != "Keep this.\n\nAnd this.\n" || files[0].previewInstructions {
+			t.Fatalf("%s: %q %v", client, data, err)
+		}
+	}
+	original, err := os.ReadFile(source)
+	if err != nil || !bytes.Equal(original, host) {
+		t.Fatal("host source changed")
+	}
+	ambiguous := append(append([]byte(nil), host...), []byte("<!-- subyard-preview -->")...)
+	if !bytes.Equal(stripLegacyPreviewBlock(ambiguous), ambiguous) {
+		t.Fatal("ambiguous markers changed")
+	}
 }

@@ -315,6 +315,49 @@ def source_identity(info, digest=None):
     return result
 
 
+def capture_additional_source(target, name, source):
+    """Use the resolved source's native authority, never an environment path."""
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name) or name in (".", ".."):
+        raise ValueError("invalid additional provision source")
+    path = Path(source["path"])
+    root = str(path.parent)
+    anchor = re.match(r"^/proc/[1-9][0-9]*/fd/(?:0|[1-9][0-9]*)(?=/|$)", root)
+    fd = os.open(anchor[0] if anchor else "/", os.O_RDONLY | os.O_DIRECTORY)
+    parts = Path(root[len(anchor[0]):]).parts if anchor else path.parent.parts[1:]
+    try:
+        for part in parts:
+            if part in ("/", ""):
+                continue
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        def check_parents():
+            for parent, expected in source["parents"].items():
+                info = os.stat(parent) if re.fullmatch(r"/proc/[1-9][0-9]*/fd/(?:0|[1-9][0-9]*)", parent) else os.lstat(parent)
+                actual = dict(mode=info.st_mode, device=info.st_dev, inode=info.st_ino,
+                              size=0, modified=0, changed=0, links=0, uid=info.st_uid, gid=info.st_gid)
+                if actual != expected:
+                    raise ValueError("additional provision source parent changed")
+        check_parents()
+        child = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        with os.fdopen(child, "rb") as payload:
+            info = os.fstat(payload.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("unsafe additional provision source")
+            digest = hashlib.file_digest(payload, "sha256").hexdigest()
+            if source_identity(info, digest) != source["identity"]:
+                raise ValueError("additional provision source changed")
+            payload.seek(0)
+            member = tarfile.TarInfo(name)
+            member.size, member.mode = info.st_size, stat.S_IMODE(info.st_mode)
+            target.addfile(member, payload)
+            if source_identity(os.fstat(payload.fileno()), digest) != source["identity"]:
+                raise ValueError("additional provision source changed during capture")
+        check_parents()
+    finally:
+        os.close(fd)
+
+
 def capture_bundle(binding):
     """Capture the approved regular-file tree before starting the guest command."""
     root = binding["root"]
@@ -385,6 +428,10 @@ def capture_bundle(binding):
                     if source_identity(os.fstat(parent)) != expected or sorted(os.listdir(parent)) != names:
                         raise ValueError("profile directory changed during capture")
                 walk(fd, ".")
+                for name, source in sorted(binding.get("sources", {}).items()):
+                    if name in entries:
+                        raise ValueError("additional provision source collides with package")
+                    capture_additional_source(target, name, source)
             check_parents()
             archive.seek(0)
             return archive, shared_tmp

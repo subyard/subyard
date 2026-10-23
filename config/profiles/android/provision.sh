@@ -23,11 +23,22 @@ JDK_HOME="/opt/jdk-${JDK_VERSION}"
 PUBLIC_ROOT="${ANDROID_PUBLIC_ROOT:-$ANDROID_SDK_ROOT/.subyard}"
 PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 emulator_libraries=(libpulse0 libnss3)
+skill_delivery() {
+  local helper="$PROFILE_DIR/agent-skills.py"
+  [ -f "$helper" ] || helper="$PROFILE_DIR/../../skills/deliver.py"
+  if [ ! -f "$helper" ]; then
+    helper="${ANDROID_TEST_ROOT:-}/usr/local/libexec/subyard/agent-skills"
+  fi
+  [ -z "${ANDROID_TEST_ROOT:-}" ] || helper="$ANDROID_TEST_ROOT/usr/local/libexec/subyard/agent-skills"
+  python3 "$helper" "$1" --provider profile-android --source "$PROFILE_DIR/skills" --home "$(getent passwd "$DEV_USER" | cut -d: -f6)" --uid "$(id -u "$DEV_USER")" --gid "$(id -g "$DEV_USER")"
+}
+
 
 if [ "$check_only" -eq 1 ]; then
   root_prefix="${ANDROID_TEST_ROOT:-}"
   rooted() { printf '%s%s' "$root_prefix" "$1"; }
   changed=0
+  skill_delivery check-registered || changed=1
   for command in curl unzip flock setsid cage Xwayland python3 socat systemctl docker slirp4netns ip; do
     command -v "$command" >/dev/null 2>&1 || changed=1
   done
@@ -250,5 +261,7 @@ USER ${DEV_UID}:${DEV_GID}
 EOF
 fi
 bash "$PROFILE_DIR/pool-install.sh"
+
+skill_delivery apply
 
 echo "android provision OK: jdk=$("$JDK_HOME/bin/java" -version 2>&1 | head -1) sdk=$ANDROID_SDK_ROOT api=$ANDROID_API"

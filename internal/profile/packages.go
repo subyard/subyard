@@ -48,10 +48,37 @@ type Source struct {
 // ProvisionBinding freezes the complete bundle before assessment. It is an
 // operation-local native transport, never a persisted settings schema.
 type ProvisionBinding struct {
-	Root        string                  `json:"root"`
-	Entries     map[string]FileIdentity `json:"entries"`
-	Environment map[string]string       `json:"environment"`
-	Parents     map[string]FileIdentity `json:"parents"`
+	Root        string                     `json:"root"`
+	Entries     map[string]FileIdentity    `json:"entries"`
+	Environment map[string]string          `json:"environment"`
+	Parents     map[string]FileIdentity    `json:"parents"`
+	Sources     map[string]ProvisionSource `json:"sources,omitempty"`
+}
+
+// ProvisionSource binds an additional regular file to a package-local archive
+// name. It uses the same source/parent authority as the resolved package.
+type ProvisionSource struct {
+	Path     string                  `json:"path"`
+	Identity FileIdentity            `json:"identity"`
+	Parents  map[string]FileIdentity `json:"parents"`
+}
+
+func (binding *ProvisionBinding) AddSource(name, path string) error {
+	if name == "." || filepath.Base(name) != name || !domain.SafeName(strings.ReplaceAll(name, ".", "-")) || !filepath.IsAbs(path) {
+		return errors.New("invalid additional provision source name")
+	}
+	if _, exists := binding.Entries[name]; exists {
+		return errors.New("additional provision source collides with package")
+	}
+	source, err := packageSource(filepath.Dir(path), filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	if binding.Sources == nil {
+		binding.Sources = map[string]ProvisionSource{}
+	}
+	binding.Sources[name] = ProvisionSource{Path: source.Path, Identity: source.Identity, Parents: source.parents}
+	return nil
 }
 
 func packageDirectory(root string) (string, error) {
@@ -426,6 +453,14 @@ func (binding ProvisionBinding) Check() error {
 	}
 	if !reflect.DeepEqual(fresh.Entries, binding.Entries) || !reflect.DeepEqual(fresh.Parents, binding.Parents) {
 		return errors.New("profile provision bundle changed")
+	}
+	for name, source := range binding.Sources {
+		if err := fresh.AddSource(name, source.Path); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(fresh.Sources[name], source) {
+			return errors.New("additional provision source changed")
+		}
 	}
 	return nil
 }

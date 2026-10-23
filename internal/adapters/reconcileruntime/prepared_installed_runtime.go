@@ -153,6 +153,20 @@ func (runtime Runtime) BindInstalledRuntimeContext(ctx context.Context, raw []by
 		for _, path := range []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"} {
 			allowed[path] = true
 		}
+		// Old recipes keep their original closed inventory. New delivery recipes
+		// include package-local static sources, captured with the wrapper.
+		for _, file := range r.Files {
+			if file.Path == "scripts/refresh-agent-skills.sh" {
+				paths, err := runtime.agentSkillSources()
+				if err != nil {
+					return nil, err
+				}
+				for _, path := range paths {
+					allowed[path] = true
+				}
+				break
+			}
+		}
 		if r.HookBefore != "" {
 			allowed["prepared/ccusage-provision.sh"] = true
 			p.hookPath = runtime.environmentValue("CCUSAGE_PROVISION")
@@ -312,6 +326,11 @@ func (runtime Runtime) PrepareInstalledRuntime(ctx context.Context, owner string
 	if owner == "core-guest-runtime" {
 		p.leaves = []string{"refresh-installed-guest-runtime.sh"}
 		paths = []string{"scripts/refresh-installed-guest-runtime.sh", "scripts/prepare-preview-route.sh", "config/preview/subyard-preview", "config/agents/ccusage/provision.sh"}
+		skillPaths, err := runtime.agentSkillSources()
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, skillPaths...)
 	} else {
 		p.leaves = runtime.installedKeyLeaves()
 		paths = []string{"scripts/install-key-tools.sh", "scripts/install-keys-auto-sync.sh", "config/systemd/subyard-keys-sync.service.in", "config/systemd/subyard-keys-sync.timer.in"}

@@ -8,6 +8,8 @@ case "${1:-}" in
   --check) mode=check; shift ;;
   --check-removed) mode=check-removed; shift ;;
   --remove) mode=remove; shift ;;
+  --refresh-skills) mode=refresh-skills; shift ;;
+  --register-skills) mode=register-skills; shift ;;
   '') ;;
   *) printf 'github provision: unknown argument %s\n' "$1" >&2; exit 2 ;;
 esac
@@ -27,6 +29,13 @@ git_mode="${GITHUB_GIT_MODE:-off}"
 case "$git_mode" in off|broker-first) ;; *) printf 'github provision: invalid Git mode\n' >&2; exit 2 ;; esac
 wiring() { python3 "$wiring_source" "$DEV_HOME" "$git_mode" "$1"; }
 remote_body() { cat "$remote_source"; }
+skill_delivery() {
+  local helper
+  helper="$(dirname "$0")/agent-skills.py"
+  [ -f "$helper" ] || helper="$(dirname "$0")/../../skills/deliver.py"
+  [ -f "$helper" ] || helper=/usr/local/libexec/subyard/agent-skills
+  python3 "$helper" "$@" --provider profile-github --source "$(dirname "$0")/skills.json" --home "$DEV_HOME" --uid "$(id -u "$DEV_USER")" --gid "$(id -g "$DEV_USER")" --extra
+}
 skill_dir=/usr/local/share/subyard/skills/subyard-github
 skill="$skill_dir/SKILL.md"
 socket_dir="$DEV_HOME/.local/share/subyard"
@@ -36,7 +45,7 @@ wrapper_source="$(dirname "$0")/bin/subyard-github"
 
 skill_links=(
   "$DEV_HOME/.claude/skills/subyard-github"
-  "$DEV_HOME/.codex/skills/subyard-github"
+  "$DEV_HOME/.agents/skills/subyard-github"
   "$DEV_HOME/.config/opencode/skills/subyard-github"
   "$DEV_HOME/.pi/agent/skills/subyard-github"
   "$DEV_HOME/.hermes/skills/subyard-github"
@@ -83,12 +92,27 @@ user_directory() {
   done
 }
 
+# Static refresh cannot register a capability whose full provision never succeeded.
+if [ "$mode" = refresh-skills ]; then
+  skill_delivery apply --registered
+  exit 0
+fi
+if [ "$mode" = register-skills ]; then
+  # The owner invokes this only after its first successful runtime handshake.
+  skill_delivery apply
+  exit 0
+fi
+
 changed=0
 if [ "$mode" = check-removed ]; then
   owned_file "$remote" remote_body && changed=1
   python3 "$wiring_source" "$DEV_HOME" off check || changed=1
   owned_file "$wrapper" wrapper_body && changed=1
+  skill_delivery check-removed || changed=1
+  # Predecessor installations have no shared receipt. Retain their explicit
+  # marked-content and exact-target absence checks until cleanup runs.
   owned_file "$skill" skill_body && changed=1
+  link_matches "$DEV_HOME/.codex/skills/subyard-github" && changed=1
   for link in "${skill_links[@]}"; do
     link_matches "$link" && changed=1
   done
@@ -104,7 +128,7 @@ if [ "$mode" = check ] || [ "$mode" = remove ]; then
   wiring check || changed=1
   [ -x "$engine" ] || changed=1
   owned_file "$wrapper" wrapper_body && cmp -s <(wrapper_body) "$wrapper" || changed=1
-  owned_file "$skill" skill_body && cmp -s <(skill_body) "$skill" || changed=1
+  skill_delivery check || changed=1
   socket_dir_ready || changed=1
   for link in "${skill_links[@]}"; do
     link_matches "$link" || changed=1
@@ -129,7 +153,14 @@ if [ "$mode" = remove ]; then
     link_matches "$link" && rm -f -- "$link"
   done
   owned_file "$wrapper" wrapper_body && rm -f -- "$wrapper"
-  owned_file "$skill" skill_body && rm -f -- "$skill"
+  # Earlier installers predate shared receipts. Keep their explicit marked-file
+  # and exact-target cleanup contract, then let the shared owner retire receipts.
+  if [ ! -f /var/lib/subyard/agent-skills/profile-github.json ]; then
+    legacy_link="$DEV_HOME/.codex/skills/subyard-github"
+    link_matches "$legacy_link" && rm -f -- "$legacy_link"
+    owned_file "$skill" skill_body && rm -f -- "$skill"
+  fi
+  skill_delivery remove
   for directory in \
     "$DEV_HOME/.claude/skills" "$DEV_HOME/.codex/skills" \
     "$DEV_HOME/.config/opencode/skills" "$DEV_HOME/.pi/agent/skills" \
@@ -160,25 +191,10 @@ if ! command -v gh >/dev/null 2>&1; then
   apt-get install -y -qq gh
 fi
 install -d -m 0755 /usr/local/bin /usr/local/libexec/subyard /usr/local/share/subyard/skills
-if [ ! -e "$skill_dir" ]; then
-  install -d -m 0755 "$skill_dir"
-elif [ ! -d "$skill_dir" ] || [ -L "$skill_dir" ]; then
-  printf 'github provision: unmanaged skill directory exists: %s\n' "$skill_dir" >&2
-  exit 1
-fi
+
 install -m 0755 "$wrapper_source" "$wrapper"
 install -m 0755 "$remote_source" "$remote"
 wiring apply
-install -m 0644 "$skill_source" "$skill"
-for link in "${skill_links[@]}"; do
-  if [ -e "$link" ] || [ -L "$link" ]; then
-    link_matches "$link" || { printf 'github provision: unmanaged skill path exists: %s\n' "$link" >&2; exit 1; }
-    continue
-  fi
-  parent="$(dirname "$link")"
-  user_directory "$parent"
-  ln -s "$skill_dir" "$link"
-done
 
 socket_path_safe || { printf 'github provision: refusing symlinked socket path\n' >&2; exit 1; }
 if [ -L "$socket_dir" ]; then
@@ -191,5 +207,8 @@ elif ! socket_dir_ready; then
   printf 'github provision: unmanaged socket directory has wrong owner or mode: %s\n' "$socket_dir" >&2
   exit 1
 fi
+
+# Ordinary guest provisioning alone cannot prove owner-service activation.
+skill_delivery apply --registered
 
 printf 'github provision OK: gh and managed GitHub broker client are ready\n'

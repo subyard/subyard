@@ -30,9 +30,11 @@ declare that optional scalar themselves. Claude, Codex and OpenCode retain `HOST
 existing core path settings without
 redeclaring or shadowing it. There is no new alias or second source authority. Other
 core settings cannot be referenced: a compatibility reference is restricted to a core
-optional absolute-path setting owned by host-files. Instructions use raw bytes, permit
-explicit operator symlinks to regular files, and always merge generated preview content,
-including missing or empty sources. They remain outside config-status scope. Raw config
+optional absolute-path setting owned by host-files. Instructions use raw bytes and permit
+explicit operator symlinks to regular files. Current delivery omits managed preview
+guidance, which is supplied by the installed capability skill, and skips missing host
+instruction sources. Historical frozen recipes retain their original preview composition,
+including missing or empty sources. Instructions remain outside config-status scope. Raw config
 is optional when missing at runtime and strict in config status. Files retain existing
 raw-file mode 0644 and developer ownership. Structured writers retain their existing
 ownership/baseline policy; declarations cannot choose different permissions.

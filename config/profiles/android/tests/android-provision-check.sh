@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
 HOOK="$ROOT/config/profiles/android/provision.sh"
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d /tmp/subyard-android-check.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 fake_bin="$tmp/bin"
@@ -68,6 +68,22 @@ printf 'install ok installed\n'
 EOF
 chmod +x "$fake_bin/dpkg-query"
 
+# Exercise the actual protected registration contract inside the disposable root.
+mkdir -p "$test_root/usr/local/libexec/subyard" "$tmp/guest-home"
+cat > "$test_root/usr/local/libexec/subyard/agent-skills" <<WRAPPER
+import runpy,sys
+sys.argv += ['--root', '$test_root']
+runpy.run_path('$ROOT/config/skills/deliver.py',run_name='__main__')
+WRAPPER
+chmod 0755 "$test_root/usr/local/libexec/subyard/agent-skills"
+cat > "$fake_bin/getent" <<GETENT
+#!/usr/bin/env bash
+printf '%s:x:%s:%s:fixture:%s:/bin/bash\n' '$(id -un)' '$(id -u)' '$(id -g)' '$tmp/guest-home'
+GETENT
+chmod 0755 "$fake_bin/getent"
+python3 "$ROOT/config/skills/deliver.py" apply --root "$test_root" --provider profile-android \
+  --source "$ROOT/config/profiles/android/skills" --home "$tmp/guest-home" --uid "$(id -u)" --gid "$(id -g)"
+
 common_env=(
   PATH="$fake_bin:$PATH"
   ANDROID_TEST_ROOT="$test_root"
@@ -84,6 +100,22 @@ before="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 env "${common_env[@]}" bash "$HOOK" --check >/dev/null
 after="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 [ "$before" = "$after" ] || { printf 'FAIL: Android check mutated state\n' >&2; exit 1; }
+
+# Static content drift belongs to common config refresh, not SDK/pool provisioning.
+printf '\nChanged guidance.\n' >> "$test_root/usr/local/share/subyard/skills/subyard-android/SKILL.md"
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+receipt="$test_root/var/lib/subyard/agent-skills/profile-android.json"
+mv "$receipt" "$tmp/registration"
+status=0
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
+[ "$status" -eq 10 ] || { printf 'FAIL: missing Android skill registration accepted\n' >&2; exit 1; }
+mv "$tmp/registration" "$receipt"
+chmod 0644 "$receipt"
+status=0
+env "${common_env[@]}" bash "$HOOK" --check >/dev/null 2>&1 || status=$?
+[ "$status" -eq 10 ] || { printf 'FAIL: unsafe Android skill registration accepted\n' >&2; exit 1; }
+chmod 0600 "$receipt"
+
 
 # The renamed client is required; retired aliases must trigger upgrade cleanup.
 client_bin="$test_root/srv/cache/android-sdk/.subyard/bin"

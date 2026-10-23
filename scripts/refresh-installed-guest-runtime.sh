@@ -10,6 +10,7 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 PROJ=(--project "$INCUS_PROJECT")
+bash "$SCRIPT_DIR/refresh-agent-skills.sh" apply
 PREVIEW_SOURCE="$SCRIPT_DIR/../config/preview/subyard-preview"
 PREVIEW_ENDPOINT="${SUBYARD_PREVIEW_ENDPOINT:?prepared preview endpoint required}"
 PREVIEW_SHA256="$(sha256sum "$PREVIEW_SOURCE" | cut -d ' ' -f1)"

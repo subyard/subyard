@@ -56,6 +56,8 @@ type IncusReader interface {
 }
 
 type Runtime struct {
+	// Retained only when restoring frozen materialization recipes.
+	legacyPreviewInstructions   bool
 	ownerInitPlanning           bool
 	ownerSources                *preparedOwnerSourceExecution
 	afterOwnerConfigs           *afterOwnerConfigPhysical

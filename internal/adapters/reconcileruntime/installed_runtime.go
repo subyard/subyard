@@ -189,6 +189,19 @@ func (runtime Runtime) observeInstalledGuestRuntime(ctx context.Context) (ports.
 	if err != nil {
 		return ports.RuntimeObservation{}, err
 	}
+	skillPaths, err := runtime.agentSkillSources()
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	if len(skillPaths) != 0 {
+		skillSources, err := runtime.installedRuntimeSources(skillPaths...)
+		if err != nil {
+			return ports.RuntimeObservation{}, err
+		}
+		for path, hash := range skillSources {
+			sources[path] = hash
+		}
+	}
 	endpoint, err := runtime.previewEndpoint(ctx)
 	if err != nil {
 		return ports.RuntimeObservation{}, err
@@ -199,6 +212,13 @@ func (runtime Runtime) observeInstalledGuestRuntime(ctx context.Context) (ports.
 		return ports.RuntimeObservation{}, err
 	}
 	ready = ready && runtime.previewRouteConverged(ctx, instance)
+	if len(skillPaths) != 0 && ready {
+		skillsReady, err := runtime.agentSkillsConverged(ctx, skillPaths)
+		if err != nil {
+			return ports.RuntimeObservation{}, err
+		}
+		ready = ready && skillsReady
+	}
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
 		payload, err := (config.MaterializedAsset{Source: filepath.Join(runtime.RepositoryRoot, "config/agents/ccusage/provision.sh")}).ReadSource()
 		if err != nil {

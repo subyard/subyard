@@ -1043,8 +1043,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
 	payload := []byte("fixture\n")
 	testkit.WriteFile(t, instructions, payload, 0o600)
-	previewSource := filepath.Join("..", "..", "..", "config", "preview", "instructions.md")
-	effective, err := (guestConfigFile{source: instructions, previewInstructions: true, previewSource: previewSource}).readSource()
+	effective, err := (guestConfigFile{source: instructions}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1083,7 +1082,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "CCUSAGE_VERSION=1.2.3",
 		"HOST_OPENCODE_AGENTS_MD=" + linkedInstructions,
 	}
-	effective, err = (guestConfigFile{source: linkedInstructions, followSymlinks: true, previewInstructions: true, previewSource: previewSource}).readSource()
+	effective, err = (guestConfigFile{source: linkedInstructions, followSymlinks: true}).readSource()
 	if err != nil {
 		t.Fatal(err)
 	}

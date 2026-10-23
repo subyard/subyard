@@ -8,9 +8,28 @@ stage() { printf 'release_activation_stage=%s elapsed_seconds=%s\n' "$1" "$SECON
 # Changing an activation input leaves ordinary mutations gated until a fresh,
 # authorized repair has reconciled the installed runtime.
 set_git_mode() {
-  local mode="$1" log_prefix="$2"
-  yard config set GITHUB_GIT_MODE "$mode" --scope yard --yes > "$log_prefix-setting.log" 2>&1
+  local mode="$1" log_prefix="$2" native_exit=0 capture_exit=0 capture_state=invalid
+  if [ "$MODE" = normal ]; then
+    # Trace only the original authenticated read-only hook at the setting gate.
+    PATH="$STATE/hook-wrappers:$PATH" SUBYARD_TRACE_REAL_BASH="$TRACE_REAL_BASH" \
+      SUBYARD_TRACE_HOOK_SOURCE="$FINAL_SOURCE/config/profiles/git-fetch/runtime.sh" \
+      SUBYARD_TRACE_HOOK_SHA256="$(hash "$FINAL_SOURCE/config/profiles/git-fetch/runtime.sh")" \
+      SUBYARD_TRACE_HOOK_LOG="$log_prefix-hook.log" \
+      yard config set GITHUB_GIT_MODE "$mode" --scope yard --yes > "$log_prefix-setting.log" 2>&1 || native_exit=$?
+    python3 "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace.py" \
+      --verify "$log_prefix-hook.log" > "$log_prefix-capture.log" 2>&1 || capture_exit=$?
+    if [ "$capture_exit" = 0 ]; then
+      capture_state="$(jq -er '.status' "$log_prefix-capture.log")" || capture_exit=1
+    fi
+    printf 'release_activation_hook_capture setting=%s native_exit=%s capture_exit=%s observation=%s\n' "$mode" "$native_exit" "$capture_exit" "$capture_state"
+    [ "$native_exit" = 0 ] || return "$native_exit"
+    [ "$capture_exit" = 0 ] || die 'native setting observation capture failed'
+    jq -e '.incomplete == 0' "$log_prefix-capture.log" >/dev/null || die 'native setting observation capture was incomplete'
+  else
+    yard config set GITHUB_GIT_MODE "$mode" --scope yard --yes > "$log_prefix-setting.log" 2>&1
+  fi
   yard migrate --yes > "$log_prefix-apply.log" 2>&1
+  claim_units
 }
 trace_deferred_migration() {
   local original_python source before native_exit capture_exit=0 unchanged=0
@@ -107,6 +126,7 @@ CREATED_YARDS=()
 STARTED="$(date +%s)"
 READY_STATE=not-started READY_EXIT=unknown READY_STARTED=$SECONDS
 YARD_BIN=''
+TRACE_REAL_BASH="$(command -v bash)"
 unit_recipe_owned() {
   local path="$1" unit="$2" yard_name=default
   [ "$UNITS_AUTHORIZED" = 1 ] && [ -f "$path" ] && [ ! -L "$path" ] \
@@ -485,6 +505,10 @@ verify_runtime() {
   [ "$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)" = "$preview" ] || die 'preview helper differs'
   [ "$(guest stat -c '%a:%u:%g' /usr/local/bin/subyard-preview)" = 755:0:0 ] || die 'preview helper permissions differ'
   [ "$(guest stat -c '%a:%u:%g' /etc/subyard/preview.json)" = 644:0:0 ] || die 'preview metadata permissions differ'
+  [ "$(guest sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)" = "$preview_instruction_hash" ] \
+    || die 'preview migration lost unmarked instructions after their host source disappeared'
+  guest test -r /home/dev/.agents/skills/subyard-preview/SKILL.md
+  guest test ! -L /home/dev/.codex/skills/subyard-github
   [ "$(guest sha256sum /etc/subyard/preview.json | cut -d' ' -f1)" = \
     "$(incus config get "$INSTANCE" user.subyard.preview_endpoint_sha256 --project "$PROJECT")" ] || die 'preview endpoint receipt differs'
   guest python3 -c 'import json; v=json.load(open("/etc/subyard/preview.json")); assert v["version"]==1 and v["host"] and 0<int(v["port"])<65536'
@@ -523,6 +547,10 @@ if [ "$MODE" = --local-probe ]; then
     # Exercise the same sequence used by the physical fixture. A setting write
     # creates pending activation; ordinary profile mutations must remain gated.
     pending="$STATE/git-mode-pending"
+    claim_units() {
+      [ ! -e "$pending" ]
+      touch "$STATE/git-mode-claimed"
+    }
     yard() {
       case "$*" in
         'config set GITHUB_GIT_MODE broker-first --scope yard --yes'|'config set GITHUB_GIT_MODE off --scope yard --yes')
@@ -533,7 +561,9 @@ if [ "$MODE" = --local-probe ]; then
       esac
     }
     for mode in broker-first off broker-first; do
+      rm -f -- "$STATE/git-mode-claimed"
       set_git_mode "$mode" "$STATE/git-mode-probe"
+      [ -f "$STATE/git-mode-claimed" ]
       yard profile enable github --yes
     done
   ) || die 'Git mode change did not authorize runtime repair before profile mutation'
@@ -691,7 +721,7 @@ chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$ABSENT/config.env"
 cp "$SUBYARD_CONFIG_HOME/yards/$ABSENT/config.env" "$STATE/selection-absent"
 SSH_PORT=$((35000 + ($$ % 10000)))
 cat > "$SUBYARD_CONFIG_HOME/config.env" <<EOF
-CODING_TOOL_INTEGRATIONS=
+CODING_TOOL_INTEGRATIONS=claude
 SUBYARD_KEYS_CONSUMER_ROOT=$SUBYARD_KEYS_CONSUMER_ROOT
 STORAGE_PATH=$STORAGE_PATH
 DEV_UID=$FIXTURE_DEV_UID
@@ -700,12 +730,14 @@ HOST_MOUNTS=
 HOST_LINKS=
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
-HOST_CLAUDE_MD=
+HOST_CLAUDE_MD=$STATE/preview-host-instructions
 HOST_CODEX_AGENTS_MD=
 HOST_OPENCODE_AGENTS_MD=
 BASE_IMAGE=subyard-e2e-debian-13-cloud-container
 BASE_IMAGE_FALLBACK=subyard-e2e-debian-13-cloud-container
 EOF
+printf 'Keep these unmarked operator instructions.\n' > "$STATE/preview-host-instructions"
+chmod 0600 "$STATE/preview-host-instructions"
 cat > "$SUBYARD_CONFIG_HOME/yards/default/config.env" <<EOF
 INCUS_PROJECT=$PROJECT
 YARD_INSTANCE_NAME=$INSTANCE
@@ -775,6 +807,19 @@ for target in default "$NAMED"; do
 done
 incus config set "$INSTANCE" user.subyard.activation-fixture "$STATE" --project "$PROJECT"
 incus config set "$NAMED_INSTANCE" user.subyard.activation-fixture "$STATE" --project "$NAMED_PROJECT"
+# The genuine predecessor created and recorded these composed instructions.
+# Bind the unmarked bytes before current activation retires their missing source.
+preview_instruction_hash="$(guest python3 - <<'PY'
+import hashlib
+from pathlib import Path
+data = Path('/home/dev/.claude/CLAUDE.md').read_bytes()
+start, end = b'<!-- subyard-preview -->', b'<!-- /subyard-preview -->'
+assert data.count(start) == data.count(end) == 1
+begin, finish = data.index(start), data.index(end) + len(end)
+assert begin < finish and b'Keep these unmarked operator instructions.' in data[:begin]
+print(hashlib.sha256(data[:begin] + data[finish:]).hexdigest())
+PY
+)"
 guest_dev /usr/local/bin/subyard-github status | jq -e '.configured==false' >/dev/null
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test ! -e /usr/local/libexec/subyard/github-client
 stage synthetic-credentials-and-intent
@@ -806,6 +851,8 @@ guest sh -eu -c 'test ! -L /usr/local/bin/subyard-preview; test "$(stat -c "%a:%
 drifted_preview="$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)"
 [ "$baseline_preview" != "$drifted_preview" ] && [ "$drifted_preview" != "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")" ] || die 'preview fixture did not produce meaningful installed drift'
 printf 'release_activation_preview_drift baseline=%s installed=%s candidate=%s\n' "$baseline_preview" "$drifted_preview" "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")"
+# All predecessor operations have finished; only the candidate sees this absence.
+rm -- "$STATE/preview-host-instructions"
 stage publish-exact-candidate
 fresh env YARD_RELEASE_BASE_URL="file://$FINAL_RELEASE" bash "$FINAL_RELEASE/subyard-install.sh" \
   --version "$CANDIDATE" --publish-only --yes > "$STATE/publish.log" 2>&1
@@ -862,18 +909,23 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/noop.log" 2>&1
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'runtime retry changed completed migrations'
 
 stage broker-first-owned-wiring-lifecycle
+install -d -m 0700 "$STATE/hook-wrappers"
+install -m 0700 "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace.py" "$STATE/hook-wrappers/bash"
 set_git_mode broker-first "$STATE/git-mode"
 yard profile enable github --yes > "$STATE/git-enable.log" 2>&1
+claim_units
 verify_git_wiring
 # Configuration delivery may replace .gitconfig; the independent XDG include survives.
 guest_dev sh -c 'printf "[user]\n\tname = Delivered fixture\n" > /home/dev/.gitconfig'
 verify_git_wiring
 wiring_inode="$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)"
 yard profile enable github --yes > "$STATE/git-repeat.log" 2>&1
+claim_units
 [ "$wiring_inode" = "$(guest stat -c '%i' /home/dev/.config/subyard/github-git.conf)" ] || die 'repeated Git enable rewrote current fragment'
 guest_dev sh -c 'printf "# subyard-managed-github-git-v1\n# fixture drift\n" > /home/dev/.config/subyard/github-git.conf'
 yard profile status github --json | jq -e '.runtime=="pending"' >/dev/null
 yard migrate --yes > "$STATE/git-repair.log" 2>&1
+claim_units
 verify_git_wiring
 set_git_mode off "$STATE/git-off"
 guest test ! -e /home/dev/.config/subyard/github-git.conf
@@ -881,6 +933,7 @@ guest_dev git config --global --get user.name | grep -Fxq 'Delivered fixture'
 set_git_mode broker-first "$STATE/git-on"
 verify_git_wiring
 yard profile disable github --yes > "$STATE/git-disable.log" 2>&1
+claim_units
 guest test ! -e /home/dev/.config/subyard/github-git.conf
 guest test ! -e /usr/local/bin/git-remote-subyard-github
 guest_dev git config --global --get user.name | grep -Fxq 'Delivered fixture'
@@ -902,6 +955,9 @@ trace_deferred_migration
 claim_units
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- runuser -u dev -- \
   /usr/local/bin/subyard-github status --runtime | jq -e --arg wanted "$wanted" '.broker_sha256==$wanted and .client_sha256==$wanted' >/dev/null
+[ "$(incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- sha256sum /home/dev/.claude/CLAUDE.md | cut -d' ' -f1)" = "$preview_instruction_hash" ] \
+  || die 'deferred preview migration lost unmarked instructions'
+incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test -r /home/dev/.agents/skills/subyard-preview/SKILL.md
 ready
 
 stage owned-timer-drift-current-repair

@@ -54,6 +54,7 @@ type materializedConfigs struct {
 	Files                      []materializedConfigFile
 	Entries                    []materializedArtifact
 	Sources                    []materializedSourceGuard
+	PreviewSkillCutover        bool `json:",omitempty"`
 }
 
 func (d materializedConfigs) semantic() materializedConfigs {
@@ -207,7 +208,7 @@ func materializedSourceIdentity(path string) (string, error) {
 }
 
 func (runtime Runtime) materializedConfigDescription(p *PreparedConfigs) (materializedConfigs, error) {
-	d := materializedConfigs{Binding: p.binding, Runtime: p.runtime, Instance: p.instance, Entries: describeMaterializedArtifacts(p.entries)}
+	d := materializedConfigs{PreviewSkillCutover: p.previewSkillCutover, Binding: p.binding, Runtime: p.runtime, Instance: p.instance, Entries: describeMaterializedArtifacts(p.entries)}
 	for _, f := range p.files {
 		file := materializedConfigFile{Integration: f.integration, Label: f.label, Source: []byte(runtime.bindingPath(f.source)), Destination: []byte(f.destination), PreviewSource: []byte(runtime.bindingPath(f.previewSource)), OwnedFormat: f.ownedFormat, FollowSymlinks: f.followSymlinks, PreviewInstructions: f.previewInstructions}
 		if payload, exists := p.payloads[f.destination]; exists {
@@ -354,6 +355,9 @@ func (runtime Runtime) restoreMaterializedConfigs(ctx context.Context, p *Prepar
 			return nil, domain.ErrPlanStale
 		}
 	}
+	// Absence is the exact historical selector, including recipes with no
+	// selected instruction descriptors. Current recipes bind cutover explicitly.
+	runtime.legacyPreviewInstructions = !original.Configs.PreviewSkillCutover
 	// The selector is only a scope/guard oracle. Its newly read payloads are
 	// discarded; the returned handle below is populated from original bytes.
 	var fresh *PreparedConfigs

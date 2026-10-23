@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -21,6 +23,16 @@ func ProfileValues(source *profile.Source, base map[string]string) (map[string]s
 func ProfileProvisionBinding(pkg profile.Package, base map[string]string) (profile.ProvisionBinding, error) {
 	binding, err := pkg.BindProvision()
 	if err != nil {
+		return profile.ProvisionBinding{}, err
+	}
+	// Current provision hooks consume the shared static-delivery helper. Bind it
+	// with the resolved package before assessment; older source roots omit it.
+	helper := filepath.Join(pkg.Root, "..", "..", "skills", "deliver.py")
+	if _, err := os.Lstat(helper); err == nil {
+		if err := binding.AddSource("agent-skills.py", helper); err != nil {
+			return profile.ProvisionBinding{}, err
+		}
+	} else if !os.IsNotExist(err) {
 		return profile.ProvisionBinding{}, err
 	}
 	declared, err := ProfileValues(pkg.Config, nil)

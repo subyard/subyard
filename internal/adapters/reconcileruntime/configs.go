@@ -1,6 +1,7 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -34,15 +35,16 @@ type guestConfigFile struct {
 // PreparedConfigs retains the exact component source/payload/destination set.
 // Its private fields cannot be reconstructed from a binding supplied over IPC.
 type PreparedConfigs struct {
-	files             []guestConfigFile
-	payloads          map[string][]byte
-	entries           []integrationArtifact
-	binding           string
-	runtime           string
-	instance          string
-	sources           map[configSourceKey]configSourceBytes
-	packageSources    []config.MaterializedAsset
-	packageIdentities map[string]string
+	previewSkillCutover bool
+	files               []guestConfigFile
+	payloads            map[string][]byte
+	entries             []integrationArtifact
+	binding             string
+	runtime             string
+	instance            string
+	sources             map[configSourceKey]configSourceBytes
+	packageSources      []config.MaterializedAsset
+	packageIdentities   map[string]string
 }
 
 type configSourceKey struct {
@@ -90,6 +92,17 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 	prepared, err := runtime.PrepareConfigs(ctx)
 	if err != nil {
 		return err
+	}
+	if !runtime.legacyPreviewInstructions {
+		paths, err := runtime.agentSkillSources()
+		if err != nil {
+			return err
+		}
+		if len(paths) != 0 {
+			if err := runtime.runScript(ctx, runtime.Stderr, "refresh-agent-skills.sh", "apply"); err != nil {
+				return err
+			}
+		}
 	}
 	return runtime.applyPreparedConfigs(ctx, prepared, false)
 }
@@ -214,7 +227,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedConfigs{files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
+	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
 // ApplyPreparedConfigs rechecks the captured sources and uses only the cached
@@ -276,6 +289,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
 	}
+	runtime.legacyPreviewInstructions = !prepared.previewSkillCutover
 	if recheck {
 		if err := runtime.CheckPreparedConfigs(ctx, prepared); err != nil {
 			return err
@@ -292,7 +306,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if output == nil {
 		output = io.Discard
 	}
-	if len(entries) != 0 {
+	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
 			return err
 		}
@@ -311,7 +325,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
 	}
-	if len(entries) != 0 {
+	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, ""); err != nil {
 			return err
 		}
@@ -343,7 +357,18 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return runtime.guestConfigsConverged(ctx, files)
+	ready, err := runtime.guestConfigsConverged(ctx, files)
+	if err != nil || !ready || runtime.legacyPreviewInstructions {
+		return ready, err
+	}
+	paths, err := runtime.agentSkillSources()
+	if err != nil {
+		return false, err
+	}
+	if len(paths) != 0 {
+		return runtime.agentSkillsConverged(ctx, paths)
+	}
+	return true, nil
 }
 
 func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestConfigFile) (bool, error) {
@@ -472,7 +497,7 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	}
 	for _, source := range sources {
 		asset := source.Asset
-		file := guestConfigFile{readAsset: reader, integration: source.Integration, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		file := guestConfigFile{readAsset: reader, integration: source.Integration, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
@@ -493,6 +518,13 @@ func (file guestConfigFile) readSource() ([]byte, error) {
 	payload, sourceErr := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
 	if sourceErr != nil && !os.IsNotExist(sourceErr) {
 		return nil, sourceErr
+	}
+	// Current instruction delivery omits only exact historical managed blocks.
+	// Frozen recipes retain the original composition path below.
+	// The artifact resolver grants source symlink following only to instructions;
+	// diagnostic labels are package-owned text, not a policy discriminator.
+	if !file.previewInstructions && file.followSymlinks && sourceErr == nil {
+		payload = stripLegacyPreviewBlock(payload)
 	}
 	// Older published runtimes lack this asset; preserve their exact desired bytes.
 	preview := []byte(previewInstructions)
@@ -522,7 +554,7 @@ For a static web preview, run ` + "`subyard-preview <relative-static-dir>`" + ` 
 // The unchanged host digest is evidence for consented initial legacy adoption;
 // the effective payload remains the desired managed identity.
 func (file guestConfigFile) legacySourceHash() (string, error) {
-	if !file.previewInstructions {
+	if !file.previewInstructions && !file.followSymlinks {
 		return "", nil
 	}
 	payload, err := file.readSourceAsset(config.MaterializedAsset{Source: file.source, FollowSymlinks: file.followSymlinks})
@@ -670,4 +702,23 @@ func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, err
 		}
 	}
 	return sources, nil
+}
+
+// Unrecognized or ambiguous markers are user content, never removal authority.
+func stripLegacyPreviewBlock(payload []byte) []byte {
+	start, end := []byte("<!-- subyard-preview -->"), []byte("<!-- /subyard-preview -->")
+	if bytes.Count(payload, start) != 1 || bytes.Count(payload, end) != 1 {
+		return payload
+	}
+	begin, finish := bytes.Index(payload, start), bytes.Index(payload, end)
+	if finish < begin {
+		return payload
+	}
+	finish += len(end)
+	block := payload[begin:finish]
+	if !bytes.Equal(block, bytes.TrimSuffix([]byte(previewInstructions), []byte("\n"))) && fmt.Sprintf("%x", sha256.Sum256(block)) != "2de48bed4c984591e976f396432ff7758f4df3ca24e0b55fc90bf1fb0a5aeb48" {
+		return payload
+	}
+	result := append([]byte(nil), payload[:begin]...)
+	return append(result, payload[finish:]...)
 }

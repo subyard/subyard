@@ -6,10 +6,10 @@ lane=full
 if [ "$#" -eq 2 ] && [ "$1" = --lane ]; then
   lane="$2"
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: android-pool-runtime.sh [--lane full|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
+  printf 'usage: android-pool-runtime.sh [--lane full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease]\n' >&2
   exit 2
 fi
-case "$lane" in full|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
+case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-debug|sdk-images|memory-lease) ;; *) printf 'invalid Android test lane\n' >&2; exit 2 ;; esac
 
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || { printf 'android-pool-runtime: requires VM1\n' >&2; exit 1; }
 [ -r /run/subyard-e2e-lease.json ] || { printf 'android-pool-runtime: missing E2E lease guard\n' >&2; exit 1; }
@@ -20,6 +20,13 @@ YARD_BIN="$root/.build/yard"
 unset YARD_ENGINE_PATH
 for command in go incus sudo timeout; do command -v "$command" >/dev/null || exit 1; done
 sudo -n true
+if [ "$lane" = skills ]; then
+  free_bytes="$(df -B1 --output=avail /var/tmp | tail -n 1)"
+  [ "$free_bytes" -ge 15032385536 ] || { printf 'skill fixture needs 14 GiB free disk\n' >&2; exit 2; }
+  available_kib="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+  [ "$available_kib" -ge 2097152 ] || { printf 'skill fixture needs 2 GiB available RAM\n' >&2; exit 2; }
+  printf 'skills_fixture_capacity=PASS emulator_allocation=none\n'
+fi
 hold_seconds="${ANDROID_DIAGNOSTIC_HOLD_SECONDS:-0}"
 [[ "$hold_seconds" =~ ^[0-9]+$ ]] || { printf 'ANDROID_DIAGNOSTIC_HOLD_SECONDS must be an integer\n' >&2; exit 1; }
 hold_seconds=$((10#$hold_seconds))
@@ -73,7 +80,7 @@ cleanup() {
     kill -TERM "$monitor_pid" 2>/dev/null || true
     wait "$monitor_pid" 2>/dev/null || true
   fi
-  if [ "$status" -ne 0 ] && [ "$lane" != full ] && [ -n "$project" ] && [ -n "$instance" ]; then
+  if [ "$status" -ne 0 ] && [ "$lane" != full ] && [ "$lane" != skills ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 15 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --once \
       < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
       || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2
@@ -86,7 +93,7 @@ cleanup() {
     fi
   fi
   if [ "$init_attempted" = 0 ] || yard teardown --yes > "$state/teardown.log" 2>&1; then
-    if [ "$lane" = full ] && [ -n "$project" ]; then
+    if { [ "$lane" = full ] || [ "$lane" = skills ]; } && [ -n "$project" ]; then
       if incus list --all-projects --format=json | python3 -c '
 import json, sys
 assert all(item["project"] != sys.argv[1] for item in json.load(sys.stdin))
@@ -135,6 +142,7 @@ if any(item["name"] == pool for item in json.load(sys.stdin)):
     [ "$cleanup_status" -ne 0 ] || printf 'android cleanup=passed\n'
   else
     printf 'android cleanup=failed\n' >&2
+    tail -n 60 "$state/teardown.log" >&2
     cleanup_status=3
     [ "$status" -ne 0 ] || status=3
   fi
@@ -181,7 +189,7 @@ project="$(yard config show INCUS_PROJECT | sed -n 's/^effective: //p')"
 instance="$(yard config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')"
 yard start --yes
 # Emulator lanes require the physical namespace boundary before downloading images.
-if [ "$lane" != full ]; then
+if [ "$lane" != full ] && [ "$lane" != skills ]; then
 incus --project "$project" exec "$instance" -- bash -ceu '
   name="$1"
   test ! -e "/run/netns/$name"
@@ -194,6 +202,45 @@ incus --project "$project" exec "$instance" -- bash -ceu '
 ' _ "subyard-android-probe-$token"
 fi
 yard provision --yes
+if [ "$lane" = skills ]; then
+  android_phase_begin skills
+  repair_skills() {
+    # Completed release history needs a fresh host-wide assessment and consent.
+    android_candidate_command "$YARD_BIN" migrate --check --json > "$state/skill-repair.json"
+    jq -e '.outcome.status == "migration-required"' "$state/skill-repair.json" >/dev/null
+    android_candidate_command "$YARD_BIN" migrate --yes
+    android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
+  }
+  pool_pid="$(incus --project "$project" exec "$instance" -- systemctl show subyard-android-pool.service -p MainPID --value)"
+  [[ "$pool_pid" =~ ^[1-9][0-9]*$ ]]
+  # Repeated static refresh and missing-link repair must not restart the capability.
+  yard init --configs --yes
+  bash "$root/config/profiles/android/tests/e2e/android-skills-discovery.sh" \
+    "$root" "$YARD_RUNTIME_ROOT/current" "$project" "$instance"
+  incus --project "$project" exec "$instance" -- rm /home/dev/.agents/skills/subyard-android
+  repair_skills
+  yard init --yes
+  incus --project "$project" exec "$instance" -- test -L /home/dev/.agents/skills/subyard-android
+  incus --project "$project" exec "$instance" -- test -r /home/dev/.agents/skills/subyard-android/SKILL.md
+  [ "$pool_pid" = "$(incus --project "$project" exec "$instance" -- systemctl show subyard-android-pool.service -p MainPID --value)" ]
+  # Provider disable removes its artifacts, preserving an unrelated personal skill.
+  incus --project "$project" exec "$instance" -- runuser -u dev -- sh -eu -c '
+    mkdir -p /home/dev/.agents/skills/personal-probe
+    printf preserved > /home/dev/.agents/skills/personal-probe/user-file
+  '
+  yard config set ENVIRONMENT_PROFILES '' --scope yard --local --yes
+  repair_skills
+  yard init --configs --yes
+  incus --project "$project" exec "$instance" -- test ! -e /usr/local/share/subyard/skills/subyard-android
+  for adapter in .agents/skills .claude/skills .config/opencode/skills; do
+    incus --project "$project" exec "$instance" -- test ! -L "/home/dev/$adapter/subyard-android"
+  done
+  [ "$(incus --project "$project" exec "$instance" -- cat /home/dev/.agents/skills/personal-probe/user-file)" = preserved ]
+  [ "$pool_pid" = "$(incus --project "$project" exec "$instance" -- systemctl show subyard-android-pool.service -p MainPID --value)" ]
+  android_phase_end 0
+  printf 'android_skills_lifecycle=PASS model_comprehension=not-run\n'
+  exit 0
+fi
 if [ "$lane" = full ]; then
   android_phase_begin sdk-build
   sdk_pool="$(yard config show SRV_POOL | sed -n 's/^effective: //p')"

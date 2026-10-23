@@ -164,7 +164,7 @@ func (runtime Runtime) profileSourcePaths(owner string) (profile.Definition, []s
 			return definition, nil, nil, err
 		}
 	}
-	for _, relative := range []string{"scripts/lib-power.sh", "scripts/lib-service.sh"} {
+	for _, relative := range []string{"scripts/lib-power.sh", "scripts/lib-service.sh", "config/skills/deliver.py"} {
 		if _, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, relative)); err == nil {
 			paths = append(paths, relative)
 		} else if !os.IsNotExist(err) {

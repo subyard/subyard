@@ -168,3 +168,32 @@ func TestPreparedRuntimeRecipeCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPreparedProfileCapturesSharedSkillHelperForPreCoreGuestActivation(t *testing.T) {
+	runtime := preparedProfileFixture(t)
+	path := filepath.Join(runtime.RepositoryRoot, "config/skills/deliver.py")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("# captured shared delivery helper\n")
+	testkit.WriteFile(t, path, original, 0o644)
+	prepared, err := runtime.PrepareProfileRuntimeSources(context.Background(), "synthetic-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if string(prepared.files["config/skills/deliver.py"]) != string(original) {
+		t.Fatal("profile recipe omitted pre-core skill delivery source")
+	}
+	testkit.WriteFile(t, path, []byte("# changed helper\n"), 0o644)
+	if _, err := runtime.BindInstalledRuntime(prepared.Recipe()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("changed helper admitted: %v", err)
+	}
+	if err := prepared.materialize(); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(filepath.Join(prepared.directory, "config/skills/deliver.py"))
+	if err != nil || string(actual) != string(original) {
+		t.Fatalf("helper recaptured after guard: %v", err)
+	}
+}

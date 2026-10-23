@@ -295,3 +295,14 @@ diagnostics: `--lane diagnostics` runs the former broad sequence; `recovery`, `v
 `viewer-native-debug`, `sdk-images` and `memory-lease` select their existing focused diagnostics.
 They use the same controller and fresh disposable allocation. Run them when changes need those
 physical contracts; they are separate from the ordinary release gate.
+
+## Agent guidance
+
+Successful Android provisioning registers the `subyard-android` user skill alongside
+core preview guidance. Coding agents can discover its Android build/test and emulator
+description from any project inside the yard. It explains the actual toolchain exports,
+L1/L2 cache distinction, bounded catalog/status probes and `android-broker run` leases.
+Skill installation does not prove that the emulator pool is currently ready.
+Static runtime refresh updates this guidance without restarting the pool or allocating
+an emulator; disabling the provider removes only its managed skill artifacts. See the
+[shared delivery contract](../config/skills/README.md).

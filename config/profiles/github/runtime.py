@@ -90,10 +90,11 @@ def observe():
     if not engine.exists():
         engine = SOURCE.parents[2]/'.build/profiles/github/bin/broker'
     inputs = {name: hashlib.sha256((SOURCE/name).read_bytes()).hexdigest()
-              for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py')}
+              for name in ('profile.json', 'owner.sh', 'runtime.sh', 'runtime.py', 'provision.sh', 'SKILL.md', 'skills.json', 'bin/subyard-github', 'bin/git-remote-subyard-github', 'git_wiring.py')}
     if engine.is_symlink():
         raise ValueError('unsafe native GitHub runtime source')
     inputs['engine'] = hashlib.sha256(engine.read_bytes()).hexdigest()
+    inputs['skill_delivery'] = hashlib.sha256((SOURCE.parents[1]/'skills/deliver.py').read_bytes()).hexdigest()
     # These are transport paths and settings; connection contents never enter a fingerprint.
     settings = {key: os.environ.get(key, '') for key in ('SUBYARD_YARD', 'INCUS_PROJECT',
         'YARD_INSTANCE_NAME', 'SUBYARD_HOME', 'SUBYARD_CONFIG_HOME', 'SUBYARD_OPERATOR_HOME',
