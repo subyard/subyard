@@ -109,6 +109,10 @@ coordinator, and do not create or close shared task files or start another full 
 - For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
   Repair with targeted checks, then freeze the final candidate. Run the original regression
   before the remaining required gates; a blocked check is incomplete, never passed.
+- For release repairs, accumulate fixes and commit them together after verification. While preparation
+  CI runs, run pending independent local/VM checks, including release-smoke regressions, on a frozen
+  local candidate. Transfer compatible evidence only through the reviewed workflow; keep fresh final
+  smoke on the prepared candidate.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)

@@ -4837,7 +4837,7 @@ smoke_rollback_fixture_contract() {
     for function_name in verify_smoke_state establish_smoke_continuation verify_predecessor_rollback_refusal finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
-    for function_name in assert_project_owned assert_legacy_continuation legacy_continuation_identity init_legacy_continuation repair_legacy_activation_after_restart establish_legacy_continuation verify_legacy_full_removal_refusal; do
+    for function_name in assert_project_owned assert_legacy_continuation legacy_continuation_identity init_legacy_continuation post_restart_release_ready repair_legacy_activation_after_restart establish_legacy_continuation verify_legacy_full_removal_refusal; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
     done
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
@@ -4986,6 +4986,11 @@ smoke_rollback_fixture_contract() {
           [ "$1" != start ] || : > "$STATE_ROOT/restarted"
           ;;
         'migrate --check --json')
+          local check_scenario="$scenario"
+          printf 'check\n' >> "$STATE_ROOT/migration-checks"
+          if [[ "$scenario" = disk-tmp-reboot-settled-* ]] && [ -f "$STATE_ROOT/migration-authorized" ]; then
+            check_scenario="${scenario/-settled/}"
+          fi
           [ "$(cat "$STATE_ROOT/restart")" = $'stop --yes\nstart --yes' ] || die 'assessment preceded restart'
           assert_legacy_continuation
           if [[ "$scenario" = disk-tmp-reboot-ready* ]]; then
@@ -4995,7 +5000,7 @@ smoke_rollback_fixture_contract() {
           fi
           printf 'assessed\n' > "$STATE_ROOT/migration-assessed"
           [ "$scenario" != disk-tmp-reboot-check-fail ] || { printf 'private-sentinel\n' >&2; return 45; }
-          jq -n --arg scenario "$scenario" '{schemaVersion:1,current:"candidate-aaaaaaaaaaaa",owner:"candidate-aaaaaaaaaaaa",next:"yard migrate",outcome:{status:"migration-required",code:"transition-required"},domains:[{domain:"settings",pending:[]}],decisions:[{scope:"activation",resource:"activation.core-guest-runtime",decision:"canonicalize"}]} |
+          jq -n --arg scenario "$check_scenario" '{schemaVersion:1,current:"candidate-aaaaaaaaaaaa",owner:"candidate-aaaaaaaaaaaa",next:"yard migrate",outcome:{status:"migration-required",code:"transition-required"},domains:[{domain:"settings",pending:[]}],decisions:[{scope:"activation",resource:"activation.core-guest-runtime",decision:"canonicalize"}]} |
             if $scenario | startswith("disk-tmp-reboot-ready") then
               .outcome={status:"ready",code:"ready",reachedGoal:true,active:.current,target:.current} | del(.next,.decisions) |
               if $scenario == "disk-tmp-reboot-ready-preserve" then .decisions=[{resource:"transition.source-metadata",decision:"preserve",result:"private-sentinel"}]
@@ -5019,16 +5024,21 @@ smoke_rollback_fixture_contract() {
             elif $scenario == "disk-tmp-reboot-private-resource" then .decisions[0].resource="private-sentinel"
             elif $scenario == "disk-tmp-reboot-resource-array-allowed" then .decisions[0].resource=["activation.core-guest-runtime"] else . end'
           [ "$scenario" != disk-tmp-reboot-inspection-mutation ] || printf 'changed\n' >> "$V2_JOURNAL"
+          if [ "$scenario" = disk-tmp-reboot-settled-ready-inspection-mutation ] && [ -f "$STATE_ROOT/migration-authorized" ]; then
+            printf 'changed\n' >> "$V2_JOURNAL"
+          fi
           ;;
         'migrate --yes')
           [[ "$scenario" != disk-tmp-reboot-ready* ]] || die 'ready inspection unexpectedly authorized a repair'
           [ -f "$STATE_ROOT/migration-assessed" ] || die 'migration authorization preceded assessment'
           assert_legacy_continuation
           [ "$scenario" != disk-tmp-reboot-apply-fail ] || { printf 'private-sentinel\n' >&2; return 45; }
-          jq --arg scenario "$scenario" '.transaction="new-transaction" | .releases.from=.goal.target |
-            if $scenario == "disk-tmp-reboot-replay" then .steps=[{checkpoint:"verified"}]
-            elif $scenario == "disk-tmp-reboot-same-transaction" then .transaction="old-transaction" else . end' "$V2_JOURNAL" > "$STATE_ROOT/new-journal"
-          cat "$STATE_ROOT/new-journal" > "$V2_JOURNAL"
+          if [[ "$scenario" != disk-tmp-reboot-settled-* ]]; then
+            jq --arg scenario "$scenario" '.transaction="new-transaction" | .releases.from=.goal.target |
+              if $scenario == "disk-tmp-reboot-replay" then .steps=[{checkpoint:"verified"}]
+              elif $scenario == "disk-tmp-reboot-same-transaction" then .transaction="old-transaction" else . end' "$V2_JOURNAL" > "$STATE_ROOT/new-journal"
+            cat "$STATE_ROOT/new-journal" > "$V2_JOURNAL"
+          fi
           [ "$scenario" != disk-tmp-reboot-ledger-change ] || printf 'changed\n' >> "$V2_LEDGER"
           [ "$scenario" != disk-tmp-reboot-links-change ] || ln -sfn releases/foreign "$OPERATOR_HOME/.subyard/runtime/current"
           printf 'authorized\n' > "$STATE_ROOT/migration-authorized"
@@ -5150,6 +5160,7 @@ smoke_rollback_fixture_contract() {
   )
 }
 for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata \
+  disk-tmp-reboot-settled-ready disk-tmp-reboot-settled-ready-inspection-mutation \
   disk-tmp-reboot-metadata-only disk-tmp-reboot-metadata-unknown disk-tmp-reboot-metadata-scope \
   disk-tmp-reboot-metadata-decision \
   disk-tmp-reboot-ready disk-tmp-reboot-ready-preserve \
@@ -5175,10 +5186,14 @@ for smoke_rollback_scenario in success disk-tmp-reboot disk-tmp-reboot-metadata 
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success || "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata || "$smoke_rollback_scenario" = disk-tmp-reboot-ready || "$smoke_rollback_scenario" = disk-tmp-reboot-ready-preserve || "$smoke_rollback_scenario" = tmp-repeat ]]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = checkpoint-success || "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata || "$smoke_rollback_scenario" = disk-tmp-reboot-ready || "$smoke_rollback_scenario" = disk-tmp-reboot-ready-preserve || "$smoke_rollback_scenario" = disk-tmp-reboot-settled-ready || "$smoke_rollback_scenario" = tmp-repeat ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
+    fi
+    if [ "$smoke_rollback_scenario" = disk-tmp-reboot-settled-ready ]; then
+      [ "$(wc -l < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/migration-checks")" = 2 ] \
+        || fail 'settled activation did not obtain fresh readiness after the no-op apply'
     fi
     if [[ "$smoke_rollback_scenario" = disk-tmp-reboot || "$smoke_rollback_scenario" = disk-tmp-reboot-metadata ]]; then
       smoke_restart_state="$TMP/smoke-rollback-$smoke_rollback_scenario/state"
