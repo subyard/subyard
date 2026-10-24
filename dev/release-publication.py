@@ -2,7 +2,7 @@
 """Prepare exact CI assets, collect local acceptance, publish through serialized Actions."""
 import argparse
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -30,6 +30,13 @@ ATTESTATION_BYTE_LIMIT = 4 << 20
 ATTESTATION_BLOB_BYTE_LIMIT = 2 << 20
 ATTESTATION_TRANSPORT = "subyard-attestation-zlib-v1"
 ATTESTATION_BLOB_TRANSPORT = "subyard-attestation-git-blob-v1"
+PREPARATION_JOBS = frozenset({"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"})
+# Git blob identities of reviewed release.yml policies. Retain historical entries
+# so the first publication checkout can recover earlier successful candidates.
+PREPARATION_WORKFLOW_POLICIES = {
+    "bb9852249013520480a165571dac6c604c487e86": PREPARATION_JOBS,
+    "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4": PREPARATION_JOBS | {"host-free-verify"},
+}
 
 
 def canonical(value):
@@ -38,6 +45,15 @@ def canonical(value):
 
 def identity_hash(identity):
     return hashlib.sha256(canonical(identity).encode()).hexdigest()
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def clear_completion(state):
+    for key in ("completed_at", "github_updated_at", "observed_at", "next_action_at"):
+        state.pop(key, None)
 
 
 def same_repository(left, right):
@@ -49,7 +65,7 @@ def git_blob_sha(payload):
     return hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
 
 
-def encode_attestation(document, github=None, request=""):
+def encode_attestation(document, github=None, request="", *, force_blob=False):
     original = canonical(document).encode()
     if len(original) > ATTESTATION_BYTE_LIMIT:
         raise ValueError("acceptance attestation exceeds uncompressed byte limit")
@@ -59,7 +75,7 @@ def encode_attestation(document, github=None, request=""):
     envelope = {"transport": ATTESTATION_TRANSPORT, "uncompressed_bytes": len(original),
                 "sha256": identity_hash(document), "payload": base64.b64encode(compressed).decode()}
     encoded = base64.b64encode(canonical(envelope).encode()).decode()
-    if len(canonical({"candidate": document.get("candidate_id", ""), "attestation": encoded, "request": request})) <= DISPATCH_INPUT_LIMIT:
+    if not force_blob and len(canonical({"candidate": document.get("candidate_id", ""), "attestation": encoded, "request": request})) <= DISPATCH_INPUT_LIMIT:
         return encoded
     if github is None:
         raise ValueError("large acceptance attestation requires GitHub blob transport")
@@ -130,6 +146,38 @@ def read_attestation(path):
     if len(raw) > ATTESTATION_BYTE_LIMIT:
         raise ValueError("acceptance attestation file exceeds byte limit")
     return json.loads(raw)
+
+
+def publication_preflight(output, manifest_paths, github):
+    root, receipt = a.load_bound(output)
+    manifest = a.candidate_manifest(root, receipt)
+    manifests = {a.evidence_hash(manifest): manifest}
+    checks = {}
+    for name, result in receipt["checks"].items():
+        checks[name] = {key: result[key] for key in ("status", "exit_code", "log_sha256", "environments", "evidence_transfer") if key in result}
+        if "original_attempt" in result:
+            record, original = a.original_attempt(output, receipt, name, result)
+            checks[name]["original_attempt"] = record
+            manifests[record["manifest_sha256"]] = original
+        if result.get("evidence_transfer", {}).get("schema_version") == 2:
+            for role in ("manifest", "target_manifest"):
+                original = a.read_transfer_json(output / result["evidence_files"][role])
+                manifests[a.evidence_hash(original)] = original
+    for path in manifest_paths:
+        original = a.read_transfer_json(path)
+        a.validate_manifest(original)
+        manifests[a.evidence_hash(original)] = original
+    document = {"diagnostic": "publication-preflight-v1", "candidate_id": "diagnostic-local",
+                "manifests": manifests, "checks": checks,
+                "external_obligations": {name: {"status": item["status"]} for name, item in receipt["external_obligations"].items()}}
+    encoded = encode_attestation(document, github, force_blob=True)
+    envelope = json.loads(base64.b64decode(encoded, validate=True))
+    if decode_attestation(envelope, github) != document:
+        raise ValueError("publication preflight transport roundtrip mismatch")
+    return {"diagnostic": True, "acceptance": False, "source_fingerprint": receipt["source_fingerprint"],
+            "manifest_count": len(manifests), "canonical_bytes": len(canonical(document).encode()),
+            "compressed_bytes": len(zlib.compress(canonical(document).encode())), "transport": envelope["transport"],
+            "dispatch_characters": len(canonical({"candidate": document["candidate_id"], "attestation": encoded, "request": ""}))}
 
 
 def write_json(path, value):
@@ -261,8 +309,17 @@ def verify_run(github, candidate):
         or run["status"] != "completed" or run["conclusion"] != "success"
         or run["run_attempt"] != attempt or not same_repository(run["repository"]["full_name"], github.repository)):
         raise ValueError("preparation run/attempt did not pass")
+    revision = run.get("head_sha")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("preparation workflow revision is missing or invalid")
+    declaration = github.api("contents/.github/workflows/release.yml?ref=" + revision)
+    if (declaration.get("type") != "file" or declaration.get("path") != ".github/workflows/release.yml"
+        or not isinstance(declaration.get("sha"), str)):
+        raise ValueError("invalid preparation workflow file identity")
+    required = PREPARATION_WORKFLOW_POLICIES.get(declaration["sha"])
+    if required is None:
+        raise ValueError("unknown preparation workflow policy")
     jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
-    required = {"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"}
     if (len(jobs) != len(required) or {job["name"] for job in jobs} != required
         or any(job["status"] != "completed" or job["conclusion"] != "success" for job in jobs)):
         raise ValueError("preparation job inventory did not completely pass in this attempt")
@@ -867,11 +924,15 @@ def dispatch(github, workflow, inputs, state, path):
     while time.monotonic() < deadline:
         run = discover(github, workflow, request)
         if run:
+            if state.get("run_attempt") != run["run_attempt"]:
+                clear_completion(state)
+                state["run_attempt"] = run["run_attempt"]
             state["run_id"] = run["id"]
             if run["status"] == "completed" and run["conclusion"] != "success":
                 # Persist rerun intent too: response loss must not launch another attempt.
                 target = run["run_attempt"] + 1
                 if state.get("rerun_attempt", 0) < target:
+                    clear_completion(state)
                     state["rerun_attempt"] = target
                     state["status"] = "rerun-outcome-unknown"
                     write_json(path, state)
@@ -890,10 +951,15 @@ def dispatch(github, workflow, inputs, state, path):
                 last_report = 0
                 while True:
                     run = github.api(f"actions/runs/{run['id']}")
+                    if state.get("run_attempt") != run["run_attempt"]:
+                        clear_completion(state)
                     state["run_attempt"] = run["run_attempt"]
                     state["status"] = run["status"]
                     write_json(path, state)
                     if run["status"] == "completed":
+                        state.setdefault("observed_at", utc_now())
+                        state.setdefault("completed_at", run.get("completed_at"))
+                        state["github_updated_at"] = run.get("updated_at")
                         state["status"] = "passed" if run["conclusion"] == "success" else run["conclusion"]
                         write_json(path, state)
                         if run["conclusion"] != "success":
@@ -915,6 +981,9 @@ def main():
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".build/release-publication")
     parser.add_argument("--repository", default=REPOSITORY)
     sub = parser.add_subparsers(dest="action", required=True)
+    preflight = sub.add_parser("preflight", help="diagnose publication transport from a frozen local collector; never accept or publish")
+    preflight.add_argument("--output", type=Path, required=True, help="frozen local collector directory; checks may be pending")
+    preflight.add_argument("--manifest", type=Path, action="append", default=[], help="additional real planned DIRECT v1 manifest; repeat as needed")
     prepare = sub.add_parser("prepare", help="dispatch all preparation gates on a pinned commit; create no stable tag")
     prepare.add_argument("--version", required=True)
     prepare.add_argument("--commit", required=True)
@@ -944,6 +1013,9 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     github = GitHub(args.repository)
+    if args.action == "preflight":
+        print(canonical(publication_preflight(args.output.resolve(), args.manifest, github)))
+        return 0
     if args.action == "export-ci":
         export_candidate(args.output.resolve(), args.version, args.commit, args.candidate, args.repository)
         return 0
@@ -973,6 +1045,8 @@ def main():
                 raise ValueError("request repository mismatch")
             write_json(path, state)
             run = dispatch(github, "release.yml", {"version": args.version, "commit": args.commit}, state, path)
+            state.setdefault("next_action_at", utc_now())
+            write_json(path, state)
             candidate = f"r{run['id']}-a{run['run_attempt']}"
             directory = state_dir / candidate
             directory.mkdir(exist_ok=True)
@@ -1039,6 +1113,8 @@ def main():
         write_json(path, state)
         encoded = encode_attestation(document, github, state["request"])
         run = dispatch(github, "release-publish.yml", {"candidate": args.candidate, "attestation": encoded}, state, path)
+        state.setdefault("next_action_at", utc_now())
+        write_json(path, state)
         # A failed/cancelled run can be rerun natively; no second publication request is needed.
         release = github.api("releases/tags/v" + identity["version"])
         marker = "Subyard candidate " + args.candidate + " identity " + identity_hash(identity)

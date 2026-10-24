@@ -6,11 +6,12 @@ import (
 )
 
 func TestMetadataOwnsNestedSemanticValues(t *testing.T) {
-	declaration := Definition{SchemaVersion: 1, Name: "synthetic", DisabledWhen: map[string]string{"OFF": "1"}, CredentialImportExclusions: [][]string{{"/keys/"}}, Settings: []Setting{{Name: "SYNTHETIC", Type: "string", Scopes: []string{"shipped"}, Application: "yard-init", Default: stringPointer("original")}}, Runtime: &RuntimeHook{ActivationID: "synthetic", Handler: "runtime.sh"}}
+	declaration := Definition{SchemaVersion: 1, Name: "synthetic", Disabled: true, DisabledWhen: map[string]string{"OFF": "1"}, CredentialImportExclusions: [][]string{{"/keys/"}}, Settings: []Setting{{Name: "SYNTHETIC", Type: "string", Scopes: []string{"shipped"}, Application: "yard-init", Default: stringPointer("original")}}, Runtime: &RuntimeHook{ActivationID: "synthetic", Handler: "runtime.sh"}}
 	metadata, err := declaration.Metadata()
 	if err != nil {
 		t.Fatal(err)
 	}
+	declaration.Disabled = false
 	declaration.DisabledWhen["OFF"] = "2"
 	declaration.CredentialImportExclusions[0][0] = "/changed/"
 	declaration.Settings[0].Scopes[0] = "yard"
@@ -20,13 +21,14 @@ func TestMetadataOwnsNestedSemanticValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data.DisabledWhen["OFF"] != "1" || data.CredentialImportExclusions[0][0] != "/keys/" || *data.Settings[0].Default != "original" || data.Runtime.Handler != "runtime.sh" {
+	if !data.Disabled || !metadata.definition().Clone().Disabled || data.DisabledWhen["OFF"] != "1" || data.CredentialImportExclusions[0][0] != "/keys/" || *data.Settings[0].Default != "original" || data.Runtime.Handler != "runtime.sh" {
 		t.Fatal("metadata aliases package data")
 	}
+	data.Disabled = false
 	data.DisabledWhen["OFF"] = "3"
 	*data.Settings[0].Default = "consumer changed"
 	again, err := metadata.Data()
-	if err != nil || again.DisabledWhen["OFF"] != "1" || *again.Settings[0].Default != "original" {
+	if err != nil || !again.Disabled || again.DisabledWhen["OFF"] != "1" || *again.Settings[0].Default != "original" {
 		t.Fatal("metadata aliases consumer snapshot")
 	}
 	for _, typ := range []reflect.Type{reflect.TypeOf(MetadataData{}), reflect.TypeOf(IntegrationMetadataData{})} {

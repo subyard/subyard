@@ -125,22 +125,24 @@ func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) 
 }
 
 func TestScopedProfileDisabledGuardRejectsEnableBeforeWrite(t *testing.T) {
-	for _, selection := range []string{"", "fixture"} {
-		t.Run("selection="+selection, func(t *testing.T) {
-			cli, _, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES="+selection+"\nSSH_PORT=2222\n")
-			writeProfileTestFile(t, filepath.Join(cli.options.RepositoryRoot, "config", "profiles", "fixture", "profile.json"), []byte(`{"schema_version":1,"owner_service":"owner.sh","disabled_when":{"SSH_PORT":"2222"}}`), 0600)
-			before, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := prepareScopedProfile(t, cli, "enable", "fixture"); err == nil {
-				t.Fatal("enable accepted a guard-disabled profile")
-			}
-			after, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(before, after) || len(runtime.applied) != 0 {
-				t.Fatalf("rejected enable mutated the yard: err=%v apply=%v", err, runtime.applied)
-			}
-		})
+	for _, policy := range []string{`"disabled_when":{"SSH_PORT":"2222"}`, `"disabled":true`} {
+		for _, selection := range []string{"", "fixture"} {
+			t.Run(policy+"/selection="+selection, func(t *testing.T) {
+				cli, _, runtime, path, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES="+selection+"\nSSH_PORT=2222\n")
+				writeProfileTestFile(t, filepath.Join(cli.options.RepositoryRoot, "config", "profiles", "fixture", "profile.json"), []byte(`{"schema_version":1,"owner_service":"owner.sh",`+policy+`}`), 0600)
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := prepareScopedProfile(t, cli, "enable", "fixture"); err == nil || !strings.Contains(err.Error(), "disabled") {
+					t.Fatalf("enable accepted a disabled profile or lost its diagnostic: %v", err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) || len(runtime.applied) != 0 {
+					t.Fatalf("rejected enable mutated the yard: err=%v apply=%v", err, runtime.applied)
+				}
+			})
+		}
 	}
 }
 

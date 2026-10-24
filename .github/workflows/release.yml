@@ -56,8 +56,6 @@ jobs:
           .build/yard --version
       - name: Native engine tests
         run: go test -count=1 -timeout=20m ./cmd/... ./internal/...
-      - name: Native OpenLIT profile Go checks
-        run: bash tests/helpers/profile-go.sh openlit
 
   paseo-headless:
     name: paseo-headless-${{ matrix.arch }}
@@ -95,11 +93,10 @@ jobs:
           path: .build/paseo/*
           if-no-files-found: error
 
-  prepare:
-    needs: [native-engine-arm64, paseo-headless]
+  host-free-verify:
+    needs: validate
     runs-on: ubuntu-24.04
-    # Include full verification, packaging and released-updater compatibility.
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -128,6 +125,39 @@ jobs:
           make verify 2>&1 | tee .build/ci-logs/verify.log
       - name: CLI reference freshness
         run: make cli-docs-check
+      - name: Preserve failed host-free diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-host-free-${{ github.run_attempt }}
+          path: |
+            .build/test-runs/
+            .build/ci-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  prepare:
+    needs: [host-free-verify, native-engine-arm64, paseo-headless]
+    runs-on: ubuntu-24.04
+    # Package exact final assets and verify released-updater compatibility.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install test tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - uses: actions/download-artifact@v8
         with:
           pattern: paseo-headless-*-${{ github.run_attempt }}

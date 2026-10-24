@@ -881,7 +881,10 @@ owner host.
 Retired shipped integrations are normalized only by their compatibility declaration. Old
 `aiobserver` selection entries and `AI_OBSERVER_HOST_PORT` assignments are ignored without
 rewriting their source files; other choices and explicit empty selections retain their authority.
-OpenLIT is not selected as a replacement automatically. See [retirement](openlit.md#predecessor-retirement).
+The OpenLIT profile is disabled. Historical `ENVIRONMENT_PROFILES` entries remain authored
+but are omitted from the effective selection; enable requests are refused by profile policy.
+Normal reconciliation removes its managed telemetry and dashboard publication while preserving
+existing data. See [OpenLIT](openlit.md) and [Observer retirement](openlit.md#predecessor-retirement).
 
 ## Full uninstall
 

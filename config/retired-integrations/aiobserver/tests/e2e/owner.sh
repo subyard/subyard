@@ -248,9 +248,5 @@ printf 'observer_retirement_stage=actual-candidate-forward-fixed-point\n'
 operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
 assert_retired
-printf 'observer_retirement_stage=explicit-openlit-enable\n'
-operator_yard profile enable openlit --yes
-curl -fsS --max-time 10 http://127.0.0.1:22222/ >/dev/null
 assert_history
-operator_yard profile disable openlit --yes
-printf 'ok: managed Observer retirement %s, retained database/history, repeat, epoch-1 rollback refusal, forward fixed point and explicit OpenLIT dashboard\n' "$request_mode"
+printf 'ok: managed Observer retirement %s, retained database/history, repeat, epoch-1 rollback refusal, forward fixed point\n' "$request_mode"

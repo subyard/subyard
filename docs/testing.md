@@ -144,6 +144,13 @@ the same wait without rereading plans, receipts or logs or sending an acknowledg
 default waits add model returns; explicit outer timed yields can still cause model returns.
 Each completed timed observation step also returns to the model; this protocol does not remove inference.
 
+For release CI, a requested interval for GitHub API snapshots or routine progress reports does not
+delay handling the existing release CLI process when it finishes. Keep awaiting its native completion
+with the supported waits above, without extra API queries; save the terminal result and notify the
+coordinator immediately. Resume comparison, review and pending gates on that event. Preserve the
+available GitHub timestamp and the CLI's local observation/action timestamps when handing off;
+an API update, local observation and the coordinator's next action are separate times.
+
 Copy the prescribed command as an exact code block/argv, with no prose punctuation. Before launch,
 verify its arguments, candidate, output directory, expected checks and capture paths. Keep one
 observer and one runner owner; never restart a runner to repair observation.

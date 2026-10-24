@@ -23,7 +23,7 @@ implementation example. Speaker notes include sources and implementation limits.
 
 ## Optional integrations
 
-- [OpenLIT native telemetry](openlit.md) — collect optional Claude Code and Codex native logs and metrics inside a yard.
+- [OpenLIT](openlit.md) — disabled telemetry profile; retained cleanup and data behavior.
 - [Android emulator leases](android.md) — request isolated phone/tablet runtimes and clean image caches.
 
 - [Paseo Desktop](paseo.md) — expose coding agents through a headless Paseo daemon and its hosted

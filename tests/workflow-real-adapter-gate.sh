@@ -89,8 +89,8 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
-grep -Fxq '    needs: [native-engine-arm64, paseo-headless]' "$RELEASE_WORKFLOW" \
-  || fail 'Release publication must require native ARM64 engine and Paseo checks'
+grep -Fxq '    needs: [host-free-verify, native-engine-arm64, paseo-headless]' "$RELEASE_WORKFLOW" \
+  || fail 'Release publication must require host-free, native ARM64 engine and Paseo checks'
 
 grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$CI_WORKFLOW" \
   && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \

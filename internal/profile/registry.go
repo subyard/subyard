@@ -48,6 +48,7 @@ type Definition struct {
 	Name                       string                         `json:"-"`
 	Root                       string                         `json:"-"`
 	DefaultYards               []string                       `json:"default_yards,omitempty"`
+	Disabled                   bool                           `json:"disabled,omitempty"`
 	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
 	OwnerService               string                         `json:"owner_service,omitempty"`
@@ -68,7 +69,7 @@ type Definition struct {
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
-	if definition.LifecycleOnly {
+	if definition.Disabled || definition.LifecycleOnly {
 		return false
 	}
 	for key, value := range definition.DisabledWhen {

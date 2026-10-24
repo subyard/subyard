@@ -16,6 +16,7 @@ type MetadataData struct {
 	SchemaVersion              int                            `json:"schema_version"`
 	Name                       string                         `json:"-"`
 	DefaultYards               []string                       `json:"default_yards,omitempty"`
+	Disabled                   bool                           `json:"disabled,omitempty"`
 	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
 	OwnerService               string                         `json:"owner_service,omitempty"`
@@ -65,7 +66,7 @@ func (metadata Metadata) Data() (MetadataData, error) {
 }
 func (metadata Metadata) definition() Definition {
 	data := cloneMetadataData(metadata.data)
-	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, InstancePublication: data.InstancePublication, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
+	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, Disabled: data.Disabled, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, InstancePublication: data.InstancePublication, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
 }
 func cloneMetadataData(data MetadataData) MetadataData {
 	if data.InstancePublication != nil {
@@ -289,7 +290,7 @@ func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) e
 }
 
 func (declaration Definition) metadataData() MetadataData {
-	return MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}
+	return MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, Disabled: declaration.Disabled, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}
 }
 
 // Clone returns an independent declaration, preserving its inspected package binding.

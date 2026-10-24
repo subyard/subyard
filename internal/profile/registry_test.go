@@ -290,6 +290,10 @@ func TestRegistrySelectionAndSettings(t *testing.T) {
 	if !d.Selected("default", nil) || d.Selected("other", nil) || d.Selected("default", map[string]string{"ENVIRONMENT_PROFILES": ""}) || !d.Selected("other", map[string]string{"ENVIRONMENT_PROFILES": "fixture"}) || d.Selected("default", map[string]string{"FIXTURE_OFF": "1"}) {
 		t.Fatal("selection precedence")
 	}
+	d.Disabled = true
+	if d.Selected("default", nil) || d.Selected("other", map[string]string{"ENVIRONMENT_PROFILES": "fixture"}) {
+		t.Fatal("disabled profile became selected")
+	}
 	setup := Setup{Fields: []Field{{Name: "account", Kind: "numeric-string"}, {Name: "count", Kind: "positive-integer"}}, KeyOverrideField: "key_file"}
 	if _, err := setup.Decode([]byte(`{"account":"123","count":4,"key_file":"/safe/key"}`)); err != nil {
 		t.Fatal(err)
@@ -367,6 +371,17 @@ func TestServicesScopedCheckAndApplyLeaveNeighborsUntouched(t *testing.T) {
 	data, _ = os.ReadFile(events)
 	if !strings.HasSuffix(string(data), "--remove:0\n") {
 		t.Fatal("scoped remove did not invoke the owning hook")
+	}
+	fixture(t, root, "two", hook, Definition{Disabled: true, DefaultYards: []string{"default"}})
+	env["ENVIRONMENT_PROFILES"] = "two"
+	for _, action := range []string{"--yes", "--resume"} {
+		if err := RunServices(context.Background(), root, []string{action, "two"}, env, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _ = os.ReadFile(events)
+	if !strings.HasSuffix(string(data), "--yes:0\n--resume:0\n") {
+		t.Fatalf("disabled profile lost cleanup or regained resume selection: %s", data)
 	}
 	for _, arguments := range [][]string{{"--yes", "missing"}, {"--check", "one two"}, {"--pause", "two"}} {
 		if err := RunServices(context.Background(), root, arguments, env, io.Discard, io.Discard); err == nil {

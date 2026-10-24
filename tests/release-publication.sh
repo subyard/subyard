@@ -132,6 +132,9 @@ class FakeGitHub:
         self.fail = None
         self.successful_run = True
         self.complete_jobs = True
+        self.workflow_revision = "b" * 40
+        self.workflow_blob = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
+        self.host_free_verify = True
         self.immutable = True
 
     def api(self, path, method="GET", payload=None, missing=False):
@@ -143,10 +146,12 @@ class FakeGitHub:
             return {"sha": sha}
         if path == "actions/workflows/release.yml":
             return {"id": 9}
+        if path == "contents/.github/workflows/release.yml?ref=" + self.workflow_revision:
+            return {"type": "file", "path": ".github/workflows/release.yml", "sha": self.workflow_blob}
         if path.startswith("actions/runs/") and path.endswith("/attempts/1"):
             return {"workflow_id": 9, "event": "workflow_dispatch", "status": "completed",
                 "conclusion": "success" if self.successful_run else "failure", "run_attempt": 1,
-                "repository": {"full_name": self.run_repository}}
+                "repository": {"full_name": self.run_repository}, "head_sha": self.workflow_revision}
         if path.startswith("git/ref/tags/"):
             return copy.deepcopy(self.ref)
         if path == "git/tags" and method == "POST":
@@ -177,6 +182,8 @@ class FakeGitHub:
     def pages(self, path, key=None):
         if path.startswith("actions/runs/") and path.endswith("/jobs"):
             names = ["validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"]
+            if self.host_free_verify:
+                names.append("host-free-verify")
             if not self.complete_jobs:
                 names.remove("native-engine-arm64")
             return [{"name": name, "status": "completed", "conclusion": "success"} for name in names]
@@ -251,6 +258,66 @@ class Downloads(unittest.TestCase):
 
 
 class Contracts(unittest.TestCase):
+    def test_preparation_workflow_revision_policies(self):
+        legacy = "bb9852249013520480a165571dac6c604c487e86"
+        current = "6dd2faac91a1b2f21192f8d5cfd78b670c9081e4"
+        for blob, host_free in ((legacy, False), (current, True)):
+            self.github.workflow_blob = blob
+            self.github.host_free_verify = host_free
+            self.assertEqual(m.verify_run(self.github, "r123-a1")["head_sha"], self.github.workflow_revision)
+        self.github.host_free_verify = False
+        with self.assertRaisesRegex(ValueError, "job inventory"):
+            m.verify_run(self.github, "r123-a1")
+        for host_free in (False, True):
+            self.github.workflow_blob = "f" * 40
+            self.github.host_free_verify = host_free
+            with self.assertRaisesRegex(ValueError, "unknown preparation workflow"):
+                m.verify_run(self.github, "r123-a1")
+        self.github.workflow_blob = current
+        self.github.workflow_revision = "master"
+        with self.assertRaisesRegex(ValueError, "workflow revision"):
+            m.verify_run(self.github, "r123-a1")
+        self.github.workflow_revision = "b" * 40
+        api = self.github.api
+        for changes in ({"type": "dir"}, {"path": ".github/workflows/foreign.yml"}):
+            def altered(path, method="GET", payload=None, missing=False):
+                result = api(path, method, payload, missing)
+                return {**result, **changes} if path.startswith("contents/") else result
+            with patch.object(self.github, "api", side_effect=altered), self.assertRaisesRegex(ValueError, "workflow file"):
+                m.verify_run(self.github, "r123-a1")
+
+    def test_publication_preflight_pending_snapshot_is_diagnostic_and_checks_blob_access(self):
+        output = self.directory / "pending"
+        m.a.prepare(output, self.identity["version"], self.prepared)
+        before = (output / "receipt.json").read_bytes()
+        root, receipt = m.a.load_bound(output)
+        manifest = self.directory / "planned-manifest.json"
+        manifest.write_text(json.dumps(m.a.candidate_manifest(root, receipt)))
+        argv = ["release-publication", "preflight", "--output", str(output), "--manifest", str(manifest), "--manifest", str(manifest)]
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), redirect_stdout(stdout):
+            self.assertEqual(m.main(), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertTrue(result["diagnostic"])
+        self.assertFalse(result["acceptance"])
+        self.assertEqual(result["transport"], m.ATTESTATION_BLOB_TRANSPORT)
+        self.assertEqual(result["manifest_count"], 1)
+        projected = json.loads(zlib.decompress(next(iter(self.github.blobs.values()))))
+        self.assertEqual(projected["checks"]["verify"]["status"], "pending")
+        self.assertNotIn("log", projected["checks"]["package"])
+        self.assertEqual((output / "receipt.json").read_bytes(), before)
+        self.assertIsNone(self.github.ref)
+        self.assertIsNone(self.github.release)
+        with patch.object(self.github, "api", side_effect=ValueError("fixture access denied")), patch.object(m.a, "run_checks") as checks:
+            with self.assertRaisesRegex(ValueError, "access denied"):
+                m.publication_preflight(output, [], self.github)
+            checks.assert_not_called()
+        invalid = self.directory / "invalid-manifest.json"
+        invalid.write_text('{}')
+        with patch.object(self.github, "api") as api, self.assertRaisesRegex(ValueError, "invalid candidate manifest"):
+            m.publication_preflight(output, [invalid], self.github)
+        api.assert_not_called()
+
     def test_repository_case_aliases_preserve_preparation_identity_and_request(self):
         with tempfile.TemporaryDirectory(prefix="subyard-repository-case-", dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -658,6 +725,10 @@ class Contracts(unittest.TestCase):
         pointer = json.loads(base64.b64decode(m.encode_attestation(document, github)))
         self.assertEqual(pointer["transport"], m.ATTESTATION_BLOB_TRANSPORT)
         self.assertEqual(m.decode_attestation(pointer, github), document)
+        preflight = m.publication_preflight(output, [], github)
+        self.assertGreater(preflight["canonical_bytes"], 1 << 20)
+        self.assertEqual(preflight["manifest_count"], 2)
+        self.assertEqual(preflight["transport"], m.ATTESTATION_BLOB_TRANSPORT)
         invalids = [{**pointer, **change} for change in (
             {"repository": "foreign/repository"}, {"blob_sha": "../foreign"}, {"blob_sha": "0" * 40},
             {"sha256": "f" * 64}, {"compressed_bytes": True}, {"compressed_bytes": pointer["compressed_bytes"] - 1},
@@ -696,6 +767,7 @@ class Contracts(unittest.TestCase):
         original_api = github.api
         def api(path, method="GET", payload=None, missing=False):
             if path.endswith("/dispatches"):
+                self.assertNotIn("next_action_at", json.loads((candidate / "publication.json").read_text()))
                 dispatched.append(copy.deepcopy(payload["inputs"]))
                 self.assertLessEqual(len(m.canonical(payload["inputs"])), m.DISPATCH_INPUT_LIMIT)
                 print(f"TRANSPORT original_bytes={len(original)} plain_base64_characters={len(base64.b64encode(original))} "
@@ -737,6 +809,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(retained["request"], request)
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(retained["status"], "published")
+        self.assertIsNotNone(retained["observed_at"])
+        self.assertGreaterEqual(retained["next_action_at"], retained["observed_at"])
 
     def test_plain_attestation_inputs_keep_working(self):
         encoded = base64.b64encode(m.canonical(self.document).encode()).decode()
@@ -1361,6 +1435,8 @@ class Contracts(unittest.TestCase):
     def test_workflow_contract_no_tag_trigger_pinned_checks_serialized_publication(self):
         prep = (ROOT / ".github/workflows/release.yml").read_text()
         publish = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        policy = m.PREPARATION_WORKFLOW_POLICIES.get(m.git_blob_sha((ROOT / ".github/workflows/release.yml").read_bytes()))
+        self.assertEqual(policy, {"validate", "host-free-verify", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"})
         self.assertNotIn("  push:", prep)
         self.assertNotIn("git/refs", prep)
         self.assertIn("contents: read", prep)
@@ -1369,6 +1445,13 @@ class Contracts(unittest.TestCase):
                      "dev/test-profiles.sh --e2e --list", "tests/real-host/adapter-contracts.sh", "dev/verify-release-upgrades.py"):
             self.assertIn(gate, prep)
         self.assertIn("release-candidate-${{ github.run_attempt }}", prep)
+        verify = prep.split("  host-free-verify:\n", 1)[1].split("\n  prepare:", 1)[0]
+        self.assertIn("needs: validate", verify)
+        self.assertNotIn("ui-browser-test.py", verify)
+        for workflow in (prep, (ROOT / ".github/workflows/ci.yml").read_text()):
+            self.assertNotIn("profile-go.sh openlit", workflow)
+        self.assertIn("Preserve failed host-free diagnostics", verify)
+        self.assertIn("needs: [host-free-verify, native-engine-arm64, paseo-headless]", prep)
         self.assertIn("group: subyard-release-publication-stable", publish)
         self.assertIn("cancel-in-progress: false", publish)
         self.assertIn("queue: max", publish)
@@ -1399,7 +1482,8 @@ class Contracts(unittest.TestCase):
 
     def test_native_retry_preserves_request_inputs_and_waits_for_new_attempt(self):
         path = self.directory / "retry.json"
-        state = {"request": "fixture-request", "workflow_ref": "master", "dispatch_started": True}
+        state = {"request": "fixture-request", "workflow_ref": "master", "dispatch_started": True,
+                 "run_attempt": 1, "observed_at": "old", "completed_at": "old", "github_updated_at": "old", "next_action_at": "old"}
         original = {"id": 456, "status": "completed", "conclusion": "failure", "run_attempt": 1,
                     "html_url": "https://fixture/run"}
         retried = {**original, "run_attempt": 2, "conclusion": "success"}
@@ -1417,6 +1501,31 @@ class Contracts(unittest.TestCase):
         self.assertIn(("actions/runs/456/rerun", "POST", None), github.calls)
         self.assertFalse(any("dispatches" in path for path, _, _ in github.calls))
         self.assertEqual(json.loads(path.read_text())["status"], "passed")
+        self.assertNotEqual(state["observed_at"], "old")
+        self.assertIsNone(state["completed_at"])
+        self.assertNotIn("next_action_at", state)
+
+    def test_dispatch_terminal_timestamps_preserve_first_observation_and_failure(self):
+        path = self.directory / "observed.json"
+        run = {"id": 456, "run_attempt": 1, "status": "completed", "conclusion": "success",
+               "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://fixture/run"}
+        state = {"request": "fixture-request", "workflow_ref": "master", "dispatch_started": True}
+        with patch.object(m, "discover", return_value=run), patch.object(self.github, "api", return_value=run), \
+             patch.object(m, "utc_now", side_effect=["2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"]):
+            m.dispatch(self.github, "release.yml", {}, state, path)
+            m.dispatch(self.github, "release.yml", {}, state, path)
+        self.assertEqual(state["observed_at"], "2026-01-01T00:00:01Z")
+        self.assertEqual(state["github_updated_at"], run["updated_at"])
+        self.assertIsNone(state["completed_at"])
+        self.assertNotIn("next_action_at", state)
+        failed = {**run, "run_attempt": 2, "conclusion": "failure", "completed_at": "2026-01-01T00:00:03Z"}
+        with patch.object(m, "discover", return_value={**failed, "status": "in_progress"}), \
+             patch.object(self.github, "api", return_value=failed), patch.object(m, "utc_now", return_value="2026-01-01T00:00:04Z"):
+            with self.assertRaisesRegex(ValueError, "workflow failed"):
+                m.dispatch(self.github, "release.yml", {}, state, path)
+        self.assertEqual(state["observed_at"], "2026-01-01T00:00:04Z")
+        self.assertEqual(state["completed_at"], failed["completed_at"])
+        self.assertNotIn("next_action_at", state)
 
     def test_dispatch_bounds_whole_inputs_including_candidate_and_request_before_intent(self):
         path = self.directory / "oversized-request.json"

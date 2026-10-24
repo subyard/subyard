@@ -237,7 +237,7 @@ func TestProfileDefaultsLayersAndListenerCollision(t *testing.T) {
 }
 
 func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
-	metadata, err := profile.Decode("fixture", []byte(`{"schema_version":1,"disabled_when":{"OFF":"1"},"settings":[{"name":"FIXTURE_MODE","type":"string","enum":["safe","fast"],"scopes":["shipped","command"],"application":"next-command","default":"safe"},{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"default_from":{"setting":"SSH_PORT","offset":1000}}]}`))
+	metadata, err := profile.Decode("fixture", []byte(`{"schema_version":1,"disabled":true,"disabled_when":{"OFF":"1"},"settings":[{"name":"FIXTURE_MODE","type":"string","enum":["safe","fast"],"scopes":["shipped","command"],"application":"next-command","default":"safe"},{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"default_from":{"setting":"SSH_PORT","offset":1000}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +250,10 @@ func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 	profiles := settings.Profiles()
+	if !profiles[0].Disabled {
+		t.Fatal("catalog lost disabled profile policy")
+	}
+	profiles[0].Disabled = false
 	profiles[0].DisabledWhen["OFF"] = "changed"
 	profiles[0].Settings[0].Enum[0] = "unsafe"
 	profiles[0].Settings[0].Scopes[0] = "host"
@@ -280,7 +284,7 @@ func TestCatalogExportsDoNotChangeValidationOrDeclarations(t *testing.T) {
 		t.Fatal("export changed scope validation")
 	}
 	again := settings.Profiles()[0]
-	if again.DisabledWhen["OFF"] != "1" || *again.Settings[0].Default != "safe" || again.Settings[1].DefaultFrom.Setting != "SSH_PORT" || settings.Integrations()[0].Lifecycle.SourceFiles[0] != "source" {
+	if !again.Disabled || again.DisabledWhen["OFF"] != "1" || *again.Settings[0].Default != "safe" || again.Settings[1].DefaultFrom.Setting != "SSH_PORT" || settings.Integrations()[0].Lifecycle.SourceFiles[0] != "source" {
 		t.Fatal("export changed retained declaration")
 	}
 	if port, _ := settings.LookupSetting("FIXTURE_PORT"); port.DefaultFrom.Setting != "SSH_PORT" {

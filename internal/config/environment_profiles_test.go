@@ -22,6 +22,8 @@ func TestEnvironmentProfileSelectionKeepsAuthoredIntentAndEffectiveSet(t *testin
 		{name: "empty", yard: "default", content: "ENVIRONMENT_PROFILES=\n", present: true},
 		{name: "exact descriptorless", yard: "default", content: "ENVIRONMENT_PROFILES=legacy\n", requested: "legacy", effective: "legacy", present: true},
 		{name: "disabled", yard: "default", content: "ENVIRONMENT_PROFILES='declared legacy'\nNESTED_E2E_VMS=1\n", requested: "declared legacy", effective: "legacy", present: true},
+		{name: "disabled package", yard: "default", content: "ENVIRONMENT_PROFILES='disabled legacy'\n", requested: "disabled legacy", effective: "legacy", present: true},
+		{name: "disabled package only", yard: "default", content: "ENVIRONMENT_PROFILES=disabled\n", requested: "disabled", present: true},
 		{name: "absent disabled", yard: "default", content: "NESTED_E2E_VMS=1\n"},
 		{name: "lifecycle only", yard: "default", content: "ENVIRONMENT_PROFILES=cleanup\n", requested: "cleanup", present: true},
 		{name: "legacy alias", yard: "default", content: "YARD_PROFILES=legacy\n", requested: "legacy", effective: "legacy", present: true},
@@ -36,6 +38,11 @@ func TestEnvironmentProfileSelectionKeepsAuthoredIntentAndEffectiveSet(t *testin
 			}
 			testkit.WriteFile(t, filepath.Join(root, "config/profiles/declared/profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"disabled_when":{"NESTED_E2E_VMS":"1"}}`), 0644)
 			testkit.WriteFile(t, filepath.Join(root, "config/profiles/legacy/profile.conf"), nil, 0644)
+			disabled := filepath.Join(root, "config/profiles/disabled")
+			if err := os.MkdirAll(disabled, 0700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, filepath.Join(disabled, "profile.json"), []byte(`{"schema_version":1,"disabled":true,"default_yards":["default"]}`), 0644)
 			cleanup := filepath.Join(root, "config/profiles/cleanup")
 			if err := os.MkdirAll(cleanup, 0700); err != nil {
 				t.Fatal(err)
@@ -58,6 +65,13 @@ func TestEnvironmentProfileSelectionKeepsAuthoredIntentAndEffectiveSet(t *testin
 			}
 			if tc.present && (got.Provenance.Path != path || got.Provenance.Scope != "yard") {
 				t.Fatalf("provenance=%#v", got.Provenance)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != tc.content {
+				t.Fatalf("loading changed authored selection: %v", err)
+			}
+			if eligible, reason, err := EnvironmentProfileEligibility(loaded.Context.Paths.ConfigDir, tc.yard, loaded.Environment, loaded.Catalog, "disabled"); err != nil || eligible || reason != "policy-disabled" {
+				t.Fatalf("disabled package eligibility: %t %s %v", eligible, reason, err)
 			}
 			if tc.requested == "cleanup" {
 				if proposed, err := WithEnvironmentProfiles(loaded, []string{"cleanup"}); err != nil || len(proposed.EnvironmentProfiles.Effective) != 0 {

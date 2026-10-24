@@ -12,16 +12,51 @@ Choose worktree checks using the
 [validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 
 ```sh
+python3 dev/release-acceptance.py preflight --slots 1 2 3
+python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/release-local
+dev/release.sh preflight --output .build/release-local
+```
+
+The publication preflight reads a frozen local collector, including pending checks, and measures
+its full source manifest and existing public evidence. Repeat `--manifest FILE` for real v1
+manifests of planned DIRECT source snapshots. It uploads and reads back a deterministic bounded
+Git blob through the normal encoder/decoder, checking the selected repository's Contents write/read
+access even for small projections. It creates no acceptance, tag, release or workflow dispatch and
+does not alter the collector. Dispatch authorization and future evidence growth are not certified;
+final publication still validates the complete actual attestation. Only sanitized public evidence
+is transported. A failed preflight stops expensive dependent work.
+
+Record the frozen source/build, full gate commands, slots and owners. Start ready local/VM gates,
+including complete release smoke, in one terminal while preparation CI runs in another:
+
+```sh
+python3 dev/release-acceptance.py run --output .build/release-local --slots 1 2 3
+# In a second terminal, against the same frozen public source:
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
+```
+
+After CI, compare actual binaries and consumed runtime inputs/modes and use
+[reviewed evidence transfers](../testing.md#reviewed-evidence-transfers) for equivalent complete
+original PASS results. Rerun affected or missing checks; `accept` reuses applicable imported results:
+
+```sh
 dev/release.sh accept --candidate rRUN_ID-aATTEMPT --slots 1 2 3
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT
 ```
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
-runs native ARM64 and Paseo builds, core/profile host-free checks, CLI freshness, profile inventory,
+runs native ARM64, Paseo builds and host-free verification in parallel after input validation.
+Host-free verification retains core/profile checks, CLI freshness and profile inventory. Final preparation waits
+for all these same-attempt jobs before downloading Paseo assets, running
 local adapters and the complete released-caller compatibility matrix. It builds final-version assets
 once and uploads their source archive, exact inventory and SHA-256 identity manifest for 90 days.
 `CANDIDATE` prints the attempt-specific ID and local directory. Publication never rebuilds these assets.
+
+Recovery checks the exact same-attempt job inventory against the executed workflow file at the
+native run's immutable `head_sha`. Only explicitly recorded workflow Git-blob identities are accepted:
+the retained five-job policy and the current six-job policy. Unknown policies fail closed. Workflow
+edits must register the new reviewed blob identity and retain historical policies needed for recovery;
+the owning workflow contract checks this binding. Job count alone never selects a legacy policy.
 
 The default `.build/release-publication/rRUN_ID-aATTEMPT/` directory holds:
 
@@ -33,6 +68,15 @@ Dispatch requests persist under `.build/release-publication/requests/`. Global `
 selects another root; `--repository OWNER/REPO` selects a fork or fixture. `--workflow-ref BRANCH`
 selects the dispatch workflow independently of the source SHA. Preserve the whole candidate
 directory when moving evidence between operator machines.
+
+Dispatch state records UTC `observed_at` at the first terminal observation for an attempt,
+`github_updated_at` from the API, and nullable `completed_at` only when the API supplies an actual
+completion field. An update timestamp is not an exact completion time. `next_action_at` records
+the first actual local step after successful dispatch: candidate download/validation or publication
+verification. These are CLI boundaries, not coordinator action times. A new attempt clears prior
+completion/action fields; resuming the same attempt preserves its first observation and handoff.
+The CLI polls every 20 seconds while active. Sparse agent status reports do not delay its native
+completion handling, but scheduling, network and unavailable completion metadata limit precision.
 
 `accept` imports the successful preparation into the collector without repackaging. Local gates
 precede fresh release smoke and every shipped-profile lane on leased disposable VMs. A repeat
@@ -118,8 +162,12 @@ Batch preparation and atomic application use the same
 existing per-check v2 references and shared v5 manifest table; it introduces no additional wire
 schema or publication exception. Legacy declarations and standalone evidence may share that batch.
 
-Attestation encoding and schema selection are automatic. Compressed and legacy plain inputs have
-a 1 MiB uncompressed limit; complete dispatch inputs must fit GitHub's
+Attestation encoding and schema selection are automatic. Canonical documents are bounded to
+4 MiB and compressed blobs to 2 MiB. Small attestations use inline compressed envelopes; larger
+ones use a same-repository Git-blob pointer with exact size, Git object ID and SHA-256 validation.
+Identical bytes are restored on dispatch/resume because dangling blob retention is not guaranteed;
+the canonical local attestation and durable request remain the evidence. Legacy plain inputs remain
+readable. Complete dispatch inputs must fit GitHub's
 [65,535-character limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs).
 Malformed, oversized or hash-mismatched inputs are rejected before remote mutation.
 

@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "disabled": true,
   "selected_provision_only": true,
   "owner_service": "owner.sh",
   "runtime": {

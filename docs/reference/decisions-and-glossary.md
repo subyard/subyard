@@ -753,14 +753,12 @@ yard start. After VPN down, provision/init/start/reboot preserve disabled intent
 Selecting profile alone never publishes VPN; external exposure follows confirmation policy. See
 [Amnezia](../amnezia.md).
 
-OpenLIT is an optional, default-off environment profile that owns its telemetry stack, native
-exporter settings, UI publication and local account bootstrap. Service readiness is independent
-of installed agent CLIs and emitted events; an existing backend must read new exporter settings
-before sending native logs, metrics or traces. Signals retain their upstream attributes, so
-ingestion does not establish compatible SDK model/token/cost cards. Fresh private credentials
-preserve seeded database/tenant links; initialized accounts and data survive update and
-disable/re-enable. Retired AI Observer compatibility preserves history and never selects
-OpenLIT automatically. The owning contract and its limits are in [OpenLIT](../openlit.md).
+OpenLIT is disabled through shipped profile policy. Existing requested selections remain authored
+but never become effective, and explicit enable is refused. The retained owner/runtime hooks
+reconcile desired absence: stop managed services, restore managed native exporter settings, and
+remove owned dashboard publication while preserving account/database state, credentials and
+unrelated settings. Its executable owning tests and acceptance lanes are removed. Retired
+AI Observer compatibility continues to preserve history independently. See [OpenLIT](../openlit.md).
 
 <a id="decision-47"></a>
 

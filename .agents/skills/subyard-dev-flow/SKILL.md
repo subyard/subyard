@@ -110,10 +110,14 @@ coordinator, and do not create or close shared task files or start another full 
 - For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
   Repair with targeted checks, then freeze the final candidate. Run the original regression
   before the remaining required gates; a blocked check is incomplete, never passed.
-- For release repairs, accumulate fixes and commit them together after verification. Run pending
-  local/VM gates, including complete release smoke, on a frozen local build alongside preparation CI.
-  After CI, compare binaries and consumed runtime inputs/modes, then transfer equivalent complete
-  original PASS evidence through the reviewed workflow. Rerun only affected or missing gates.
+- For release repairs, accumulate fixes and commit the verified set at the end. Before preparation
+  CI, run the [publication preflight](../../../docs/reference/release-publication.md#operator-commands-and-retained-state)
+  and assign every pending local/VM gate in the existing task plan: frozen local candidate, full
+  command, slot budget and runner owner. Build locally and start ready gates alongside CI;
+  a targeted lane does not complete the full release smoke. Do not wait for CI artifacts to begin
+  checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
+  then transfer equivalent complete original PASS evidence through the reviewed workflow.
+  Rerun only affected or missing gates.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)

@@ -55,6 +55,9 @@ func EnvironmentProfileEligibility(configDir, yard string, values map[string]str
 		if definition.Name != name {
 			continue
 		}
+		if definition.Disabled {
+			return false, "policy-disabled", nil
+		}
 		if definition.LifecycleOnly {
 			return false, "lifecycle-only", nil
 		}

@@ -231,8 +231,7 @@ Use [`yard keys`](keys.md) for selected static staging and QA credentials. The l
 owner host and materializes only an authorized consumer file; it does not synchronize coding-agent
 OAuth or session stores.
 
-[OpenLIT](openlit.md) is an optional environment profile. Enable it on a running yard
-with `yard -Y demo profile enable openlit`, then use the dashboard link or SSH instruction in
-`yard -Y demo status`. It receives native Claude Code and Codex telemetry. Its database and
-account volumes survive disable/re-enable. Claude Code, Codex, OpenCode and pi session stores
-remain separate from this telemetry stack and their credentials are retained independently.
+[OpenLIT](openlit.md) is disabled. Existing selections are suppressed; normal reconciliation
+disables its managed services, restores managed native exporter settings, and removes its
+dashboard publication. Database and account volumes are retained. Coding-agent session stores
+and credentials remain separate and are preserved.
