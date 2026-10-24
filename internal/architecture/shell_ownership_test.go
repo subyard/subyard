@@ -370,6 +370,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/lib/owner-address.sh":          {"library", "scripts/lib/preview-proxy.sh", `owner-address.sh`},
 		"scripts/lib/preview-proxy.sh":          {"library", "scripts/prepare-preview-route.sh", `lib/preview-proxy.sh`},
 		"config/agents/ccusage/provision.sh":    {"profile", "config/agents.env", `agents/ccusage/provision.sh`},
+		"config/agents/claude/provision.sh":     {"profile", "config/agents/claude/integration.json", `"provision": "provision.sh"`},
 		"config/agents/codex/provision.sh":      {"profile", "config/agents/codex/integration.json", `"provision": "provision.sh"`},
 		"config/agents/opencode/provision.sh":   {"profile", "config/agents/opencode/integration.json", `"provision": "provision.sh"`},
 		"config/agents/paseo/cleanup.sh":        {"profile", "config/agents.env", `agents/paseo/cleanup.sh`},
@@ -380,6 +381,7 @@ func productionShellContracts(t *testing.T) map[string]shellContract {
 		"scripts/04-provision-subyard.sh":       {"leaf", goReconcile, `"04-provision-subyard.sh"`},
 		"scripts/prepare-preview-route.sh":      {"leaf", goReconcile, `preparePreviewRoute`},
 		"scripts/reconcile-integrations.sh":     {"leaf", "internal/adapters/reconcileruntime/integrations.go", `"reconcile-integrations.sh"`},
+		"scripts/refresh-agent-skills.sh":       {"leaf", "internal/adapters/reconcileruntime/configs.go", `"refresh-agent-skills.sh"`},
 		"scripts/refresh-installed-guest-runtime.sh": {
 			"leaf", "internal/adapters/reconcileruntime/installed_runtime.go", `"refresh-installed-guest-runtime.sh"`,
 		},
@@ -532,6 +534,7 @@ func productionLeafContracts() map[string]leafContract {
 		},
 		"scripts/e2e-lab/invoke.sh":         {"command", "test-vms"},
 		"scripts/reconcile-integrations.sh": {"command", "integration"},
+		"scripts/refresh-agent-skills.sh":   {"command", "configs"},
 		"scripts/lifecycle-guard.sh":        {"command", "lifecycle"},
 		"scripts/teardown-physical.sh":      {"command", "teardown"},
 	}

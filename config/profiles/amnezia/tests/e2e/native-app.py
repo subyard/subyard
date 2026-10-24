@@ -483,8 +483,6 @@ class GUI:
             receipt = {'role': role, 'method': 'pointer', 'dispatch_error': 'none',
                        'stage': evidence['stage'], 'candidate_count': evidence.get('candidate_count', 1)}
             evidence['action'] = receipt
-            if getattr(self, 'discover_evidence', None) is evidence and evidence['stage'] == 'management-control':
-                evidence['management_target'] = discovery_snapshot(self, node)['target']
         selected = None
         try:
             actions = node.queryAction()
@@ -689,9 +687,13 @@ class GUI:
             finally:
                 run(['xclip', '-selection', 'clipboard'], input_data=b'', operation='clipboard-clear')
 
-    def key(self, value):
-        run(['xdotool', 'key', value], operation='keyboard-input')
-        time.sleep(0.25)
+    def key(self, value, deadline=None):
+        remaining = 30 if deadline is None else deadline - time.monotonic()
+        require(remaining > 0, 'native Management activation deadline expired')
+        run(['xdotool', 'key', value], operation='keyboard-input', timeout=remaining)
+        remaining = 0.25 if deadline is None else deadline - time.monotonic()
+        require(remaining > 0, 'native Management activation deadline expired')
+        time.sleep(min(0.25, remaining))
 
     def tab(self, index):
         frames = self.wait(lambda: [node for node in self.nodes()
@@ -966,8 +968,10 @@ def revoke(gui, args):
 def discovery_snapshot(gui, target=None):
     # Observe fixed flags only. Geometry, UI labels and private state never leave
     # this function, and observation failure never changes action delivery.
-    flags = dict(owned=None, showing=None, enabled=None, in_frame=None, defunct=None, checked=None, selected=None)
+    flags = dict(owned=None, showing=None, enabled=None, in_frame=None, defunct=None, checked=None, selected=None,
+                 focusable=None, focused=None)
     result = dict(session_owned=False, owned_frames=0, frame_eligible=False,
+                  frame_active=None,
                   management_tabs=0, management_checked=None, management_selected=None,
                   data_rows={key: 0 for key in ('scan_title', 'scan_description', 'reboot', 'remove', 'clear', 'reset')},
                   error_codes=[], classification='ownership-or-access-unavailable', target=flags)
@@ -996,13 +1000,16 @@ def discovery_snapshot(gui, target=None):
                 or bounds.x + bounds.width > 1024 or bounds.y + bounds.height > 900):
             return result
         result['frame_eligible'] = True
+        active = getattr(gui.api, 'STATE_ACTIVE', None)
+        result['frame_active'] = bool(frame.getState().contains(active)) if active is not None else None
 
         def control_flags(node):
             value = dict(flags)
             try:
                 value['owned'] = node.getApplication().get_process_id() == app['pid']
                 for key, attribute in (('showing', 'STATE_SHOWING'), ('enabled', 'STATE_ENABLED'),
-                                       ('checked', 'STATE_CHECKED'), ('selected', 'STATE_SELECTED'), ('defunct', 'STATE_DEFUNCT')):
+                                       ('checked', 'STATE_CHECKED'), ('selected', 'STATE_SELECTED'), ('defunct', 'STATE_DEFUNCT'),
+                                       ('focusable', 'STATE_FOCUSABLE'), ('focused', 'STATE_FOCUSED')):
                     constant = getattr(gui.api, attribute, None)
                     value[key] = bool(node.getState().contains(constant)) if constant is not None else None
                 parent = node
@@ -1064,6 +1071,70 @@ def discovery_match(gui, label, key):
     return nodes
 
 
+def activate_management(gui):
+    # Pinned PageSettingsServerInfo.qml binds Management Return/Enter to index 2.
+    # Keep one activation within the existing named-control wait budget.
+    deadline = time.monotonic() + 30
+    nodes = gui.wait(lambda: gui.matching('Management'), 'native server management control',
+                     max(0, deadline - time.monotonic()))
+    require(len(nodes) == 1, 'native Management control is ambiguous')
+    node = nodes[0]
+    snapshot = discovery_snapshot(gui, node)
+    target = snapshot['target']
+    require(node.getRoleName() == 'page tab' and snapshot['session_owned'] and snapshot['frame_eligible']
+            and all(target[key] is True for key in ('owned', 'showing', 'enabled', 'in_frame'))
+            and target['defunct'] is False, 'native Management target is not eligible')
+    evidence = gui.discover_evidence
+    evidence['candidate_count'] = 1
+    evidence['management_target'] = target
+    receipt = dict(role='page tab', method='atspi', dispatch_error='none',
+                   stage='management-control', candidate_count=1)
+    evidence['action'] = receipt
+    selected = None
+    try:
+        actions = node.queryAction()
+        for index in range(actions.nActions):
+            if actions.getName(index).casefold() in ('click', 'press', 'activate'):
+                selected = (actions, index)
+                break
+    except Exception:
+        pass
+    if selected is not None:
+        try:
+            accepted = selected[0].doAction(selected[1])
+        except Exception as error:
+            receipt['dispatch_error'] = 'timeout' if isinstance(error, TimeoutError) else 'action-exception'
+            raise Failure('native Management action failed') from None
+        if accepted is False:
+            receipt['dispatch_error'] = 'not-accepted'
+            raise Failure('native Management activation was not accepted')
+    else:
+        receipt['method'] = 'focus-return'
+        require(target['focusable'] is True, 'native Management control is not focusable')
+        try:
+            focused = node.queryComponent().grabFocus()
+        except Exception:
+            receipt['dispatch_error'] = 'focus-exception'
+            raise Failure('native Management focus is unavailable') from None
+        if focused is False:
+            receipt['dispatch_error'] = 'focus-refused'
+            raise Failure('native Management focus was rejected')
+        def focused_target():
+            current = discovery_snapshot(gui, node)
+            flags = current['target']
+            return (current['session_owned'] and current['frame_eligible'] and current['frame_active'] is True
+                    and flags['defunct'] is False
+                    and all(flags[key] is True for key in ('owned', 'showing', 'enabled', 'in_frame', 'focusable', 'focused')))
+        gui.wait(focused_target, 'focused native Management control', max(0, deadline - time.monotonic()))
+        gui.key('Return', deadline=deadline)
+    evidence['stage'] = 'management-selection'
+    def selected_page():
+        current = discovery_snapshot(gui)
+        return (current['session_owned'] and current['frame_eligible'] and current['management_tabs'] == 1
+                and (current['management_checked'] is True or current['management_selected'] is True))
+    gui.wait(selected_page, 'selected native Management page', max(0, deadline - time.monotonic()))
+
+
 def discover(gui, args):
     gui.discover_evidence = dict(stage='servers-control', matches={})
     gui.share_evidence = gui.discover_evidence  # Existing bounded action receipt, emitted only on failure.
@@ -1073,7 +1144,7 @@ def discover(gui, args):
     gui.discover_evidence['stage'] = 'saved-server'
     gui.click_saved_server()
     gui.discover_evidence['stage'] = 'management-control'
-    gui.click('Management', description='native server management control')
+    activate_management(gui)
     # The row title is capped at two elided lines; its complete description
     # belongs to the same stock MouseArea and invokes the same scan handler.
     gui.discover_evidence['stage'] = 'scan-control'
@@ -1110,21 +1181,40 @@ def discovery_self_check():
     from unittest import mock
     api = SimpleNamespace(ROLE_FRAME=1, ROLE_WINDOW=2, ROLE_PUSH_BUTTON=3, ROLE_TEXT=8,
                           STATE_ENABLED=5, STATE_CHECKED=6, STATE_SHOWING=9,
-                          STATE_DEFUNCT=12, STATE_SELECTED=13, DESKTOP_COORDS=0)
+                          STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_FOCUSABLE=15,
+                          STATE_FOCUSED=16, STATE_ACTIVE=17, DESKTOP_COORDS=0)
     session_bytes = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
-    for scenario in ('ready', 'not-accepted', 'action-exception', 'read-only', 'unknown-match'):
-        state = dict(page='info', clock=0.0, dispatches=0)
+    for scenario in ('ready', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
+                     'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
+                     'inactive-frame', 'ambiguous-management', 'focus-no-selection'):
+        state = dict(page='info', clock=0.0, dispatches=0, focus_requests=0, focused=False, keys=0, pointers=0,
+                     clock_consumed=False, key_timeouts=[])
         def node(label, role, action=lambda: True, parent=None):
             item = SimpleNamespace(name=label, parent=parent)
             item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
             item.getRole = lambda: role
             item.getRoleName = lambda: {1: 'frame', 3: 'button', 8: 'text', 14: 'page tab'}[role]
             item.get_parent = lambda: parent
-            item.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9) or
-                flag in (6, 13) and label == 'Management' and state['page'] in ('data', 'scan-complete'))
+            def contains(flag):
+                if (label == 'Management' and flag == 16 and state['focused'] and not state['clock_consumed']
+                        and scenario in ('focus-after-deadline', 'focus-near-deadline')):
+                    state['clock'] += 31 if scenario == 'focus-after-deadline' else 29.9
+                    state['clock_consumed'] = True
+                return (flag in (5, 9) or
+                flag in (6, 13) and label == 'Management' and state['page'] in ('data', 'scan-complete') or
+                flag == 15 and label == 'Management' and scenario != 'focus-unavailable' or
+                flag == 16 and label == 'Management' and state['focused'] or
+                flag == 17 and role == 1 and scenario != 'inactive-frame')
+            item.getState = lambda: SimpleNamespace(contains=contains)
+            def focus():
+                state['focus_requests'] += 1
+                if scenario == 'focus-exception':
+                    raise RuntimeError('synthetic-private-focus')
+                state['focused'] = scenario not in ('focus-refused', 'focus-unconfirmed')
+                return scenario != 'focus-refused'
             item.queryComponent = lambda: SimpleNamespace(getExtents=lambda coordinates: SimpleNamespace(
                 x=0 if role == 1 else 16, y=0 if role == 1 else 100,
-                width=380 if role == 1 else 300, height=800 if role == 1 else 40))
+                width=380 if role == 1 else 300, height=800 if role == 1 else 40), grabFocus=focus)
             item.queryAction = lambda: SimpleNamespace(nActions=1, getName=lambda index: 'press',
                                                       doAction=lambda index: action())
             item.queryText = mock.Mock(side_effect=RuntimeError('synthetic-private-body'))
@@ -1147,6 +1237,10 @@ def discovery_self_check():
                     node('Close', 3, parent=frame), node('Servers', 14, parent=frame),
                     node('Users', 14, parent=frame), node('retained-test-user', 8, parent=frame),
                     node('Remove server from application', 8, parent=frame)]
+        if scenario.startswith('focus-') or scenario == 'inactive-frame':
+            controls[0].queryAction = mock.Mock(side_effect=NotImplementedError('synthetic-private-action'))
+        if scenario == 'foreign-management':
+            controls[0].getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
         def current_nodes():
             valid = {'Management', 'Servers'}
             if state['page'] == 'data':
@@ -1157,7 +1251,8 @@ def discovery_self_check():
                 valid.update((controls[2].name, 'Close'))
             if state['page'] == 'users':
                 valid.update(('Users', 'retained-test-user'))
-            return [frame] + [item for item in controls if item.name in valid]
+            return [frame] + [item for item in controls if item.name in valid] + (
+                [node('Management', 14, management, frame)] if scenario == 'ambiguous-management' else [])
         def matching(labels):
             if labels == controls[1].name and scenario == 'unknown-match':
                 raise RuntimeError('synthetic-private-matching')
@@ -1167,28 +1262,74 @@ def discovery_self_check():
         gui.api, gui.nodes, gui.matching = api, current_nodes, matching
         gui.click_saved_server = lambda: None  # Isolate the next native boundary.
         gui.tab = lambda index: state.update(page='users') if index == 1 else None
+        def external(command, **kwargs):
+            if command != ['xdotool', 'key', 'Return']:
+                state['pointers'] += 1
+                raise Failure('unexpected Management keyboard command')
+            require(0 < kwargs['timeout'] <= state['activation_deadline'] - state['clock'],
+                    'Management keyboard timeout exceeded deadline')
+            state['key_timeouts'].append(kwargs['timeout'])
+            state['keys'] += 1
+            state['dispatches'] += 1
+            if scenario != 'focus-no-selection':
+                state['page'] = 'data'
+            state['clock'] += 0.08
+            return subprocess.CompletedProcess(command, 0)
         waits = []
         def wait(action, description, seconds=30):
+            if description == 'native server management control':
+                state['activation_deadline'] = state['clock'] + seconds
             waits.append((description, seconds))
             return GUI.wait(gui, action, description, seconds)
         gui.wait = wait
         with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session_bytes), \
                 mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
                 mock.patch.dict(os.environ, DISPLAY=':synthetic'), \
+                mock.patch.object(subprocess, 'run', side_effect=external), \
                 mock.patch.object(time, 'monotonic', side_effect=lambda: state['clock']), \
                 mock.patch.object(time, 'sleep', side_effect=lambda seconds: state.update(clock=state['clock'] + seconds)):
             try:
                 discover(gui, SimpleNamespace(name='retained-test-user'))
             except Failure as error:
-                require(scenario != 'ready' and str(error) == 'GUI timed out waiting for native service discovery control',
-                        'discovery observation changed the original failure')
+                expected = {
+                    'not-accepted': 'native Management activation was not accepted',
+                    'action-exception': 'native Management action failed',
+                    'focus-unavailable': 'native Management control is not focusable',
+                    'focus-refused': 'native Management focus was rejected',
+                    'focus-exception': 'native Management focus is unavailable',
+                    'focus-unconfirmed': 'GUI timed out waiting for focused native Management control',
+                    'focus-after-deadline': 'native Management activation deadline expired',
+                    'focus-near-deadline': 'GUI timed out waiting for selected native Management page',
+                    'foreign-management': 'native Management target is not eligible',
+                    'inactive-frame': 'GUI timed out waiting for focused native Management control',
+                    'ambiguous-management': 'native Management control is ambiguous',
+                    'focus-no-selection': 'GUI timed out waiting for selected native Management page',
+                }.get(scenario, 'GUI timed out waiting for native service discovery control')
+                require(scenario not in ('ready', 'focus-return') and str(error) == expected,
+                        'Management activation changed its safe failure boundary')
             else:
-                require(scenario == 'ready', 'unready discovery was accepted')
+                require(scenario in ('ready', 'focus-return'), 'unready discovery was accepted')
                 require(('native server scan', 120) in waits and ('retained native user after discovery', 90) in waits,
                         'discovery observation changed existing completion waits')
             snapshot = discovery_snapshot(gui)
-            require(('native service discovery control', 30) in waits, 'discovery observation changed the control wait')
-            require(state['dispatches'] == 1, 'discovery observation retried the Management action')
+            if scenario in ('ready', 'focus-return', 'read-only', 'unknown-match'):
+                require(('native service discovery control', 30) in waits, 'discovery changed the control wait')
+            refused = scenario in ('focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
+                                   'inactive-frame', 'ambiguous-management')
+            require(state['dispatches'] == (0 if refused else 1), 'Management activation was repeated or bypassed refusal')
+            require(state['pointers'] == 0, 'Management activation used coordinate input')
+            require(state['keys'] == int(scenario in ('focus-return', 'focus-no-selection', 'focus-near-deadline')),
+                    'Management key escaped its focused single activation')
+            require(state['focus_requests'] == int(scenario in ('focus-return', 'focus-refused',
+                    'focus-exception', 'focus-unconfirmed', 'focus-no-selection', 'inactive-frame',
+                    'focus-after-deadline', 'focus-near-deadline')),
+                    'Management focus was retried or unnecessarily requested')
+            if scenario == 'focus-after-deadline':
+                require(not state['key_timeouts'], 'expired Management activation dispatched a keyboard command')
+            if scenario == 'focus-near-deadline':
+                require(len(state['key_timeouts']) == 1 and 0 < state['key_timeouts'][0] <= 0.100001
+                        and state['clock'] <= state['activation_deadline'] + 0.000001,
+                        'Management keyboard command or settle exceeded its deadline')
             if scenario == 'read-only':
                 require(snapshot['classification'] == 'selected-management-scan-missing'
                         and snapshot['data_rows']['remove'] == 1, 'selected page without scan was not distinguished')
@@ -1200,14 +1341,16 @@ def discovery_self_check():
                 require(gui.discover_evidence['matches']['title'] == dict(count=None, failure='matching-exception')
                         and snapshot['classification'] == 'selected-management-scan-visible',
                         'matching failure was mistaken for a missing scan row')
-            else:
+            elif scenario in ('ready', 'focus-return'):
                 state['page'] = 'data'
                 require(discovery_snapshot(gui)['classification'] == 'selected-management-scan-visible',
                         'ready selected Management page was not distinguished')
             foreign = node('Management', 14, parent=frame)
             foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
             gui.nodes = lambda: current_nodes() + [foreign, node('synthetic-private-label', 8, parent=frame)]
-            require(discovery_snapshot(gui)['management_tabs'] == 1, 'foreign Management node entered diagnostics')
+            expected_tabs = 0 if scenario == 'foreign-management' else 2 if scenario == 'ambiguous-management' else 1
+            require(discovery_snapshot(gui)['management_tabs'] == expected_tabs,
+                    'foreign Management node entered diagnostics')
             defunct = node('Management', 14, parent=frame)
             defunct.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9, 12))
             with mock.patch.object(gui, 'nodes', return_value=[frame, defunct]):

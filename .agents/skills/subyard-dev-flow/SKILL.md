@@ -95,6 +95,7 @@ coordinator, and do not create or close shared task files or start another full 
 - Before publishing a runtime release, run fresh release smoke
   (`dev/e2e/p0-acceptance.sh --slot N`), the full release compatibility check in
   [Development](../../../docs/development.md), and all shipped-profile acceptance on the same candidate.
+  Complete local smoke may precede CI completion and transfer after review of equivalent inputs.
   Required local/VM gates remain mandatory; optional live checks may stay `not-run` under the
   [release contract](../../../docs/reference/release-publication.md#external-checks).
   Failed or invalid external results still block publication. These gates do not apply to every edit;
@@ -109,6 +110,10 @@ coordinator, and do not create or close shared task files or start another full 
 - For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
   Repair with targeted checks, then freeze the final candidate. Run the original regression
   before the remaining required gates; a blocked check is incomplete, never passed.
+- For release repairs, accumulate fixes and commit them together after verification. Run pending
+  local/VM gates, including complete release smoke, on a frozen local build alongside preparation CI.
+  After CI, compare binaries and consumed runtime inputs/modes, then transfer equivalent complete
+  original PASS evidence through the reviewed workflow. Rerun only affected or missing gates.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)

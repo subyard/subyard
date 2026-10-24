@@ -558,6 +558,19 @@ init_legacy_continuation() {
   [ "$after_identity" = "$identity" ] || return "$rc"
 }
 
+post_restart_release_ready() {
+  local report="$1" target="$2"
+  jq -e --arg current "$target" '
+    .schemaVersion == 1 and .current == $current and .owner == $current and
+    .outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and
+    .outcome.active == $current and .outcome.target == $current and
+    (if has("next") then (.next | type == "string" and . == "") else true end) and
+    (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
+    (if has("blockers") then (.blockers | type == "array" and length == 0) else true end) and
+    (if has("decisions") then (.decisions | type == "array" and length <= 256 and all(.[]; .decision == "preserve")) else true end)
+  ' "$report" >/dev/null 2>&1
+}
+
 repair_legacy_activation_after_restart() {
   # Completed release history grants no authority for the new activation drift.
   local report="$STATE_ROOT/post-restart-migrate.json" migration_output="$STATE_ROOT/post-restart-migrate.log"
@@ -589,15 +602,7 @@ repair_legacy_activation_after_restart() {
     || die 'post-restart migration inspection changed protected history or runtime links'
   assert_legacy_continuation
   # A ready fixed point preserves completed history and requires no new consent.
-  if ! jq -e --arg current "$target" '
-    .schemaVersion == 1 and .current == $current and .owner == $current and
-    .outcome.status == "ready" and .outcome.code == "ready" and .outcome.reachedGoal == true and
-    .outcome.active == $current and .outcome.target == $current and
-    (if has("next") then (.next | type == "string" and . == "") else true end) and
-    (.domains | type == "array" and length > 0) and all(.domains[]; .pending == []) and
-    (if has("blockers") then (.blockers | type == "array" and length == 0) else true end) and
-    (if has("decisions") then (.decisions | type == "array" and length <= 256 and all(.[]; .decision == "preserve")) else true end)
-  ' "$report" >/dev/null 2>&1; then
+  if ! post_restart_release_ready "$report" "$target"; then
     jq -e --arg current "$target" --argjson resources "$resources" '
       .schemaVersion == 1 and .current == $current and .owner == $current and .next == "yard migrate" and
       .outcome.status == "migration-required" and .outcome.code == "transition-required" and
@@ -614,14 +619,23 @@ repair_legacy_activation_after_restart() {
     write_fixture_value "$migration_output.exit" "$migration_rc" || return "$?"
     printf 'power_activation_repair_apply_exit=%s\n' "$migration_rc"
     [ "$migration_rc" = 0 ] || return "$migration_rc"
+    if [ "$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')" = "$journal_before" ]; then
+      # Drift may settle before migrate's fresh assessment; ready preserves history.
+      operator_yard migrate --check --json > "$report" 2> "$migration_output" || return "$?"
+      post_restart_release_ready "$report" "$target" \
+        || die 'unchanged post-restart history is not at a ready fixed point'
+      [ "$(operator_env sha256sum "$V2_JOURNAL" | awk '{print $1}')" = "$journal_before" ] \
+        || die 'post-restart readiness inspection changed completed history'
+    else
+      operator_env jq -e --arg transaction "$transaction_before" --arg target "$target" '
+        .schemaVersion == 2 and .checkpoint == "complete" and .transaction != $transaction and
+        (.transaction | type == "string" and length > 0) and .steps == [] and
+        .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and .releases.from == $target
+      ' "$V2_JOURNAL" >/dev/null || die 'post-restart activation repair reused history or replayed migrations'
+    fi
     [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$ledger_before" ] \
       && [ "$(operator_env stat -c '%d:%i:%a:%u:%g:%N' "$runtime/current" "$runtime/previous")" = "$links_before" ] \
       || die 'post-restart activation repair changed the migration ledger or runtime links'
-    operator_env jq -e --arg transaction "$transaction_before" --arg target "$target" '
-      .schemaVersion == 2 and .checkpoint == "complete" and .transaction != $transaction and
-      (.transaction | type == "string" and length > 0) and .steps == [] and
-      .goal == {target:$target,direction:"activate-target"} and .releases.target == $target and .releases.from == $target
-    ' "$V2_JOURNAL" >/dev/null || die 'post-restart activation repair reused history or replayed migrations'
   fi
   assert_legacy_continuation
   verify_legacy_full_removal_refusal

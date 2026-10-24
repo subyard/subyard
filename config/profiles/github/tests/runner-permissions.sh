@@ -17,7 +17,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 fixture="$tmp/source with spaces"
-mkdir -p "$fixture/config/profiles/github/tests" "$fixture/tests/helpers" "$tmp/tools"
+mkdir -p "$fixture/config/profiles/github/tests/e2e" "$fixture/tests/helpers" "$tmp/tools"
 cp "$ROOT/config/profiles/github/tests/run.sh" "$fixture/config/profiles/github/tests/run.sh"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
 # Only the permission runner is under test here; its other owning checks run for real
@@ -25,6 +25,7 @@ cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-perm
 for check in "$ROOT/config/profiles/github/tests/"*.sh "$ROOT/config/profiles/github/tests/"*.py; do
   [ "${check##*/}" = run.sh ] || printf '# Isolated permission fixture.\n' > "$fixture/config/profiles/github/tests/${check##*/}"
 done
+printf '# Isolated permission fixture.\n' > "$fixture/config/profiles/github/tests/e2e/runtime-hook-trace-test.py"
 cat > "$tmp/tools/go" <<'SH'
 #!/usr/bin/env bash
 set -eu

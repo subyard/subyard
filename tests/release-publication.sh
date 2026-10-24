@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import base64
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from unittest.mock import patch
 from contextlib import redirect_stdout
@@ -26,7 +28,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory, lanes=(), external_required=None):
+def fixture(directory, lanes=(), external_required=None, inventory_entries=0):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -34,6 +36,11 @@ def fixture(directory, lanes=(), external_required=None):
         shutil.copy2(ROOT / name, target)
     (root / ".gitignore").write_text("/.build/\n/private/\n/.subyard-acceptance/\n")
     (root / "untracked-public.txt").write_text("frozen input\n")
+    if inventory_entries:
+        inventory = root / "config/inventory"
+        inventory.mkdir(parents=True)
+        for index in range(inventory_entries):
+            (inventory / f"source-{index:04}.txt").write_text(str(index))
     (root / "dev/test-profiles.sh").write_text("#!/bin/bash\nprintf 'runner\\tsample\\tconfig/profiles/sample/tests/e2e/acceptance.sh\\n'\n")
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
@@ -114,11 +121,13 @@ class FakeGitHub:
     repository = m.REPOSITORY
     def __init__(self, identity):
         self.identity = identity
+        self.run_repository = self.repository
         self.ref = None
         self.tag = None
         self.release = None
         self.assets = []
         self.data = {}
+        self.blobs = {}
         self.calls = []
         self.fail = None
         self.successful_run = True
@@ -127,12 +136,17 @@ class FakeGitHub:
 
     def api(self, path, method="GET", payload=None, missing=False):
         self.calls.append((path, method))
+        if path == "git/blobs" and method == "POST":
+            content = base64.b64decode(payload["content"], validate=True)
+            sha = m.git_blob_sha(content)
+            self.blobs[sha] = content
+            return {"sha": sha}
         if path == "actions/workflows/release.yml":
             return {"id": 9}
         if path.startswith("actions/runs/") and path.endswith("/attempts/1"):
             return {"workflow_id": 9, "event": "workflow_dispatch", "status": "completed",
                 "conclusion": "success" if self.successful_run else "failure", "run_attempt": 1,
-                "repository": {"full_name": self.repository}}
+                "repository": {"full_name": self.run_repository}}
         if path.startswith("git/ref/tags/"):
             return copy.deepcopy(self.ref)
         if path == "git/tags" and method == "POST":
@@ -181,6 +195,12 @@ class FakeGitHub:
     def download(self, path, destination):
         destination.write_bytes(self.data[int(path.split("/")[-1])])
 
+    def attestation_blob(self, sha, size):
+        self.calls.append(("git/blobs/" + sha, "GET"))
+        if sha not in self.blobs:
+            raise ValueError("fixture missing attestation blob")
+        return self.blobs[sha]
+
     def maybe_fail(self, point):
         if self.fail == point:
             self.fail = None
@@ -188,6 +208,27 @@ class FakeGitHub:
 
 
 class Downloads(unittest.TestCase):
+    def test_attestation_blob_reads_only_fixed_repository_and_bounded_bytes(self):
+        github = m.GitHub()
+        for payload, status in ((b"abc", 0), (b"abcd", 0), (b"ab", 0), (b"abc", 1)):
+            with self.subTest(payload=payload, status=status), patch.object(m.subprocess, "Popen") as popen:
+                process = popen.return_value.__enter__.return_value
+                process.stdout = io.BytesIO(payload)
+                process.wait.return_value = status
+                if payload == b"abc" and status == 0:
+                    self.assertEqual(github.attestation_blob("a" * 40, 3), payload)
+                else:
+                    with self.assertRaises(ValueError):
+                        github.attestation_blob("a" * 40, 3)
+                self.assertEqual(popen.call_args.args[0], ["gh", "api", github.prefix + "git/blobs/" + "a" * 40,
+                    "-H", "Accept: application/vnd.github.raw+json"])
+                self.assertEqual(process.kill.called, len(payload) > 3)
+        with patch.object(m.subprocess, "Popen") as popen:
+            for sha, size in (("../foreign", 3), ("a" * 40, True), ("a" * 40, m.ATTESTATION_BLOB_BYTE_LIMIT + 1)):
+                with self.assertRaises(ValueError):
+                    github.attestation_blob(sha, size)
+            popen.assert_not_called()
+
     def test_download_media_types(self):
         with tempfile.TemporaryDirectory(prefix="subyard-download-", dir="/tmp") as directory:
             destination = Path(directory) / "download"
@@ -210,6 +251,58 @@ class Downloads(unittest.TestCase):
 
 
 class Contracts(unittest.TestCase):
+    def test_repository_case_aliases_preserve_preparation_identity_and_request(self):
+        with tempfile.TemporaryDirectory(prefix="subyard-repository-case-", dir="/tmp") as temporary:
+            directory = Path(temporary)
+            _, prepared, identity = fixture(directory)
+            identity["repository"] = "subyard/subyard"
+            m.write_json(prepared / "identity.json", identity)
+            original_identity = (prepared / "identity.json").read_bytes()
+            archive = directory / "candidate.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for path in prepared.rglob("*"):
+                    if path.is_file():
+                        zipped.write(path, path.relative_to(prepared))
+            github = FakeGitHub(identity)
+            github.run_repository = identity["repository"]
+            pages = github.pages
+            state_dir = directory / "state"
+            argv = ["release-publication", "--state-dir", str(state_dir), "--repository", "Subyard/Subyard",
+                    "prepare", "--version", identity["version"], "--commit", identity["commit"]]
+            with patch.object(m, "GitHub", return_value=github), redirect_stdout(io.StringIO()):
+                github.repository = "Subyard/Subyard"
+                with patch.object(github, "pages", side_effect=lambda path, key=None:
+                        [{"id": 42, "name": "release-candidate-1", "expired": False}]
+                        if path.endswith("/artifacts") else pages(path, key)), \
+                        patch.object(github, "download", side_effect=lambda path, destination: shutil.copyfile(archive, destination)), \
+                        patch.object(m, "dispatch", return_value={"id": 123, "run_attempt": 1}), \
+                        patch.object(sys, "argv", argv):
+                    self.assertEqual(m.main(), 0)
+                    request = state_dir / "requests" / (identity["version"] + "-" + identity["commit"] + ".json")
+                    original_request = request.read_bytes()
+                    argv[4] = github.repository = "subyard/subyard"
+                    self.assertEqual(m.main(), 0)
+                    self.assertEqual(request.read_bytes(), original_request)
+                    argv[4] = github.repository = "foreign/subyard"
+                    with self.assertRaisesRegex(ValueError, "request repository mismatch"):
+                        m.main()
+                local = state_dir / identity["candidate_id"] / "prepared"
+                self.assertEqual((local / "identity.json").read_bytes(), original_identity)
+                github.repository = argv[4] = "SUBYARD/Subyard"
+                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
+                with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1):
+                    self.assertEqual(m.main(), 1)
+                    argv[4] = github.repository = "foreign/subyard"
+                    with self.assertRaisesRegex(ValueError, "another candidate/repository"):
+                        m.main()
+                github.repository = "Subyard/Subyard"
+                for repository in ("foreign/subyard", "subyard/foreign", "", "subyard/subyard/", "ſubyard/subyard"):
+                    with self.subTest(repository=repository):
+                        github.run_repository = repository
+                        with self.assertRaisesRegex(ValueError, "run/attempt did not pass"):
+                            m.verify_run(github, identity["candidate_id"])
+            self.assertEqual((local / "identity.json").read_bytes(), original_identity)
+
     def test_v5_deduplicates_manifests_and_rejects_extra_dangling_conflicting_references(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -246,7 +339,7 @@ class Contracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflicting"):
                 m.validate_attestation(invalid, identity, root)
             invalid = copy.deepcopy(document)
-            invalid["extra"] = "x" * (1 << 20)
+            invalid["extra"] = "x" * m.ATTESTATION_BYTE_LIMIT
             with self.assertRaisesRegex(ValueError, "byte limit"):
                 m.validate_attestation(invalid, identity, root)
 
@@ -327,6 +420,19 @@ class Contracts(unittest.TestCase):
 
     def publish(self):
         return m.publish_remote(self.github, self.prepared, self.document, self.frozen)
+
+    def test_repository_case_alias_publishes_without_rewriting_identity(self):
+        original = (self.prepared / "identity.json").read_bytes()
+        self.github.repository = self.identity["repository"].swapcase()
+        self.github.run_repository = self.identity["repository"].lower()
+        self.assertTrue(self.publish()["immutable"])
+        self.assertEqual((self.prepared / "identity.json").read_bytes(), original)
+        self.assertIn(m.identity_hash(self.identity), self.github.release["body"])
+        self.github.repository = "foreign/subyard"
+        self.github.calls.clear()
+        with self.assertRaisesRegex(ValueError, "source/repository mismatch"):
+            self.publish()
+        self.assertEqual(self.github.calls, [])
 
     def test_exact_import_no_rebuild_and_changed_public_inputs_reject(self):
         frozen, receipt = m.a.load_bound(self.output)
@@ -506,7 +612,7 @@ class Contracts(unittest.TestCase):
 
     def test_large_reviewed_attestation_roundtrips_existing_workflow_and_retained_request(self):
         large = self.directory / "large"
-        _, prepared, identity = fixture(large, ("one", "two", "three", "four"))
+        _, prepared, identity = fixture(large, ("one", "two", "three", "four"), inventory_entries=5000)
         source_output, _, _ = accepted(large, prepared, identity)
         _, source = m.a.load_bound(source_output)
         for name, result in source["checks"].items():
@@ -515,12 +621,13 @@ class Contracts(unittest.TestCase):
                 if m.a.is_live(name):
                     result["slot"] = 2
         m.a.save(source_output, source)
+        _, source = capture_attempts(source_output)
         state_dir = self.directory / "publication"
         candidate = state_dir / identity["candidate_id"]
         candidate.mkdir(parents=True)
         shutil.copytree(prepared, candidate / "prepared")
         output = candidate / "acceptance"
-        with patch.object(m.a, "execution_environment", return_value=source["environment"]):
+        with patch.object(m.a, "execution_environment", return_value={**source["environment"], "go": "go version target fixture"}):
             m.a.prepare(output, identity["version"], candidate / "prepared")
         root, receipt = m.a.load_bound(output)
         # This fixture explicitly transfers diagnostic execution as historical evidence.
@@ -529,8 +636,10 @@ class Contracts(unittest.TestCase):
         names = sorted(set(source["checks"]) - {"package"})
         self.assertEqual(len(names), 10)
         for name in names:
-            review = {"schema_version": 1, "check": name, "tested": m.a.transfer_candidate(source),
-                "target": m.a.transfer_candidate(receipt), "source_receipt_sha256": m.a.digest(source_output / "receipt.json"),
+            record, manifest = m.a.original_attempt(source_output, source, name, source["checks"][name])
+            review = {"schema_version": 2, "check": name, "tested_manifest_sha256": m.a.evidence_hash(manifest),
+                "target_manifest_sha256": m.a.evidence_hash(m.a.candidate_manifest(root, receipt)),
+                "original_attempt": source["checks"][name]["original_attempt"],
                 "review": {"unchanged_scope": "Reviewed unchanged scope. " * 70,
                            "reason": "Retain original passing evidence. " * 30,
                            "authorization_reference": "operator-confirmation:fixture"}, "standalone": None}
@@ -540,9 +649,47 @@ class Contracts(unittest.TestCase):
         m.a.defer_external(output, ["sample:fixture-external"], "External account unavailable", "fixture-authorization")
         document = m.attestation(output, identity)
         original = m.canonical(document).encode()
+        self.assertEqual(document["schema_version"], 5)
+        self.assertEqual(len(document["manifests"]), 2)
+        self.assertGreater(len(original), 1 << 20)
         self.assertGreater(len(base64.b64encode(original)), m.DISPATCH_INPUT_LIMIT)
         self.assertEqual(document["reviewed_transfers"], names)
         github = FakeGitHub(identity)
+        pointer = json.loads(base64.b64decode(m.encode_attestation(document, github)))
+        self.assertEqual(pointer["transport"], m.ATTESTATION_BLOB_TRANSPORT)
+        self.assertEqual(m.decode_attestation(pointer, github), document)
+        invalids = [{**pointer, **change} for change in (
+            {"repository": "foreign/repository"}, {"blob_sha": "../foreign"}, {"blob_sha": "0" * 40},
+            {"sha256": "f" * 64}, {"compressed_bytes": True}, {"compressed_bytes": pointer["compressed_bytes"] - 1},
+            {"compressed_bytes": m.ATTESTATION_BLOB_BYTE_LIMIT + 1}, {"uncompressed_bytes": True},
+            {"uncompressed_bytes": m.ATTESTATION_BYTE_LIMIT + 1}, {"extra": True})]
+        compressed = github.blobs[pointer["blob_sha"]]
+        for payload in (compressed[:-1], compressed + b"trailing", compressed + compressed,
+                        zlib.compress(b"x" * (m.ATTESTATION_BYTE_LIMIT + 1))):
+            sha = m.git_blob_sha(payload)
+            github.blobs[sha] = payload
+            invalids.append({**pointer, "blob_sha": sha, "compressed_bytes": len(payload)})
+        noncanonical = b'{ "noncanonical": true }'
+        payload = zlib.compress(noncanonical)
+        sha = m.git_blob_sha(payload)
+        github.blobs[sha] = payload
+        invalids.append({**pointer, "blob_sha": sha, "compressed_bytes": len(payload),
+                        "uncompressed_bytes": len(noncanonical), "sha256": hashlib.sha256(noncanonical).hexdigest()})
+        invalid_document = copy.deepcopy(document)
+        invalid_document["checks"]["verify"]["log_sha256"] = "0" * 64
+        invalids.append(json.loads(base64.b64decode(m.encode_attestation(invalid_document, github))))
+        for invalid in invalids:
+            github.calls.clear()
+            with self.subTest(pointer_change=set(invalid)), self.assertRaises(ValueError):
+                m.publish_remote(github, prepared, invalid, root)
+            self.assertTrue(all(method == "GET" for _, method in github.calls))
+            self.assertIsNone(github.ref)
+        with patch.object(github, "attestation_blob", return_value=b"x" * len(compressed)):
+            with self.assertRaisesRegex(ValueError, "blob size or hash"):
+                m.publish_remote(github, prepared, pointer, root)
+        with patch.object(github, "api", return_value={"sha": "0" * 40}):
+            with self.assertRaisesRegex(ValueError, "uploaded.*mismatch"):
+                m.encode_attestation(document, github)
         dispatched = []
         run = {"id": 456, "status": "completed", "conclusion": "success", "run_attempt": 1,
                "html_url": "https://fixture/run"}
@@ -558,7 +705,7 @@ class Contracts(unittest.TestCase):
                 worker_file = self.directory / "worker-attestation.json"
                 m.write_json(worker_file, envelope)
                 self.assertEqual(worker_file.stat().st_mode & 0o777, 0o600)
-                decoded = m.decode_attestation(m.read_attestation(worker_file))
+                decoded = m.decode_attestation(m.read_attestation(worker_file), github)
                 self.assertEqual(decoded, document)
                 self.assertEqual(decoded["external_obligations"]["sample:fixture-external"]["status"], "not-run")
                 # The pinned second checkout validates the entire original document.
@@ -572,11 +719,22 @@ class Contracts(unittest.TestCase):
         github.api = api
         argv = ["release-publication", "--state-dir", str(state_dir), "publish", "--candidate", identity["candidate_id"]]
         with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=github), patch.object(m, "discover", return_value=run):
+            # A lost upload response retains the same request before dispatch.
+            def lost_upload(path, method="GET", payload=None, missing=False):
+                result = original_api(path, method, payload, missing)
+                if path == "git/blobs":
+                    raise ValueError("fixture lost blob upload response")
+                return result
+            with patch.object(github, "api", side_effect=lost_upload), self.assertRaisesRegex(ValueError, "lost blob upload"):
+                m.main()
+            request = json.loads((candidate / "publication.json").read_text())["request"]
             self.assertEqual(m.main(), 0)
+            github.blobs.clear()  # Dangling remote objects have no retention guarantee.
             self.assertEqual(m.main(), 0)
         retained = json.loads((candidate / "publication.json").read_text())
         self.assertEqual(retained["attestation_sha256"], m.identity_hash(document))
         self.assertEqual(retained["request"], dispatched[0]["request"])
+        self.assertEqual(retained["request"], request)
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(retained["status"], "published")
 

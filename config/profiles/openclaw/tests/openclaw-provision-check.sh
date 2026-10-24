@@ -7,6 +7,50 @@ tmp="$(mktemp -d /tmp/subyard-openclaw-provision.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 dev_home="$tmp/home"
+
+# Exercise the production extraction command against a disposable prefix. Archive
+# directory ownership is foreign; host-free coverage proves metadata preservation,
+# while the owning VM lane verifies root extraction and the generic guest guard.
+archive_root="$tmp/node-archive"
+node_prefix="$tmp/node-prefix"
+mkdir -p "$archive_root" "$node_prefix"/{bin,lib,include,share}
+chmod 0750 "$node_prefix"/{bin,lib,include,share}
+for directory in bin lib include share; do
+  printf 'retained %s\n' "$directory" > "$node_prefix/$directory/retained"
+done
+python3 - "$archive_root/node-fixture.tar.xz" <<'NODE_ARCHIVE'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], 'w:xz') as archive:
+    for name in ('bin', 'lib', 'include', 'share', 'lib/node_modules'):
+        member = tarfile.TarInfo('node-fixture/' + name)
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o777
+        member.uid, member.gid = 424242, 424243
+        archive.addfile(member)
+    member = tarfile.TarInfo('node-fixture/lib/node_modules/fixture.txt')
+    member.uid, member.gid, member.mode = 424242, 424243, 0o644
+    payload = b'installed fixture\n'
+    member.size = len(payload)
+    archive.addfile(member, io.BytesIO(payload))
+NODE_ARCHIVE
+node_extract="$(awk '/^  tar -xJf / && / -C \/usr\/local --strip-components=1/ {
+  sub(/-C \/usr\/local/, "-C \"$target_prefix\""); print; found++
+} END { if (found != 1) exit 1 }' "$HOOK")"
+prefix_before="$(stat -c '%u:%g:%a:%i' "$node_prefix"/{bin,lib,include,share})"
+for extraction in first repeat; do
+  tmp="$archive_root" base=node-fixture target_prefix="$node_prefix" bash -c "$node_extract"
+  prefix_after="$(stat -c '%u:%g:%a:%i' "$node_prefix"/{bin,lib,include,share})"
+  [ "$prefix_before" = "$prefix_after" ] \
+    || { printf 'FAIL: %s Node extraction changed existing prefix metadata\n' "$extraction" >&2; exit 1; }
+  for directory in bin lib include share; do
+    printf 'retained %s\n' "$directory" | cmp -s - "$node_prefix/$directory/retained" \
+      || { printf 'FAIL: Node extraction changed retained content\n' >&2; exit 1; }
+  done
+  printf 'installed fixture\n' | cmp -s - "$node_prefix/lib/node_modules/fixture.txt" \
+    || { printf 'FAIL: Node extraction did not install its payload\n' >&2; exit 1; }
+done
+printf 'ok: Node extraction preserves existing prefix metadata and contents (first/repeat; root ownership requires VM)\n'
+
 mkdir -p "$test_root/usr/local/bin" "$test_root/opt/venv/bin" \
   "$test_root/srv/cache/pnpm" "$test_root/srv/cache/pip" "$test_root/srv/cache/npm" "$test_root/srv/cache/playwright" \
   "$test_root/etc/profile.d" "$test_root/etc/subyard" "$dev_home/.config/pip"

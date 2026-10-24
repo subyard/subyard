@@ -20,6 +20,20 @@ LIBC.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes
 VERSION = "subyard-producer-v3"
 
 
+def report_failure(error):
+    message = "operation failed; inspect preserved storage before retrying"
+    for _ in range(4):
+        if type(error) is ValueError and error.args in (
+                ("producer busy",), ("producer busy while namespace exits",),
+                ("foreign operation storage",), ("invalid shared temporary directory",)):
+            message = error.args[0]
+            break
+        error = error.__cause__
+        if error is None:
+            break
+    print("producer: " + message, file=sys.stderr)
+
+
 def pdeath(parent):
     if LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) or os.getppid() != parent:
         os._exit(130)
@@ -301,7 +315,7 @@ def launch(source, kind, root, command):
         state["active"] = None
         write_state(lock, state)
     except (OSError, ValueError) as error:
-        print("producer: cleanup failed: " + str(error), file=sys.stderr)
+        report_failure(error)
         return status or 125
     return status
 
@@ -528,5 +542,5 @@ if __name__ == "__main__":
         launcher = os.getpid()
         sys.exit(main())
     except (OSError, ValueError, KeyError, tarfile.TarError) as error:
-        print("producer: " + str(error), file=sys.stderr)
+        report_failure(error)
         sys.exit(125)

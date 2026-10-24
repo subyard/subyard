@@ -26,8 +26,10 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "Subyard/Subyard")
 DISPATCH_INPUT_LIMIT = 65535
-ATTESTATION_BYTE_LIMIT = 1 << 20
+ATTESTATION_BYTE_LIMIT = 4 << 20
+ATTESTATION_BLOB_BYTE_LIMIT = 2 << 20
 ATTESTATION_TRANSPORT = "subyard-attestation-zlib-v1"
+ATTESTATION_BLOB_TRANSPORT = "subyard-attestation-git-blob-v1"
 
 
 def canonical(value):
@@ -38,32 +40,76 @@ def identity_hash(identity):
     return hashlib.sha256(canonical(identity).encode()).hexdigest()
 
 
-def encode_attestation(document):
+def same_repository(left, right):
+    return (all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value)
+                for value in (left, right)) and left.lower() == right.lower())
+
+
+def git_blob_sha(payload):
+    return hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+
+
+def encode_attestation(document, github=None, request=""):
     original = canonical(document).encode()
     if len(original) > ATTESTATION_BYTE_LIMIT:
         raise ValueError("acceptance attestation exceeds uncompressed byte limit")
+    compressed = zlib.compress(original)
+    if len(compressed) > ATTESTATION_BLOB_BYTE_LIMIT:
+        raise ValueError("compressed acceptance attestation exceeds blob byte limit")
     envelope = {"transport": ATTESTATION_TRANSPORT, "uncompressed_bytes": len(original),
-                "sha256": identity_hash(document), "payload": base64.b64encode(zlib.compress(original)).decode()}
-    return base64.b64encode(canonical(envelope).encode()).decode()
+                "sha256": identity_hash(document), "payload": base64.b64encode(compressed).decode()}
+    encoded = base64.b64encode(canonical(envelope).encode()).decode()
+    if len(canonical({"candidate": document.get("candidate_id", ""), "attestation": encoded, "request": request})) <= DISPATCH_INPUT_LIMIT:
+        return encoded
+    if github is None:
+        raise ValueError("large acceptance attestation requires GitHub blob transport")
+    sha = git_blob_sha(compressed)
+    # A dangling blob is temporary transport. Restore identical bytes on every
+    # dispatch/resume; the local attestation and durable request remain the evidence.
+    uploaded = github.api("git/blobs", "POST", {"content": base64.b64encode(compressed).decode(), "encoding": "base64"})
+    if uploaded.get("sha") != sha or github.attestation_blob(sha, len(compressed)) != compressed:
+        raise ValueError("uploaded acceptance attestation blob mismatch")
+    pointer = {"transport": ATTESTATION_BLOB_TRANSPORT, "repository": github.repository,
+               "blob_sha": sha, "compressed_bytes": len(compressed),
+               "uncompressed_bytes": len(original), "sha256": identity_hash(document)}
+    return base64.b64encode(canonical(pointer).encode()).decode()
 
 
-def decode_attestation(document):
+def decode_attestation(document, github=None):
     if not isinstance(document, dict):
         raise ValueError("acceptance attestation must be a JSON object")
     if "transport" not in document:
         if len(canonical(document).encode()) > ATTESTATION_BYTE_LIMIT:
             raise ValueError("acceptance attestation exceeds uncompressed byte limit")
         return document  # Existing plain JSON workflow inputs remain valid.
-    if (set(document) != {"transport", "uncompressed_bytes", "sha256", "payload"}
-        or document["transport"] != ATTESTATION_TRANSPORT
-        or type(document["uncompressed_bytes"]) is not int
+    blob = document.get("transport") == ATTESTATION_BLOB_TRANSPORT
+    keys = {"transport", "uncompressed_bytes", "sha256"} | (
+        {"repository", "blob_sha", "compressed_bytes"} if blob else {"payload"})
+    if (set(document) != keys or document["transport"] not in (ATTESTATION_TRANSPORT, ATTESTATION_BLOB_TRANSPORT)
+        or type(document.get("uncompressed_bytes")) is not int
         or not 0 < document["uncompressed_bytes"] <= ATTESTATION_BYTE_LIMIT
         or not isinstance(document["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", document["sha256"])
-        or not isinstance(document["payload"], str)
         or len(base64.b64encode(canonical(document).encode())) > DISPATCH_INPUT_LIMIT):
         raise ValueError("invalid acceptance attestation envelope")
+    if blob:
+        if (github is None or not same_repository(document["repository"], github.repository)
+            or not isinstance(document["blob_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", document["blob_sha"])
+            or type(document["compressed_bytes"]) is not int
+            or not 0 < document["compressed_bytes"] <= ATTESTATION_BLOB_BYTE_LIMIT):
+            raise ValueError("invalid acceptance attestation blob pointer")
+        compressed = github.attestation_blob(document["blob_sha"], document["compressed_bytes"])
+        if len(compressed) != document["compressed_bytes"] or git_blob_sha(compressed) != document["blob_sha"]:
+            raise ValueError("acceptance attestation blob size or hash mismatch")
+    else:
+        if not isinstance(document["payload"], str):
+            raise ValueError("invalid acceptance attestation envelope")
+        try:
+            compressed = base64.b64decode(document["payload"], validate=True)
+        except ValueError as error:
+            raise ValueError("invalid compressed acceptance attestation") from error
+    if len(compressed) > ATTESTATION_BLOB_BYTE_LIMIT:
+        raise ValueError("compressed acceptance attestation exceeds blob byte limit")
     try:
-        compressed = base64.b64decode(document["payload"], validate=True)
         decoder = zlib.decompressobj()
         original = decoder.decompress(compressed, document["uncompressed_bytes"] + 1)
     except (ValueError, zlib.error) as error:
@@ -126,6 +172,21 @@ class GitHub:
             if len(items) < 100:
                 return rows
         raise ValueError("GitHub inventory exceeded pagination limit")
+
+    def attestation_blob(self, sha, size):
+        if (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+            or type(size) is not int or not 0 < size <= ATTESTATION_BLOB_BYTE_LIMIT):
+            raise ValueError("invalid acceptance attestation blob request")
+        with subprocess.Popen(["gh", "api", self.prefix + "git/blobs/" + sha,
+                               "-H", "Accept: application/vnd.github.raw+json"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+            payload = process.stdout.read(size + 1)
+            if len(payload) > size:
+                process.kill()
+            status = process.wait()
+        if status or len(payload) != size:
+            raise ValueError("acceptance attestation blob unavailable or size mismatch; restore identical blob and retry")
+        return payload
 
     def download(self, path, destination):
         accept = "application/json" if re.fullmatch(r"actions/artifacts/[0-9]+/zip", path) else "application/octet-stream"
@@ -198,7 +259,7 @@ def verify_run(github, candidate):
     workflow = github.api("actions/workflows/release.yml")
     if (run["workflow_id"] != workflow["id"] or run["event"] != "workflow_dispatch"
         or run["status"] != "completed" or run["conclusion"] != "success"
-        or run["run_attempt"] != attempt or run["repository"]["full_name"] != github.repository):
+        or run["run_attempt"] != attempt or not same_repository(run["repository"]["full_name"], github.repository)):
         raise ValueError("preparation run/attempt did not pass")
     jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
     required = {"validate", "native-engine-arm64", "paseo-headless-amd64", "paseo-headless-arm64", "prepare"}
@@ -226,7 +287,7 @@ def fetch(github, candidate, destination):
         zipped.extractall(destination)
     archive.unlink()
     identity = checked_identity(destination)
-    if identity["candidate_id"] != candidate or identity["repository"] != github.repository:
+    if identity["candidate_id"] != candidate or not same_repository(identity["repository"], github.repository):
         raise ValueError("preparation artifact belongs to another candidate")
     return identity
 
@@ -710,9 +771,9 @@ def report_unrun_checks(document):
 
 
 def publish_remote(github, prepared, document, root):
-    document = decode_attestation(document)
+    document = decode_attestation(document, github)
     identity = checked_identity(prepared)
-    if identity["repository"] != github.repository or a.source_fingerprint(root) != identity["source_fingerprint"]:
+    if not same_repository(identity["repository"], github.repository) or a.source_fingerprint(root) != identity["source_fingerprint"]:
         raise ValueError("publication source/repository mismatch")
     verify_run(github, identity["candidate_id"])
     validate_attestation(document, identity, root)
@@ -908,7 +969,7 @@ def main():
             state = json.loads(path.read_text()) if path.exists() else {
                 "request": str(uuid.uuid4()), "version": args.version, "commit": args.commit,
                 "repository": args.repository, "workflow_ref": args.workflow_ref}
-            if state["repository"] != args.repository:
+            if not same_repository(state["repository"], args.repository):
                 raise ValueError("request repository mismatch")
             write_json(path, state)
             run = dispatch(github, "release.yml", {"version": args.version, "commit": args.commit}, state, path)
@@ -924,7 +985,7 @@ def main():
                         raise ValueError("preparation inputs mismatch")
                     staging.rename(prepared)
             identity = checked_identity(prepared)
-            if (identity["candidate_id"] != candidate or identity["repository"] != github.repository
+            if (identity["candidate_id"] != candidate or not same_repository(identity["repository"], github.repository)
                 or identity["version"] != args.version or identity["commit"] != args.commit):
                 raise ValueError("local preparation state mismatch")
             write_json(directory / "identity.json", identity)
@@ -942,7 +1003,7 @@ def main():
                 fetch(github, args.candidate, staging)
                 staging.rename(prepared)
         identity = checked_identity(prepared)
-        if identity["candidate_id"] != args.candidate or identity["repository"] != github.repository:
+        if identity["candidate_id"] != args.candidate or not same_repository(identity["repository"], github.repository):
             raise ValueError("local state belongs to another candidate/repository")
         write_json(directory / "identity.json", identity)
         output = directory / "acceptance"
@@ -976,7 +1037,7 @@ def main():
             raise ValueError("publication attestation changed; preserve original unfinished state")
         write_json(directory / "attestation.json", document)
         write_json(path, state)
-        encoded = encode_attestation(document)
+        encoded = encode_attestation(document, github, state["request"])
         run = dispatch(github, "release-publish.yml", {"candidate": args.candidate, "attestation": encoded}, state, path)
         # A failed/cancelled run can be rerun natively; no second publication request is needed.
         release = github.api("releases/tags/v" + identity["version"])

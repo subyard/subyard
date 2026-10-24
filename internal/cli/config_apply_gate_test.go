@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -133,6 +134,101 @@ func TestProfileInitRepairBindsIntegrationOnlyDrift(t *testing.T) {
 				t.Fatalf("post-init readiness: %v", err)
 			}
 		})
+	}
+}
+
+func TestInitRechecksCompletedReleaseAdmission(t *testing.T) {
+	for _, mode := range []string{"cli", "rpc"} {
+		for _, scenario := range []string{"ready", "persistent drift", "inspection failed"} {
+			t.Run(mode+"/"+scenario, func(t *testing.T) {
+				fixture := newConfigApplyRepairFixture(t, false)
+				program := fixture.cli
+				platform := newInitPlatformFixture()
+				for stage := range platform.converged {
+					platform.converged[stage] = true
+				}
+				platform.converged[ports.ReconcileStageFinalize] = true
+				program.options.InitPlatform = platform
+				program.options.Arguments = []string{"init", "--yes"}
+				var output bytes.Buffer
+				program.options.Stdout, program.options.Stderr = &output, &output
+
+				// Model external convergence between read-only inspections, retaining
+				// the real sealed-engine and protected-history admission boundaries.
+				engine := filepath.Join(program.env["YARD_RUNTIME_ROOT"], "current", "bin", "yard-engine")
+				payload, err := os.ReadFile(engine)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario != "persistent drift" {
+					after := fmt.Sprintf("    : > %q\n", fixture.readyMarker)
+					if scenario == "inspection failed" {
+						after = fmt.Sprintf("    : > %q\n", filepath.Join(program.options.RepositoryRoot, "inspection-failed"))
+						payload = bytes.Replace(payload, []byte("_release-transition)\n"), []byte(fmt.Sprintf("_release-transition)\n  [ ! -e %q ] || exit 2\n", filepath.Join(program.options.RepositoryRoot, "inspection-failed"))), 1)
+					}
+					payload = bytes.Replace(payload, []byte("  fi ;;"), []byte("  fi\n"+after+"  ;;"), 1)
+					writeCLIFile(t, engine, string(payload), 0o700)
+					manifestPath := filepath.Join(program.env["YARD_RUNTIME_ROOT"], "current", "runtime-files.sha256")
+					manifest, err := os.ReadFile(manifestPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, rest, _ := bytes.Cut(manifest, []byte("\n"))
+					manifest = append([]byte(fmt.Sprintf("%x  ./bin/yard-engine\n", sha256.Sum256(payload))), rest...)
+					writeCLIFile(t, manifestPath, string(manifest), 0o600)
+					journal, err := os.ReadFile(fixture.journalPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					record, err := releasetransition.ParseJournal(journal)
+					if err != nil {
+						t.Fatal(err)
+					}
+					record.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))
+					journal, err = releasetransition.MarshalJournal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					writeCLIFile(t, fixture.journalPath, string(journal), 0o600)
+				}
+				journalBefore := mustReadConfigFixture(t, fixture.journalPath)
+				ledgerPath := filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json")
+				ledgerBefore := mustReadConfigFixture(t, ledgerPath)
+				code := 0
+				if mode == "cli" {
+					code = program.Run(context.Background())
+				} else {
+					loaded, err := program.loadContext("default")
+					if err != nil {
+						t.Fatal(err)
+					}
+					handler := &rpcHandler{cli: program, loaded: loaded}
+					defer handler.closePlans()
+					_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "init-recheck", Params: json.RawMessage(`{"command":"init","arguments":[]}`)}, nil)
+					if err == nil {
+						_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "init-recheck", Params: json.RawMessage(`{"confirmed":true}`)}, nil)
+					}
+					if err != nil {
+						code = 1
+						fmt.Fprint(&output, err)
+					}
+				}
+				if scenario == "ready" {
+					if code != 0 || platform.projectHooks != 1 {
+						t.Fatalf("fresh ready admission retained stale drift: code=%d hooks=%d output=%s", code, platform.projectHooks, output.String())
+					}
+				} else if code != 1 || platform.projectHooks != 0 {
+					t.Fatalf("unready admission ran init: code=%d hooks=%d output=%s", code, platform.projectHooks, output.String())
+				}
+				if scenario == "inspection failed" && strings.Contains(output.String(), "activation drift") {
+					t.Fatalf("inspection failure retained the stale drift outcome: %s", output.String())
+				}
+				if !bytes.Equal(journalBefore, mustReadConfigFixture(t, fixture.journalPath)) ||
+					!bytes.Equal(ledgerBefore, mustReadConfigFixture(t, ledgerPath)) {
+					t.Fatal("ordinary init changed completed release history")
+				}
+			})
+		}
 	}
 }
 

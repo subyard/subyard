@@ -294,7 +294,8 @@ if [ "$(/usr/local/bin/node --version 2>/dev/null)" != "v${NODE_VERSION}" ]; the
   # tar won't prune files a new release dropped, so an in-place major upgrade would merge the old
   # npm/corepack into the new one (broken deps, e.g. minipass mismatch). Replace them cleanly.
   rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack
-  tar -xJf "$tmp/${base}.tar.xz" -C /usr/local --strip-components=1
+  # Keep shared prefix directories intact and install archive files as root.
+  tar -xJf "$tmp/${base}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner --no-overwrite-dir
   rm -rf "$tmp"
 fi
 
