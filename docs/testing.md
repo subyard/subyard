@@ -72,8 +72,9 @@ documented tools and never acquire VM leases.
 A local native fixture does not establish systemd/cgroup, physical disk or Incus behavior.
 Frozen release smoke and peer fixtures already reuse collector candidate assets when present;
 source A/B, tagged owner histories and pinned predecessors retain distinct artifact identities.
-Full/release-smoke, reboot observations, nested teardown and all shipped-profile acceptance
-requirements remain as documented; local passes do not replace them.
+Full/release-smoke, reboot observations, nested teardown and shipped-profile VM acceptance
+remain separate physical checks, requested explicitly for release collection; local passes do not
+claim that physical coverage.
 
 T0 is the smallest named regression (aim for 60 seconds); T1 is the affected owning local
 set (aim for about three minutes). T2 is the complete host-free suite, T3 the affected physical
@@ -470,7 +471,7 @@ host-free `tests/run.sh` and, when it has live scenarios, `tests/e2e/acceptance.
 before running any of them. A missing entrypoint is reported as incomplete and exits nonzero; a
 profile can declare `tests/run.not-applicable` or `tests/e2e/acceptance.not-applicable` with a reason
 only when that runner is mutually exclusive with the declaration. The reserved `default` profile is
-the only built-in exception. An incomplete live runner keeps profile release acceptance incomplete.
+the only built-in exception. A requested incomplete live runner keeps release acceptance incomplete.
 
 Run all profile host-free checks with `bash dev/test-profiles.sh`, or invoke one profile's runner
 directly. Core tests exercise generic APIs with synthetic fixtures; profile tests check their preset
@@ -478,13 +479,13 @@ and runtime through those APIs. Profile test directories are excluded from runti
 For profile-owned live checks, use `bash dev/test-profiles.sh --e2e --slot N` or a profile's
 `tests/e2e/acceptance.sh` directly, following the VM allocation guide below. The shared runner
 forwards arguments; each profile owns its fixtures, assertions and lease cleanup. These profile
-results are one part of release acceptance alongside core release smoke and compatibility checks;
-no green subset implies the combined gate passed.
+results supply physical evidence alongside core release smoke when explicitly requested. The
+default release runs the host-free checks and compatibility matrix without allocating VMs.
 
-Moving checks into profiles changes ownership, not release coverage: release acceptance must
-aggregate core and all shipped profiles' declared checks against the same candidate. Missing or
-failed required profile checks leave acceptance incomplete; optional runtime selection does not
-make a shipped profile optional to release verification.
+Moving checks into profiles changes ownership: release acceptance inventories core and all shipped
+profiles against the same candidate. Host-free checks remain required regardless of runtime profile
+selection. Unrequested VM checks remain `not-run`; requested incomplete or failed checks block
+acceptance. A passing default release does not claim full physical acceptance.
 
 ### One release candidate
 
@@ -492,10 +493,15 @@ The same profile inventory is used by local acceptance and branch CI preflight.
 Check prerequisites before packaging or acquiring a VM, then freeze the final candidate:
 
 ```sh
-python3 dev/release-acceptance.py preflight --slots 1 2 3 --types subyard-pair android-test
+python3 dev/release-acceptance.py preflight
 python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/release-acceptance
-python3 dev/release-acceptance.py run --output .build/release-acceptance --slots 1 2 3
+python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
+
+Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke/profile checks,
+or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
+request VM execution. Once explicitly requested, a pending VM check remains required on
+continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
@@ -536,8 +542,8 @@ its original attempt logs/events and applicable PASS results from the same candi
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
-and ordered `lanes` entries containing `id` and runner `arguments`. The collector requires every
-lane to pass and accepts `--only profile:NAME/ID` for one lane. Available approved slots take the
+and ordered `lanes` entries containing `id` and runner `arguments`. Explicit `--with-vms` requests
+every runnable lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
 next independent check. The blocked attempt is recorded and is never requeued in that run;

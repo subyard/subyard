@@ -619,6 +619,9 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
             checks[name] = {"status": "failed", "exit_code": decision["exit_code"], "log_sha256": decision["artifacts"]["log"],
                             "execution": "operator-accepted", "environments": decision["environments"], "operator_acceptance": decision}
             continue
+        if a.optional_vm_not_run(name, result):
+            checks[name] = result.copy()
+            continue
         if result["status"] == "passed":
             if result.get("exit_code") != 0 or not re.fullmatch(r"[0-9a-f]{64}", result.get("log_sha256", "")):
                 raise ValueError("passing check lacks evidence")
@@ -718,8 +721,11 @@ def validate_attestation(document, identity, root):
     required["package"] = ["ci-prepared"]
     if set(document["checks"]) != set(required):
         raise ValueError("acceptance attestation check inventory mismatch")
+    optional_vms = a.vm_checks_optional(root)
     for name, command in required.items():
         result = document["checks"][name]
+        if optional_vms and command and a.optional_vm_not_run(name, result):
+            continue
         if command is None or (name == "process-coverage" and result == {"status": "not-applicable"}):
             if result != {"status": "not-applicable"}:
                 raise ValueError("invalid not-applicable attestation")
@@ -819,6 +825,9 @@ def verify_owned_ref(github, tag, marker, commit, ref=None):
 
 
 def report_unrun_checks(document):
+    optional_vms = [name for name, result in document["checks"].items() if a.optional_vm_not_run(name, result)]
+    if optional_vms:
+        print("PUBLICATION vm_optional_not_run=" + ",".join(optional_vms) + " status=not-run", flush=True)
     optional = [name for name, result in document["external_obligations"].items() if result == {"status": "not-run"}]
     if optional:
         print("PUBLICATION external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
@@ -992,7 +1001,9 @@ def main():
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
         if action == "accept":
-            command.add_argument("--slots", nargs="+", type=int, required=True)
+            command.add_argument("--slots", nargs="+", type=int, default=[])
+            command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
+            command.add_argument("--only", action="append", default=[], help="run one exact check or check family; repeat as needed")
         else:
             command.add_argument("--workflow-ref", default="master")
             command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
@@ -1092,7 +1103,7 @@ def main():
                     a.prepare(staging, identity["version"], prepared)
                     staging.rename(output)
             with a.acceptance_lock(output):
-                result = a.run_checks(output, args.slots, [], False)
+                result = a.run_checks(output, args.slots, args.only, False, with_vms=args.with_vms)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result

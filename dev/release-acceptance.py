@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Freeze a release candidate and run its acceptance checks with local reports."""
 import argparse
+import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, ExitStack
@@ -239,6 +240,61 @@ def defer_external(output, obligations, reason, authorization_reference):
     return 0
 
 
+OPTIONAL_VM_NOT_RUN = {"status": "not-run", "reason": "optional VM check; run explicitly with --with-vms or --only"}
+
+
+def vm_checks_optional(root):
+    # Read the declaration from pinned source; historical candidates keep their policy.
+    path = root / "dev/release-acceptance.py"
+    if not path.is_file():
+        return False
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "OPTIONAL_VM_NOT_RUN" for target in node.targets):
+            return ast.literal_eval(node.value) == OPTIONAL_VM_NOT_RUN
+    return False
+
+
+def optional_vm_not_run(name, result):
+    return is_live(name) and result == OPTIONAL_VM_NOT_RUN
+
+
+def validate_optional_vm_history(output, names):
+    if not names:
+        return
+    for name in names:
+        prefix = name.replace(":", "-").replace("/", "-")
+        log = output / (prefix + ".log")
+        if log.exists() or log.is_symlink() or any(re.fullmatch(re.escape(prefix) + r"-[0-9a-f]{8}\.log", path.name)
+                                                  for path in output.glob(prefix + "-*.log")):
+            raise ValueError("optional VM not-run cannot hide existing execution logs")
+    events = output / "events.jsonl"
+    if events.exists():
+        with events.open() as stream:
+            for line in stream:
+                item = json.loads(line)
+                if (not isinstance(item, dict) or not isinstance(item.get("checks", []), list)
+                    or any(not isinstance(name, str) for name in item.get("checks", []))
+                    or item.get("check") is not None and not isinstance(item["check"], str)):
+                    raise ValueError("invalid retained collector execution event")
+                if item.get("check") in names or names.intersection(item.get("checks", [])):
+                    raise ValueError("optional VM not-run cannot hide a previous request or execution")
+    for path in output.glob("attempts/*.json"):
+        item = json.loads(path.read_text())
+        if (not isinstance(item, dict) or set(item) != {"schema_version", "id", "manifest_sha256", "check", "command", "result"}
+            or item["schema_version"] != 1 or not isinstance(item["check"], str)):
+            raise ValueError("invalid retained collector attempt")
+        if item["check"] in names:
+            raise ValueError("optional VM not-run cannot hide a previous attempt")
+    for path in output.glob("runs/*.json"):
+        item = json.loads(path.read_text())
+        if (not isinstance(item, dict) or item.get("schema_version") != 1
+            or any(not isinstance(item.get(key, []), list) or any(not isinstance(name, str) for name in item.get(key, []))
+                   for key in ("selected", "requested")) or "selected" not in item):
+            raise ValueError("invalid retained collector invocation")
+        if names.intersection(item["selected"]) or names.intersection(item.get("requested", [])):
+            raise ValueError("optional VM not-run cannot hide a previous request")
+
+
 PROCESS_COVERAGE_DIAGNOSTIC = {"status": "not-applicable", "reason": "optional process coverage diagnostic; ordinary process contracts run in verify"}
 
 
@@ -272,13 +328,15 @@ def update_result(receipt):
                     if key == family or key.startswith(family + "/")]
         receipt["profile_results"][name] = ("failed" if "failed" in children else
             "passed" if children and all(state == "passed" for state in children) else
-            "not-applicable" if children == ["not-applicable"] else "incomplete")
-    states = [item["status"] for item in receipt["checks"].values()]
+            "not-applicable" if children == ["not-applicable"] else
+            "not-run" if children and all(state == "not-run" for state in children) else "incomplete")
+    states = [item["status"] for name, item in receipt["checks"].items() if not optional_vm_not_run(name, item)]
     receipt["reproducible_result"] = (
         "failed" if "failed" in states else
         "passed" if all(state in ("passed", "not-applicable") for state in states) else "incomplete")
     if receipt["reproducible_result"] == "passed" and any(
         receipt["checks"].get(name, {}).get("status") != "not-applicable"
+        and not optional_vm_not_run(name, receipt["checks"].get(name, {}))
         for name in receipt.get("operator_exclusions", [])):
         receipt["reproducible_result"] = "incomplete"
     receipt["result"] = receipt["reproducible_result"]
@@ -308,7 +366,7 @@ class Invocation:
                       "log", "log_sha256", "failure_class", "last_completed_phase", "cleanup",
                       "cleanup_status", "capture_status", "environment_evidence", "slot")
 
-    def __init__(self, output, receipt, selected, pending, excluded):
+    def __init__(self, output, receipt, selected, pending, excluded, requested=None):
         self.output, self.receipt = output, receipt
         self.id = uuid.uuid4().hex
         self.path = output / "runs" / (self.id + ".json")
@@ -321,6 +379,7 @@ class Invocation:
             "candidate": {key: receipt.get(key) for key in
                           ("version", "source_fingerprint", "runtime_sha256", "candidate_bundle_sha256")},
             "started_at": datetime.now(timezone.utc).isoformat(), "selected": self.selected,
+            "requested": sorted(selected if requested is None else requested),
             "excluded": sorted(excluded), "state": "running"}
         self.path.parent.mkdir(mode=0o700, exist_ok=True)
         sync_directory(output)
@@ -597,6 +656,10 @@ def prepare(output, version, prepared=None):
         if command is None:
             receipt["checks"][name]["reason"] = inventory[name.split(":", 1)[1]]["reason"]
     receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
+    if vm_checks_optional(root):
+        for name, command in commands(root, version, inventory).items():
+            if command and is_live(name):
+                receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     if prepared:
         assets = prepared / "assets"
         actual = {path.name: digest(path) for path in assets.iterdir() if path.is_file() and not path.is_symlink()}
@@ -681,7 +744,11 @@ def load_bound(output, entries=None, context=None):
     release = root / ".subyard-acceptance/release"
     if {path.name: digest(path) for path in sorted(release.iterdir()) if path.is_file()} != receipt["release_files"]:
         raise ValueError("candidate release assets changed")
+    optional_vms = vm_checks_optional(root)
+    validate_optional_vm_history(output, {name for name, result in receipt["checks"].items() if optional_vm_not_run(name, result)})
     for name, result in receipt["checks"].items():
+        if result["status"] == "not-run" and (not optional_vms or not required_commands.get(name) or not optional_vm_not_run(name, result)):
+            raise ValueError("invalid optional VM not-run result or frozen policy")
         if "original_attempt" in result:
             attempt = original_attempt(output, receipt, name, result)
             if context is not None:
@@ -752,7 +819,7 @@ def is_live(name):
     return name == "p0-release-smoke" or name.startswith("profile:")
 
 
-def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=()):
+def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
     if len(set(slots)) != len(slots) or any(type(slot) is not int or slot < 1 or slot > 999 for slot in slots):
         raise ValueError("slots must be unique integers from 1 to 999")
     if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) for kind in types):
@@ -768,8 +835,12 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                               for name, command in commands(root, "preflight", inventory).items()}}
         receipt["checks"]["package"] = {"status": "pending"}
         receipt["checks"]["process-coverage"] = PROCESS_COVERAGE_DIAGNOSTIC.copy()
+        if vm_checks_optional(root):
+            for name, command in commands(root, "preflight", inventory).items():
+                if command and is_live(name):
+                    receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
-    selected = select_checks(checks, only) if only else set(checks)
+    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
     excluded = select_checks(checks, exclude)
     readiness = {}
     if external_readiness:
@@ -780,7 +851,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
             or any(value not in ("available", "unavailable", "unknown") for value in readiness.values())):
             raise ValueError("invalid external readiness declaration")
     report = {"schema_version": 1, "candidate": "frozen" if output else "worktree", "superseded": bool(receipt.get("superseded")),
-              "checks": [{"id": name, "status": entry["status"], "required": entry["status"] != "not-applicable",
+              "checks": [{"id": name, "status": entry["status"], "required": entry["status"] != "not-applicable" and (name in selected or not optional_vm_not_run(name, entry)),
                           "selected": name in selected and name not in excluded,
                           "excluded": name in excluded, "physical": is_live(name)}
                          for name, entry in checks.items()],
@@ -905,7 +976,7 @@ def public_broker_status(path):
         return {"status": "unavailable", "reason": "invalid or unreadable public status"}
 
 
-def run_checks(output, slots, only, rerun, first=(), exclude=()):
+def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False):
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
         raise ValueError("candidate was explicitly superseded; prepare a new candidate")
@@ -913,10 +984,12 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     if measured_environment != receipt.get("environment", measured_environment):
         raise ValueError("execution environment changed since candidate preparation")
     checks = commands(root, receipt["version"], receipt["profiles"])
-    selected = select_checks(checks, only) if only else set(checks)
+    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    prioritized = select_checks(checks, first)
+    selected |= prioritized
+    requested = selected.copy()
     excluded = select_checks(checks, exclude)
     selected -= excluded
-    prioritized = select_checks(checks, first)
     priority_order = [name for selector in first for name in checks
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
@@ -928,7 +1001,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     if live and not slots:
         raise ValueError("live checks require --slots N [N ...]")
     try:
-        invocation = Invocation(output, receipt, selected, pending, excluded)
+        invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:
         print("release-acceptance: invocation capture failed before dispatch", file=sys.stderr)
         raise
@@ -936,6 +1009,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
     lock = threading.Lock()
     try:
         receipt["operator_exclusions"] = sorted(excluded)
+        for name in requested:
+            if optional_vm_not_run(name, receipt["checks"][name]):
+                receipt["checks"][name] = {"status": "pending"}
         save(output, receipt)
         event(output, "run-start", invocation_id=invocation.id, checks=pending, slots=slots, exclusions=sorted(excluded))
         for name in invocation.reused:
@@ -1021,6 +1097,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=()):
         save(output, receipt)
         invocation.finish("interrupted" if STOP.is_set() else "finished",
                           "interrupted-before-dispatch" if STOP.is_set() else failure_reason)
+        optional_vms = [name for name, item in receipt["checks"].items() if optional_vm_not_run(name, item)]
+        if optional_vms:
+            print("ACCEPTANCE vm_optional_not_run=" + ",".join(optional_vms) + " status=not-run", flush=True)
         optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
         if optional:
             print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
@@ -2187,6 +2266,7 @@ def main():
     run = sub.add_parser("run", help="run pending checks; each live retry acquires fresh VMs")
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--slots", type=int, nargs="+", default=[])
+    run.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
     run.add_argument("--only", action="append", default=[])
     run.add_argument("--rerun", action="store_true")
     run.add_argument("--first", action="append", default=[], help="prioritize a check/family after required local gates")
@@ -2194,6 +2274,7 @@ def main():
     pre = sub.add_parser("preflight", help="read-only obligations and prerequisites; never packages or authenticates")
     pre.add_argument("--output", type=Path, help="inspect a bound frozen receipt instead of the worktree")
     pre.add_argument("--only", action="append", default=[])
+    pre.add_argument("--with-vms", action="store_true", help="also select optional VM smoke and profile checks")
     pre.add_argument("--exclude", action="append", default=[])
     pre.add_argument("--broker-status", type=Path, help="already-collected public broker JSON; no live query")
     pre.add_argument("--external-readiness", type=Path, help="JSON obligation IDs mapped to available/unavailable/unknown")
@@ -2221,7 +2302,7 @@ def main():
     args = parser.parse_args()
     if args.action == "preflight":
         report = preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
-                           args.broker_status, args.external_readiness, args.slots, args.types)
+                           args.broker_status, args.external_readiness, args.slots, args.types, args.with_vms)
         return 1 if report["capacity_summary"]["planning"] == "insufficient" else 0
     output = args.output.resolve()
     if output == ROOT or (ROOT in output.parents and ROOT / ".build" not in output.parents):
@@ -2253,7 +2334,7 @@ def main():
     if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
         parser.error("slots must be unique integers from 1 to 999")
     with acceptance_lock(output):
-        return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude)
+        return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude, args.with_vms)
 
 
 if __name__ == "__main__":

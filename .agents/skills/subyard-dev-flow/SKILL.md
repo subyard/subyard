@@ -92,15 +92,15 @@ coordinator, and do not create or close shared task files or start another full 
   existing owning systemd lanes separately. Follow the explicit dependency map in
   [coverage ownership](../../../docs/testing.md#coverage-ownership); there is no automatic
   changed-file selector. Run the mode's local prerequisites before its allocation.
-- Before publishing a runtime release, run fresh release smoke
-  (`dev/e2e/p0-acceptance.sh --slot N`), the full release compatibility check in
-  [Development](../../../docs/development.md), and all shipped-profile acceptance on the same candidate.
-  Complete local smoke may precede CI completion and transfer after review of equivalent inputs.
-  Required local/VM gates remain mandatory; optional live checks may stay `not-run` under the
+- Runtime releases default to the existing host-free/CI checks, local adapters and full
+  released-caller compatibility check in [Development](../../../docs/development.md).
+  Long VM smoke and shipped-profile VM checks run only on explicit operator request:
+  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
+  Available slots alone do not request a VM run. Unrequested VM checks remain `not-run`,
+  never passed; requested incomplete or failed checks block acceptance/publication.
+  Optional external checks follow the
   [release contract](../../../docs/reference/release-publication.md#external-checks).
-  Failed or invalid external results still block publication. These gates do not apply to every edit;
-  existing CI/merge checks are unchanged. Full P0 remains separate from release smoke and risk-selected
-  or explicitly requested.
+  Existing CI/merge checks and risk-based development validation are unchanged.
 - Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
   risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
   the full lifecycle or release gate passed.
@@ -112,9 +112,10 @@ coordinator, and do not create or close shared task files or start another full 
   before the remaining required gates; a blocked check is incomplete, never passed.
 - For release repairs, accumulate fixes and commit the verified set at the end. Before preparation
   CI, run the [publication preflight](../../../docs/reference/release-publication.md#operator-commands-and-retained-state)
-  and assign every pending local/VM gate in the existing task plan: frozen local candidate, full
-  command, slot budget and runner owner. Build locally and start ready gates alongside CI;
-  a targeted lane does not complete the full release smoke. Do not wait for CI artifacts to begin
+  and assign every required local check and explicitly requested VM gate in the existing task plan:
+  frozen local candidate, full command, slot budget and runner owner. Build locally and start ready
+  requested gates alongside CI; a targeted lane does not complete full release smoke. Do not
+  allocate VMs without an explicit request or wait for CI artifacts to begin
   checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
   then transfer equivalent complete original PASS evidence through the reviewed workflow.
   Rerun only affected or missing gates.

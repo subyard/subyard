@@ -28,7 +28,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture(directory, lanes=(), external_required=None, inventory_entries=0):
+def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False):
     root = directory / "source"
     for name in ("dev/agent-e2e.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
@@ -73,6 +73,8 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0):
             artifact = name.removesuffix(".provenance.json")
             (assets / name).write_text(json.dumps({"schemaVersion": 1, "artifact": artifact,
                 "sha256": m.a.digest(assets / artifact), "version": version, "sourceRevision": "a" * 40}))
+    if optional_vms:
+        shutil.copy2(ROOT / "dev/release-acceptance.py", root / "dev/release-acceptance.py")
     m.a.bundle(root, prepared / "source.tar.gz")
     identity = {"schema_version": 1, "candidate_id": "r123-a1", "repository": m.REPOSITORY,
         "version": version, "commit": "a" * 40, "source_fingerprint": m.a.source_fingerprint(root),
@@ -82,13 +84,13 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0):
     return root, prepared, identity
 
 
-def accepted(directory, prepared, identity, external_passed=True):
+def accepted(directory, prepared, identity, external_passed=True, with_vms=True):
     output = directory / "acceptance"
     with patch.object(m.a, "execution_environment", return_value={"system": "Linux", "machine": "x86_64", "go": "go version fixture"}):
         m.a.prepare(output, identity["version"], prepared)
     root, receipt = m.a.load_bound(output)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
-        if command:
+        if command and (with_vms or not m.a.is_live(name)):
             log = output / (name.replace(":", "-").replace("/", "-") + ".log")
             log.write_text("synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
@@ -513,6 +515,82 @@ class Contracts(unittest.TestCase):
         (frozen / "untracked-public.txt").write_text("changed")
         with self.assertRaisesRegex(ValueError, "source fingerprint"):
             m.attestation(self.output, self.identity)
+
+    def test_fast_default_accepts_and_publishes_honest_unrun_vm_inventory(self):
+        directory = self.directory / "r123-a1"
+        directory.mkdir()
+        _, prepared, identity = fixture(directory, external_required=False, optional_vms=True)
+        output, frozen, document = accepted(directory, prepared, identity, external_passed=False, with_vms=False)
+        live = [name for name in document["checks"] if m.a.is_live(name)]
+        self.assertEqual(set(live), {"p0-release-smoke", "profile:sample"})
+        self.assertTrue(all(document["checks"][name] == m.a.OPTIONAL_VM_NOT_RUN for name in live))
+        self.assertEqual(document["schema_version"], 1)
+        github = FakeGitHub(identity)
+        captured = io.StringIO()
+        for slots in ([], ["--slots", "1"]):
+            with patch.object(m, "GitHub", return_value=github), \
+                 patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+                 patch.object(m.a, "execute", side_effect=AssertionError("default accept dispatched a VM")), \
+                 patch.object(m.signal, "signal"), redirect_stdout(captured), \
+                 patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
+                                           "accept", "--candidate", identity["candidate_id"], *slots]):
+                self.assertEqual(m.main(), 0)
+        self.assertIn("vm_optional_not_run=", captured.getvalue())
+        with redirect_stdout(captured):
+            self.assertTrue(m.publish_remote(github, prepared, document, frozen)["immutable"])
+        self.assertIn("PUBLICATION vm_optional_not_run=", captured.getvalue())
+        # Both local collector state and remote attestation reject attempted or fake execution.
+        _, receipt = m.a.load_bound(output)
+        original = copy.deepcopy(receipt)
+        for name in (*live, "verify"):
+            mutations = [{"status": status} for status in ("pending", "failed", "blocked", "running", "unknown")]
+            mutations += [{**m.a.OPTIONAL_VM_NOT_RUN, key: value} for key, value in
+                          (("exit_code", 0), ("log_sha256", "c" * 64), ("original_attempt", {}), ("environments", []))]
+            if name == "verify":
+                mutations.append(m.a.OPTIONAL_VM_NOT_RUN.copy())
+            for result in mutations:
+                invalid = copy.deepcopy(document)
+                invalid["checks"][name] = result
+                refusing = FakeGitHub(identity)
+                with self.subTest(name=name, result=result), self.assertRaises(ValueError):
+                    m.publish_remote(refusing, prepared, invalid, frozen)
+                self.assertFalse(any(method in ("POST", "PATCH", "DELETE") for _, method in refusing.calls))
+                broken = copy.deepcopy(original)
+                broken["checks"][name] = result
+                m.a.save(output, broken)
+                with self.assertRaises(ValueError):
+                    m.attestation(output, identity)
+        m.a.save(output, original)
+        # A frozen candidate predating this declaration retains its mandatory physical gates.
+        legacy = copy.deepcopy(self.document)
+        legacy["checks"]["p0-release-smoke"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
+        with self.assertRaises(ValueError):
+            m.validate_attestation(legacy, self.identity, self.output / "source")
+        for option in (["--with-vms"], ["--only", live[0]]):
+            with patch.object(m, "GitHub", return_value=github), \
+                 patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+                 patch.object(m.signal, "signal"), \
+                 patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
+                                           "accept", "--candidate", identity["candidate_id"], *option]):
+                with self.assertRaisesRegex(ValueError, "require --slots"):
+                    m.main()
+
+    def test_optional_vm_receipt_reset_refuses_publication_with_retained_history(self):
+        directory = self.directory / "optional-history"
+        directory.mkdir()
+        _, prepared, identity = fixture(directory, external_required=False, optional_vms=True)
+        output, frozen, document = accepted(directory, prepared, identity, external_passed=False, with_vms=False)
+        _, receipt = m.a.load_bound(output)
+        name = "profile:sample"
+        receipt["checks"][name] = {"status": "pending"}
+        m.a.save(output, receipt)
+        m.a.Invocation(output, receipt, {name}, [name], []).finish("interrupted")
+        receipt["checks"][name] = m.a.OPTIONAL_VM_NOT_RUN.copy()
+        m.a.save(output, receipt)
+        before = (output / "receipt.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "optional VM.*previous request"):
+            m.attestation(output, identity)
+        self.assertEqual((output / "receipt.json").read_bytes(), before)
 
     def test_optional_coverage_and_historical_required_publication(self):
         original = (self.output / "receipt.json").read_bytes()

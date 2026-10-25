@@ -12,7 +12,7 @@ Choose worktree checks using the
 [validation policy](../../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
 
 ```sh
-python3 dev/release-acceptance.py preflight --slots 1 2 3
+python3 dev/release-acceptance.py preflight
 python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/release-local
 dev/release.sh preflight --output .build/release-local
 ```
@@ -26,11 +26,11 @@ does not alter the collector. Dispatch authorization and future evidence growth 
 final publication still validates the complete actual attestation. Only sanitized public evidence
 is transported. A failed preflight stops expensive dependent work.
 
-Record the frozen source/build, full gate commands, slots and owners. Start ready local/VM gates,
-including complete release smoke, in one terminal while preparation CI runs in another:
+Record the frozen source/build, check commands and owners. Start ready local checks in one
+terminal while preparation CI runs in another:
 
 ```sh
-python3 dev/release-acceptance.py run --output .build/release-local --slots 1 2 3
+python3 dev/release-acceptance.py run --output .build/release-local
 # In a second terminal, against the same frozen public source:
 dev/release.sh prepare --version X.Y.Z --commit FULL_SHA
 ```
@@ -40,9 +40,23 @@ After CI, compare actual binaries and consumed runtime inputs/modes and use
 original PASS results. Rerun affected or missing checks; `accept` reuses applicable imported results:
 
 ```sh
-dev/release.sh accept --candidate rRUN_ID-aATTEMPT --slots 1 2 3
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT
 dev/release.sh publish --candidate rRUN_ID-aATTEMPT
 ```
+
+The default runs host-free/CI verification, local adapters and released-caller compatibility.
+Long VM smoke and shipped-profile VM checks remain available only on explicit request:
+
+```sh
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
+# Or select one check from an existing frozen collector:
+python3 dev/release-acceptance.py run --output .build/release-local \
+  --only p0-release-smoke --slots 1
+```
+
+`--slots` alone does not request VM execution. Unrequested checks remain `not-run` in acceptance
+and publication; they are not passing physical evidence. Once requested, incomplete or failed
+checks block the candidate, including after interruption or a later default invocation.
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
 runs native ARM64, Paseo builds and host-free verification in parallel after input validation.
@@ -79,7 +93,7 @@ The CLI polls every 20 seconds while active. Sparse agent status reports do not 
 completion handling, but scheduling, network and unavailable completion metadata limit precision.
 
 `accept` imports the successful preparation into the collector without repackaging. Local gates
-precede fresh release smoke and every shipped-profile lane on leased disposable VMs. A repeat
+precede any explicitly requested checks on leased disposable VMs. A repeat
 runs only pending checks; SIGINT/SIGTERM drain workers and retain interrupted evidence.
 Unavailable environments and missing required results stay incomplete.
 
@@ -88,7 +102,7 @@ VM status. Collector selectors can target the downloaded candidate's acceptance 
 
 ```sh
 python3 dev/release-acceptance.py preflight \
-  --output .build/release-publication/ID/acceptance --slots 1 2 3
+  --output .build/release-publication/ID/acceptance --with-vms --slots 1 2 3
 ```
 
 Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
@@ -102,8 +116,9 @@ OpenClaw staging gateway and QA broker checks declare `required: false`: they ma
 without real credentials or external staging. No deferral is needed; `accept` exits zero once its
 required gates pass. Acceptance and publication report skipped IDs as `external_optional_not_run`.
 
-Local, core and all shipped-profile VM gates remain required, including OpenClaw's synthetic staging
-safety/lifecycle fixture. Synthetic checks do not prove live API/provider behavior or deployed Convex
+Local/core and shipped-profile host-free checks remain required. VM checks, including OpenClaw's
+synthetic staging safety/lifecycle fixture, run only when requested. Synthetic checks do not prove
+live API/provider behavior or deployed Convex
 allocation, concurrency and exhaustion. Failed, unknown or malformed external results block
 publication; skipped entries cannot carry execution evidence. After an actual same-candidate PASS,
 record `status: passed` and its `evidence_sha256` in the receipt. Keep secrets out of receipts.
