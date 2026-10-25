@@ -12,6 +12,7 @@ import (
 
 type Facade struct {
 	OnStatus        func(LeasePool) ResourceStatus
+	OnObserve       func([]LeaseSlot) []ResourceObservation
 	EnvironmentSpec func(string) (EnvironmentSpec, error)
 	Store           LeaseStore
 	Output          io.Writer
@@ -22,6 +23,7 @@ type Facade struct {
 }
 
 type facadeResponse struct {
+	Observation   *ObservationPage    `json:"observation,omitempty"`
 	Resources     *ResourceStatus     `json:"resources,omitempty"`
 	SchemaVersion int                 `json:"schema_version"`
 	Status        string              `json:"status"`
@@ -63,8 +65,61 @@ func (facade Facade) Run(originalCommand string) error {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1", "lease-logs-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1"}, Pool: &pool, Resources: resources,
 		})
+	case "observe-v1":
+		if len(fields) != 4 || facade.Events == nil {
+			return facade.writeError("invalid_request", "observe-v1 requires client_id cursor|- count")
+		}
+		count, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return facade.writeError("invalid_request", "invalid observer count")
+		}
+		page, err := facade.Events.readObservationPage(fields[1], fields[2], count)
+		if err != nil {
+			return facade.writeError("unavailable", "observer records unavailable")
+		}
+		pool, err := facade.Store.Inspect()
+		if err != nil {
+			return facade.writeError("unavailable", "observer state unavailable")
+		}
+		var owned []LeaseSlot
+		for _, slot := range pool.Slots {
+			if slot.ClientID == fields[1] && slot.State != SlotAvailable {
+				owned = append(owned, slot)
+			}
+		}
+		if facade.OnObserve != nil && len(owned) > 0 {
+			page.Observations = facade.OnObserve(owned)
+		}
+		// A delayed measurement cannot be attached to a successor allocation.
+		current, err := facade.Store.Inspect()
+		if err != nil {
+			return facade.writeError("unavailable", "observer state unavailable")
+		}
+		kept := page.Observations[:0]
+		for _, sample := range page.Observations {
+			for _, slot := range current.Slots {
+				if slot.ClientID == fields[1] && slot.SlotID == sample.SlotID && slot.ResourceGeneration == sample.ResourceGeneration && slot.LeaseEpoch == sample.LeaseEpoch && slot.State != SlotAvailable {
+					kept = append(kept, sample)
+					break
+				}
+			}
+		}
+		page.Observations = kept
+		if page.Observations == nil {
+			page.Observations = []ResourceObservation{}
+		}
+		page.ObservedAt = facade.Events.now()
+		for _, slot := range current.Slots {
+			if slot.ClientID == fields[1] && slot.State != SlotAvailable {
+				if allocation := publicResourceAllocation(slot); allocation != nil {
+					page.Allocations = append(page.Allocations, allocation)
+				}
+			}
+		}
+		return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Observation: &page})
+
 	case "logs-v1", "incident-v1":
 		if facade.Events == nil {
 			return facade.writeError("unavailable", "agent logs are unavailable")
@@ -268,6 +323,7 @@ func (facade Facade) recordSlotSnapshot(
 		Error:              errorStringOrEmpty(cause),
 		IncidentID:         slot.IncidentID,
 		Context:            leaseContextFromSlot(slot),
+		Allocation:         publicResourceAllocation(slot),
 		agentClientID:      slot.ClientID,
 	})
 	return err

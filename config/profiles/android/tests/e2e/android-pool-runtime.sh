@@ -59,16 +59,25 @@ monitor_stop=''
 definition_checksum=''
 sdk_pool=''
 sdk_volume=''
+sdk_api=''
 init_attempted=0
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
 cleanup() {
   status=$?
   trap - EXIT INT TERM
+  failed_phase="${android_phase:-}"
   android_phase_end "$status"
   android_phase_begin cleanup
   cleanup_status=0
   touch "$monitor_host_stop"
+  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ] || [ "$lane" = memory-lease ]; } \
+    && [ "$failed_phase" = images ] && { [ "$sdk_api" = 35 ] || [ "$sdk_api" = 36 ]; } \
+    && [ -n "$project" ] && [ -n "$instance" ]; then
+    timeout --signal=TERM --kill-after=15 960 "${incus_binary[@]}" --project "$project" exec "$instance" -- python3 - --api "$sdk_api" \
+      < "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" \
+      || printf 'android-sdk-diagnostic retry=unavailable original_failure_preserved=true\n' >&2
+  fi
   if [ -n "$monitor_pid" ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       touch "$monitor_stop" >/dev/null 2>&1 || true
@@ -275,7 +284,9 @@ if [ "$lane" = projects ]; then
     done
   '
   android_phase_begin images
+  sdk_api=35
   yard emu cache prepare --api 35
+  sdk_api=36
   yard emu cache prepare --api 36
   android_phase_end 0
   android_phase_begin projects
@@ -326,7 +337,38 @@ PY
     until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do sleep 0.2; done
   '
   android_phase_begin images
+  sdk_api=36
   yard emu cache prepare --api 36
+  android_phase_end 0
+  if [ -n "${SUBYARD_E2E_PROFILE_EXERCISE:-}" ]; then
+    android_phase_begin telemetry-profile
+    android_candidate_command python3 -B "$SUBYARD_E2E_PROFILE_EXERCISE" \
+      --engine "$YARD_BIN" --yard "$YARD_NAME" --project "$project" --instance "$instance" \
+      --source "$root" --native-state "${SUBYARD_TELEMETRY_NATIVE_STATE:?}"
+    android_phase_end 0
+  fi
+  if [ -n "${SUBYARD_E2E_NATIVE_EXERCISE:-}" ]; then
+    android_phase_begin telemetry-native
+    android_candidate_command python3 -B "$SUBYARD_E2E_NATIVE_EXERCISE" --exercise \
+      --state "$state/telemetry-native" --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" --source "$root" --kind android -- \
+      "$YARD_BIN" -Y "$YARD_NAME" emu run --purpose telemetry-native-tool -- python3 -c 'import time; time.sleep(2)'
+    android_phase_end 0
+  fi
+  if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+    android_phase_begin telemetry-storage
+    android_candidate_command python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" \
+      --kind android --stage storage-failure --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" \
+      --evidence "$state/telemetry-storage" --native-command \
+      "$YARD_BIN" -Y "$YARD_NAME" emu run --purpose telemetry-storage-failure -- python3 -c 'import time; time.sleep(2)'
+    incus --project "$project" exec "$instance" -- python3 - <<'PY'
+import json, pathlib, subprocess
+status = json.loads(subprocess.check_output(['/usr/bin/python3', '/usr/local/lib/subyard-android/client.py', 'status']))
+assert all(slot['state'] == 'available' for slot in status['slots'])
+assert not list(pathlib.Path('/var/lib/subyard-android/runtimes').iterdir())
+print('android storage fault native lifecycle cleanup=PASS')
+PY
+    android_phase_end 0
+  fi
   android_phase_begin memory-lease
   timeout --foreground --kill-after=15 4800 "${incus_binary[@]}" --project "$project" exec "$instance" \
     --user 1000 --group 1000 --env HOME=/home/dev -- env \
@@ -344,6 +386,12 @@ assert not any(line.startswith('subyard-android-slot-') for line in namespaces.s
 print('android runtime, network and disposable cleanup=PASS')
 PY
   android_phase_end 0
+  if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+    android_phase_begin telemetry-resource-observer
+    android_candidate_command python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind android --stage exercise \
+      --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" --engine "$YARD_BIN" --yard "$YARD_NAME"
+    android_phase_end 0
+  fi
   exit 0
 fi
 direct_catalog="$state/direct-catalog.log"
@@ -383,9 +431,16 @@ android_phase_begin images
 printf 'android phase=prepare-images\n'
 # Normal lanes prepare both APIs before boot; sdk-images prepares only API 36.
 # These public calls exercise the real installer and cache, never a diagnostic seed.
-[ "$lane" = sdk-images ] || yard emu cache prepare --api 35
+if [ "$lane" != sdk-images ]; then
+  sdk_api=35
+  yard emu cache prepare --api 35
+fi
+sdk_api=36
 yard emu cache prepare --api 36
-[ "$lane" = viewer ] || [ "$lane" = viewer-native-debug ] || [ "$lane" = sdk-images ] || yard emu cache prepare --api 35
+if [ "$lane" != viewer ] && [ "$lane" != viewer-native-debug ] && [ "$lane" != sdk-images ]; then
+  sdk_api=35
+  yard emu cache prepare --api 35
+fi
 android_phase_end 0
 [ "$lane" != sdk-images ] || exit 0
 # Monitor all viewer and restart windows, including diagnostic lanes.

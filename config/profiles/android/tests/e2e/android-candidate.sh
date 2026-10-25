@@ -60,7 +60,7 @@ android_candidate_install() {
     candidate_rc=$?
     [ "$candidate_rc" = 1 ] || return "$candidate_rc"
     release_root="$state/release"
-    release_version=0.1.0-android.e2e
+    release_version=1.0.0-android.e2e
     runtime_source="$root"
     # Packaging builds the engine and every declared profile/integration executable.
     "$root/dev/package-engine.sh" --version "$release_version" --output-dir "$release_root" >&2 || return

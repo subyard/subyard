@@ -34,6 +34,7 @@ type Definition struct {
 	Bootstrap          bool
 	Startup            bool
 	ControllerSessions []string
+	ContextEnvironment []string `json:",omitempty"`
 	path               string
 	actions            []actionDeclaration
 }
@@ -348,6 +349,7 @@ func (registry Registry) definition(value string) (Definition, bool) {
 func cloneDefinition(definition Definition) Definition {
 	definition.Verbs = slices.Clone(definition.Verbs)
 	definition.ControllerSessions = slices.Clone(definition.ControllerSessions)
+	definition.ContextEnvironment = slices.Clone(definition.ContextEnvironment)
 	definition.actions = slices.Clone(definition.actions)
 	if definition.Proxy != nil {
 		proxy := *definition.Proxy
@@ -482,6 +484,15 @@ func parseResource(profile, name string, reader io.Reader, path string) (Resourc
 			}
 		}
 	}
+	contextEnvironment := strings.Fields(values.singletons["CONTEXT_ENV"])
+	if len(contextEnvironment) > 16 {
+		return ResourceSpec{}, fmt.Errorf("too many CONTEXT_ENV names in %s", path)
+	}
+	for index, name := range contextEnvironment {
+		if !contextEnvironmentName(name) || slices.Contains(contextEnvironment[:index], name) {
+			return ResourceSpec{}, fmt.Errorf("invalid CONTEXT_ENV name in %s", path)
+		}
+	}
 	profileRoot := filepath.Join("/", "profiles", profile)
 	handlerPath := filepath.Clean(filepath.Join(profileRoot, handler))
 	relative, err := filepath.Rel(profileRoot, handlerPath)
@@ -491,8 +502,29 @@ func parseResource(profile, name string, reader io.Reader, path string) (Resourc
 	return ResourceSpec{definition: Definition{
 		Profile: profile, Name: name, Command: command, Handler: handler,
 		BringUp: bringUp, Shutdown: shutdown, Verbs: verbs, Title: title,
-		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", ControllerSessions: controllerSessions, actions: declarations,
+		Proxy: proxy, Dashboard: dashboard, Management: management, Endpoint: endpoint, Bootstrap: bootstrap, Startup: startup != "", ControllerSessions: controllerSessions, ContextEnvironment: contextEnvironment, actions: declarations,
 	}, actions: actionDefinitions, valid: true}, nil
+}
+
+// Context is explicit nonsecret metadata, never process setup or route authority.
+func contextEnvironmentName(name string) bool {
+	if name == "" || len(name) > 64 || name[0] >= '0' && name[0] <= '9' || strings.IndexFunc(name, func(r rune) bool {
+		return !(r == '_' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) >= 0 {
+		return false
+	}
+	for _, prefix := range []string{"LD_", "DYLD_", "PYTHON", "PERL", "RUBY", "NODE_", "BASH", "LC_", "SSH_",
+		"YARD_", "INCUS_", "DEV_", "SUBYARD_RESOURCE_", "SUBYARD_ENGINE_", "SUBYARD_CONFIG_", "SUBYARD_INSTALLATION_",
+		"SUBYARD_DISPATCH", "SUBYARD_OPERATOR_", "SUBYARD_STATE_", "SUBYARD_PREPARED_", "SUBYARD_NATIVE_", "SUBYARD_SUDO_",
+		"SUBYARD_ELEVATED", "SUBYARD_POWER_", "SUBYARD_KEYS_", "SUBYARD_TEARDOWN_", "SUBYARD_PROFILE_", "SUBYARD_TEST_VMS_"} {
+		if strings.HasPrefix(name, prefix) {
+			return false
+		}
+	}
+	return !slices.Contains([]string{"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM", "DISPLAY",
+		"WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "IFS", "ENV", "SHELLOPTS",
+		"CDPATH", "GLOBIGNORE", "LANG", "LANGUAGE", "TZ", "PWD", "OLDPWD", "SHLVL", "_", "SUBYARD_HOME", "SUBYARD_YARD",
+		"GCONV_PATH", "GLIBC_TUNABLES", "LOCPATH", "NLSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"}, name)
 }
 
 func resolveResourceHandler(profileRoot, path string, definition Definition) (string, error) {
@@ -783,7 +815,7 @@ func recoveryClass(value string) (domain.RecoveryClass, bool) {
 func readDescriptor(reader io.Reader, path string) (descriptorValues, error) {
 	allowed := map[string]struct{}{
 		"COMMAND": {}, "HANDLER": {}, "TITLE": {}, "ACTION": {}, "BRINGUP": {}, "SHUTDOWN": {},
-		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {}, "CONTROLLER_SESSION": {},
+		"PROXY": {}, "DASHBOARD": {}, "MANAGEMENT": {}, "ENDPOINT_DEFAULTS": {}, "BOOTSTRAP": {}, "STARTUP": {}, "CONTROLLER_SESSION": {}, "CONTEXT_ENV": {},
 	}
 	values := descriptorValues{singletons: make(map[string]string)}
 	scanner := bufio.NewScanner(reader)

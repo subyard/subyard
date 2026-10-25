@@ -9,10 +9,12 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -70,6 +72,164 @@ def load(name):
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
+
+
+# Capture the actual bounded Images.ensure failure from a real child process,
+# without constructing Images on the live pool root or exposing credentials.
+sdk_diagnostic = load('android-sdk-diagnostic')
+pool_spec = importlib.util.spec_from_file_location('sdk_diagnostic_pool', E2E.parents[1] / 'pool.py')
+sdk_pool_module = importlib.util.module_from_spec(pool_spec)
+pool_spec.loader.exec_module(sdk_pool_module)
+with tempfile.TemporaryDirectory(prefix='android-sdk-diagnostic-', dir='/tmp') as name:
+    directory = Path(name)
+    sdk = directory / 'sdk'
+    manager = sdk / 'cmdline-tools/latest/bin/sdkmanager'
+    manager.parent.mkdir(parents=True)
+    manager.write_text('#!/usr/bin/env python3\nprint("Error: unsupported SDK option")\n'
+                       'print("https://private-user:private-pass@example.test/repository?token=private-query")\n'
+                       'print("Authorization: Bearer private-bearer")\n'
+                       'print("token=private-token /private/fixture/config")\nraise SystemExit(7)\n')
+    manager.chmod(0o755)
+    image = dict(key='a' * 64, package='system-images;android-36;google_apis;x86_64',
+                 revision='1.0.0', size=16, sha1='b' * 40)
+    live = directory / 'live/download-123456789012345678901234'
+    live.mkdir(parents=True)
+    (live / '.download-owner.json').write_text(json.dumps(dict(schema=sdk_pool_module.SCHEMA, kind='image-download')))
+    config = dict(sdk_root=str(sdk), size=1)
+    with patch.object(sdk_pool_module.Images, 'resolve', return_value=image), \
+            patch.object(sdk_pool_module.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3)):
+        result = sdk_diagnostic.diagnose(sdk_pool_module, config, directory / 'private')
+    assert result['retry'] == 'failed' and result['original_failure_preserved']
+    assert result['sdk_output_present'] and result['sdk_exit_code'] == 7
+    assert 'unsupported SDK option' in result['sdk_error'] and live.is_dir()
+    assert not list((directory / 'private/images').glob('download-*'))
+    assert all(value not in json.dumps(result) for value in
+               ('private-user', 'private-pass', 'private-query', 'private-bearer', 'private-token', '/private/fixture'))
+    assert len(sdk_diagnostic.public_error(b'x' * 16385)) <= 4096
+    for api in (35, 36):
+        selected = dict(image, package=f'system-images;android-{api};google_apis;x86_64')
+        with patch.object(sdk_pool_module.Images, 'resolve', return_value=selected) as resolve, \
+                patch.object(sdk_pool_module.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3)):
+            result = sdk_diagnostic.diagnose(sdk_pool_module, config, directory / f'api-{api}', api)
+        assert resolve.call_args.args[0]['api'] == api
+        assert result['api'] == api and result['sdk_exit_code'] == 7 and result['original_failure_preserved']
+    for api in (34, 37, '35', True):
+        try:
+            sdk_diagnostic.diagnose(sdk_pool_module, config, directory / 'invalid', api)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid diagnostic API accepted')
+    for arguments in (['--api', '34'], ['--api', '37'], ['--api', '35', 'extra'], ['--unknown']):
+        invalid = subprocess.run([sys.executable, '-B', str(E2E / 'android-sdk-diagnostic.py'), *arguments],
+                                 capture_output=True, text=True)
+        assert invalid.returncode == 2 and not invalid.stdout
+    with patch.object(sdk_pool_module.Images, 'resolve', return_value=image), \
+            patch.object(sdk_pool_module.Images, 'ensure', return_value=directory):
+        retry = sdk_diagnostic.diagnose(sdk_pool_module, config, directory / 'retry')
+    assert retry['retry'] == 'succeeded' and retry['original_failure_preserved']
+
+    # External TERM must unwind the real method's finally, despite the SDK
+    # starting in a separate session. Its child and download stage must disappear.
+    child_identity = directory / 'sdk-pids'
+    manager.write_text('#!/usr/bin/env python3\nimport os, pathlib, subprocess, sys, time\n'
+                       'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
+                       f'pathlib.Path({str(child_identity)!r}).write_text(str(os.getpid())+" "+str(child.pid))\n'
+                       'time.sleep(60)\n')
+    worker = '''import importlib.util, pathlib, signal, sys
+from types import SimpleNamespace
+from unittest.mock import patch
+def load(path):
+    spec=importlib.util.spec_from_file_location(path.stem, path)
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+diagnostic=load(pathlib.Path(sys.argv[1])); pool=load(pathlib.Path(sys.argv[2]))
+signal.signal(signal.SIGTERM, diagnostic.interrupted)
+try:
+    with patch.object(pool.Images, 'resolve', return_value=__import__('json').loads(sys.argv[5])), patch.object(pool.shutil, 'disk_usage', return_value=SimpleNamespace(free=64*1024**3)):
+        diagnostic.diagnose(pool, dict(sdk_root=sys.argv[3], size=1), pathlib.Path(sys.argv[4]))
+except InterruptedError:
+    pass
+assert not list(pathlib.Path(sys.argv[4]).glob('images/download-*'))
+raise SystemExit(23)
+'''
+    process = subprocess.Popen([sys.executable, '-B', '-c', worker, str(E2E / 'android-sdk-diagnostic.py'),
+                                str(E2E.parents[1] / 'pool.py'), str(sdk), str(directory / 'cancelled'),
+                                json.dumps(image)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    pids = []
+    try:
+        deadline = time.monotonic() + 5
+        while not child_identity.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        pids = [int(value) for value in child_identity.read_text().split()]
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 23, (process.returncode, stdout, stderr)
+        for pid in pids:
+            status = Path('/proc', str(pid), 'stat')
+            assert not status.exists() or status.read_text().split(') ', 1)[1].startswith('Z ')
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pids[0], signal.SIGKILL)
+
+# The failed owning image lanes retry; even diagnostic failure cannot replace the
+# original status. Execute the owning shell branch with a harmless transport.
+runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
+diagnostic_branch = runtime_source[runtime_source.index('  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ]'):
+                                   runtime_source.index('\n  if [ -n "$monitor_pid" ]')]
+for lane, phase, api, diagnostic_status, called in (('sdk-images', 'images', 36, 0, True),
+                                                  ('sdk-images', 'images', 36, 17, True),
+                                                  ('sdk-images', 'setup', 36, 0, False),
+                                                  ('memory-lease', 'images', 35, 0, True),
+                                                  ('memory-lease', 'images', 36, 17, True),
+                                                  ('memory-lease', 'images', 34, 0, False),
+                                                  ('projects', 'images', 35, 0, False)):
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
+                             'root="$1"; lane="$2"; failed_phase="$3"; sdk_api="$4"; diagnostic_status="$5"\n'
+                             'status=23; project=fixture; instance=fixture; incus_binary=(incus)\n'
+                             'timeout() { printf "%s\\n" "$*"; return "$diagnostic_status"; }\n'
+                             + diagnostic_branch + '\nexit "$status"\n', '_', str(ROOT), lane, phase,
+                             str(api), str(diagnostic_status)], capture_output=True, text=True)
+    assert result.returncode == 23 and (f'python3 - --api {api}' in result.stdout) == called
+
+# Execute the actual normal prepare block: failing its first API35 or the
+# sdk-images-only API36 forwards that API to the real helper's strict CLI.
+start = runtime_source.rindex('android_phase_begin images\n')
+prepare = runtime_source[start:runtime_source.index('\nandroid_phase_end 0', start)]
+for lane, api in (('memory-lease', 35), ('sdk-images', 36)):
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
+                             'root="$1"; lane="$2"; project=fixture; instance=fixture; incus_binary=(incus)\n'
+                             'android_phase_begin() { :; }; yard() { return 23; }\n'
+                             'timeout() { python3 -B "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" --api "$sdk_api" --help >/dev/null; printf "api=%s\\n" "$sdk_api"; }\n'
+                             'cleanup() { status=$?; failed_phase=images;\n' + diagnostic_branch
+                             + '\nexit "$status"; }; trap cleanup EXIT\n' + prepare,
+                             '_', str(ROOT), lane], capture_output=True, text=True)
+    assert result.returncode == 23 and result.stdout.splitlines()[-1] == f'api={api}', result.stderr
+
+# A successful SDK prepare closes its phase before any telemetry hook. Execute
+# those actual dispatch blocks: each failed hook retains23 without an SDK retry.
+start = runtime_source.index('  android_phase_begin images\n', runtime_source.index('if [ "$lane" = memory-lease ]; then'))
+hooks = runtime_source[start:runtime_source.index('  android_phase_begin memory-lease\n', start)]
+for hook, phase in (('PROFILE_EXERCISE', 'telemetry-profile'), ('NATIVE_EXERCISE', 'telemetry-native'),
+                    ('RESOURCE_OBSERVER', 'telemetry-storage')):
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
+                             'root="$1"; lane=memory-lease; android_fixture=runtime; project=fixture; instance=fixture\n'
+                             'sdk_api=""; state=/tmp/fixture; YARD_BIN=fixture; YARD_NAME=fixture; incus_binary=(incus)\n'
+                             'SUBYARD_E2E_PROFILE_EXERCISE=""; SUBYARD_E2E_NATIVE_EXERCISE=""; SUBYARD_E2E_RESOURCE_OBSERVER=""\n'
+                             'printf -v "SUBYARD_E2E_$2" %s fixture\n'
+                             'SUBYARD_TELEMETRY_NATIVE_STATE=fixture; SUBYARD_TELEMETRY_DATA_DIR=fixture\n'
+                             '. "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"\n'
+                             'yard() { return 0; }; android_candidate_command() { return 23; }\n'
+                             'timeout() { printf "unexpected-sdk-diagnostic\\n"; }\n'
+                             'cleanup() { status=$?; trap - EXIT; failed_phase="${android_phase:-}"; android_phase_end "$status";\n'
+                             + diagnostic_branch + '\nexit "$status"; }; trap cleanup EXIT\n' + hooks,
+                             '_', str(ROOT), hook], capture_output=True, text=True)
+    assert result.returncode == 23 and 'unexpected-sdk-diagnostic' not in result.stdout, result.stderr
+    assert 'runtime-images state=end' in result.stdout and 'exit_code=0' in result.stdout
+    assert f'runtime-{phase} state=end' in result.stdout and 'exit_code=23' in result.stdout
 
 
 capture = load('android-pool-capture')

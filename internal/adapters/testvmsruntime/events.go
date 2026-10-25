@@ -37,6 +37,8 @@ var (
 )
 
 type BrokerEvent struct {
+	Allocation         *ResourceAllocation   `json:"allocation,omitempty"`
+	Observations       []ResourceObservation `json:"observations,omitempty"`
 	agentClientID      string
 	SchemaVersion      int           `json:"schema_version"`
 	Timestamp          time.Time     `json:"timestamp"`
@@ -363,6 +365,27 @@ func validateBrokerEvent(event BrokerEvent) error {
 	}
 	if event.Context != nil && validateLeaseContext(*event.Context) != nil {
 		return errors.New("invalid broker event attribution")
+	}
+	if event.Allocation != nil {
+		allocation := event.Allocation
+		if allocation.SlotID != event.SlotID || allocation.ResourceGeneration != event.ResourceGeneration || allocation.LeaseEpoch != event.LeaseEpoch || allocation.Environment == nil || allocation.Environment.Validate() != nil || (allocation.Context != nil && validateLeaseContext(*allocation.Context) != nil) {
+			return errors.New("invalid resource allocation observation")
+		}
+	}
+	if len(event.Observations) > 2 {
+		return errors.New("too many resource observations")
+	}
+	for _, sample := range event.Observations {
+		if sample.SlotID != event.SlotID || sample.ResourceGeneration != event.ResourceGeneration || sample.LeaseEpoch != event.LeaseEpoch || sample.SourceTime.IsZero() || (sample.Selector != "1" && sample.Selector != "2") || (sample.Phase != "baseline" && sample.Phase != "pre_stop" && sample.Phase != "periodic") || (sample.Accounting != "" && sample.Accounting != "qemu-process-and-threads") || sample.FinalComplete || len(sample.CounterGeneration) > 64 || !safeLeaseText(sample.CounterGeneration, 64) || len(sample.BootID) > 64 || !safeLeaseText(sample.BootID, 64) || len(sample.Missing) > 11 {
+			return errors.New("invalid resource counter observation")
+		}
+		for _, field := range sample.Missing {
+			switch field {
+			case "cpu_ns", "memory_bytes", "memory_peak_bytes", "swap_bytes", "io_read_bytes", "io_write_bytes", "io_read_ops", "io_write_ops", "rss_bytes", "pss_bytes", "rss_peak_bytes":
+			default:
+				return errors.New("invalid missing resource counter")
+			}
+		}
 	}
 	if event.Error != redactBrokerText(event.Error, 8192) {
 		return errors.New("unredacted broker event error")

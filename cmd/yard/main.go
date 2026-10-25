@@ -173,6 +173,9 @@ func main() {
 				Path: cfg.LeaseStatePath(), SlotCount: cfg.SlotCount,
 			}
 			err = (testvmsruntime.Facade{
+				OnObserve: func(slots []testvmsruntime.LeaseSlot) []testvmsruntime.ResourceObservation {
+					return runtime.Observe(ctx, slots)
+				},
 				OnStatus: func(pool testvmsruntime.LeasePool) testvmsruntime.ResourceStatus {
 					return runtime.ResourceStatus(ctx, pool)
 				},

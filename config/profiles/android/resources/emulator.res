@@ -10,6 +10,7 @@ ACTION="release release bounded-write not-needed"
 ACTION="cache cache bounded-write not-needed"
 ACTION="view view session not-needed"
 CONTROLLER_SESSION=view
+CONTEXT_ENV="SUBYARD_AGENT_RUN_ID SUBYARD_TELEMETRY_DATA_DIR"
 ACTION="revoke revoke shared-workload-change reversible"
 ACTION="down down shared-workload-change reversible"
 BRINGUP=status

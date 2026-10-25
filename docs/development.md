@@ -19,7 +19,7 @@ The tooling program never changes which exact release owns a transition.
 
 ## Toolchain
 
-`go.mod` is authoritative: the module's minimum language baseline is Go 1.25.6 and its `toolchain`
+`go.mod` is authoritative: the module's minimum language baseline is Go 1.26.0 and its `toolchain`
 directive selects Go 1.26.6 for development and CI. A recent Go bootstrap can fetch that toolchain
 automatically. CI uses `actions/setup-go` with `go-version-file: go.mod`; it does not carry a second
 version constant.

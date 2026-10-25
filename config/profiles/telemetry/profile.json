@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "selected_provision_only": true,
+  "owner_service": "profile.sh",
+  "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh"},
+  "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}]
+}

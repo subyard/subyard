@@ -132,6 +132,9 @@ func (runtime *Runtime) acquireSlotLocked(
 		return grant, err
 	}
 	grant.ExpiresAt = expires
+	if slot, err := storeSlot(store, grant.SlotID); err == nil {
+		runtime.recordObservation(ctx, slot, "baseline")
+	}
 	return grant, nil
 }
 
@@ -182,6 +185,7 @@ func (runtime *Runtime) ReleaseSlot(
 				FromState:          SlotHeld,
 				ToState:            SlotDraining,
 				Context:            leaseContextFromSlot(slot),
+				Allocation:         publicResourceAllocation(slot),
 				agentClientID:      slot.ClientID,
 			})
 			return runtime.completeDrain(ctx, store, slot)
@@ -282,6 +286,7 @@ func (runtime *Runtime) finishDrainingSlot(
 		FromState:          fromState,
 		ToState:            SlotDraining,
 		Context:            leaseContextFromSlot(slot),
+		Allocation:         publicResourceAllocation(slot),
 		agentClientID:      slot.ClientID,
 	})
 	number, err := slotNumber(slot.SlotID, runtime.Config.SlotCount)
@@ -290,6 +295,7 @@ func (runtime *Runtime) finishDrainingSlot(
 	}
 	child := runtime.slotRuntime(number, "")
 	child.useLeaseSlot(slot)
+	runtime.recordObservation(ctx, slot, "pre_stop")
 	evidence, stopErr := child.stopRetainedWithEvidence(ctx)
 	if stopErr == nil && slot.Environment != nil {
 		stopErr = child.deleteAllocation(ctx)
@@ -308,6 +314,7 @@ func (runtime *Runtime) finishDrainingSlot(
 			FromState:          SlotDraining,
 			ToState:            SlotAvailable,
 			Context:            leaseContextFromSlot(slot),
+			Allocation:         publicResourceAllocation(slot),
 			agentClientID:      slot.ClientID,
 		})
 		return nil
@@ -321,6 +328,7 @@ func (runtime *Runtime) finishDrainingSlot(
 		ToState:            SlotQuarantined,
 		Error:              stopErr.Error(),
 		Context:            leaseContextFromSlot(slot),
+		Allocation:         publicResourceAllocation(slot),
 		agentClientID:      slot.ClientID,
 	})
 	incidentErr := runtime.handleQuarantineLocked(ctx, store, slot.SlotID, stopErr)
@@ -720,6 +728,7 @@ func (runtime *Runtime) recordStopOutcome(
 			LeaseEpoch:         slot.LeaseEpoch,
 			Error:              errorStringOrEmpty(cause),
 			Context:            leaseContextFromSlot(slot),
+			Allocation:         publicResourceAllocation(slot),
 			agentClientID:      slot.ClientID,
 		})
 	}
@@ -730,6 +739,7 @@ func (runtime *Runtime) recordStopOutcome(
 			ResourceGeneration: slot.ResourceGeneration,
 			LeaseEpoch:         slot.LeaseEpoch,
 			Context:            leaseContextFromSlot(slot),
+			Allocation:         publicResourceAllocation(slot),
 			agentClientID:      slot.ClientID,
 		})
 	}

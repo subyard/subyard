@@ -58,6 +58,26 @@ and cancellation do not start a worker, release another holder, or continue
 retrying in the background. Wait is bounded polling, without fairness or FIFO
 guarantees. Resource-specific capacity and validation errors remain immediate.
 
+## Independent telemetry observation
+
+Telemetry correlation does not change the existing lease owner or acquire `run`
+field into an agent session ID. The optional telemetry profile records an explicit
+local mapping from an inherited `agent_run_id` to the acquire correlation and the
+validated returned resource generation. Legacy strict requests stay unchanged.
+
+The VM broker advertises `resource-observe-v1` independently of acquire/renew/release
+capabilities. Its bounded controller-owned observer reads retained lifecycle events
+and validated current-generation measurements with an independent cursor. It does
+not acknowledge or delete the host sink's spool. Android provides the corresponding
+owning read capability for its generation-owned emulator units. Credentials and
+lease capabilities stay in private transport configuration, never event records.
+
+Measurements and ownership intervals are separate records. Requested/reserved
+capacity is distinct from actual CPU, memory and I/O. Expiry can leave a live
+draining worker, and a missing final counter boundary is a coverage gap. A late
+sample for an old generation never updates a successor. See
+[local collection](agent-telemetry.md) for the data and aggregation contract.
+
 ## Adapter projections
 
 Android's `status.slots[].lease` and allocation `lease` use

@@ -760,6 +760,16 @@ remove owned dashboard publication while preserving account/database state, cred
 unrelated settings. Its executable owning tests and acceptance lanes are removed. Retired
 AI Observer compatibility continues to preserve history independently. See [OpenLIT](../openlit.md).
 
+Local collection is a separate optional `telemetry` profile, independently runnable
+without Subyard. It uses the official OTLP HTTP/protobuf receiver and local SQLite;
+an analytics product is not an ingestion dependency. Native events retain supported
+structure after the capture policy runs before durable storage. Explicit execution,
+session, process and generation-owned allocation identities remain distinct.
+Temporal evidence determines attribution; shared work and unavailable counters are
+not fabricated into per-agent totals. Commit-before-ack, bounded queues/storage,
+independent owner cursors and versioned export/replay preserve auditable provenance.
+See [collection contracts](agent-telemetry.md) and the [operator guide](../telemetry.md).
+
 <a id="decision-47"></a>
 
 ## Provision backend: Go and Bash
