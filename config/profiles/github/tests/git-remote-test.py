@@ -77,6 +77,7 @@ class NativeGitTest(unittest.TestCase):
         self.lose_push_response = False
         self.push_posts = 0
         self.legacy_available = True
+        self.token_expires_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 3600))
         fixture = self
         class Broker(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_): pass
@@ -86,12 +87,12 @@ class NativeGitTest(unittest.TestCase):
                 if self.path == '/token':
                     if not fixture.legacy_available:
                         self.send_error(503); return
-                    payload = json.dumps(dict(token='synthetic-broker-token', expires_at='2099-01-01T00:00:00Z')).encode()
+                    payload = json.dumps(dict(token='synthetic-broker-token', expires_at=fixture.token_expires_at)).encode()
                     self.send_response(200); self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
                     return
                 response = dict(version=1, state=fixture.access)
                 if fixture.access == 'available':
-                    response['token'] = dict(token='synthetic-broker-token', expires_at='2099-01-01T00:00:00Z')
+                    response['token'] = dict(token='synthetic-broker-token', expires_at=fixture.token_expires_at)
                 payload = json.dumps(response).encode()
                 self.send_response(200); self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
         class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

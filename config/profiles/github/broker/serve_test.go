@@ -296,6 +296,7 @@ func (fixture *sshForwardFixture) Close() {
 }
 
 func TestClientHandlerAndFakeGitHubContractOverUnixSocket(t *testing.T) {
+	now := time.Now().UTC()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -308,10 +309,10 @@ func TestClientHandlerAndFakeGitHubContractOverUnixSocket(t *testing.T) {
 		if readErr != nil || string(body) != `{}` || strings.Contains(string(body), "permissions") || strings.Contains(string(body), "repositories") {
 			t.Errorf("GitHub request body = %q", body)
 		}
-		_, _ = io.WriteString(writer, `{"token":"ghs_joined","expires_at":"2030-01-01T00:00:00Z"}`)
+		_, _ = fmt.Fprintf(writer, `{"token":"ghs_joined","expires_at":%q}`, now.Add(time.Hour).Format(time.RFC3339))
 	}))
 	defer github.Close()
-	issuer := newTestIssuer(Config{AppID: "9", InstallationID: 7}, key, github.Client(), github.URL, func() time.Time { return time.Date(2029, 12, 31, 23, 0, 0, 0, time.UTC) })
+	issuer := newTestIssuer(Config{AppID: "9", InstallationID: 7}, key, github.Client(), github.URL, func() time.Time { return now })
 	socket := brokerServer(t, NewHandler(issuer))
 	var stdout, stderr strings.Builder
 	code := RunClient(context.Background(), []string{"--socket", socket, "credential", "get"}, strings.NewReader("protocol=https\nhost=github.com\n\n"), &stdout, &stderr)

@@ -23,10 +23,10 @@ printf 'yard 0.1.0-dev\n'
 SH
 chmod +x "$fixture/.build/yard"
 
-touch -d '2035-01-01T00:00:00Z' "$fixture/internal/sample/sample_test.go"
+touch -r "$fixture/.build/yard" -d '+1 second' "$fixture/internal/sample/sample_test.go"
 PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh"
 
-touch -d '2036-01-01T00:00:00Z' "$fixture/cmd/yard/main.go"
+touch -r "$fixture/.build/yard" -d '+1 second' "$fixture/cmd/yard/main.go"
 if PATH="$no_go_path" /bin/bash "$fixture/scripts/build-engine.sh" >"$TMP/stdout" 2>"$TMP/stderr"; then
   printf 'build-engine: production source change did not require a rebuild\n' >&2
   exit 1
