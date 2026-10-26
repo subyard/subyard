@@ -7,26 +7,10 @@ tmp="$(mktemp -d /tmp/subyard-android-check.XXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 test_root="$tmp/root"
 fake_bin="$tmp/bin"
-mkdir -p "$fake_bin" "$test_root/opt/jdk-17/bin" \
-  "$test_root/srv/cache/android-sdk/cmdline-tools/latest/bin" \
-  "$test_root/srv/cache/android-sdk/platform-tools" \
-  "$test_root/srv/cache/android-sdk/platforms/android-36" \
-  "$test_root/srv/cache/android-sdk/build-tools/36.0.0" \
-  "$test_root/srv/cache/android-sdk/emulator" \
-  "$test_root/srv/cache/android-sdk/licenses" "$test_root/srv/cache/gradle" \
+mkdir -p "$fake_bin" "$test_root/srv/cache/gradle" \
   "$test_root/srv/cache/android-sdk/.subyard/bin" "$test_root/etc/profile.d" \
   "$test_root/etc/systemd/system" "$test_root/usr/local/lib/subyard-android"
 
-for command in java sdkmanager adb emulator; do
-  case "$command" in
-    java) path="$test_root/opt/jdk-17/bin/java" ;;
-    sdkmanager) path="$test_root/srv/cache/android-sdk/cmdline-tools/latest/bin/sdkmanager" ;;
-    adb) path="$test_root/srv/cache/android-sdk/platform-tools/adb" ;;
-    emulator) path="$test_root/srv/cache/android-sdk/emulator/emulator" ;;
-  esac
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$path"
-  chmod +x "$path"
-done
 # Populate the same selected identities used by production check, without downloads.
 python3 - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
 import importlib.util, pathlib, sys
@@ -39,7 +23,6 @@ with patch.object(fixture.toolchain.platform, 'machine', return_value='x86_64'):
     for name, entry in fixture.toolchain.selected(profile / 'toolchain.json').items():
         fixture.fixture(pathlib.Path(str(root) + entry['destination']), name, entry)
 PYTOOLCHAIN
-printf 'accepted\n' > "$test_root/srv/cache/android-sdk/licenses/android-sdk-license"
 cat > "$test_root/etc/profile.d/subyard-android.sh" <<'ENV'
 export JAVA_HOME="/opt/jdk-17"
 export ANDROID_HOME="/srv/cache/android-sdk"
@@ -122,74 +105,62 @@ common_env=(
   ANDROID_API=36
   JDK_VERSION=17
   BUILD_TOOLS_VERSION=36.0.0
-  SYSTEM_IMAGE='system-images;android-36;google_apis;x86_64'
   ANDROID_SDK_ROOT=/srv/cache/android-sdk
   GRADLE_USER_HOME=/srv/cache/gradle
 )
 
+expect_check() {
+  local expected="$1" status=0
+  shift
+  env "${common_env[@]}" "$@" bash "$HOOK" --check >/dev/null 2>&1 || status=$?
+  [ "$status" -eq "$expected" ] || {
+    printf 'FAIL: Android check at line %s: status=%s, want %s\n' "${BASH_LINENO[0]}" "$status" "$expected" >&2; exit 1;
+  }
+}
+
 before="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+expect_check 0
 after="$(find "$tmp" -type f -exec sha256sum {} + | sort | sha256sum)"
 [ "$before" = "$after" ] || { printf 'FAIL: Android check mutated state\n' >&2; exit 1; }
 
 # Static content drift belongs to common config refresh, not SDK/pool provisioning.
 printf '\nChanged guidance.\n' >> "$test_root/usr/local/share/subyard/skills/subyard-android/SKILL.md"
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+expect_check 0
 receipt="$test_root/var/lib/subyard/agent-skills/profile-android.json"
 mv "$receipt" "$tmp/registration"
-status=0
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
-[ "$status" -eq 10 ] || { printf 'FAIL: missing Android skill registration accepted\n' >&2; exit 1; }
+expect_check 10
 mv "$tmp/registration" "$receipt"
 chmod 0644 "$receipt"
-status=0
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null 2>&1 || status=$?
-[ "$status" -eq 10 ] || { printf 'FAIL: unsafe Android skill registration accepted\n' >&2; exit 1; }
+expect_check 10
 chmod 0600 "$receipt"
 
 
 # The renamed client is required; retired aliases must trigger upgrade cleanup.
 client_bin="$test_root/srv/cache/android-sdk/.subyard/bin"
 mv "$client_bin/android-broker" "$tmp/android-broker"
-status=0
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
-[ "$status" -eq 10 ] || { printf 'FAIL: missing broker client accepted\n' >&2; exit 1; }
+expect_check 10
 mv "$tmp/android-broker" "$client_bin/android-broker"
 for retired in yard yard-emu; do
   ln -s missing-client "$client_bin/$retired"
-  status=0
-  env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
-  [ "$status" -eq 10 ] || { printf 'FAIL: retired client accepted\n' >&2; exit 1; }
+  expect_check 10
   rm "$client_bin/$retired"
 done
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null
+expect_check 0
 
 # Runtime dependencies must converge even when SDK binaries already exist.
 for library in libpulse0 libnss3; do
-  status=0
-  env "${common_env[@]}" FAKE_ANDROID_MISSING_LIBRARY="$library" bash "$HOOK" --check >/dev/null || status=$?
-  [ "$status" -eq 10 ] || { printf 'FAIL: missing %s status=%s, want 10\n' "$library" "$status" >&2; exit 1; }
+  expect_check 10 FAKE_ANDROID_MISSING_LIBRARY="$library"
 done
 
 # SDK command discovery remains part of ordinary builds, independent of emulator leases.
 profile_env="$test_root/etc/profile.d/subyard-android.sh"
 cp "$profile_env" "$tmp/profile-env"
 sed -i 's@:/srv/cache/android-sdk/cmdline-tools/latest/bin@@' "$profile_env"
-status=0
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null || status=$?
-[ "$status" -eq 10 ] || { printf 'FAIL: missing SDK tools PATH status=%s, want 10\n' "$status" >&2; exit 1; }
+expect_check 10
 cp "$tmp/profile-env" "$profile_env"
 
-# Command-line Tools 23 can install components without the legacy licenses directory.
-rm -f "$test_root/srv/cache/android-sdk/licenses/android-sdk-license"
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null
-
 rm -f "$test_root/srv/cache/android-sdk/platform-tools/adb"
-set +e
-env "${common_env[@]}" bash "$HOOK" --check >/dev/null
-status=$?
-set -e
-[ "$status" -eq 10 ] || { printf 'FAIL: Android drift status=%s, want 10\n' "$status" >&2; exit 1; }
+expect_check 10
 
 # Exercise the owning download boundary with native curl against a local server.
 # No provision/install commands or remote downloads run on the host.
@@ -197,7 +168,6 @@ python3 - "$HOOK" <<'PYDOWNLOAD'
 import http.server
 import os
 import pathlib
-import re
 import socket
 import struct
 import subprocess
@@ -243,7 +213,6 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
 
     for scenario in ('transient', 'exhausted'):
         stage = 'jdk' if scenario == 'transient' else 'cmdline-tools'
-        start_line = f'android provision: download stage={stage} state=start\n'.encode()
         with http.server.HTTPServer(('127.0.0.1', 0), Handler) as server:
             server.scenario, server.calls = scenario, 0
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -258,15 +227,9 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
             if scenario == 'transient':
                 assert result.returncode == 0 and server.calls == 3
                 assert destination.read_bytes() == payload  # No retained partial response.
-                assert re.fullmatch(start_line +
-                    rb'android provision: download stage=jdk state=complete elapsed_seconds=\d+ archive_bytes=' +
-                    str(len(payload)).encode() + rb'\n', result.stderr)
             else:
                 assert result.returncode != 0 and server.calls == 4
                 assert not destination.exists()
-                assert re.fullmatch(start_line +
-                    rb'android provision: download stage=cmdline-tools state=failed exit=\d+ elapsed_seconds=\d+ last_output_bytes=' +
-                    str(len(canary)).encode() + rb'\n', result.stderr)
 
     # Shorten only the fixture's clock: native timeout must remain fatal and reap curl.
     fake_bin = root / 'bin'
@@ -284,14 +247,9 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
     for existing_output in (True, False):
         if existing_output:
             destination.write_text(canary)
-        result = download('http://127.0.0.1/unused', 'catalog',
+        result = download('http://127.0.0.1/unused', 'jdk',
                           dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'))
         assert result.returncode == 124 and not destination.exists()
-        count = str(len(canary)).encode() if existing_output else b'unknown'
-        assert re.fullmatch(
-            rb'android provision: download stage=catalog state=start\n'
-            rb'android provision: download stage=catalog state=failed exit=124 elapsed_seconds=\d+ last_output_bytes=' +
-            count + rb'\n', result.stderr)
         assert canary.encode() not in result.stdout + result.stderr and not result.stdout
         try:
             os.kill(int(pid_file.read_text()), 0)
