@@ -178,6 +178,21 @@ raise SystemExit(23)
 # The failed owning image lanes retry; even diagnostic failure cannot replace the
 # original status. Execute the owning shell branch with a harmless transport.
 runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
+repeat_start = runtime_source.index('android_repeat_provision() {')
+repeat_function = runtime_source[repeat_start:runtime_source.index('\n}\n', repeat_start) + 3]
+with tempfile.TemporaryDirectory(prefix='android-repeat-provision-', dir='/tmp') as directory:
+    for phase, label in (('toolchain-repeat', 'toolchain_repeat'), ('toolchain-after-images', 'toolchain_after_images')):
+        for downloaded in (False, True):
+            output = ('android provision: download stage=jdk state=start' if downloaded
+                      else 'android provision: component=jdk state=reused')
+            prelude = ('set -euo pipefail\nstate="$1"\n'
+                       'android_phase_begin() { :; }; android_phase_end() { :; }; android_network_received() { :; }\n'
+                       'yard() { [ "$*" = "provision --yes" ]; printf "%s\\n" "$REPEAT_OUTPUT"; }\n')
+            result = subprocess.run(['bash', '-c', prelude + repeat_function
+                                     + '\nandroid_repeat_provision "$2" "$3"\n', '_', directory, phase, label],
+                                    capture_output=True, text=True, env=dict(os.environ, REPEAT_OUTPUT=output))
+            assert result.returncode == (1 if downloaded else 0), result.stderr
+            assert (f'android {label}=PASS archive_downloads=0' in result.stdout) is not downloaded
 diagnostic_branch = runtime_source[runtime_source.index('  if [ "$status" -ne 0 ] && { [ "$lane" = sdk-images ]'):
                                    runtime_source.index('\n  if [ -n "$monitor_pid" ]')]
 for lane, phase, api, diagnostic_status, called in (('sdk-images', 'images', 36, 0, True),
@@ -202,7 +217,7 @@ prepare = runtime_source[start:runtime_source.index('\nandroid_phase_end 0', sta
 for lane, api in (('memory-lease', 35), ('sdk-images', 36)):
     result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'
                              'root="$1"; lane="$2"; project=fixture; instance=fixture; incus_binary=(incus)\n'
-                             'android_phase_begin() { :; }; yard() { return 23; }\n'
+                             'android_phase_begin() { :; }; android_network_received() { :; }; yard() { return 23; }\n'
                              'timeout() { python3 -B "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" --api "$sdk_api" --help >/dev/null; printf "api=%s\\n" "$sdk_api"; }\n'
                              'cleanup() { status=$?; failed_phase=images;\n' + diagnostic_branch
                              + '\nexit "$status"; }; trap cleanup EXIT\n' + prepare,
@@ -241,19 +256,105 @@ remote_viewer = load('android-pool-remote-viewer')
 # Canonical registration uses the fixture's actual owner inventory RPC route.
 # Keep the forced command allowlist closed to unrelated host operations.
 remote_source = (E2E / 'android-pool-remote.sh').read_text()
+remote_evidence = load('android-remote-evidence')
+controller_start = remote_source.index('controller() {')
+controller_function = remote_source[controller_start:remote_source.index('\n}\n', controller_start) + 3]
+context_start = remote_source.index('controller_context() {')
+controller_context = remote_source[context_start:remote_source.index('\n}\n', context_start) + 3]
+with tempfile.TemporaryDirectory(prefix='android-controller-context-', dir='/tmp') as directory:
+    binary = Path(directory) / 'yard'
+    binary.write_text('''#!/bin/sh
+[ "$SUBYARD_CONFIG_HOME" = "$EXPECTED_WORK/controller-config" ] || exit 81
+[ "$SUBYARD_HOME" = "$EXPECTED_WORK/controller-data" ] || exit 82
+[ "$YARD_RUNTIME_ROOT" = "$EXPECTED_WORK/controller-data/runtime" ] || exit 83
+[ -z "${SUBYARD_REPOSITORY_ROOT:-}" ] || exit 84
+[ "$HOME" = "$EXPECTED_WORK/controller-home" ] || exit 85
+[ "$SUBYARD_OPERATOR_HOME" = "$EXPECTED_WORK/controller-home" ] || exit 86
+[ "$XDG_CONFIG_HOME" = "$EXPECTED_WORK/controller-home/.config" ] || exit 87
+[ "$SUBYARD_KEYS_SYSTEMD_DIR" = "$EXPECTED_WORK/controller-home/.config/systemd/user" ] || exit 88
+[ -z "${YARD_ENGINE_PATH:-}" ] || exit 89
+exit 23
+''')
+    binary.chmod(0o755)
+    prelude = ('set -euo pipefail\nwork="$1"; controller_bin="$1/yard"; controller_home="$1/controller-home"; '
+               'android_candidate_command() { "$@"; }; '
+               'export YARD_RUNTIME_ROOT=/fixture/owner/runtime SUBYARD_REPOSITORY_ROOT=/fixture/owner/source YARD_ENGINE_PATH=/fixture/owner/engine\n')
+    result = subprocess.run(['bash', '-c', prelude + controller_context + '\n' + controller_function
+                             + '\nstatus=0; controller run -- /fixture/payload || status=$?; [ "$status" = 23 ]\n',
+                             '_', directory], capture_output=True, text=True,
+                            env=dict(os.environ, EXPECTED_WORK=directory))
+    assert result.returncode == 0, result.stderr
+# Execute the actual six-argument run and cleanup with local transport failures.
+remote_cleanup = remote_source[remote_source.index('cleanup() {'):remote_source.index('\ntrap cleanup EXIT')]
+remote_report = remote_source[remote_source.index('report_remote() {'):remote_source.index('\ntrap \'report_remote')]
+remote_modes = remote_source[remote_source.index('case "$#:${7:-}" in'):remote_source.index('\nesac') + 5]
+run_start = remote_source.index('if [ -n "$run_payload" ] && [ -z "$viewer_tools" ]; then')
+remote_run = remote_source[run_start:remote_source.index('\nremote_stage=owner-unchanged', run_start)]
+for command_exit, cleanup_exit in ((17, 0), (17, 3), (23, 0), (23, 3)):
+    with tempfile.TemporaryDirectory(prefix='android-remote-evidence-', dir='/tmp') as directory:
+        work = Path(directory) / 'remote'
+        work.mkdir()
+        (work / '.marker').write_text('subyard-android-remote-v1\n')
+        prelude = '''set -euo pipefail
+evidence_helper="$1/config/profiles/android/tests/e2e/android-remote-evidence.py"
+work="$2"; viewer_tools=''; viewer_lease=''; run_payload=/fixture/payload
+sshd_job=''; remote_stage=run; remote_mode=unknown; remote_command_exit=''
+fail() { printf 'android-pool-remote: %s\\n' "$*" >&2; exit 1; }
+controller() {
+  if [ "$1" = run ]; then
+    remote_command_exit="$FAKE_COMMAND_EXIT"
+    printf 'android-pool-remote: rejected SSH command private-diagnostic-canary\\n' >&2
+    printf '36\\n'
+    return "$remote_command_exit"
+  fi
+  remote_command_exit=0
+  printf '%s\\n' '{"slots":[{"state":"available"},{"state":"available"}]}'
+}
+sudo() {
+  [ "${1:-}" != -n ] || shift
+  [ "$FAKE_CLEANUP_EXIT" = 0 ] || return "$FAKE_CLEANUP_EXIT"
+  "$@"
+}
+'''
+        script = (prelude + remote_modes + '\n' + remote_report + '\n' + remote_cleanup
+                  + '\ntrap cleanup EXIT\n' + remote_run + '\nremote_stage=complete\n')
+        result = subprocess.run(['bash', '-c', script, '_', str(ROOT), str(work), 'yard', 'project', 'instance', '/fixture/adb'],
+            capture_output=True, text=True, env=dict(os.environ, FAKE_COMMAND_EXIT=str(command_exit),
+                                                    FAKE_CLEANUP_EXIT=str(cleanup_exit)))
+        expected = 1 if command_exit != 23 else cleanup_exit
+        assert result.returncode == expected, result.stderr
+        assert 'private-diagnostic-canary' not in result.stdout + result.stderr
+        diagnostic = Path(directory) / 'final-adb.log'
+        diagnostic.write_text(result.stderr)
+        observed = remote_evidence.summary(diagnostic, result.returncode)
+        assert observed['mode'] == 'run' and observed['cleanup_exit'] == cleanup_exit
+        assert observed['native_exit'] == (1 if command_exit != 23 else 0)
+        assert observed['stage'] == ('run' if command_exit != 23 else 'complete')
+        if command_exit != 23:
+            assert observed['command_exit'] == command_exit
+            assert observed['error'] == 'ssh-command-refused'
+        if cleanup_exit == 0:
+            assert not work.exists()
+        diagnostic.write_text(remote_evidence.PREFIX + '{"stage":"private-diagnostic-canary"}\n')
+        assert remote_evidence.summary(diagnostic, 1)['stage'] == 'unknown'
+        assert 'private-diagnostic-canary' not in json.dumps(remote_evidence.summary(diagnostic, 1))
 dispatch = '#!/usr/bin/python3\n' + remote_source.split("source = '''#!/usr/bin/python3\n", 1)[1].split("'''.replace('VALUES'", 1)[0]
 dispatch = dispatch.replace('VALUES', repr(('/fixture/source', '/fixture/state', 'owner-yard',
-                                          '/fixture/home', '/fixture/storage', '', '/candidate/yard')), 1)
+                                          '/fixture/home', '/fixture/storage', '/fixture/payload', '/candidate/yard')), 1)
 for request, expected in (
         (['exec', 'yard', 'rpc', '--stdio'], ['/candidate/yard', 'rpc', '--stdio']),
         (['yard', '-Y', 'owner-yard', 'emu', '--session-wire', 'view'],
          ['/candidate/yard', '-Y', 'owner-yard', 'emu', '--session-wire', 'view']),
+        (['SUBYARD_OPERATION_ID=fixture-run', 'yard', '-Y', 'owner-yard', 'emu', 'run', '--', '/usr/bin/python3', '/fixture/payload'],
+         ['/candidate/yard', '-Y', 'owner-yard', 'emu', 'run', '--', '/usr/bin/python3', '/fixture/payload']),
+        (['SUBYARD_OPERATION_ID=fixture-run', 'yard', '-Y', 'owner-yard', 'emu', 'run', '--', '/usr/bin/python3', '/other/payload'], None),
         (['exec', 'yard', 'stop'], None),
         (['yard', '-Y', 'other-yard', 'emu', '--session-wire', 'view'], None)):
     calls = []
     def dispatched(program, arguments, environment):
         calls.append((program, arguments, environment))
-    with patch.dict(os.environ, SSH_ORIGINAL_COMMAND=shlex.join(['--', 'bash', '-lc', shlex.join(request)])), \
+    with patch.dict(os.environ, SSH_ORIGINAL_COMMAND=shlex.join(['--', 'bash', '-lc', shlex.join(request)]),
+                    YARD_RUNTIME_ROOT='/unrelated-caller-runtime'), \
             patch.object(os, 'execve', side_effect=dispatched):
         try:
             exec(compile(dispatch, '<remote-owner-dispatch>', 'exec'), {})
@@ -262,6 +363,7 @@ for request, expected in (
         else:
             assert expected is not None and calls[0][1] == expected
             assert calls[0][2]['SUBYARD_CONFIG_HOME'] == '/fixture/state/config'
+            assert calls[0][2]['YARD_RUNTIME_ROOT'] == '/fixture/state/runtime'
     assert bool(calls) is (expected is not None)
 
 # Local viewer cleanup retains detached descendant identities and preserves an
@@ -1505,7 +1607,7 @@ runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
 recovery_source = (E2E / 'android-pool-recovery.sh').read_text()
 # Execute the SDK-only early return with harmless transport substitutes. This
 # proves dispatch and failure propagation, not the SDK's native build behavior.
-full_start = runtime_source.index('if [ "$lane" = full ]; then\n')
+full_start = runtime_source.index('if [ "$lane" = full ]; then\n  android_phase_begin sdk-build\n')
 full_end = runtime_source.index('\nincus --project "$project" exec "$instance" --user', full_start)
 with tempfile.TemporaryDirectory() as directory:
     state = Path(directory)
@@ -1647,7 +1749,8 @@ dispatch_start = runtime_source.index('viewer_args=()')
 dispatch_end = runtime_source.index('android_phase_end 0', dispatch_start)
 for lane, mode in (('diagnostics', ''), ('viewer', '--viewer-only'), ('recovery', '--recovery-only'), ('viewer-native-debug', '--viewer-native-debug'), ('sdk-images', '')):
     prelude = ('set -euo pipefail\nlane="$1"; root=/fixture; state=/fixture; YARD_NAME=fixture; project=fixture; instance=fixture\n'
-               'android_phase_begin() { :; }; timeout() { printf "%s\\n" "$*"; }; yard() { printf "%s\\n" "$*"; }\n')
+               'android_phase_begin() { :; }; android_network_received() { :; }; incus() { :; }; timeout() { printf "%s\\n" "$*"; };\n'
+               'yard() { if [ "$*" = "emu catalog" ]; then printf \'%s\\n\' \'{"images":[{"api":36,"variant":"google_apis","abi":"x86_64","cached":true}]}\'; else printf "%s\\n" "$*"; fi; }\n')
     result = subprocess.run(['bash', '-c', prelude + runtime_source[remote_start:remote_end], '_', lane], capture_output=True, text=True, check=True)
     assert ('android-pool-remote.sh' in result.stdout) == (lane not in ('viewer', 'viewer-native-debug', 'sdk-images'))
     result = subprocess.run(['bash', '-c', prelude + runtime_source[images_start:images_end], '_', lane], capture_output=True, text=True, check=True)
@@ -1659,7 +1762,9 @@ for lane, mode in (('diagnostics', ''), ('viewer', '--viewer-only'), ('recovery'
         result = subprocess.run(['bash', '-c', prelude + 'android_phase_end() { :; };\n'
                                  + runtime_source[images_start:end] + '\nprintf reached-after-images\n', '_', lane],
                                 capture_output=True, text=True, check=True)
-        assert result.stdout.splitlines() == ['android phase=prepare-images', 'emu cache prepare --api 36']
+        assert result.stdout.splitlines() == ['android phase=prepare-images', 'emu cache prepare --api 36',
+                                              'emu cache prepare --api 36',
+                                              'android image_cache_repeat=PASS cached_before=true']
         continue
     result = subprocess.run(['bash', '-c', prelude + runtime_source[dispatch_start:dispatch_end], '_', lane], capture_output=True, text=True, check=True)
     assert 'android-pool-recovery.sh' in result.stdout

@@ -2,6 +2,8 @@
 # Converge the profile-owned pool only after active leases release their SDK read locks.
 set -euo pipefail
 PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+selection="$(python3 "$PROFILE_DIR/toolchain.py" defaults "$PROFILE_DIR/toolchain.json")"
+IFS=$'\t' read -r ANDROID_API jdk_major <<< "$selection"
 SDK_ROOT="${ANDROID_SDK_ROOT:-/srv/cache/android-sdk}"
 PUBLIC_ROOT="${ANDROID_PUBLIC_ROOT:-$SDK_ROOT/.subyard}"
 STATE_ROOT="${ANDROID_STATE_ROOT:-/var/lib/subyard-android}"
@@ -14,13 +16,16 @@ if [ "${SUBYARD_ANDROID_SDK_LOCKED:-}" != 1 ]; then
   exec 9>/run/lock/subyard-android/sdk.lock
   flock -w 30 9 || { echo 'Android SDK is in use; retry after leases finish' >&2; exit 1; }
 fi
+# The manifest owns image revision selection policy as well as toolchain pins.
+image_policy="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_policy"])' "$PROFILE_DIR/toolchain.json")"
+[ "$image_policy" = latest-stable ] || { echo 'unsupported Android image policy' >&2; exit 1; }
 stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 python3 - "$stage/config.json" "$SDK_ROOT" "$STATE_ROOT" "$PUBLIC_ROOT" "${EMULATOR_POOL_SIZE:-2}" \
-  "${ANDROID_API:-36}" "${EMULATOR_DEVICE:-phone}" "${ANDROID_VARIANT:-google_apis}" \
-  "${ANDROID_ABI:-x86_64}" "${EMULATOR_GPU:-host}" "$DEV_USER" "${JAVA_HOME:-/opt/jdk-17}" <<'PY'
+  "$ANDROID_API" "${EMULATOR_DEVICE:-phone}" "${ANDROID_VARIANT:-google_apis}" \
+  "${ANDROID_ABI:-x86_64}" "${EMULATOR_GPU:-host}" "$DEV_USER" "${JAVA_HOME:-/opt/jdk-$jdk_major}" "$image_policy" <<'PY'
 import json, pathlib, sys
-output, sdk, state, public, size, api, device, variant, abi, gpu, user, java = sys.argv[1:]
+output, sdk, state, public, size, api, device, variant, abi, gpu, user, java, image_policy = sys.argv[1:]
 if not (1 <= int(size) <= 32 and int(api) in (34, 35, 36) and device in ('phone', 'tablet')
         and variant in ('google_apis', 'google_apis_playstore') and abi == 'x86_64' and gpu in ('host', 'software', 'software-gles')):
     raise SystemExit('invalid Android pool configuration')
@@ -29,7 +34,7 @@ for path in (sdk, state, public, java):
         raise SystemExit('Android paths must be absolute without whitespace')
 pathlib.Path(output).write_text(json.dumps(dict(sdk_root=sdk, state_root=state, public_root=public,
     size=int(size), api=int(api), device=device, variant=variant, abi=abi, gpu=gpu,
-    dev_user=user, runtime_user='subyard-android', java_home=java), separators=(',', ':')) + '\n')
+    dev_user=user, runtime_user='subyard-android', java_home=java, image_policy=image_policy), separators=(',', ':')) + '\n')
 PY
 cat > "$stage/unit" <<'EOF'
 [Unit]

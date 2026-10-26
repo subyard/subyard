@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # Check the public remote-owner Android route against the retained E2E yard.
 set -euo pipefail
+evidence_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/android-remote-evidence.py"
+remote_stage=arguments
+remote_mode=unknown
+remote_command_exit=''
+report_remote() {
+  python3 "$evidence_helper" record "$remote_stage" "$remote_mode" "$1" "$remote_command_exit" "${work:-}" >&2 || true
+}
+trap 'report_remote "$?"' EXIT
 
 fail() { printf 'android-pool-remote: %s\n' "$*" >&2; exit 1; }
 [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ] \
   || fail 'usage: script ROOT STATE YARD PROJECT INSTANCE [OWNER_ADB [--viewer TOOLS YARD_LEASE|--standalone-viewer TOOLS]]'
 root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
+. "$root/config/profiles/android/tests/e2e/android-candidate.sh"
 if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
 owner_adb="${6:-}"
 viewer_tools="${8:-}" viewer_lease="${9:-}"
@@ -16,13 +25,16 @@ if [ -n "$viewer_tools" ]; then
     || fail 'viewer tools are not the retained recovery fixture'
 fi
 case "$#:${7:-}" in
-  5:|6:) ;;
-  8:--standalone-viewer) [ -n "$viewer_tools" ] || fail 'standalone viewer tools are missing' ;;
+  5:) remote_mode='read' ;;
+  6:) remote_mode=run ;;
+  8:--standalone-viewer) remote_mode=view; [ -n "$viewer_tools" ] || fail 'standalone viewer tools are missing' ;;
   9:--viewer)
+    remote_mode=view
     [[ "$viewer_lease" =~ ^/home/dev/\.cache/subyard-android-recovery\.[a-zA-Z0-9]+/first.json$ ]] \
       && [ -n "$viewer_tools" ] || fail 'viewer lease is not the retained recovery fixture' ;;
   *) fail 'invalid remote viewer arguments' ;;
 esac
+remote_stage=preflight
 [[ "$root" = /* && "$state" = /* ]] || fail 'root and state must be absolute paths'
 [[ "$yard_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
   && "$project" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ \
@@ -54,6 +66,7 @@ owner() {
     timeout --foreground 45 "$YARD_BIN" -Y "$yard_name" "$@"
   fi
 }
+remote_stage=owner-config
 [ "$(owner config show INCUS_PROJECT | sed -n 's/^effective: //p')" = "$project" ] \
   || fail 'yard Incus project differs from retained fixture'
 [ "$(owner config show YARD_INSTANCE_NAME | sed -n 's/^effective: //p')" = "$instance" ] \
@@ -63,24 +76,17 @@ work="$(mktemp -d "$state/android-remote.XXXXXX")"
 printf '%s\n' subyard-android-remote-v1 > "$work/.marker"
 sshd_job=''
 cleanup() {
-  local result=$? pid='' watchdog=''
+  local original=$? result pid='' watchdog='' cleanup_status=0
+  result="$original"
   trap - EXIT INT TERM
   set +e
-  if [ "$result" -ne 0 ]; then
-    for log in remote-catalog.err remote-status.err remote-run.err remote-after.err sshd.log; do
-      if [ -f "$work/$log" ]; then
-        printf 'android-pool-remote diagnostic: %s\n' "$log" >&2
-        sed -n '1,30p' "$work/$log" \
-          | sed -E 's/(token|credential|secret|identityfile)[^[:space:]]*/[redacted]/Ig; s/[[:xdigit:]]{64}/[redacted]/g' >&2
-      fi
-    done
-  fi
+  report_remote "$original"
   if [ -f "$work/sshd.pid" ]; then
     pid="$(cat "$work/sshd.pid")"
     if [[ "$pid" =~ ^[0-9]+$ ]] && [ -f "/proc/$pid/cmdline" ]; then
       if sudo -n python3 -c 'import sys; assert sys.argv[2].encode() in open("/proc/"+sys.argv[1]+"/cmdline","rb").read()' \
         "$pid" "$work/sshd_config"; then
-        sudo -n kill -TERM "$pid" || result=3
+        sudo -n kill -TERM "$pid" || cleanup_status=3
       else
         fail 'refusing to stop an unrelated sshd process'
       fi
@@ -89,7 +95,7 @@ cleanup() {
   # A failed daemon can exit before writing its PID file; stop its own job too.
   if [ -n "$sshd_job" ]; then
     if [ -z "$pid" ] && kill -0 "$sshd_job" 2>/dev/null; then
-      sudo -n kill -TERM "$sshd_job" 2>/dev/null || result=3
+      sudo -n kill -TERM "$sshd_job" 2>/dev/null || cleanup_status=3
     fi
     ( sleep 5; sudo -n kill -KILL "$sshd_job" 2>/dev/null || true ) &
     watchdog=$!
@@ -98,16 +104,27 @@ cleanup() {
     wait "$watchdog" 2>/dev/null || true
   fi
   if [ "$(cat "$work/.marker" 2>/dev/null)" = subyard-android-remote-v1 ]; then
-    sudo -n find "$work" -depth -delete || result=3
+    sudo -n find "$work" -depth -delete || cleanup_status=3
   else
-    result=3
+    cleanup_status=3
   fi
+  printf 'android-remote-cleanup exit_code=%s\n' "$cleanup_status" >&2
+  [ "$original" -ne 0 ] || result="$cleanup_status"
   exit "$result"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-install -d -m 0700 "$work/controller-config/yards/remote" "$work/controller-data" "$work/client-bin"
+controller_home="$work/controller-home"
+controller_bin="$YARD_BIN"
+controller_context() {
+  android_candidate_command env -u SUBYARD_REPOSITORY_ROOT -u YARD_ENGINE_PATH \
+    HOME="$controller_home" SUBYARD_OPERATOR_HOME="$controller_home" XDG_CONFIG_HOME="$controller_home/.config" \
+    SUBYARD_KEYS_SYSTEMD_DIR="$controller_home/.config/systemd/user" \
+    PATH="$work/client-bin:$PATH" SUBYARD_CONFIG_HOME="$work/controller-config" \
+    SUBYARD_HOME="$work/controller-data" YARD_RUNTIME_ROOT="$work/controller-data/runtime" "$@"
+}
+install -d -m 0700 "$work/controller-config/yards/remote" "$work/controller-data" "$work/client-bin" "$controller_home"
 owner_config="$state/config/yards/$yard_name/config.env"
 [ -f "$owner_config" ] || fail 'owner registration is missing'
 owner_hash="$(sha256sum "$owner_config" | cut -d' ' -f1)"
@@ -120,6 +137,14 @@ SSH_PORT=$owner_port
 CODING_TOOL_INTEGRATIONS=
 CONFIG
 chmod 0600 "$work/controller-config/yards/remote/config.env"
+if [ "$remote_mode" != read ]; then
+  remote_stage=controller-bootstrap
+  controller_bin="$(controller_context bash -c '
+      . "$1/tests/helpers/release-candidate.sh"
+      release_candidate_install "$1" "$2"
+    ' _ "$root" "$work/controller-data")" 2> "$work/controller-bootstrap.err"
+fi
+remote_stage=payload
 run_payload=''
 if [ -n "$owner_adb" ]; then
   run_payload="$work/payload.py"
@@ -143,6 +168,7 @@ PY
   chmod 0600 "$run_payload"
 fi
 
+remote_stage=ssh
 # The dedicated key can reach only this temporary daemon. It never touches ~/.ssh.
 ssh-keygen -q -t ed25519 -N '' -f "$work/host-key"
 ssh-keygen -q -t ed25519 -N '' -f "$work/client-key"
@@ -181,6 +207,7 @@ for key in ("CODING_TOOL_INTEGRATIONS", "AGENTS", "SUBYARD_ENGINE_CONTEXT", "SUB
     env.pop(key, None)
 env.update(SUBYARD_OPERATOR_HOME=home, SUBYARD_CONFIG_HOME=state + "/config",
            SUBYARD_HOME=state + "/data", SUBYARD_REPOSITORY_ROOT=root,
+           YARD_RUNTIME_ROOT=state + "/runtime",
            STORAGE_PATH=storage, SUBYARD_NO_AUDIT="1", SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE="1")
 if operation is not None:
     env["SUBYARD_OPERATION_ID"] = operation
@@ -248,16 +275,22 @@ done
 controller() {
   local seconds=60
   if [ "$1" = run ]; then seconds=1320; fi
-  PATH="$work/client-bin:$PATH" SUBYARD_CONFIG_HOME="$work/controller-config" \
-    SUBYARD_HOME="$work/controller-data" timeout --foreground "$seconds" \
-    "$YARD_BIN" -Y remote emu "$@" </dev/null
+  remote_command_exit=0
+  controller_context timeout --foreground "$seconds" \
+    "$controller_bin" -Y remote emu "$@" </dev/null || remote_command_exit=$?
+  return "$remote_command_exit"
 }
+remote_stage=owner-catalog
 owner emu catalog > "$work/local-catalog.json"
+remote_stage=remote-catalog
 controller catalog > "$work/remote-catalog.json" 2> "$work/remote-catalog.err" \
   || fail 'remote catalog failed'
+remote_stage=owner-status
 owner emu status > "$work/local-status.json"
+remote_stage=remote-status
 controller status > "$work/remote-status.json" 2> "$work/remote-status.err" \
   || fail 'remote status failed'
+remote_stage=compare
 python3 - "$work" "$viewer_lease" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -277,21 +310,25 @@ if not sys.argv[2]:
         'Android slots were not idle during remote route check'
 PY
 if [ -n "$viewer_tools" ]; then
-  PATH="$work/client-bin:$PATH" SUBYARD_CONFIG_HOME="$work/controller-config" \
-    SUBYARD_HOME="$work/controller-data" python3 -B \
+  remote_stage=viewer
+  controller_context python3 -B \
     "$root/config/profiles/android/tests/e2e/android-pool-remote-viewer.py" \
-    "$YARD_BIN" "$work" "$viewer_tools" "$yard_name" "$project" "$instance" "$viewer_lease"
+    "$controller_bin" "$work" "$viewer_tools" "$yard_name" "$project" "$instance" "$viewer_lease"
   [ ! -e "$work/controller-incus-called" ] || fail 'remote controller invoked local Incus'
   printf 'android-pool-remote controller-incus=unused\n'
 fi
 if [ -n "$run_payload" ] && [ -z "$viewer_tools" ]; then
+  remote_stage=run
   run_status=0
   controller run -- /usr/bin/python3 "$run_payload" \
     > "$work/remote-run.out" 2> "$work/remote-run.err" || run_status=$?
   [ "$run_status" -eq 23 ] || fail "remote run returned $run_status instead of payload exit 23"
+  remote_stage=run-output
   [ "$(tr -d '\r' < "$work/remote-run.out")" = 36 ] || fail 'remote run changed payload stdout'
+  remote_stage=after-status
   controller status > "$work/remote-after.json" 2> "$work/remote-after.err" \
     || fail 'remote status after run failed'
+  remote_stage=after-compare
   python3 - "$work/remote-after.json" <<'PY'
 import json, sys
 slots = json.load(open(sys.argv[1]))['slots']
@@ -300,6 +337,8 @@ assert len(slots) == 2 and all(slot['state'] == 'available' for slot in slots), 
 PY
   printf 'android-pool-remote run=PASS sdk=36 exit=23 slots=available\n'
 fi
+remote_stage=owner-unchanged
 [ "$(sha256sum "$owner_config" | cut -d' ' -f1)" = "$owner_hash" ] \
   || fail 'remote reads changed owner registration'
 printf 'android-pool-remote catalog=PASS status=PASS owner-config=unchanged\n'
+remote_stage=complete

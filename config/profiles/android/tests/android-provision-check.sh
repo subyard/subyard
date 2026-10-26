@@ -27,6 +27,18 @@ for command in java sdkmanager adb emulator; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$path"
   chmod +x "$path"
 done
+# Populate the same selected identities used by production check, without downloads.
+python3 - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
+import importlib.util, pathlib, sys
+from unittest.mock import patch
+profile, root = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('fixture', profile / 'tests/toolchain-test.py')
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+with patch.object(fixture.toolchain.platform, 'machine', return_value='x86_64'):
+    for name, entry in fixture.toolchain.selected(profile / 'toolchain.json').items():
+        fixture.fixture(pathlib.Path(str(root) + entry['destination']), name, entry)
+PYTOOLCHAIN
 printf 'accepted\n' > "$test_root/srv/cache/android-sdk/licenses/android-sdk-license"
 cat > "$test_root/etc/profile.d/subyard-android.sh" <<'ENV'
 export JAVA_HOME="/opt/jdk-17"
@@ -35,7 +47,7 @@ export ANDROID_SDK_ROOT="/srv/cache/android-sdk"
 export GRADLE_USER_HOME="/srv/cache/gradle"
 export PATH="/srv/cache/android-sdk/.subyard/bin:/opt/jdk-17/bin:/srv/cache/android-sdk/platform-tools:/srv/cache/android-sdk/cmdline-tools/latest/bin:$PATH"
 ENV
-printf '{"sdk_root":"/srv/cache/android-sdk","state_root":"/var/lib/subyard-android","public_root":"/srv/cache/android-sdk/.subyard","size":2,"api":36,"device":"phone","variant":"google_apis","abi":"x86_64","gpu":"host","dev_user":"%s","runtime_user":"subyard-android","java_home":"/opt/jdk-17"}\n' "$(id -un)" \
+printf '{"sdk_root":"/srv/cache/android-sdk","state_root":"/var/lib/subyard-android","public_root":"/srv/cache/android-sdk/.subyard","size":2,"api":36,"device":"phone","variant":"google_apis","abi":"x86_64","gpu":"host","dev_user":"%s","runtime_user":"subyard-android","java_home":"/opt/jdk-17","image_policy":"latest-stable"}\n' "$(id -un)" \
   > "$test_root/etc/subyard-android.json"
 cat > "$test_root/etc/systemd/system/subyard-android-pool.service" <<'UNIT'
 ExecStart=/usr/bin/python3 /usr/local/lib/subyard-android/pool.py serve
@@ -67,6 +79,25 @@ cat > "$fake_bin/dpkg-query" <<'EOF'
 printf 'install ok installed\n'
 EOF
 chmod +x "$fake_bin/dpkg-query"
+
+# Only this disposable fixture models an x86_64 toolchain on every CI architecture.
+# The production helper has no architecture override; toolchain-test.py checks rejection.
+cat > "$fake_bin/python3" <<'PYTHON'
+#!/usr/bin/python3
+import os
+from pathlib import Path
+import platform
+import runpy
+import sys
+if len(sys.argv) > 1 and Path(sys.argv[1]).name == 'toolchain.py':
+    platform.machine = lambda: 'x86_64'
+    sys.argv = sys.argv[1:]
+    runpy.run_path(sys.argv[0], run_name='__main__')
+else:
+    os.execv('/usr/bin/python3', ['/usr/bin/python3', *sys.argv[1:]])
+PYTHON
+chmod +x "$fake_bin/python3"
+
 
 # Exercise the actual protected registration contract inside the disposable root.
 mkdir -p "$test_root/usr/local/libexec/subyard" "$tmp/guest-home"
@@ -227,7 +258,9 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
             if scenario == 'transient':
                 assert result.returncode == 0 and server.calls == 3
                 assert destination.read_bytes() == payload  # No retained partial response.
-                assert result.stderr == start_line
+                assert re.fullmatch(start_line +
+                    rb'android provision: download stage=jdk state=complete elapsed_seconds=\d+ archive_bytes=' +
+                    str(len(payload)).encode() + rb'\n', result.stderr)
             else:
                 assert result.returncode != 0 and server.calls == 4
                 assert not destination.exists()

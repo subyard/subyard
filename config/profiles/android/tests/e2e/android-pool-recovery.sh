@@ -17,6 +17,8 @@ root="$1" state="$2" yard_name="$3" project="$4" instance="$5"
 . "$root/tests/helpers/release-candidate.sh"
 # shellcheck source=config/profiles/android/tests/e2e/android-pool-phases.sh
 . "$root/config/profiles/android/tests/e2e/android-pool-phases.sh"
+# Used by the sourced phase recorder.
+# shellcheck disable=SC2034
 android_fixture=recovery
 android_phase_begin setup
 if YARD_BIN="$(release_candidate_prepare "$root")"; then unset YARD_ENGINE_PATH; else candidate_rc=$?; [ "$candidate_rc" = 1 ] || exit "$candidate_rc"; YARD_BIN="$root/.build/yard"; fi
@@ -83,13 +85,18 @@ lease_dir=''
 phase_log=''
 cleanup() {
   local result=$?
+  local android_phase_before_cleanup="${android_phase:-}"
   trap - EXIT INT TERM
   recovery_cleanup=1
   android_phase_end "$result"
   if [ "$result" -ne 0 ]; then
     # Numeric observations only; never copy arbitrary viewer output into evidence.
     if [ -s "$phase_log" ]; then
-      python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" "$result" || true
+      if [ "$android_phase_before_cleanup" = final-remote ]; then
+        python3 "$root/config/profiles/android/tests/e2e/android-remote-evidence.py" summary "$phase_log" "$result" || true
+      else
+        python3 "$root/config/profiles/android/tests/e2e/android-pool-viewer.py" --summary "$phase_log" "$result" || true
+      fi
     fi
     incus_exec 15 -- python3 - --once < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" \
       || printf 'android-display-observation query=unavailable screen_state=unknown\n' >&2

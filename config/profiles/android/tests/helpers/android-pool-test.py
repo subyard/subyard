@@ -1825,6 +1825,20 @@ os.write(1, result.stdout)
             server.shutdown()
             server.server_close()
 
+    def test_image_policy_selects_latest_stable_revision_independent_of_order(self):
+        images = poolmod.Images(self.root / 'policy-images', self.root / 'sdk')
+        def package(major, channel='channel-0', preview=''):
+            return f"""<remotePackage path="system-images;android-35;google_apis;x86_64">
+                <revision><major>{major}</major>{preview}</revision><channelRef ref="{channel}"/>
+                <archives><archive><complete><url>fixture.zip</url><size>16</size>
+                <checksum>{'a' * 40}</checksum></complete></archive></archives></remotePackage>"""
+        (images.root / 'google_apis.xml').write_text('<repository>' + package(2) + package(1)
+            + package(9, 'channel-1') + package(10, preview='<preview>1</preview>') + '</repository>')
+        selected = images.resolve(dict(api=35, variant='google_apis', abi='x86_64'))
+        self.assertEqual(selected['revision'], '2.0.0')
+        with self.assertRaisesRegex(poolmod.PoolError, 'unsupported Android image policy'):
+            poolmod.Images(self.root / 'invalid-policy', self.root / 'sdk', image_policy='preview')
+
     @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
     def test_sdk_installer_failure_diagnostics_are_bounded_private_and_atomic(self, _disk):
         sdk = self.root / 'diagnostic-sdk'

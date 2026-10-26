@@ -473,6 +473,13 @@ It skips the separate L2 builds, concurrent device lifecycle and expiry checks; 
 source-specific evidence when those paths are unchanged. The default remains the small SDK/build/removal
 gate. Android fixtures emit bounded `E2E_PHASE` durations and exit codes. Diagnostic lanes also emit
 validated numeric tool versions, capture observations and read-only numeric monitor samples.
+The default SDK/build lane repeats provisioning and rejects another toolchain archive download.
+Image-bearing runtime lanes repeat API 36 preparation after verifying its catalog cache entry.
+They report preparation durations, installed image bytes and nested-yard `eth0` receive counters
+before and after provisioning and image preparation. Counter differences include apt and metadata
+traffic; missing counters are `unknown`, not zero. The smaller `--lane sdk-images` diagnostic
+retains the same image cache measurement without booting an emulator.
+
 Unknown, incomplete or timed-out display queries remain unknown. Scrcpy download and extraction
 are measured separately; these timings do not establish a reusable dependency cache.
 

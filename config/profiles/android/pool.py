@@ -88,8 +88,9 @@ def report_failure(exc):
 
 class Images:
     """Only this private directory is pruneable; build SDK and user AVDs are external."""
-    def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3):
+    def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3, image_policy='latest-stable'):
         self.root, self.sdk = Path(root), Path(sdk)
+        require(image_policy == 'latest-stable', 'config', 'unsupported Android image policy')
         self.java_home = java_home
         self.disk_headroom = disk_headroom
         self.root.mkdir(parents=True, exist_ok=True)
@@ -137,6 +138,9 @@ class Images:
             if node.tag.rsplit('}', 1)[-1] != 'remotePackage':
                 continue
             # Child elements are unqualified in Google's repository schema.
+            channel = node.find('channelRef')
+            if (channel is not None and channel.get('ref') != 'channel-0') or node.find('revision/preview') is not None:
+                continue
             revision = node.find('revision')
             if revision is None:
                 continue
@@ -153,6 +157,8 @@ class Images:
                 package = node.attrib['path']
                 digest = complete.findtext('checksum', '')
                 if not re.fullmatch('[a-fA-F0-9]{40}', digest):
+                    continue
+                if package in result and tuple(map(int, result[package]['revision'].split('.'))) >= tuple(map(int, revision.split('.'))):
                     continue
                 result[package] = dict(package=package, revision=revision,
                     url=f'https://dl.google.com/android/repository/sys-img/{variant}/{filename}',
@@ -980,7 +986,7 @@ class Pool:
         self.cancelled = {}
         self.runtime = runtime or Runtime(config)
         self.images = images or Images(self.root / 'images', config['sdk_root'],
-                                      config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3)
+                                      config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3, config.get('image_policy', 'latest-stable'))
         self.cancel, self.workers, self.connections, self.sdk_locks = {}, {}, {}, {}
         self.prepare_cancel = threading.Event()
         data = {}

@@ -29,6 +29,25 @@ These are profile settings,
 not flags to `yard init`. Setup never changes the outer yard's trust lane or enables host
 privileges to work around missing devices. Both container and VM yards are supported.
 
+The profile's [`toolchain.json`](../config/profiles/android/toolchain.json) selects exact Linux
+x86_64 JDK 17 and SDK revisions, archive URLs and upstream checksums. `ANDROID_API` and
+`BUILD_TOOLS_VERSION` select the platform and build tools from that manifest. Updating a manifest
+pin and provisioning again replaces the affected component under the exclusive SDK maintenance
+lock; active emulator leases retain their shared lock until release. The setup check compares the
+installed package revision, JDK runtime version and recorded component payload digest with the selection.
+A missing or invalid installation receipt causes a verified reinstall. Existing SDK/JDK mounts
+remain read-only in L2 environments. The profile currently keeps JDK 17 and API 34/35/36 compatibility;
+changing the JDK major requires matching manifest pins and `JDK_VERSION` in `profile.conf`.
+The profile derives its JDK environment and mount paths from that setting.
+
+System images use the manifest's explicit `latest-stable` policy for the requested API, variant
+and ABI. The pool refreshes upstream metadata at most daily, verifies the installed package and
+revision, and keeps immutable image revisions under its existing cache keys and prune controls.
+Provision logs report per-archive successful download bytes and duration, toolchain preparation
+time and installed SDK/JDK bytes. Download bytes describe the final successful archive, excluding
+failed retry traffic; they are not a total network counter. Compatible components report reuse.
+No additional persistent archive cache is enabled.
+
 Provision adequate capacity before use: two devices reserve 7.5 GiB including the pool's
 yard allowance. Yard processes and other workloads need additional capacity; this budget
 does not guarantee that two active emulators fit in 8 GiB. Both presets use
