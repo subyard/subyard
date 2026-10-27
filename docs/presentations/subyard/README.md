@@ -4,8 +4,8 @@ English, 11 slides, 16:9. A 10–12 minute talk about requirements for the envir
 
 The opening problem leads into the container/VM comparison on slide 2, shared capacity on slide 3, and separate workspaces with their own tools, access, and resources on slide 4. The remaining slides build up operational requirements and close with criteria for evaluating an implementation.
 
-- [Open the browser deck](index.html).
-- [Speaker notes and source attribution](notes.html).
+- [Open the browser deck](https://subyard.github.io/subyard/presentations/subyard/).
+- [Speaker notes and source attribution](https://subyard.github.io/subyard/presentations/subyard/notes.html).
 
 Open `index.html` directly in a modern browser. Everything needed to present is local; there are no remote scripts, fonts, analytics, build steps, or runtime dependencies. Keep the directory together when sharing it.
 
@@ -17,7 +17,7 @@ Edit the slide content in `index.html`, layout in `styles.css`, and speaker note
 
 This directory is a static website and can be served directly by GitHub Pages or any static host. GitHub's repository file viewer displays HTML source; a Pages deployment provides the browser presentation.
 
-For [branch-based GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site), after these files reach the chosen publishing branch, select **Settings → Pages → Deploy from a branch**, that branch, and **/docs**. The deck will be at `/presentations/subyard/` under the site's base URL. With the default project domain for this repository, that would be `https://subyard.github.io/Subyard/presentations/subyard/`. This publishes the whole public `docs` directory; it does not require a presentation build step.
+For [branch-based GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site), after these files reach the chosen publishing branch, select **Settings → Pages → Deploy from a branch**, that branch, and **/docs**. The deck will be at `/presentations/subyard/` under the site's base URL. For this repository, it is `https://subyard.github.io/subyard/presentations/subyard/`. This publishes the whole public `docs` directory; it does not require a presentation build step.
 
 Alternatively, a GitHub Actions Pages workflow can upload only this directory and serve the deck at the site's root. Pages must be configured separately; storing these files in Git alone does not publish a site.
 
