@@ -5,10 +5,6 @@ Start with [Getting started](getting-started.md) to install Subyard and create a
 and local or remote yard selection. [Security](security.md) describes the host boundary and the
 choices that widen it.
 
-[Agent environment presentation](presentations/subyard/README.md) explores requirements for
-isolation, reusable setup, and resource management in 12 browser slides, using Subyard as one
-implementation example. Speaker notes include sources and implementation limits.
-
 ## Operator guides
 
 - [CLI reference](cli-reference.md) — generated public command help and invocation syntax.
