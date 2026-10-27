@@ -309,6 +309,12 @@ class TestAcceptance(unittest.TestCase):
 
     def transfer_fixture(self, directory, standalone=False, core=False):
         checkout = fixture_checkout(directory)
+        if core:
+            # Synthetic known producer: exercise parsing and binding without executing it.
+            controller = checkout / "dev/e2e/p0-acceptance.sh"
+            controller.write_text("#!/bin/bash\nexit 0\n")
+            known_digest = m.digest(controller)  # Freeze before preparing either candidate.
+            self.enterContext(patch.object(m, "HISTORICAL_P0_SHA256", known_digest))
         first, second = directory / "old", directory / "new"
         old_root, old = prepare_fixture(checkout, first)
         name = "p0-release-smoke" if core else "profile:sample/one" if standalone else "verify"
@@ -914,13 +920,14 @@ class TestAcceptance(unittest.TestCase):
             self.assertNotIn("phases", result)
             self.assertEqual((first / "receipt.json").read_bytes(), old_receipt)
 
-    def test_historical_p0_producer_requires_asserted_negative_and_final_cleanup(self):
+    def test_known_p0_parser_requires_asserted_negative_and_final_cleanup(self):
+        self.assertEqual(m.HISTORICAL_P0_SHA256, "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5")
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True, core=True)
             source, receipt = m.load_bound(first)
             files = {role: Path(item["path"]) for role, item in review["standalone"].items()}
             launch = json.loads(files["launch"].read_text())
-            self.assertEqual(launch["acceptance_script_sha256"], "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5")
+            self.assertEqual(launch["acceptance_script_sha256"], m.HISTORICAL_P0_SHA256)
             bundle = receipt["candidate_bundle_sha256"]
             def phase(phase, state, rc=0, vm=1):
                 return f"E2E_PHASE phase={phase} state={state} duration_seconds=0 exit_code={rc} vm={vm}\n"
@@ -1023,7 +1030,7 @@ class TestAcceptance(unittest.TestCase):
             files["launch"].write_text(json.dumps(launch))
             # Exercise actual import and reload, retaining unchanged originals and no invented timing.
             files["log"].write_text(log)
-            review["review"]["reason"] = "Interpret the exact historical P0 producer's asserted guest exit 23 and native-propagated direct cleanup"
+            review["review"]["reason"] = "Interpret the synthetic known P0 producer's asserted guest exit 23 and native-propagated direct cleanup"
             for role, path in files.items():
                 review["standalone"][role]["sha256"] = m.digest(path)
             declaration.write_text(json.dumps(review))

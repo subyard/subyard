@@ -237,7 +237,7 @@ if yard "$YARD" init --yes; then
   :
 else
   repeat_init_rc=$?
-  hermes_capture_repeat_init_readiness "$repeat_init_rc" || true
+  hermes_capture_release_readiness "$repeat_init_rc" || true
   exit "$repeat_init_rc"
 fi
 
@@ -338,6 +338,11 @@ yard "$YARD" stop --yes
 yard "$YARD" start --yes
 [ "$(state_signature)" = "$before" ] || die "stop/start changed opaque state"
 incus restart "$instance" --project "$project" --timeout 120
+hermes_wait_github_runtime || {
+  runtime_rc=$?
+  hermes_capture_release_readiness "$runtime_rc" || true
+  exit "$runtime_rc"
+}
 [ "$(state_signature)" = "$before" ] || die "container restart changed opaque state"
 yard "$YARD" security --require-live --quiet
 
@@ -364,8 +369,14 @@ if curl --noproxy '*' -fsS --connect-timeout 2 "http://$guest_ip:9119/" >/dev/nu
   die "guest loopback fixture is reachable through the L1 address"
 fi
 
-yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes
-yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes
+if yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes \
+  && yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes; then
+  :
+else
+  route_config_rc=$?
+  hermes_capture_release_readiness "$route_config_rc" || true
+  exit "$route_config_rc"
+fi
 
 cat >"$STATE/faultbin/timeout" <<'TIMEOUT'
 #!/usr/bin/env sh

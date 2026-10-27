@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import runpy
 import select
+import shlex
 import signal
 import socket
 import shutil
@@ -193,7 +194,48 @@ def selected_baseline_archives(args, release, arch):
     return archives
 
 
-def write_observation_incus(shims, control, unexpected, package_roots=(), activation_failure=None):
+def skill_fixture(package):
+    """Bind canned skill delivery/readiness to exact package bytes, never execute them."""
+    script = package / "scripts/refresh-agent-skills.sh"
+    invocation = script.read_text().split("| incus exec ", 1)[1].split("\nimport json, pathlib", 1)[0].replace("\\\n", "")
+    substitutions = {"$YARD_INSTANCE_NAME": "yard", "$INCUS_PROJECT": "subyard",
+                     "DEV_USER=${DEV_USER:-dev}": "DEV_USER=dev",
+                     "ENVIRONMENT_PROFILES=${ENVIRONMENT_PROFILES:-}": "ENVIRONMENT_PROFILES=",
+                     "ALLOWS_CODING_TOOLS=${ALLOWS_CODING_TOOLS:-true}": "ALLOWS_CODING_TOOLS=true",
+                     "$mode": "apply"}
+    command = ["exec"] + [substitutions.get(word, word) for word in shlex.split(invocation)]
+    require(command[:14] == ["exec", "yard", "--project", "subyard", "--env", "DEV_USER=dev",
+                            "--env", "ENVIRONMENT_PROFILES=", "--env", "ALLOWS_CODING_TOOLS=true",
+                            "--", "bash", "-eu", "-c"] and command[15:] == ["--", "apply"],
+            "unexpected skill delivery fixture command")
+    members = {}
+    def capture(path, filtered=False):
+        relative = path.relative_to(package).as_posix()
+        if filtered and ("__pycache__" in relative or "/tests" in relative): return
+        require(not path.is_symlink(), "skill fixture source is a symlink")
+        # main installs the normalized runtime with --no-same-permissions under
+        # 0077. Checkout/source-snapshot permission bits are not delivery modes.
+        mode = 0o700 if path.is_dir() or path.stat().st_mode & 0o111 else 0o600
+        members[relative] = ["directory" if path.is_dir() else "file", mode,
+                             "" if path.is_dir() else digest(path)]
+        if path.is_dir():
+            for child in sorted(path.iterdir()): capture(child, filtered)
+    capture(package / "config/skills", True)
+    for profile in sorted((package / "config/profiles").iterdir()):
+        if (profile / "skills").is_dir(): capture(profile / "skills")
+        manifest = profile / "skills.json"
+        if manifest.is_file():
+            capture(manifest)
+            for files in json.loads(manifest.read_text()).values():
+                for relative in files.values(): capture(profile / relative)
+    probe_files = {name: value[2] for name, value in members.items()
+                   if value[0] == "file" and not any(part in ("tests", "__pycache__") for part in Path(name).parts)
+                   and not name.endswith(".pyc")}
+    probe_files["scripts/refresh-agent-skills.sh"] = digest(script)
+    return {"command": command, "archive": members, "files": probe_files}
+
+
+def write_observation_incus(shims, control, unexpected, package_roots=(), activation_failure=None, skills=None):
     source = Path(__file__).resolve().parent.parent
     probes = {}
     host_probes = {}
@@ -225,10 +267,19 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                 host_probes[key] = (response, code)
     incus = shims / "incus"
     # Exact canned observations only; no command or guest script is executed.
-    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
+    incus.write_text("#!/usr/bin/python3\nimport hashlib, io, json, pathlib, sys, tarfile\n"
                      "arguments = sys.argv[1:]\n"
                      f"probes = {probes!r}\n"
                      f"activation_failure = {str(activation_failure) if activation_failure else None!r}\n"
+                     f"skills = {skills!r}\n"
+                     "if skills and arguments == skills['command']:\n"
+                     "    actual = {}\n"
+                     "    with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()), mode='r:') as archive:\n"
+                     "        for member in archive:\n"
+                     "            if member.name in actual or not (member.isdir() or member.isfile()): sys.exit(99)\n"
+                     "            actual[member.name] = ['directory' if member.isdir() else 'file', member.mode,\n"
+                     "                '' if member.isdir() else hashlib.sha256(archive.extractfile(member).read()).hexdigest()]\n"
+                     "    if actual == skills['archive']: sys.exit(0)\n"
                      "if activation_failure and pathlib.Path(activation_failure).exists():\n"
                      "    journal = json.loads(pathlib.Path(activation_failure).read_text())\n"
                      "    state_path = pathlib.Path(journal['journal'])\n"
@@ -1960,6 +2011,37 @@ def history_snapshot(root):
             for path in root.rglob("*") if path.is_file()}
 
 
+def history_cut_snapshot(root, journal):
+    before, pending = history_snapshot(root), {}
+    allowed = {f"evidence/{step['id']}.{phase}.json" for step in journal["steps"]
+               for phase in ("captured", "applied", "verified")}
+    published = {}
+    for name, identity in before.items():
+        if any(part.startswith(".") for part in Path(name).parts) or name.endswith(".pending"):
+            path = Path(name)
+            require(path.parent == Path("evidence") and path.name.startswith(".") and path.name.endswith(".json.pending"),
+                    "process cut contains unknown evidence staging")
+            destination = str(path.with_name(path.name[1:-len(".pending")]))
+            require(destination in allowed and destination not in before,
+                    "process cut contains unknown or conflicting evidence staging")
+            pending[destination] = (identity[:2], (root / name).read_bytes())
+        else:
+            published[name] = identity
+    return published, pending
+
+
+def history_preserves_cut_evidence(root, published, pending):
+    after = history_snapshot(root)
+    require(all(after.get(name) == identity for name, identity in published.items()),
+            "process retry rewrote retained migration evidence")
+    require(not any(part.startswith(".") or part.endswith(".pending")
+                    for name in after for part in Path(name).parts),
+            "process retry left unpublished evidence staging")
+    for name, (identity, prefix) in pending.items():
+        require(name in after and after[name][:2] == identity and (root / name).read_bytes().startswith(prefix),
+                "process retry replaced staged evidence or changed its captured prefix")
+
+
 def history_links(fixture):
     return tuple((os.readlink(path), path.lstat().st_mode, path.lstat().st_ino, path.lstat().st_mtime_ns)
                  if path.is_symlink() else None
@@ -2040,10 +2122,12 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     history["target"] = fixture.version + "-" + digest(bundle)[:12]
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
+    skills = skill_fixture(Path(__file__).resolve().parent.parent)
+    history["skillFilesSHA256"] = skills["files"]
     shims = fixture.root / "commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent], skills=skills)
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     set_fixture_observation(control, "Running", history=history)
     return history, source, guest, unexpected
@@ -2216,7 +2300,9 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
                    "--source-transaction", original["transaction"], "--candidate-target", target,
                    "--marker", str(marker), "--timeout", "90"]
         if cut == "checkpoint": command += ["--checkpoint", str(checkpoint)]
-        else: command += ["--ledger", str(checkpoint.parent / "ledger.json"), "--migration", "introduce-owner-publication-state-v1"]
+        # Earlier ledger CAS events may queue until the final migration has
+        # already advanced the file; bind the cut to that stable final value.
+        else: command += ["--ledger", str(checkpoint.parent / "ledger.json"), "--migration", "localize-ssh-port-settings-v3"]
         command += ["--", str(fixture.old_launcher), "update", "--version", version, "--yes"]
         result = run_process(command, fixture.env, timeout=120)
         require(result.returncode == -signal.SIGKILL and marker.exists(),
@@ -2226,7 +2312,8 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
         shutil.copytree(fixture.config, HISTORY_EVIDENCE / (cut + "-stopped-config"))
         (HISTORY_EVIDENCE / (cut + "-stopped-links.json")).write_text(json.dumps(history_links(fixture)) + "\n")
         stopped = json.loads(fixture.journal.read_text())
-        stopped_evidence = history_snapshot(checkpoint.parent / "transactions" / stopped["transaction"])
+        evidence_root = checkpoint.parent / "transactions" / stopped["transaction"]
+        stopped_evidence, staged_evidence = history_cut_snapshot(evidence_root, stopped)
         binding = tuple(stopped[key] for key in ("transaction", "authorizationPlan", "resumePlan", "observationScope"))
         if cut == "ledger": require(not checkpoint.exists(), "history converted before activation readiness")
         before = snapshot(fixture.config)
@@ -2243,9 +2330,7 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
             (HISTORY_EVIDENCE / (cut + "-failed-links.json")).write_text(json.dumps(history_links(fixture)) + "\n")
             raise
         complete = json.loads(fixture.journal.read_text())
-        after_evidence = history_snapshot(checkpoint.parent / "transactions" / stopped["transaction"])
-        require(all(after_evidence.get(name) == value for name, value in stopped_evidence.items()),
-                "process retry rewrote retained migration evidence")
+        history_preserves_cut_evidence(evidence_root, stopped_evidence, staged_evidence)
         require(tuple(complete[key] for key in ("transaction", "authorizationPlan", "resumePlan", "observationScope")) == binding,
                 "process cut lost the durable authorization or scope")
         (HISTORY_EVIDENCE / (cut + "-cut.json")).write_bytes(marker.read_bytes())

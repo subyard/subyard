@@ -2,12 +2,66 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestHistorySkillObservationRequiresExactSourcesAndSettings(t *testing.T) {
+	root := testkit.TempDir(t)
+	control := filepath.Join(root, "control")
+	files := map[string][]byte{"config/skills/probe.py": []byte("exact probe"), "config/skills/deliver.py": []byte("exact helper")}
+	hashes := map[string]string{}
+	for name, payload := range files {
+		hashes[name] = fmt.Sprintf("%x", sha256.Sum256(payload))
+	}
+	respond := historyResponder(historyControl{SkillFilesSHA256: hashes}, control)
+	for _, change := range []string{"valid", "bytes", "missing", "extra", "user", "profiles", "coding", "program"} {
+		t.Run(change, func(t *testing.T) {
+			input := map[string]any{"files": map[string][]byte{}, "user": "dev", "profiles": "", "coding": true}
+			values := input["files"].(map[string][]byte)
+			for name, payload := range files {
+				values[name] = payload
+			}
+			program := string(files["config/skills/probe.py"])
+			switch change {
+			case "bytes":
+				values["config/skills/deliver.py"] = []byte("changed")
+			case "missing":
+				delete(values, "config/skills/deliver.py")
+			case "extra":
+				values["unknown"] = []byte("unknown")
+			case "user":
+				input["user"] = "other"
+			case "profiles":
+				input["profiles"] = "other"
+			case "coding":
+				input["coding"] = false
+			case "program":
+				program = "unknown"
+			}
+			payload, _ := json.Marshal(input)
+			call := testkit.IncusServerExecCall{Project: "subyard", Name: "yard", Command: []string{"python3", "-B", "-c", program}, Stdin: payload}
+			step := respond(call)
+			code := step.ExitCode
+			if step.AfterInput != nil {
+				code = step.AfterInput(call)
+			}
+			if change == "valid" {
+				if code != 0 || string(step.Stdout) != "skills-current\n" {
+					t.Fatalf("valid skill observation: %+v code=%d", step, code)
+				}
+			} else if code != 99 {
+				t.Fatalf("changed skill observation accepted: %d", code)
+			}
+		})
+	}
+}
 
 func TestHistoryResponderFailsOnlyExactPostMigrationApply(t *testing.T) {
 	root := testkit.TempDir(t)

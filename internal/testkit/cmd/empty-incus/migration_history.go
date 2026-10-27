@@ -12,16 +12,17 @@ import (
 )
 
 type historyControl struct {
-	Journal         string   `json:"journal"`
-	Runtime         string   `json:"runtime"`
-	Target          string   `json:"target"`
-	Source          string   `json:"source"`
-	Guest           string   `json:"guest"`
-	InitialDrift    string   `json:"initialDrift"`
-	Destination     string   `json:"destination"`
-	Migrations      []string `json:"migrations"`
-	FailOnce        bool     `json:"failOnce"`
-	InventorySHA256 string   `json:"inventoryProgramSHA256"`
+	Journal          string            `json:"journal"`
+	Runtime          string            `json:"runtime"`
+	Target           string            `json:"target"`
+	Source           string            `json:"source"`
+	Guest            string            `json:"guest"`
+	InitialDrift     string            `json:"initialDrift"`
+	Destination      string            `json:"destination"`
+	Migrations       []string          `json:"migrations"`
+	FailOnce         bool              `json:"failOnce"`
+	InventorySHA256  string            `json:"inventoryProgramSHA256"`
+	SkillFilesSHA256 map[string]string `json:"skillFilesSHA256"`
 }
 
 var historyMu sync.Mutex
@@ -54,6 +55,28 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		programSHA := ""
 		if len(command) > 3 {
 			programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))
+		}
+		// Static skills are seeded current in this synthetic guest; the CLI shim
+		// separately validates exact delivery archives without running guest code.
+		if len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.SkillFilesSHA256["config/skills/probe.py"] {
+			return testkit.IncusServerExecStep{Stdout: []byte("skills-current\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
+				var input struct {
+					Files          map[string][]byte
+					User, Profiles string
+					Coding         bool
+				}
+				if json.Unmarshal(actual.Stdin, &input) != nil || input.User != "dev" || input.Profiles != "" || !input.Coding || len(input.Files) != len(control.SkillFilesSHA256) {
+					reject()
+					return 99
+				}
+				for name, payload := range input.Files {
+					if fmt.Sprintf("%x", sha256.Sum256(payload)) != control.SkillFilesSHA256[name] {
+						reject()
+						return 99
+					}
+				}
+				return 0
+			}}
 		}
 		if len(command) == 4 && command[0] == "test" && command[1] == "!" && command[2] == "-e" && command[3] == "/var/lib/subyard/integrations/inventory.json" {
 			return testkit.IncusServerExecStep{ExitCode: 1}

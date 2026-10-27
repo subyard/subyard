@@ -132,6 +132,11 @@ class Resources(unittest.TestCase):
                 resource_observer.assert_records(self.root,'vm','held')
 
     def test_storage_command_preserves_vm_and_android_argv_through_both_parsers(self):
+        assets = self.root/'prepared-assets'
+        assets.mkdir()
+        binary = assets/'subyard-telemetry'
+        binary.write_text('synthetic executable')
+        binary.chmod(0o700)
         commands = [
             ['bash', '/tmp/fixture with spaces/dev/agent-e2e.sh', '--yard', 'test-yard', '--slot', '1',
              '--vm-count', '1', '--purpose', 'telemetry-storage-failure', '--vm', '1', '--', 'bash', '-c', 'sleep 2'],
@@ -145,13 +150,15 @@ class Resources(unittest.TestCase):
                 self.assertEqual(Path(argv[2]).name, 'storage-failure.py')
                 storage_failure.main(argv[3:])
 
-            with self.subTest(kind=kind), patch.dict(os.environ, SUBYARD_E2E_VM='1', SUBYARD_AGENT_RUN_ID='fixture'), \
+            with self.subTest(kind=kind), patch.dict(os.environ, SUBYARD_E2E_VM='1', SUBYARD_AGENT_RUN_ID='fixture',
+                                                   SUBYARD_TELEMETRY_FIXTURE_ASSETS=str(assets)), \
                  patch.object(Path, 'is_file', return_value=True), patch.object(resource_observer.subprocess, 'run', side_effect=forward), \
                  patch.object(storage_failure, 'run', side_effect=received.append), redirect_stdout(io.StringIO()):
                 self.assertEqual(resource_observer.main(['--kind', kind, '--stage', 'storage-failure', '--data-dir', str(self.root),
                     '--evidence', str(self.root/'evidence'), '--native-command', *command]), 0)
             self.assertEqual(len(received), 1)
             self.assertEqual(received[0].native_command, command)
+            self.assertEqual(received[0].binary, binary)
 
     def test_storage_command_rejects_empty_tail_and_unknown_prefix_in_both_layers(self):
         cases = [(resource_observer.main, ['--kind', 'vm', '--stage', 'storage-failure', '--data-dir', '/tmp/fixture']),

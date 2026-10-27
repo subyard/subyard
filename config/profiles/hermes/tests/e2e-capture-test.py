@@ -15,25 +15,37 @@ DIAGNOSTIC = b'controlled broker failure: connection refused; token=private-fixt
 
 def check_repeat_init_diagnostic():
     source = (SOURCE/'hermes-profile.sh').read_text()
+    wait = source.split('incus restart "$instance" --project "$project" --timeout 120\n', 1)[1]
+    wait = wait.split('\n[ "$(state_signature)"', 1)[0]
+    route = source.split('if yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST', 1)[1]
+    route = 'if yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST' + route.split('\ncat >', 1)[0]
     start = source.index('yard "$YARD" start --yes\n')
     repeat = source[start:source.index("\nprintf '  [ .. ] provisioning only", start)]
     with tempfile.TemporaryDirectory(prefix='subyard-hermes-readiness-', dir='/tmp') as temporary:
         root = Path(temporary)
         engine = root/'yard'
         engine.write_text('''#!/usr/bin/python3
-import os, pathlib, sys, time
+import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
-assert sys.argv[1:] == ['migrate', '--check', '--json']
+args = sys.argv[1:]
+with (root/'calls').open('a') as output: output.write(json.dumps(args)+'\\n')
+assert args[:2] == ['-Y', 'fixture']
+if args[2:] == ['profile', 'status', 'github', '--json']:
+    if os.environ['READINESS_MODE'] == 'timeout': time.sleep(2)
+    print(json.dumps(dict(runtime='ready' if len((root/'calls').read_text().splitlines()) > 1 else 'unavailable', configured=False, ready=False)))
+    raise SystemExit()
+assert args[2:] == ['migrate', '--check', '--json']
 (root/'called').touch()
 print('PRIVATE_SENTINEL', file=sys.stderr)
-if os.environ['READINESS_MODE'] == 'timeout': time.sleep(2)
+if os.environ['READINESS_MODE'] == 'timeout' and not os.environ.get('WAIT_ONLY'): time.sleep(2)
 print((root/'response').read_text())
 raise SystemExit(17 if os.environ['READINESS_MODE'] == 'native-failure' else 0)
 ''')
         engine.chmod(0o700)
         bound = root/'timeout'
         bound.write_text('''#!/bin/sh
-test "$1 $2 $3" = '--signal=TERM --kill-after=2 15' || exit 99
+test "$1 $2" = '--signal=TERM --kill-after=2' || exit 99
+case "$3" in 1|2|3|4|5|15) ;; *) exit 99 ;; esac
 shift 3
 exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
 ''')
@@ -70,14 +82,44 @@ yard() {
             if not original:
                 assert result.stdout == '' and result.stderr == ''
                 continue
-            expected = f'HERMES_REPEAT_INIT_DIAGNOSTIC original_exit_code={original} native_exit_code={native} capture_exit_code={capture}'
+            expected = f'HERMES_RELEASE_DIAGNOSTIC original_exit_code={original} native_exit_code={native} capture_exit_code={capture}'
             assert expected in result.stdout, 'inspection native/capture exits were conflated'
             if capture == 0:
-                line, = [line for line in result.stdout.splitlines() if line.startswith('HERMES_REPEAT_INIT_READINESS=')]
+                line, = [line for line in result.stdout.splitlines() if line.startswith('HERMES_RELEASE_READINESS=')]
                 value = json.loads(line.split('=', 1)[1])
                 assert value['changed_activation_owners'] == ['activation.github-runtime']
                 assert value['other_changed_decisions'] == 1
                 assert value['blocker_codes'] == {'dependency-unavailable': 1}
+
+        (root/'response').write_text(json.dumps(report))
+        script = '''set -euo pipefail
+. "$1"
+YARD=fixture YARD_BIN="$2" TAILSCALE_IP=100.127.254.20 dashboard_port=19119
+sleep() { SECONDS=$((SECONDS + 10)); }
+yard() { printf '%s\\n' "$*" >>"$YARD_BIN.route-calls"; return 23; }
+'''
+        for mode in ('reconnect', 'timeout', 'route-failure'):
+            (root/'calls').unlink(missing_ok=True)
+            started = time.monotonic()
+            result = subprocess.run(['bash', '-c', script + (route if mode == 'route-failure' else wait),
+                'fixture', str(SOURCE/'failure-capture.sh'), str(engine)], capture_output=True, text=True,
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, WAIT_ONLY='1'), timeout=7)
+            assert result.returncode == {'reconnect': 0, 'timeout': 1, 'route-failure': 23}[mode]
+            assert time.monotonic() - started < 5, 'reconnect wait was not bounded'
+            assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr
+            calls = [json.loads(line)[2:] for line in (root/'calls').read_text().splitlines()]
+            if mode == 'reconnect':
+                assert calls == [['profile', 'status', 'github', '--json']]*2
+                assert not result.stdout and not result.stderr
+            else:
+                assert calls[-1] == ['migrate', '--check', '--json']
+                assert '"changed_activation_owners": ["activation.github-runtime"]' in result.stdout
+            route_calls = root/'yard.route-calls'
+            if mode == 'route-failure':
+                assert route_calls.read_text().splitlines() == [
+                    'fixture config set HERMES_DASHBOARD_ADVERTISE_HOST 100.127.254.20 --scope yard --yes']
+            else:
+                assert not route_calls.exists(), 'runtime wait performed a mutation'
 
 
 def check(original=23, cleanup=0, fault=''):

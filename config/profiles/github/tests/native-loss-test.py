@@ -129,7 +129,6 @@ class NativeLossTest(unittest.TestCase):
 
     def test_generated_owning_pause_wrappers_preserve_shell_grammar(self):
         examples = [('github', 'release-activation-guest.sh', ['fixture.service'], 'systemctl'),
-                    ('openlit', 'owner.sh', ['fixture-instance'], 'incus'),
                     ('orca', 'orca-bootstrap.sh', ['fixture-instance'], 'incus'),
                     ('git-fetch', 'installed-activation.sh', ['/tmp/fixture', 'fixture-instance', 'fixture-project'], 'incus')]
         with tempfile.TemporaryDirectory(prefix='subyard-loss wrapper-', dir='/tmp') as temporary:

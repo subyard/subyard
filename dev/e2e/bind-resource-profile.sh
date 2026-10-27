@@ -5,6 +5,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE=''
 YARD_NAME=''
+mode=normal
+case "$#:${1:-}" in
+  0:) ;;
+  1:--producer-reboot) mode=producer-reboot ;;
+  *) printf 'Usage: bind-resource-profile.sh [--producer-reboot]\n' >&2; exit 2 ;;
+esac
 
 die() { printf 'bind-resource-profile-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
@@ -16,22 +22,58 @@ sudo -n true || die 'passwordless sudo is required on the disposable VM'
   || die 'this synthetic-profile fixture requires a plain source bundle'
 
 incus() {
+  local -a prefix=()
+  [ "$mode" != producer-reboot ] || prefix=(timeout --signal=TERM --kill-after=2 15)
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
-    sudo -n /usr/bin/incus "$@"
+    "${prefix[@]}" sudo -n /usr/bin/incus "$@"
   else
-    /usr/bin/incus "$@"
+    "${prefix[@]}" /usr/bin/incus "$@"
   fi
 }
 yard() {
+  local program="$ROOT/.build/yard"
+  [ "$mode" != producer-reboot ] || program="$fixture_launcher"
   # First init can enroll this user, but cannot update its parent shell's groups.
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
     local command
-    printf -v command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    printf -v command '%q ' "$program" -Y "$YARD_NAME" "$@"
     sg incus-admin -c "exec $command"
   else
-    "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
+    "$program" -Y "$YARD_NAME" "$@"
   fi
+}
+
+producer_reboot_check() {
+  local output="$STATE/profile-list.json"
+  install -m 0600 /dev/null "$output"
+  timeout --signal=TERM --kill-after=2 30 "$fixture_launcher" -Y "$YARD_NAME" profile list --json \
+    >"$output" 2>/dev/null || return "$?"
+  jq -e '[.profiles[] | select(.name == "fixture-provision")] | length == 1 and .[0].convergence == "current"' \
+    "$output" >/dev/null
+}
+producer_reboot_probe() {
+  local before_boot after_boot cycle
+  yard provision "$profile" --yes || return "$?"
+  producer_reboot_check || return "$?"
+  # Real block-backed /srv is required to exercise the reboot identity boundary.
+  incus exec "$instance" --project "$project" -- sh -ceu \
+    'mountpoint -q /srv; test "$(stat -c %d /srv)" != "$(stat -c %d /var/lib/subyard)"' || return "$?"
+  before_boot="$(incus exec "$instance" --project "$project" -- cat /proc/sys/kernel/random/boot_id)" || return "$?"
+  yard stop --yes || return "$?"
+  yard start --yes || return "$?"
+  after_boot="$(incus exec "$instance" --project "$project" -- cat /proc/sys/kernel/random/boot_id)" || return "$?"
+  [ -n "$before_boot" ] && [ -n "$after_boot" ] && [ "$before_boot" != "$after_boot" ] || return 1
+  producer_reboot_check || return "$?"
+  for cycle in 1 2; do
+    yard init --yes || return "$?"
+    producer_reboot_check || return "$?"
+    printf 'producer_reboot checkpoint=%s convergence=current\n' "$cycle"
+    if [ "$cycle" = 1 ]; then
+      bash "$ROOT/dev/e2e/vm-page-reporting.sh" "$project" "$instance" || return "$?"
+    fi
+  done
+  printf 'producer_reboot=result-not-reproduced reboots=1 init_checkpoints=2 diagnostic_only=true full_release_gate=false\n'
 }
 
 cleanup() {
@@ -98,8 +140,20 @@ export MIN_DISK_GIB=1
 profile=fixture-provision
 [ ! -e "$ROOT/config/profiles/$profile" ] || die 'provision fixture already exists'
 mkdir "$ROOT/config/profiles/$profile"
-printf 'PROFILE_NAME=%s\nYARD_MOUNTS=provision-prerequisite:/mnt/provision-prerequisite:ro:0755\n' \
-  "$profile" > "$ROOT/config/profiles/$profile/profile.conf"
+printf 'PROFILE_NAME=%s\n' "$profile" > "$ROOT/config/profiles/$profile/profile.conf"
+if [ "$mode" = producer-reboot ]; then
+  cat > "$ROOT/config/profiles/$profile/provision.sh" <<'HOOK'
+#!/usr/bin/env bash
+# subyard-provision-check-v1
+set -euo pipefail
+marker=/var/lib/subyard-fixture-provision
+if [ "${1:-}" = --check ]; then [ -f "$marker" ] && exit 0; exit 10; fi
+[ ! -e "$marker" ]
+printf 'installed\n' > "$marker"
+chmod 0600 "$marker"
+HOOK
+else
+printf 'YARD_MOUNTS=provision-prerequisite:/mnt/provision-prerequisite:ro:0755\n' >> "$ROOT/config/profiles/$profile/profile.conf"
 cat > "$ROOT/config/profiles/$profile/provision.sh" <<'HOOK'
 #!/usr/bin/env bash
 # subyard-provision-check-v1
@@ -114,6 +168,7 @@ fi
 printf 'installed\n' > "$marker"
 chmod 0600 "$marker"
 HOOK
+fi
 chmod 0755 "$ROOT/config/profiles/$profile/provision.sh"
 # Commit the isolated release baseline before creating any yard registration.
 # shellcheck source=tests/helpers/release-candidate.sh
@@ -136,6 +191,12 @@ RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
 EOF
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+# Diagnostic VM topology uses the ordinary public configuration path.
+if [ "$mode" = producer-reboot ]; then
+  printf 'YARD_KIND=vm\nLIMITS_CPU=2\nLIMITS_MEMORY=1GiB\nROOT_DISK_SIZE=10GiB\nSRV_VOLUME_TYPE=block\nSRV_VOLUME_SIZE=2GiB\nVM_FREE_PAGE_REPORTING=1\nHOST_MOUNTS=\nHOST_LINKS=\n' \
+    >> "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+  incus list --project default --format=json >/dev/null
+fi
 
 source="$STATE/host/live-bind"
 mkdir -p "$source"
@@ -150,6 +211,10 @@ yard start --yes
 
 project="subyard-$YARD_NAME"
 instance="yard-$YARD_NAME"
+if [ "$mode" = producer-reboot ]; then
+  producer_reboot_probe
+  exit
+fi
 
 # Existing container limits must reconcile through the product without replacing state.
 incus exec "$instance" --project "$project" -- sh -ceu \

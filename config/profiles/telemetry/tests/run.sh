@@ -4,7 +4,7 @@ export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$(cd "$ROOT/../../.." && pwd)"
 cd "$SOURCE"
-for check in records process native native-signals launcher lifecycle forward owner sqlite-fixture resources; do
+for check in assets records process native native-signals launcher lifecycle forward owner sqlite-fixture resources; do
   python3 -B "$ROOT/tests/$check-test.py"
 done
 bash "$ROOT/tests/broker-controller-test.sh"

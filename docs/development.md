@@ -198,7 +198,7 @@ journal and observed facts.
 
 Native Paseo builds share public npm downloads through `SUBYARD_NPM_PUBLIC_CACHE`
 when configured by the profile. HOME, npm configuration and logs remain isolated. Other
-downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-<uid>`. A private temporary mount catches direct
+downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-v4-<uid>`. A private temporary mount catches direct
 `/tmp`, `/var/tmp` and `/dev/shm` writes. One build runs per checkout and user;
 completion removes scratch, and the next invocation removes leftovers with a valid
 durable ownership receipt after SIGKILL or reboot. Incomplete initialization or
@@ -208,11 +208,19 @@ retries remain bounded; version, integrity and native-module failures stop the b
 The build needs Linux user/mount/PID namespace support and verified disk storage.
 
 Profile extraction uses the same lifecycle in guest disk storage under
-`/var/lib/subyard/profile-operation`, with one operation per guest. Controller stderr
+`/var/lib/subyard/profile-operation-v4`, with one operation per guest. Controller stderr
 is drained with a 64 KiB capture limit. An optional profile `provision-tmp-paths`
 file lists exact existing temporary directories needed by migration hooks; symlinks
 are refused. Other temporary files remain private. The original guest `/proc` stays
 visible for guards that inspect existing workloads.
+Version 4 receipts bind opened filesystem IDs and inodes across reboot; live descriptor/path
+checks still bind device IDs and inodes. Filesystems without a usable filesystem ID refuse.
+The previous v3 directory remains a coordination bridge: both versions share its lock, and an
+exactly authenticated v3 receipt mirrors the worker's durable active-process identity. Its data
+is never cleared by v4. A valid v3 receipt whose device identity changed is preserved unchanged;
+v4 uses its independently owned directory without adopting the old data. Old helpers remain
+usable when their original v3 ownership checks pass. No receipt is reset to repair ambiguous
+ownership, and incomplete initialization remains a refusal.
 Hooks that call `systemctl` need the guest's existing system bus; the worker sets
 the [documented `SYSTEMCTL_FORCE_BUS=1` route](https://github.com/systemd/systemd/blob/v257.13/docs/ENVIRONMENT.md)
 across the PID namespace, preserving

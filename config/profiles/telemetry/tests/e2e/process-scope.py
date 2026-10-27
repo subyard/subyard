@@ -51,6 +51,23 @@ assert '/run-'+parent+'/run-'+document['child']+'/workload' in document['cgroup'
     raise AssertionError('nested scope final counters were not committed')
 
 
+def wait_for_short_run_samples(data_dir, run):
+    deadline = time.monotonic()+40
+    with closing(sqlite3.connect('file:'+str(data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
+        while time.monotonic() < deadline:
+            # The outbox commits each object's endpoints independently.
+            for suffix in (':scope', ':workload'):
+                rows = db.execute('SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (run+suffix,)).fetchall()
+                samples = [json.loads(row[0]) for row in rows]
+                if (not samples or samples[0].get('populated') is not False or
+                        samples[0].get('final') is not False or samples[-1].get('final') is not True):
+                    break
+            else:
+                return
+            time.sleep(0.2)
+    raise AssertionError('short-run baseline and final samples were not committed')
+
+
 def short_run(args):
     context = args.state/'short-context.json'
     code = r'''import json,os,subprocess,sys,time
@@ -66,16 +83,7 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':os.environ['SUBYARD_AGEN
     elapsed = time.monotonic()-started
     assert elapsed < 5, 'short-run fixture exceeded the sampling interval'
     run = json.loads(context.read_text())
-    deadline = time.monotonic()+40
-    with closing(sqlite3.connect('file:'+str(args.data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
-        while time.monotonic() < deadline:
-            rows = db.execute('SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (run['agent_run_id']+':scope',)).fetchall()
-            samples = [json.loads(row[0]) for row in rows]
-            if any(sample.get('final') for sample in samples):
-                break
-            time.sleep(0.2)
-        else:
-            raise AssertionError('short-run final sample was not committed')
+    wait_for_short_run_samples(args.data_dir, run['agent_run_id'])
     binary = '/usr/local/lib/subyard-telemetry/subyard-telemetry'
     result = subprocess.run([binary, 'show-run', '--data-dir', str(args.data_dir), '--run', run['agent_run_id']],
                             capture_output=True, check=True, timeout=8)

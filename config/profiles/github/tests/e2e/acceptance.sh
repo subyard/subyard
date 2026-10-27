@@ -359,11 +359,8 @@ wait_status() {
   die "guest GitHub status did not converge to $expected"
 }
 write_config() {
-  local explicit=''
-  [ "$#" -eq 0 ] || explicit="$1"
   {
     printf '# %s\nSSH_PORT=%s\nCODING_TOOL_INTEGRATIONS=\n' "$MARKER" "$SSH_PORT"
-    [ "$explicit" = disable ] && printf 'ENVIRONMENT_PROFILES=\n'
     printf 'HOST_BASE=%s/host\nHOST_MOUNTS=\nHOST_LINKS=\n' "$STATE"
     printf 'RESTRICTED_DISK_PATHS=%s/host\nFORWARD_SSH_AGENT=0\n' "$STATE"
     printf 'HOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n'
@@ -617,8 +614,7 @@ if [ "$MODE" = --verify-reboot ]; then
 elif [ "$MODE" = --cleanup ]; then
   info 'disabling and removing the marked default broker fixture'
   if incus project show "$PROJECT" >/dev/null 2>&1; then
-    write_config disable
-    yard init --yes
+    yard profile disable github --yes
     DEV_UID="$(guest id -u dev)"
     DEV_GID="$(guest id -g dev)"
     [ ! -e "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] || die 'cleanup left owner broker service'
@@ -708,8 +704,7 @@ fi
 
 info 'explicitly disabling GitHub in default yard'
 connection_hash="$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')"
-write_config disable
-yard init --yes
+yard profile disable github --yes
 [ ! -e "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] || die 'disable left owner broker service'
 assert_removed
 yard profile status github --json | jq -e '.enabled == false and .configured == true and .runtime == "removed" and .ready == false' >/dev/null \

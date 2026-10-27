@@ -647,8 +647,11 @@ actor verifies its original schema-2 lease and exact fixture marker before delet
 both actors require native APT's canonical lists directory. Nonblocking POSIX APT/dpkg
 locks exclude concurrent package activity; complete ownership and nonsymlink checks
 precede deletion. Package databases, sources, directories and lock inodes are retained.
-Existing before/after categories report APT index bytes in both scopes; reclaiming them still
-requires a fresh physical-capacity admission result.
+The allocated VM actor also validates the canonical native APT archive directory and its
+entries, then runs bounded `apt-get clean` after releasing its preflight locks so native
+APT can acquire its own locks. Before/after categories report APT index bytes in both
+scopes and archive bytes in the allocated VM. Failed archive cleanup stops the fixture;
+reclamation still requires a fresh physical-capacity admission result.
 Fixed numeric categories cover caches and staging in both the allocated guest and its
 owner container; missing measurements are explicit. The owner provisioner copies the
 compiled broker rather than building it inside the container.

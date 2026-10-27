@@ -465,6 +465,7 @@ reclaim_owner_apt_indexes() {
 import fcntl,json,os,pathlib,pwd,shlex,stat,subprocess,sys
 scope,state,marker,uid,project,run,slot,purpose=sys.argv[1:]
 root=pathlib.Path('/var/lib/apt/lists')
+archives=pathlib.Path('/var/cache/apt/archives') if scope=='outer_vm' else None
 locks=['/var/lib/dpkg/lock-frontend','/var/lib/dpkg/lock','/var/lib/apt/lists/lock']
 def canonical(path):
     if path.resolve()!=path or not path.exists(): raise RuntimeError('unsafe APT metadata path')
@@ -490,9 +491,18 @@ body=subprocess.check_output(['apt-config','shell','LISTS','Dir::State::lists/d'
 rows=shlex.split(body.decode()) if len(body)<=4096 else []
 if len(rows)!=1 or rows[0] not in ('LISTS='+str(root),'LISTS='+str(root)+'/'):
     raise RuntimeError('foreign APT lists configuration')
+if archives is not None:
+    body=subprocess.check_output(['apt-config','shell','ARCHIVES','Dir::Cache::archives/d'],stderr=subprocess.DEVNULL,timeout=2)
+    rows=shlex.split(body.decode()) if len(body)<=4096 else []
+    if len(rows)!=1 or rows[0] not in ('ARCHIVES='+str(archives),'ARCHIVES='+str(archives)+'/'):
+        raise RuntimeError('foreign APT archive configuration')
+    info=canonical(archives)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)&0o022:
+        raise RuntimeError('unsafe APT archive directory')
+    locks.append(str(archives/'lock'))
 info=canonical(root)
 if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid(): raise RuntimeError('foreign APT metadata owner')
-held=[]
+held=[]; lock_identities={}
 for name in locks:
     path=pathlib.Path(name); before=canonical(path)
     fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
@@ -501,6 +511,7 @@ for name in locks:
         raise RuntimeError('unsafe APT lock')
     fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
     held.append(fd)
+    lock_identities[name]=(info.st_dev,info.st_ino)
 owners={os.geteuid(),pwd.getpwnam('_apt').pw_uid}
 indexes=[]
 for parent,dirs,files in os.walk(root,followlinks=False):
@@ -512,16 +523,42 @@ for parent,dirs,files in os.walk(root,followlinks=False):
         if stat.S_ISREG(info.st_mode):
             if info.st_nlink!=1: raise RuntimeError('linked APT metadata entry')
             if path!=root/'lock': indexes.append(path)
+if archives is not None:
+    for parent,dirs,files in os.walk(archives,followlinks=False):
+        for name in dirs+files:
+            info=canonical(pathlib.Path(parent)/name)
+            if (info.st_uid not in owners or stat.S_IMODE(info.st_mode)&0o022
+                or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                or stat.S_ISREG(info.st_mode) and info.st_nlink!=1):
+                raise RuntimeError('unsafe APT archive entry')
 def measure(phase):
-    value=None
-    try:
-        fields=subprocess.check_output(['du','-sx','-B1','--',str(root)],stderr=subprocess.DEVNULL,timeout=2).split()
-        if fields and fields[0].isdigit() and len(fields[0])<=18: value=int(fields[0])
-    except (OSError,subprocess.SubprocessError): pass
-    print('STAGING_DISPOSABLE_CAPACITY='+json.dumps({'phase':phase,'scope':scope,'apt_lists_bytes':value}))
+    result={'phase':phase,'scope':scope}
+    paths={'apt_lists_bytes':root}
+    if archives is not None: paths['apt_archives_bytes']=archives
+    for key,path in paths.items():
+        result[key]=None
+        try:
+            fields=subprocess.check_output(['du','-sx','-B1','--',str(path)],stderr=subprocess.DEVNULL,timeout=2).split()
+            if fields and fields[0].isdigit() and len(fields[0])<=18: result[key]=int(fields[0])
+        except (OSError,subprocess.SubprocessError): pass
+    print('STAGING_DISPOSABLE_CAPACITY='+json.dumps(result))
 # Preflight the entire tree before deleting anything. Native APT locks stay held.
 measure('before_reclaim')
 for path in indexes: path.unlink()
+if archives is not None:
+    # Native APT takes its own locks. Leave every lock inode in place and let
+    # it reclaim only downloaded archives after the complete actor preflight.
+    for fd in held: os.close(fd)
+    try:
+        subprocess.run(['apt-get','clean'],check=True,timeout=20,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError('allocated VM APT archive cleanup failed: exit '+str(error.returncode)) from None
+    except (OSError,subprocess.TimeoutExpired):
+        raise RuntimeError('allocated VM APT archive cleanup could not complete within its deadline') from None
+    for name,identity in lock_identities.items():
+        info=canonical(pathlib.Path(name))
+        if (info.st_dev,info.st_ino)!=identity or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1:
+            raise RuntimeError('native APT archive cleanup changed a lock identity')
 measure('after_reclaim')
 PYAPTINDEX
 }
@@ -1073,7 +1110,7 @@ p0_capacity_remove_build_cache
 verify_broker_installation || die 'owner changed before disposable cache cleanup'
 outer_exec apt-get clean
 reclaim_owner_apt_indexes owner_container || die 'owner APT index cleanup refused'
-reclaim_owner_apt_indexes outer_vm || die 'allocated VM APT index cleanup refused'
+reclaim_owner_apt_indexes outer_vm || die 'allocated VM APT cleanup refused'
 if [ "$RELEASE_STAGED" = 1 ]; then
   reclaim_release_staging || die 'release staging ownership not verified'
 fi

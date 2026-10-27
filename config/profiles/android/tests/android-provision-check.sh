@@ -11,8 +11,19 @@ mkdir -p "$fake_bin" "$test_root/srv/cache/gradle" \
   "$test_root/srv/cache/android-sdk/.subyard/bin" "$test_root/etc/profile.d" \
   "$test_root/etc/systemd/system" "$test_root/usr/local/lib/subyard-android"
 
+common_env=(
+  PATH="$fake_bin:$PATH"
+  ANDROID_TEST_ROOT="$test_root"
+  DEV_USER="$(id -un)"
+  ANDROID_API=36
+  JDK_VERSION=17
+  BUILD_TOOLS_VERSION=36.0.0
+  ANDROID_SDK_ROOT=/srv/cache/android-sdk
+  GRADLE_USER_HOME=/srv/cache/gradle
+)
+
 # Populate the same selected identities used by production check, without downloads.
-python3 - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
+env "${common_env[@]}" python3 - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
 import importlib.util, pathlib, sys
 from unittest.mock import patch
 profile, root = map(pathlib.Path, sys.argv[1:])
@@ -97,17 +108,6 @@ GETENT
 chmod 0755 "$fake_bin/getent"
 python3 "$ROOT/config/skills/deliver.py" apply --root "$test_root" --provider profile-android \
   --source "$ROOT/config/profiles/android/skills" --home "$tmp/guest-home" --uid "$(id -u)" --gid "$(id -g)"
-
-common_env=(
-  PATH="$fake_bin:$PATH"
-  ANDROID_TEST_ROOT="$test_root"
-  DEV_USER="$(id -un)"
-  ANDROID_API=36
-  JDK_VERSION=17
-  BUILD_TOOLS_VERSION=36.0.0
-  ANDROID_SDK_ROOT=/srv/cache/android-sdk
-  GRADLE_USER_HOME=/srv/cache/gradle
-)
 
 expect_check() {
   local expected="$1" status=0
