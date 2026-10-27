@@ -3,8 +3,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
 cd "$ROOT"
+# shellcheck source=config/profiles/github/tests/e2e/release-activation-fixture.sh
+. "$ROOT/config/profiles/github/tests/e2e/release-activation-fixture.sh"
 die() { printf 'release-activation: %s\n' "$*" >&2; exit 2; }
-stage() { printf 'release_activation_stage=%s elapsed_seconds=%s\n' "$1" "$SECONDS"; }
 # Changing an activation input leaves ordinary mutations gated until a fresh,
 # authorized repair has reconciled the installed runtime.
 set_git_mode() {
@@ -124,7 +125,7 @@ UNITS_AUTHORIZED=0
 CREATION_GID="$(id -g)"
 CREATED_YARDS=()
 STARTED="$(date +%s)"
-READY_STATE=not-started READY_EXIT=unknown READY_STARTED=$SECONDS
+release_activation_initialize_readiness
 YARD_BIN=''
 TRACE_REAL_BASH="$(command -v bash)"
 unit_recipe_owned() {
@@ -183,86 +184,7 @@ cleanup_image_probe() {
   incus project delete "$IMAGE_PROBE_PROJECT" || return 1
   IMAGE_PROBE_CLAIMED=0
 }
-cleanup() {
-  local original=$? failed=0 yard project marker safe_units=1 unit path mutated_units=0
-  local cleanup_loss="${NATIVE_LOSS:-}"
-  trap - EXIT INT TERM
-  set +e
-  if [ "$original" != 0 ]; then
-    # Fixed in-memory facts only; never repeat the command or print its private JSON.
-    printf 'release_activation_ready_failure elapsed_seconds=%s state=%s native_exit=%s trigger_exit=%s\n' \
-      "$SECONDS" "${READY_STATE:-not-started}" "${READY_EXIT:-unknown}" "$original" >&2 || :
-  fi
-  # An interrupted update is a fixture-owned process group, never the user manager.
-  if [ -f "$STATE/updater.json" ]; then
-    python3 - "$STATE/updater.json" <<'PY'
-import json, os, signal, sys
-value=json.load(open(sys.argv[1]))
-for group in value.get('groups', [])+[value]:
-    try:
-        pid=group['pid']
-        if os.getpgid(pid)==pid and open('/proc/'+str(pid)+'/stat').read().split()[21]==group['start']:
-            os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, FileNotFoundError):
-        pass
-PY
-    [ "$?" = 0 ] || failed=1
-  fi
-  cleanup_image_probe || failed=1
-  if [ "$UNITS_AUTHORIZED" = 1 ]; then
-    for unit in "$UNIT" "$NAMED_UNIT" subyard-keys-sync.service subyard-keys-sync.timer; do
-      path="$UNIT_DIR/$unit"
-      [ -e "$path" ] || [ -L "$path" ] || continue
-      unit_owned "$path" "$unit" || { safe_units=0; failed=1; }
-    done
-  fi
-  for yard in "${CREATED_YARDS[@]}"; do
-    [ "$safe_units" = 1 ] || continue
-    project="$PROJECT"; [ "$yard" = default ] || project="$NAMED_PROJECT"
-    if incus project show "$project" >/dev/null 2>&1; then
-      marker="$(incus project get "$project" user.subyard.activation-fixture 2>/dev/null)"
-      if [ "$marker" != "$STATE" ]; then
-        printf 'release-activation: cleanup refused unmarked project %s\n' "$project" >&2
-        failed=1
-        continue
-      fi
-      if [ -n "$cleanup_loss" ] && [ "$cleanup_loss" != owner ] && [ -f "$STATE/native-loss/after-cut.json" ]; then
-        printf 'release_activation_pending_fixture_cleanup=allocation-release yard=%s\n' "$yard"
-      else
-        fresh timeout --signal=TERM --kill-after=10 75 "$YARD_BIN" -Y "$yard" teardown --yes \
-          > "$STATE/cleanup-$yard.log" 2>&1 || failed=1
-      fi
-    fi
-  done
-  for unit in "$UNIT" "$NAMED_UNIT" subyard-keys-sync.timer subyard-keys-sync.service; do
-    [ "$UNITS_AUTHORIZED" = 1 ] || continue
-    path="$UNIT_DIR/$unit"
-    if [ -f "$path" ] && [ ! -L "$path" ]; then
-      unit_owned "$path" "$unit" || { failed=1; continue; }
-      mutated_units=1
-      systemctl_user stop "$unit" || failed=1
-      systemctl_user disable "$unit" >/dev/null 2>&1 || failed=1
-      rm -- "$path" || failed=1
-    fi
-  done
-  [ "$mutated_units" = 0 ] || systemctl_user daemon-reload || failed=1
-  printf 'release_activation_terminal original_exit=%s cleanup_exit=%s duration_seconds=%s\n' \
-    "$original" "$failed" "$(( $(date +%s) - STARTED ))"
-  # Preserve full native logs before the standard runner deletes its source/VM.
-  for log in "$STATE"/*.log; do
-    [ -f "$log" ] || continue
-    printf 'release_activation_log=%s\n' "${log##*/}"
-    cat "$log"
-  done
-  if [ "$failed" = 0 ] && { [ -z "$cleanup_loss" ] || [ "$cleanup_loss" = owner ] || [ ! -f "$STATE/native-loss/after-cut.json" ]; }; then
-    [[ "$STATE" = /tmp/subyard-release-activation.* ]] && [ ! -L "$STATE" ] \
-      && [ "$(cat "$STATE/.marker")" = "$MARKER" ] || { [ "$original" != 0 ] && exit "$original"; exit 3; }
-    find "$STATE" -depth -delete || { [ "$original" != 0 ] && exit "$original"; exit 3; }
-  fi
-  [ "$failed" = 0 ] || [ "$original" != 0 ] || exit 3
-  exit "$original"
-}
-trap cleanup EXIT
+trap release_activation_cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 incus() { sudo -n /usr/bin/incus "$@"; }
@@ -296,22 +218,6 @@ else
 fi
 SH
 setting() { yard config show "$1" | sed -n 's/^effective: //p'; }
-ready() {
-  READY_STATE=running READY_EXIT=unknown READY_STARTED=$SECONDS
-  printf 'release_activation_ready state=start elapsed_seconds=%s\n' "$SECONDS" || :
-  if yard migrate --check --json > "$STATE/readiness.json"; then
-    READY_EXIT=0
-  else
-    READY_EXIT=$?
-  fi
-  READY_STATE=returned
-  printf 'release_activation_ready state=returned elapsed_seconds=%s native_exit=%s operation_elapsed_seconds=%s\n' \
-    "$SECONDS" "$READY_EXIT" "$((SECONDS - READY_STARTED))" || :
-  [ "$READY_EXIT" = 0 ] || return "$READY_EXIT"
-  jq -e '.outcome.status == "ready"' "$STATE/readiness.json" >/dev/null || return $?
-  jq -c '.outcome | {status,code,warnings}' "$STATE/readiness.json" || return $?
-  READY_STATE=complete
-}
 update() {
   local version="$1" release="$2"; shift 2
   fresh env YARD_RELEASE_BASE_URL="file://$release" "$YARD_BIN" update --version "$version" --offline "$@"
@@ -656,14 +562,14 @@ SH
   mv -f -- "$UNIT_DIR/replacement" "$UNIT_DIR/$UNIT"
   replaced_hash="$(hash "$UNIT_DIR/$UNIT")"
   printf 'release_activation_probe=replacement-inode expected_cleanup_exit=1 expected_native_exit=3\n'
-  if (cleanup) > "$STATE/replacement-cleanup.probe" 2>&1; then die 'replacement unit was accepted for cleanup'; else probe_rc=$?; fi
+  if (release_activation_cleanup) > "$STATE/replacement-cleanup.probe" 2>&1; then die 'replacement unit was accepted for cleanup'; else probe_rc=$?; fi
   [ "$probe_rc" = 3 ] && [ "$(hash "$UNIT_DIR/$UNIT")" = "$replaced_hash" ] || die 'replacement unit was mutated'
   grep -Fq "release_activation_cleanup_guard unit=$UNIT reason=metadata" "$STATE/replacement-cleanup.probe" \
     || die 'replacement cleanup refusal did not classify its guard'
   printf 'ok: replacement unit inode was refused and preserved\n'
   UNITS_AUTHORIZED=0
   printf '# Managed by Subyard GitHub broker\nExecStart=/foreign/operator/broker\n' > "$UNIT_DIR/$UNIT"
-  (cleanup)
+  (release_activation_cleanup)
   [ "$(hash "$UNIT_DIR/$UNIT")" = "$foreign_before" ] || die 'collision cleanup changed pre-existing foreign unit'
   [[ "$PROBE_UNITS" = /tmp/subyard-activation-unit-probe.* ]] && [ ! -L "$PROBE_UNITS" ] || exit 3
   find "$PROBE_UNITS" -depth -delete
@@ -1010,20 +916,7 @@ if [ -n "$NATIVE_LOSS" ]; then
   loss_case="$STATE/native-loss"
   install -d -m 0700 "$loss_case" "$loss_case/bin"
   printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
-  python3 - "$loss_case" "$UNIT" <<'PY'
-from pathlib import Path
-import shlex,sys
-case,unit=sys.argv[1:]
-script='#!/bin/bash\nset -euo pipefail\ncase='+shlex.quote(case)+'\nunit='+shlex.quote(unit)+'\n'+r'''
-if [ "${1:-}" = --user ] && [ "${2:-}" = restart ] && [ "${3:-}" = "$unit" ]; then
-  printf 'restart\n' >> "$case/calls"
-  printf '%s\n' "$$" > "$case/paused"
-  while [ ! -e "$case/release" ]; do sleep .05; done
-fi
-exec /usr/bin/systemctl "$@"
-'''
-path=Path(case)/'bin/systemctl';path.write_text(script);path.chmod(0o700)
-PY
+  python3 -B "${ROOT}/config/profiles/github/tests/e2e/native-loss-wrapper.py" "$loss_case" "$UNIT"
   # Owned delivered bytes drift while the loaded broker remains usable. The
   # ordinary runtime handler must restore them before its actual restart call.
   printf '\nfixture-owned loss drift\n' >> "$SUBYARD_HOME/github-broker/default-engine"

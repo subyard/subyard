@@ -255,6 +255,28 @@ Verify a built candidate with the unmodified supported updater before release:
 python3 dev/verify-release-upgrades.py --release-dir .build/release --version <candidate-version>
 ```
 
+Build those assets from the current public worktree with `dev/package-engine.sh`, using the
+same version and output directory supplied to the verifier. Its pinned historical inputs are
+self-contained; earlier temporary fixture directories are unnecessary. A pass on a published
+baseline does not establish acceptance of a dirty or untracked current candidate.
+
+Small contracts precede that full gate. `tests/agent-skills.sh` and `tests/release-candidate.sh`
+cover delivery and the actual wrapper's strict transport. Native source-inventory parity and
+prepared-source tests remain in `internal/adapters/reconcileruntime`;
+`TestHistoryReadinessContract` in `internal/testkit/cmd/empty-incus` connects the actual public
+readiness producer to its nonexecuting migration-history consumer. The package-local
+`config/skills/package.py` owns Python inventory and canonical transport modes: directories
+`0700`, regular files `0600`, independent of checkout, private installed or frozen `0500`
+source modes. Native Go admission keeps its independent inventory.
+
+`TestEvidenceOracleContract` in `internal/releasetransition` connects real POSIX writer cuts
+to the Python compatibility oracle through a bounded process handshake. Published evidence
+retains its complete identity. A captured `.pending` file may complete only at its allowed
+journal step/checkpoint destination with its inode, mode and prefix preserved; successful
+retry removes staging. The normal transition validator still proves the full record's content.
+These local contracts complement the complete packaged compatibility gate below. Native ARM
+acceptance remains a CI result; cross-building does not establish it.
+
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
 downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1, v0.18.6 and v0.19.0 runtimes for the local architecture
 and verifies retired-source refusal/full-uninstall, the inclusive v0.11.0 source boundary, frozen and

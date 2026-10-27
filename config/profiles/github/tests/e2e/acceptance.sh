@@ -7,6 +7,8 @@ if [ "${1:-}" = --installed-worker ]; then
   printf 'GitHub physical selection: installed worker admission and real SSH/SOPS peer; required for keys unit, installer/refresh or shared admission changes\n'
   exec bash "$ROOT/config/profiles/github/tests/e2e/connection-sync.sh" "$@"
 fi
+# shellcheck source=config/profiles/github/tests/e2e/broker-fixture.sh
+. "$ROOT/config/profiles/github/tests/e2e/broker-fixture.sh"
 # shellcheck source=tests/helpers/release-candidate.sh
 . "$ROOT/tests/helpers/release-candidate.sh"
 if YARD_BIN="$(release_candidate_prepare "$ROOT")"; then
@@ -85,54 +87,9 @@ controller_main() {
     [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || die '--wait must be seconds or end in s/m'
   fi
   LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-github-e2e.XXXXXX")"
-  controller_cleanup() {
-    rc=${1:-$?}
-    local original_rc="$rc" existing_directory cleanup_started=$SECONDS fixture_rc release_rc=0
-    trap - EXIT INT TERM
-    set +e
-    phase_end "$original_rc"
-    E2E_ACTIVE_PHASE=''
-    phase_marker cleanup/release start 0 0
-    if [ "$prepared" = 1 ] && [ -n "${bundle:-}" ] && [ -n "${bundle_hash:-}" ]; then
-      existing_directory="${GUEST_DIRS[1]:-}"
-      if [ -n "$existing_directory" ]; then
-        cleanup_guest 1 quiet || cleanup_failed=1
-      fi
-      if [ "$cleanup_failed" = 0 ]; then
-        : > "$LOCAL_TEMP/fixture-cleanup.log"
-        chmod 0600 "$LOCAL_TEMP/fixture-cleanup.log"
-        fixture_rc=0
-        run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --cleanup \
-          > "$LOCAL_TEMP/fixture-cleanup.log" 2>&1 || fixture_rc=$?
-        printf 'github_e2e_fixture_cleanup exit_code=%s\n' "$fixture_rc" >&2
-        [ "$fixture_rc" = 0 ] || cleanup_failed=1
-        cleanup_guest 1 quiet || cleanup_failed=1
-      fi
-    fi
-    for cleanup_vm in "${!GUEST_DIRS[@]}"; do
-      cleanup_guest "$cleanup_vm" quiet || cleanup_failed=1
-    done
-    if [ -n "${LEASE_KEEPER_PID:-}" ]; then
-      kill "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
-      wait "$LEASE_KEEPER_PID" >/dev/null 2>&1 || true
-      LEASE_KEEPER_PID=''
-    fi
-    release_lease || release_rc=$?
-    printf 'github_e2e_release exit_code=%s\n' "$release_rc" >&2
-    [ "$release_rc" = 0 ] || cleanup_failed=1
-    case "${LOCAL_TEMP:-}" in
-      /tmp/subyard-github-e2e.*|"${TMPDIR:-/tmp}"/subyard-github-e2e.*)
-        find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1 ;;
-    esac
-    [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
-    phase_marker cleanup/release end "$((SECONDS - cleanup_started))" "$((cleanup_failed * 3))"
-    printf 'github_e2e_controller_result original_exit_code=%s cleanup_exit_code=%s final_exit_code=%s\n' \
-      "$original_rc" "$((cleanup_failed * 3))" "$rc" >&2
-    exit "$rc"
-  }
-  trap controller_cleanup EXIT
-  trap 'controller_cleanup 130' INT
-  trap 'controller_cleanup 143' TERM
+  trap broker_controller_cleanup EXIT
+  trap 'broker_controller_cleanup 130' INT
+  trap 'broker_controller_cleanup 143' TERM
   acquire_lease
   start_lease_keeper
   bundle="$LOCAL_TEMP/worktree.tar.gz"
@@ -444,56 +401,9 @@ cleanup_hermes() {
   fi
   cleanup_unit_file "$HERMES_UNIT" "$HERMES_UNIT_FILE"
 }
-cleanup() {
-  local rc=${1:-$?} state_cleaned=0 cleanup_rc=0
-  local original_rc="$rc"
-  trap - EXIT INT TERM
-  set +e
-  printf 'github_e2e_guest_exit mode=%s original_exit_code=%s\n' "$MODE" "$original_rc" >&2
-  if [ "$rc" -ne 0 ] && [ -n "$UNIT_FILE" ] && [ -f "$UNIT_FILE" ]; then
-    systemctl_user show "$UNIT" -p ActiveState -p Result -p ExecMainStatus >&2
-    journalctl --user -u "$UNIT" --no-pager -n 8 >&2
-  fi
-  [ -z "$HERMES_PROJECT" ] || cleanup_hermes || cleanup_rc=3
-  if [ -n "$PROJECT" ] && incus project show "$PROJECT" >/dev/null 2>&1; then
-    project_marker="$(incus project get "$PROJECT" user.subyard.e2e 2>/dev/null || true)"
-    instance_marker="$(incus config get "$INSTANCE" user.subyard.e2e --project "$PROJECT" 2>/dev/null || true)"
-    if [ "$project_marker" = "$MARKER" ] && [ "$instance_marker" = "$MARKER" ] \
-      || { [ "$PROJECT_CLAIMED" = 1 ] && [ -z "$project_marker" ] && [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ]; }; then
-      yard teardown --yes >/dev/null 2>&1 || cleanup_rc=3
-    else
-      printf 'github-broker-e2e: refusing to remove unmarked project %s\n' "$PROJECT" >&2
-      cleanup_rc=3
-    fi
-  fi
-  cleanup_unit || cleanup_rc=3
-  if [ "$cleanup_rc" = 0 ] && [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-github-broker.* ]] \
-    && [ -f "$STATE/.marker" ] && [ "$(cat "$STATE/.marker")" = "$MARKER" ]; then
-    if [ "$(incus storage get default source 2>/dev/null || true)" = "$STATE/storage" ]; then
-      # A retained Incus pool from an older fixture must outlive its test state.
-      for child in "$STATE"/*; do
-        [ "$child" != "$STATE/storage" ] || continue
-        [ -e "$child" ] || [ -L "$child" ] || continue
-        sudo -n find "$child" -depth -delete || cleanup_rc=3
-      done
-    else
-      sudo -n find "$STATE" -depth -delete || cleanup_rc=3
-    fi
-    [ "$cleanup_rc" != 0 ] || state_cleaned=1
-  fi
-  if { [ "$MODE" = --verify-reboot ] || [ "$MODE" = --cleanup ]; } && [ "$cleanup_rc" = 0 ] \
-    && { [ "$state_cleaned" = 1 ] || { [ "$MODE" = --cleanup ] && [ "$rc" = 0 ]; }; } \
-    && [ -f "$CHECKPOINT" ] && [ "$(stat -c '%a' "$CHECKPOINT")" = 600 ] \
-    && [ "$(jq -r '.STATE' "$CHECKPOINT" 2>/dev/null || true)" = "$STATE" ]; then
-    rm -f -- "$CHECKPOINT" || cleanup_rc=3
-  fi
-  [ "$original_rc" != 0 ] || rc="$cleanup_rc"
-  printf 'github_e2e_guest_result mode=%s original_exit_code=%s cleanup_exit_code=%s final_exit_code=%s\n' "$MODE" "$original_rc" "$cleanup_rc" "$rc" >&2
-  exit "$rc"
-}
-trap cleanup EXIT
-trap 'cleanup 130' INT
-trap 'cleanup 143' TERM
+trap broker_guest_cleanup EXIT
+trap 'broker_guest_cleanup 130' INT
+trap 'broker_guest_cleanup 143' TERM
 
 if [ "$MODE" = --prepare-reboot ] \
   && { [ -e "$CHECKPOINT" ] || [ -L "$CHECKPOINT" ]; }; then
@@ -614,11 +524,7 @@ if [ "$MODE" = --verify-reboot ]; then
 elif [ "$MODE" = --cleanup ]; then
   info 'disabling and removing the marked default broker fixture'
   if incus project show "$PROJECT" >/dev/null 2>&1; then
-    yard profile disable github --yes
-    DEV_UID="$(guest id -u dev)"
-    DEV_GID="$(guest id -g dev)"
-    [ ! -e "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] || die 'cleanup left owner broker service'
-    assert_removed
+    cleanup_default_broker
   fi
   ok 'marked default broker fixture disabled'
   exit 0
@@ -703,14 +609,8 @@ else
 fi
 
 info 'explicitly disabling GitHub in default yard'
-connection_hash="$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')"
-yard profile disable github --yes
-[ ! -e "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] || die 'disable left owner broker service'
-assert_removed
-yard profile status github --json | jq -e '.enabled == false and .configured == true and .runtime == "removed" and .ready == false' >/dev/null \
-  || die 'disabled profile status is incorrect'
-[ "$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')" = "$connection_hash" ] \
-  || die 'disable changed the shared connection'
+connection_before_lifecycle="$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')"
+disable_default_broker
 ok 'explicit no-github selection removed service, helper and skills'
 
 info 'initializing a fresh named Hermes yard from its preset'
@@ -790,34 +690,7 @@ hermes_yard init --yes
 ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps DEV_SUDO=0'
 
 info 'scoped enable/disable preserves the second yard and unrelated init drift'
-hermes_pid="$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)"
-profiles_before="$(setting ENVIRONMENT_PROFILES)"
-guest mv /home/dev/.gitconfig /home/dev/.gitconfig-scoped-fixture
-yard profile enable github --yes
-yard profile enable github --yes
-guest test ! -e /home/dev/.gitconfig || die 'scoped enable reconciled unrelated git identity drift'
-guest mv /home/dev/.gitconfig-scoped-fixture /home/dev/.gitconfig
-yard profile status github --json | jq -e '.enabled and .configured and .ready and .runtime == "ready"' >/dev/null \
-  || die 'scoped enable status is incorrect'
-wait_status '{"configured":true}'
-assert_wiring
-yard profile disable github --yes
-[ "$(setting ENVIRONMENT_PROFILES)" = "$profiles_before" ] || die 'scoped disable changed neighboring selections'
-[ "$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)" = "$hermes_pid" ] || die 'scoped operations restarted another yard broker'
-[ "$(hermes_status || true)" = '{"configured":true}' ] || die 'scoped disable disconnected the other yard'
-[ "$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" | awk '{print $1}')" = "$connection_hash" ] \
-  || die 'scoped operations changed the shared connection'
-yard stop --yes
-if yard profile enable github --yes >"$STATE/stopped-profile.log" 2>&1; then die 'scoped enable accepted a stopped yard'; fi
-[ "$(setting ENVIRONMENT_PROFILES)" = "$profiles_before" ] || die 'stopped enable wrote the profile selection'
-yard profile setup github --yes
-yard profile status github --json | jq -e '.configured and .runtime == "unavailable" and .ready == false' >/dev/null \
-  || die 'stopped profile status is incorrect'
-yard start --yes
-yard profile enable github --yes
-wait_status '{"configured":true}'
-[ "$(hermes_dev sha256sum "$opaque" | awk '{print $1}')" = "$opaque_before" ] \
-  || die 'scoped operations changed Hermes opaque state'
+verify_scoped_broker_lifecycle "$connection_before_lifecycle" "$opaque" "$opaque_before"
 ok 'scoped lifecycle preserved credentials, neighboring profiles/yard and explicit power control'
 credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
 [ -n "$credential" ] || die 'GitHub key record is missing after reboot'

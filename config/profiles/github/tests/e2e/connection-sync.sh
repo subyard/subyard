@@ -2,6 +2,8 @@
 # A bounded current-worktree GitHub connection acceptance in one disposable pair.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd -P)"
+# shellcheck source=config/profiles/github/tests/e2e/connection-fixture.sh
+. "$ROOT/config/profiles/github/tests/e2e/connection-fixture.sh"
 # shellcheck source=dev/agent-e2e.sh
 . "$ROOT/dev/agent-e2e.sh"
 VM_COUNT_REQUESTED=2
@@ -31,25 +33,6 @@ fixture() {
     timeout --foreground --signal=TERM --kill-after=60 "$budget" bash "${GUEST_DIRS[$vm]}/src/$fixture_path" "$@" </dev/null || rc=$?
   printf 'E2E_PHASE phase=fixture/connection-%s state=end duration_seconds=%s exit_code=%s\n' "$mode" "$((SECONDS - started))" "$rc" >&2
   return "$rc"
-}
-cleanup_acceptance() {
-  local rc=${1:-$?} vm failed=0 cleanup_rc cleanup_log
-  trap - EXIT INT TERM
-  set +e
-  for vm in 1 2; do
-    [ -n "${GUEST_DIRS[$vm]:-}" ] || continue
-    mkdir -p "$ROOT/.build/github-connection-sync"
-    cleanup_log="$ROOT/.build/github-connection-sync/$LEASE_RUN-cleanup-vm$vm.log"
-    fixture "$vm" cleanup >"$cleanup_log" 2>&1
-    cleanup_rc=$?
-    if [ "$cleanup_rc" != 0 ]; then
-      failed=1
-      printf 'github-connection-e2e: VM%s cleanup exit=%s; evidence=%s\n' "$vm" "$cleanup_rc" "$cleanup_log" >&2
-    fi
-  done
-  [ "$failed" = 0 ] || printf 'github-connection-e2e: fixture phase exit=%s; cleanup also failed (exit=3)\n' "$rc" >&2
-  [ "$failed" = 0 ] || [ "$rc" != 0 ] || rc=3
-  cleanup_on_exit '' "$rc"
 }
 trap cleanup_acceptance EXIT
 trap 'cleanup_acceptance 130' INT

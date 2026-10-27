@@ -179,20 +179,20 @@ printf '{"version":"test","runtime_file":"runtime.tar.gz","runtime_sha256":"%s"}
 ! release_candidate_prepare "$root" >/dev/null
 printf 'ok: release candidate helper validates packaged runtime\n'
 printf 'ok: fresh release fixture installs isolated entrypoints and requires unselected migration readiness\n'
+python3 -B "$ROOT/tests/helpers/skills-transport-test.py" "$ROOT"
+python3 -B "$ROOT/tests/helpers/release-candidate-test.py"
+python3 -B "$ROOT/tests/helpers/evidence-oracle-test.py"
 
 # Compatibility controls bind the native runtime and bound owned scratch lifetime
 # without changing deliberate interruption or shared fixture ownership.
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import contextlib
-import copy
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import runpy
 import signal
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -231,94 +231,6 @@ with tempfile.TemporaryDirectory(prefix='subyard-history-architecture-', dir='/t
 print('ok: migration-history apply control binds the selected architecture in a mixed release inventory')
 
 globals_ = helper.__globals__
-with tempfile.TemporaryDirectory(prefix='subyard-history-skills-', dir='/tmp') as temporary:
-    base = Path(temporary)
-    skills = globals_['skill_fixture'](root)
-    control = base / 'control'
-    control.write_text('{"instances":[]}')
-    globals_['write_observation_incus'](base, control, base/'unexpected', skills=skills)
-    program = (root/'scripts/refresh-agent-skills.sh').read_text().split("' -- \"$mode\"\n", 1)[1].rsplit('\nPY', 1)[0]
-    for name, directory_mode, regular_mode, executable_mode in (('normalized-source', 0o755, 0o644, 0o755),
-                                                                ('private-installed', 0o700, 0o600, 0o700)):
-        package = base / name
-        for relative, (kind, mode, _) in skills['archive'].items():
-            path = package / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if kind == 'directory': path.mkdir(exist_ok=True)
-            else: path.write_bytes((root / relative).read_bytes())
-            path.chmod(directory_mode if kind == 'directory' else executable_mode if mode & 0o111 else regular_mode)
-        script = package / 'scripts/refresh-agent-skills.sh'
-        script.parent.mkdir(parents=True)
-        script.write_bytes((root / 'scripts/refresh-agent-skills.sh').read_bytes())
-        script.chmod(executable_mode)
-        assert globals_['skill_fixture'](package) == skills, name
-    archive = subprocess.run([sys.executable, '-c', program, str(package)], check=True, capture_output=True).stdout
-    command = [str(base/'incus'), *skills['command']]
-    assert subprocess.run(command, input=archive, capture_output=True).returncode == 0
-    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-        members = [(member, source.extractfile(member).read() if member.isfile() else None) for member in source]
-    for change in ('bytes', 'mode', 'extra', 'duplicate', 'command'):
-        altered = io.BytesIO()
-        with tarfile.open(fileobj=altered, mode='w') as target:
-            for member, data in members:
-                member = copy.copy(member)
-                if member.name == 'config/skills/deliver.py':
-                    if change == 'bytes': data = b'x' * len(data)
-                    if change == 'mode': member.mode ^= 0o020
-                target.addfile(member, io.BytesIO(data) if data is not None else None)
-            if change in ('extra', 'duplicate'):
-                member = tarfile.TarInfo('unknown' if change == 'extra' else 'config/skills/deliver.py')
-                target.addfile(member, io.BytesIO(b''))
-        argv = command[:-1] + ['unknown'] if change == 'command' else command
-        assert subprocess.run(argv, input=altered.getvalue(), capture_output=True).returncode == 99, change
-print('ok: migration-history skill delivery normalizes source modes and accepts only exact package commands and archive identity')
-
-with tempfile.TemporaryDirectory(prefix='subyard-history-staging-', dir='/tmp') as temporary:
-    for prefix in (b'', b'published '):
-        for change in ('valid', 'inode', 'mode', 'prefix', 'published', 'published-inode', 'published-mode',
-                       'published-mtime', 'unknown', 'collision', 'leftover'):
-            if not prefix and change == 'prefix': continue
-            case = Path(tempfile.mkdtemp(dir=temporary))
-            evidence = case/'evidence'
-            evidence.mkdir(mode=0o700)
-            captured = evidence/'first.ledger.captured.json'
-            staged = evidence/'.first.ledger.applied.json.pending'
-            final = evidence/'first.ledger.applied.json'
-            captured.write_bytes(b'captured\n'); captured.chmod(0o600)
-            staged.write_bytes(prefix); staged.chmod(0o600)
-            if change == 'unknown':
-                unknown = evidence/'.unknown.pending'
-                unknown.write_bytes(b''); unknown.chmod(0o600)
-            if change == 'collision':
-                final.write_bytes(b'published result\n'); final.chmod(0o600)
-            try:
-                published, pending = globals_['history_cut_snapshot'](case, {'steps': [{'id': 'first.ledger'}]})
-                staged.write_bytes(b'published result\n')
-                staged.rename(final)
-                if change == 'inode':
-                    replacement = evidence/'replacement'
-                    replacement.write_bytes(final.read_bytes()); replacement.chmod(0o600)
-                    replacement.replace(final)
-                if change == 'mode': final.chmod(0o640)
-                if change == 'prefix': final.write_bytes(b'changed prefix\n')
-                if change == 'published': captured.write_bytes(b'changed published evidence\n')
-                if change == 'published-inode':
-                    replacement = evidence/'replacement'
-                    replacement.write_bytes(captured.read_bytes()); replacement.chmod(0o600)
-                    replacement.replace(captured)
-                if change == 'published-mode': captured.chmod(0o640)
-                if change == 'published-mtime':
-                    info = captured.stat()
-                    os.utime(captured, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
-                if change == 'leftover':
-                    staged.write_bytes(b''); staged.chmod(0o600)
-                globals_['history_preserves_cut_evidence'](case, published, pending)
-            except RuntimeError:
-                assert change != 'valid', (prefix, change)
-            else:
-                assert change == 'valid', (prefix, change)
-print('ok: migration-history cuts preserve published evidence and only complete exact staged prefixes')
-
 verify = globals_['verify']
 with tempfile.TemporaryDirectory(prefix='subyard-compat-scratch-', dir='/tmp') as temporary:
     base = Path(temporary)

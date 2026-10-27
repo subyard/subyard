@@ -11,37 +11,42 @@ mkdir -p "$fake_bin" "$test_root/srv/cache/gradle" \
   "$test_root/srv/cache/android-sdk/.subyard/bin" "$test_root/etc/profile.d" \
   "$test_root/etc/systemd/system" "$test_root/usr/local/lib/subyard-android"
 
+# One explicit fixture selection drives preparation and the real shell/CLI check.
+fixture_versions="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["android_api"]+"\t"+m["jdk"]["major"]+"\t"+m["build_tools"])' "$ROOT/config/profiles/android/toolchain.json")"
+IFS=$'\t' read -r fixture_api fixture_jdk fixture_build <<< "$fixture_versions"
 common_env=(
   PATH="$fake_bin:$PATH"
+  TMPDIR=/tmp
   ANDROID_TEST_ROOT="$test_root"
   DEV_USER="$(id -un)"
-  ANDROID_API=36
-  JDK_VERSION=17
-  BUILD_TOOLS_VERSION=36.0.0
+  ANDROID_API="$fixture_api"
+  JDK_VERSION="$fixture_jdk"
+  BUILD_TOOLS_VERSION="$fixture_build"
   ANDROID_SDK_ROOT=/srv/cache/android-sdk
+  ANDROID_PUBLIC_ROOT=/srv/cache/android-sdk/.subyard
   GRADLE_USER_HOME=/srv/cache/gradle
+  YARD_GRADLE_USER_HOME=/srv/cache/gradle
 )
 
 # Populate the same selected identities used by production check, without downloads.
-env "${common_env[@]}" python3 - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
-import importlib.util, pathlib, sys
-from unittest.mock import patch
+env "${common_env[@]}" python3 -B - "$ROOT/config/profiles/android" "$test_root" <<'PYTOOLCHAIN'
+import importlib.util, os, pathlib, sys
 profile, root = map(pathlib.Path, sys.argv[1:])
-spec = importlib.util.spec_from_file_location('fixture', profile / 'tests/toolchain-test.py')
+spec = importlib.util.spec_from_file_location('fixture', profile / 'tests/toolchain-fixture.py')
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
-with patch.object(fixture.toolchain.platform, 'machine', return_value='x86_64'):
-    for name, entry in fixture.toolchain.selected(profile / 'toolchain.json').items():
-        fixture.fixture(pathlib.Path(str(root) + entry['destination']), name, entry)
+entries = fixture.toolchain.selected(profile / 'toolchain.json', environment=os.environ, architecture='x86_64')
+for name, entry in entries.items():
+    fixture.fixture(pathlib.Path(str(root) + entry['destination']), name, entry)
 PYTOOLCHAIN
-cat > "$test_root/etc/profile.d/subyard-android.sh" <<'ENV'
-export JAVA_HOME="/opt/jdk-17"
+cat > "$test_root/etc/profile.d/subyard-android.sh" <<ENV
+export JAVA_HOME="/opt/jdk-$fixture_jdk"
 export ANDROID_HOME="/srv/cache/android-sdk"
 export ANDROID_SDK_ROOT="/srv/cache/android-sdk"
 export GRADLE_USER_HOME="/srv/cache/gradle"
-export PATH="/srv/cache/android-sdk/.subyard/bin:/opt/jdk-17/bin:/srv/cache/android-sdk/platform-tools:/srv/cache/android-sdk/cmdline-tools/latest/bin:$PATH"
+export PATH="/srv/cache/android-sdk/.subyard/bin:/opt/jdk-$fixture_jdk/bin:/srv/cache/android-sdk/platform-tools:/srv/cache/android-sdk/cmdline-tools/latest/bin:\$PATH"
 ENV
-printf '{"sdk_root":"/srv/cache/android-sdk","state_root":"/var/lib/subyard-android","public_root":"/srv/cache/android-sdk/.subyard","size":2,"api":36,"device":"phone","variant":"google_apis","abi":"x86_64","gpu":"host","dev_user":"%s","runtime_user":"subyard-android","java_home":"/opt/jdk-17","image_policy":"latest-stable"}\n' "$(id -un)" \
+printf '{"sdk_root":"/srv/cache/android-sdk","state_root":"/var/lib/subyard-android","public_root":"/srv/cache/android-sdk/.subyard","size":2,"api":%s,"device":"phone","variant":"google_apis","abi":"x86_64","gpu":"host","dev_user":"%s","runtime_user":"subyard-android","java_home":"/opt/jdk-%s","image_policy":"latest-stable"}\n' "$fixture_api" "$(id -un)" "$fixture_jdk" \
   > "$test_root/etc/subyard-android.json"
 cat > "$test_root/etc/systemd/system/subyard-android-pool.service" <<'UNIT'
 ExecStart=/usr/bin/python3 /usr/local/lib/subyard-android/pool.py serve
@@ -57,7 +62,7 @@ for source in pool.py client.py runtime.sh; do
 done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/srv/cache/android-sdk/.subyard/bin/android-broker"
 chmod +x "$test_root/srv/cache/android-sdk/.subyard/bin/android-broker"
-/usr/bin/python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+env "${common_env[@]}" /usr/bin/python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
   "$test_root/srv/cache/android-sdk/.subyard/control.sock"
 for command in curl unzip flock setsid cage Xwayland socat systemctl slirp4netns ip; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/$command"
@@ -106,8 +111,9 @@ cat > "$fake_bin/getent" <<GETENT
 printf '%s:x:%s:%s:fixture:%s:/bin/bash\n' '$(id -un)' '$(id -u)' '$(id -g)' '$tmp/guest-home'
 GETENT
 chmod 0755 "$fake_bin/getent"
-python3 "$ROOT/config/skills/deliver.py" apply --root "$test_root" --provider profile-android \
+env "${common_env[@]}" python3 "$ROOT/config/skills/deliver.py" apply --root "$test_root" --provider profile-android \
   --source "$ROOT/config/profiles/android/skills" --home "$tmp/guest-home" --uid "$(id -u)" --gid "$(id -g)"
+
 
 expect_check() {
   local expected="$1" status=0
@@ -164,7 +170,7 @@ expect_check 10
 
 # Exercise the owning download boundary with native curl against a local server.
 # No provision/install commands or remote downloads run on the host.
-python3 - "$HOOK" <<'PYDOWNLOAD'
+env "${common_env[@]}" PATH=/usr/bin:/bin python3 - "$ROOT/config/profiles/android/provision-helpers.sh" <<'PYDOWNLOAD'
 import http.server
 import os
 import pathlib
@@ -175,9 +181,7 @@ import sys
 import tempfile
 import threading
 
-source = pathlib.Path(sys.argv[1]).read_text()
-start = source.index('android_download() {')
-function = source[start:source.index('\n}\n', start) + 3]
+helper = pathlib.Path(sys.argv[1])
 canary = 'android-download-private-canary'
 payload = b'complete toolchain input\n'
 
@@ -207,8 +211,8 @@ with tempfile.TemporaryDirectory(prefix='subyard-android-download-', dir='/tmp')
     destination = root / 'download'
     def download(url, stage, env=None):
         env = dict(os.environ if env is None else env, NO_PROXY='127.0.0.1', no_proxy='127.0.0.1')
-        return subprocess.run(['bash', '-eu', '-c', function + '\nandroid_download "$1" "$2" "$3"',
-                               'android-download-test', url, str(destination), stage],
+        return subprocess.run(['bash', '-eu', '-c', '. "$4"; android_download "$1" "$2" "$3"',
+                               'android-download-test', url, str(destination), stage, str(helper)],
                               env=env, capture_output=True, timeout=15)
 
     for scenario in ('transient', 'exhausted'):
@@ -261,19 +265,35 @@ print('ok: bounded Android downloads recover or fail without publishing partial 
 PYDOWNLOAD
 
 # The declaration keeps the pre-existing migration target visible to the generic runner.
-python3 - "$ROOT/config/profiles/android" "$tmp" <<'PYLEGACY'
+env "${common_env[@]}" python3 - "$ROOT/config/profiles/android" "$tmp" <<'PYLEGACY'
 import pathlib, subprocess, sys
 profile, fixture = map(pathlib.Path, sys.argv[1:])
 paths = (profile / 'provision-tmp-paths').read_text().splitlines()
 assert paths == ['/tmp/subyard-android']
-legacy = fixture / 'legacy'
+legacy = fixture / "legacy ' root"
 legacy.mkdir()
-source = (profile / 'pool-install.sh').read_text()
-start = source.index('if [ -d /tmp/subyard-android ]')
-block = source[start:source.index('\nfi', start) + 3]
-# Run the actual migration block against fixture-owned files, without installation.
-block = block.replace('/tmp/subyard-android', str(legacy))
-subprocess.run(['bash', '-euc', block], env={'PROFILE_DIR':str(profile), 'PATH':'/usr/bin:/bin'}, check=True)
+unrelated = legacy / 'operator-avd'
+unrelated.write_bytes(b'untouched')
+def refresh(root):
+    script = '''before=$(pwd; set +o; trap -p)
+. "$1"
+[ "$before" = "$(pwd; set +o; trap -p)" ]
+android_refresh_legacy_helpers "$2" "$3"
+'''
+    subprocess.run(['bash', '-euc', script,
+                    'android-legacy-test', str(profile/'provision-helpers.sh'), str(root), str(profile)],
+                   check=True)
+refresh(legacy)
+assert unrelated.read_bytes() == b'untouched'
+missing = fixture/'missing-legacy'
+refresh(missing)
+assert not missing.exists()
+target = fixture/'foreign-target'
+target.mkdir()
+linked = fixture/'linked-legacy'
+linked.symlink_to(target, target_is_directory=True)
+refresh(linked)
+assert linked.is_symlink() and not list(target.iterdir())
 for name in ('emulator-run.sh', 'emulator-control.sh'):
     assert (legacy / name).read_bytes() == (profile / name).read_bytes()
     assert (legacy / name).stat().st_mode & 0o777 == 0o755

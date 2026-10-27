@@ -1786,24 +1786,7 @@ if [ -n "$NATIVE_LOSS" ]; then
   loss_case="$STATE/native-loss"
   install -d -m 0700 "$loss_case" "$loss_case/bin"
   printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
-  python3 - "$loss_case" "$INSTANCE" <<'PY'
-from pathlib import Path
-import shlex,sys
-case,instance=sys.argv[1:]
-script='#!/bin/bash\nset -euo pipefail\ncase='+shlex.quote(case)+'\ninstance='+shlex.quote(instance)+'\n'+r'''
-if [ "${1:-}" = file ] && [ "${2:-}" = push ] && [[ "${4:-}" = "$instance/tmp/subyard-orca."* ]]; then
-  printf 'registration-push\n' >> "$case/calls"
-  /usr/bin/incus "$@"
-  if [ ! -e "$case/paused" ]; then
-    printf '%s\n' "$$" > "$case/paused"
-    while [ ! -e "$case/release" ]; do sleep .05; done
-  fi
-  exit 0
-fi
-exec /usr/bin/incus "$@"
-'''
-path=Path(case)/'bin/incus';path.write_text(script);path.chmod(0o700)
-PY
+  python3 -B "${ROOT}/config/profiles/orca/tests/e2e/native-loss-wrapper.py" "$loss_case" "$INSTANCE"
   guest_root sh -c 'printf "\n# fixture-owned native loss drift\n" >> /usr/local/libexec/subyard/orca-registration/reconcile.py'
   loss_observe() {
     local command

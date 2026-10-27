@@ -134,31 +134,7 @@ cleanup_fixture_pool() {
   incus storage delete default --project default >/dev/null
 }
 
-cleanup() {
-  local original=$? capture_rc=0 cleanup_rc=0
-  trap - EXIT INT TERM
-  set +e
-  if [ "$original" -ne 0 ] && [ -n "$YARD" ]; then
-    hermes_capture_failure "$ROOT/.build/hermes-failure" "$original" || capture_rc=$?
-  fi
-  if [ -n "$YARD" ] && [ -f "$SUBYARD_CONFIG_HOME/yards/$YARD/config.env" ]; then
-    yard "$YARD" teardown --yes >/dev/null 2>&1 || cleanup_rc=3
-  fi
-  if [ -n "$TAILSCALE_IP" ]; then
-    sudo -n ip address del "$TAILSCALE_IP/32" dev lo >/dev/null 2>&1 || true
-  fi
-  cleanup_fixture_pool || cleanup_rc=3
-  if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-hermes-profile.* ]] \
-    && [ -f "$STATE/.marker" ] \
-    && [ "$(<"$STATE/.marker")" = subyard-hermes-profile-e2e-v3 ]; then
-    sudo -n find "$STATE" -depth -delete || cleanup_rc=3
-  fi
-  printf 'HERMES_GUEST_RESULT original_exit_code=%s capture_exit_code=%s cleanup_exit_code=%s\n' \
-    "$original" "$capture_rc" "$cleanup_rc"
-  [ "$original" -eq 0 ] || exit "$original"
-  exit "$cleanup_rc"
-}
-trap cleanup EXIT
+trap hermes_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -233,13 +209,7 @@ else
 fi
 [ "$(stat -c %a "$definition")" = 600 ] || die "yard definition is not mode 0600"
 yard "$YARD" start --yes
-if yard "$YARD" init --yes; then
-  :
-else
-  repeat_init_rc=$?
-  hermes_capture_release_readiness "$repeat_init_rc" || true
-  exit "$repeat_init_rc"
-fi
+hermes_repeat_init
 
 printf '  [ .. ] provisioning only the generic Hermes substrate\n'
 yard "$YARD" provision --yes
@@ -338,11 +308,7 @@ yard "$YARD" stop --yes
 yard "$YARD" start --yes
 [ "$(state_signature)" = "$before" ] || die "stop/start changed opaque state"
 incus restart "$instance" --project "$project" --timeout 120
-hermes_wait_github_runtime || {
-  runtime_rc=$?
-  hermes_capture_release_readiness "$runtime_rc" || true
-  exit "$runtime_rc"
-}
+hermes_wait_github_runtime_or_report
 [ "$(state_signature)" = "$before" ] || die "container restart changed opaque state"
 yard "$YARD" security --require-live --quiet
 
@@ -369,14 +335,7 @@ if curl --noproxy '*' -fsS --connect-timeout 2 "http://$guest_ip:9119/" >/dev/nu
   die "guest loopback fixture is reachable through the L1 address"
 fi
 
-if yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes \
-  && yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes; then
-  :
-else
-  route_config_rc=$?
-  hermes_capture_release_readiness "$route_config_rc" || true
-  exit "$route_config_rc"
-fi
+hermes_configure_dashboard_route
 
 cat >"$STATE/faultbin/timeout" <<'TIMEOUT'
 #!/usr/bin/env sh

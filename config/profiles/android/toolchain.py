@@ -14,21 +14,21 @@ import urllib.parse
 import zipfile
 
 
-def selected(path):
+def selected(path, *, environment, architecture):
     manifest = json.loads(Path(path).read_text())
-    if (type(manifest['schema']) is not int or manifest['schema'] != 1 or manifest['architecture'] != platform.machine()
+    if (type(manifest['schema']) is not int or manifest['schema'] != 1 or manifest['architecture'] != architecture
             or manifest['architecture'] != 'x86_64' or manifest['image_policy'] != 'latest-stable'):
         raise ValueError('unsupported toolchain configuration')
     jdk = manifest['jdk']
     version = re.fullmatch(r'([1-9][0-9]*)(?:\.\d+)*\+\d+', jdk['version'])
     if (version is None or version.group(1) != jdk['major']
-            or os.environ.get('JDK_VERSION', jdk['major']) != jdk['major']):
+            or environment.get('JDK_VERSION', jdk['major']) != jdk['major']):
         raise ValueError('JDK version does not match selected major')
-    api = os.environ.get('ANDROID_API', manifest['android_api'])
-    build = os.environ.get('BUILD_TOOLS_VERSION', manifest['build_tools'])
+    api = environment.get('ANDROID_API', manifest['android_api'])
+    build = environment.get('BUILD_TOOLS_VERSION', manifest['build_tools'])
     if not re.fullmatch(r'\d+', api) or not re.fullmatch(r'\d+\.\d+\.\d+', build):
         raise ValueError('invalid Android version selection')
-    sdk = Path(os.environ.get('ANDROID_SDK_ROOT', '/srv/cache/android-sdk'))
+    sdk = Path(environment.get('ANDROID_SDK_ROOT', '/srv/cache/android-sdk'))
     entries = {'jdk': dict(jdk, destination='/opt/jdk-' + jdk['major'], executable='bin/java')}
     for package, executable in [('cmdline-tools;latest', 'bin/sdkmanager'), ('platform-tools', 'adb'),
                                  ('platforms;android-' + api, 'android.jar'),
@@ -158,7 +158,7 @@ def install(archive, destination, name, entry):
 
 def main():
     action, manifest, *args = sys.argv[1:]
-    entries = selected(manifest)
+    entries = selected(manifest, environment=os.environ, architecture=platform.machine())
     if action == 'defaults':
         api = next(name.removeprefix('platforms;android-') for name in entries if name.startswith('platforms;'))
         print(api + '\t' + entries['jdk']['major'])

@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 # Private, bounded diagnostics; never send their contents to the terminal.
-hermes_wait_github_runtime() {
-  local deadline=$((SECONDS + 30)) remaining
+hermes_wait_github_runtime_or_report() {
+  local deadline=$((SECONDS + ${1:-30})) rc=1 remaining
+  local -a codes
   while [ "$SECONDS" -lt "$deadline" ]; do
     remaining=$((deadline - SECONDS))
     [ "$remaining" -gt 0 ] || break
     [ "$remaining" -le 5 ] || remaining=5
-    if timeout --signal=TERM --kill-after=2 "$remaining" "$YARD_BIN" -Y "$YARD" \
-      profile status github --json 2>/dev/null | jq -e '.runtime == "ready"' >/dev/null 2>&1; then
+    if timeout --signal=TERM --kill-after=2 "$remaining" "$YARD_BIN" -Y "$YARD" profile status github --json 2>/dev/null \
+      | jq -e '.runtime == "ready"' >/dev/null 2>&1; then
       return 0
+    else
+      codes=("${PIPESTATUS[@]}")
     fi
+    rc="${codes[0]}"
+    [ "$rc" != 0 ] || rc="${codes[1]}"
     [ "$SECONDS" -ge "$deadline" ] || sleep 1
   done
-  return 1
+  hermes_capture_release_readiness "$rc" || true
+  return "$rc"
+}
+
+hermes_configure_dashboard_route() {
+  local rc=0
+  yard "$YARD" config set HERMES_DASHBOARD_ADVERTISE_HOST "$TAILSCALE_IP" --scope yard --yes || rc=$?
+  if [ "$rc" = 0 ]; then
+    # shellcheck disable=SC2154
+    yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$dashboard_port" --scope yard --yes || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then hermes_capture_release_readiness "$rc" || true; fi
+  return "$rc"
 }
 
 # Project only fixed enums from one read-only inspection; keep its native exit
@@ -139,4 +156,39 @@ except (OSError, tarfile.TarError, AssertionError, UnicodeError):
     sys.exit(1)
 PY
   return "$rc"
+}
+
+hermes_repeat_init() {
+  if yard "$YARD" init --yes; then
+    :
+  else
+    repeat_init_rc=$?
+    hermes_capture_release_readiness "$repeat_init_rc" || true
+    exit "$repeat_init_rc"
+  fi
+}
+
+hermes_cleanup() {
+  local original=$? capture_rc=0 cleanup_rc=0
+  trap - EXIT INT TERM
+  set +e
+  if [ "$original" -ne 0 ] && [ -n "$YARD" ]; then
+    hermes_capture_failure "$ROOT/.build/hermes-failure" "$original" || capture_rc=$?
+  fi
+  if [ -n "$YARD" ] && [ -f "$SUBYARD_CONFIG_HOME/yards/$YARD/config.env" ]; then
+    yard "$YARD" teardown --yes >/dev/null 2>&1 || cleanup_rc=3
+  fi
+  if [ -n "$TAILSCALE_IP" ]; then
+    sudo -n ip address del "$TAILSCALE_IP/32" dev lo >/dev/null 2>&1 || true
+  fi
+  cleanup_fixture_pool || cleanup_rc=3
+  if [ -n "$STATE" ] && [[ "$STATE" = /var/tmp/subyard-hermes-profile.* ]] \
+    && [ -f "$STATE/.marker" ] \
+    && [ "$(<"$STATE/.marker")" = subyard-hermes-profile-e2e-v3 ]; then
+    sudo -n find "$STATE" -depth -delete || cleanup_rc=3
+  fi
+  printf 'HERMES_GUEST_RESULT original_exit_code=%s capture_exit_code=%s cleanup_exit_code=%s\n' \
+    "$original" "$capture_rc" "$cleanup_rc"
+  [ "$original" -eq 0 ] || exit "$original"
+  exit "$cleanup_rc"
 }

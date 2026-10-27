@@ -20,7 +20,7 @@ func TestHistorySkillObservationRequiresExactSourcesAndSettings(t *testing.T) {
 	for name, payload := range files {
 		hashes[name] = fmt.Sprintf("%x", sha256.Sum256(payload))
 	}
-	respond := historyResponder(historyControl{SkillFilesSHA256: hashes}, control)
+	respond := historyResponder(historyControl{Skills: &historySkills{Files: hashes, ProgramSHA256: hashes["config/skills/probe.py"], User: "dev", Profiles: "", Coding: true}}, control)
 	for _, change := range []string{"valid", "bytes", "missing", "extra", "user", "profiles", "coding", "program"} {
 		t.Run(change, func(t *testing.T) {
 			input := map[string]any{"files": map[string][]byte{}, "user": "dev", "profiles": "", "coding": true}

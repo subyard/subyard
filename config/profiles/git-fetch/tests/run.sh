@@ -15,3 +15,5 @@ bash -n "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profil
 shellcheck -S warning "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
 bash "$profile/tests/e2e/acceptance.sh" --help >/dev/null
 bash "$profile/tests/e2e/acceptance.sh" --preflight
+
+python3 -B "$profile/tests/native-loss-test.py"

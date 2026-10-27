@@ -27,3 +27,4 @@ workflow-real-adapter-gate.sh
 yard-extras-convergence.sh
 yard-usage.sh
 installed-runtime-refresh.sh
+profile-native-loss.sh

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bind the activation fixture to current frozen metadata and authentic predecessors."""
-import ast
+import importlib.util
+import shlex
 import hashlib
 import io
 import json
@@ -17,6 +18,16 @@ from unittest import mock
 
 GUEST = Path(__file__).parent/'e2e/release-activation-guest.sh'
 INSTALLER_SHA = 'eeacda9ded1cc4c095ecc1e0569cf6fd96a737b3af6ab30ce7804833e3d8f1d1'
+
+
+def source_fixture(name):
+    return '. '+shlex.quote(str(GUEST.with_name(name)))+'\n'
+
+
+spec = importlib.util.spec_from_file_location('connection_diagnostic', GUEST.with_name('connection-diagnostic.py'))
+diagnostic = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(diagnostic)
+
 
 
 class ActivationIdentityTest(unittest.TestCase):
@@ -56,62 +67,64 @@ class ActivationIdentityTest(unittest.TestCase):
                 self.assertNotEqual(self.identity(**changes).returncode, 0)
 
 
-class CandidateArchiveTest(unittest.TestCase):
-    def test_actual_archive_verification_repeat_refusal_and_partial_retry(self):
-        helper = GUEST.parents[5]/'tests/helpers/release-candidate.sh'
-        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
-            root = Path(temporary)
-            release = root/'.subyard-acceptance/release'
-            release.mkdir(parents=True)
-            archive = release/'subyard-0.21.0-linux-amd64.tar.gz'
-            metadata = release.parent/'candidate.json'
-            payload = b'#!/bin/sh\nprintf "yard-engine 0.21.0\\n"\n'
-            def package(bad_manifest=False):
-                files = {'bin/yard':payload, 'bin/yard-engine':payload}
-                files['runtime-files.sha256'] = ''.join(
-                    f'{"0"*64 if bad_manifest else hashlib.sha256(body).hexdigest()}  {name}\n'
-                    for name,body in files.items()).encode()
-                with tarfile.open(archive,'w:gz') as bundle:
-                    for name,body in files.items():
-                        entry = tarfile.TarInfo(name)
-                        entry.size = len(body)
-                        entry.mode = 0o755 if name.startswith('bin/') else 0o644
-                        bundle.addfile(entry,io.BytesIO(body))
-                metadata.write_text(json.dumps(dict(version='0.21.0',runtime_file=archive.name,
-                    runtime_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())))
-            def prepare():
-                return subprocess.run(['bash','-c','. "$1"; release_candidate_prepare "$2"',
-                    'fixture',str(helper),str(root)],capture_output=True,text=True,timeout=5)
-            package()
-            for _ in range(2):
-                result = prepare()
-                self.assertEqual(result.returncode,0,result.stderr)
-                engine = Path(result.stdout.strip())
-                self.assertEqual(subprocess.check_output([str(engine)],text=True),'yard-engine 0.21.0\n')
-                self.assertFalse((release.parent/'runtime.next').exists())
-            before = engine.read_bytes()
-            archive.write_bytes(archive.read_bytes()+b'tampered')
-            self.assertNotEqual(prepare().returncode,0)
-            self.assertEqual(engine.read_bytes(),before)
-            package(bad_manifest=True)
-            self.assertNotEqual(prepare().returncode,0)
-            package()
-            self.assertEqual(prepare().returncode,0)
-            self.assertFalse((release.parent/'runtime.next').exists())
-
-
 class ControllerPrerequisiteTest(unittest.TestCase):
+    def test_source_only_operations_have_no_sourcing_effects(self):
+        for name in ('release-activation-fixture.sh', 'broker-fixture.sh', 'connection-fixture.sh'):
+            result = subprocess.run(['bash', '-c', '''set -euo pipefail
+before=$(pwd; set +o; trap -p)
+. "$1"
+after=$(pwd; set +o; trap -p)
+[ "$before" = "$after" ]
+[ -z "${READY_STATE+x}" ]
+''', 'fixture', str(GUEST.with_name(name))], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_default_broker_disable_uses_scoped_lifecycle_and_preserves_connection(self):
+        script = source_fixture('broker-fixture.sh')+r'''
+set -euo pipefail
+STATE=$1 failure=$2 operation=$3
+SUBYARD_KEYS_CONSUMER_ROOT=$STATE UNIT_FILE=$STATE/unit
+mkdir -p "$STATE/github"
+printf 'protected connection\n' > "$STATE/github/connection.json"
+touch "$UNIT_FILE" "$STATE/wiring"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+yard() {
+  printf '%s\n' "$*" >> "$STATE/calls"
+  case "$*" in
+    'profile disable github --yes')
+      [ "$failure" != native ] || return 23
+      [ "$failure" = unit ] || rm -- "$UNIT_FILE"
+      [ "$failure" = wiring ] || rm -- "$STATE/wiring"
+      [ "$failure" != connection ] || printf changed > "$STATE/github/connection.json"
+      ;;
+    'profile status github --json')
+      printf '{"enabled":false,"configured":true,"runtime":"%s","ready":false}\n' "$([ "$failure" = status ] && printf ready || printf removed)"
+      ;;
+    *) exit 99 ;;
+  esac
+}
+assert_removed() { [ ! -e "$STATE/wiring" ] || die 'wiring survived'; }
+guest() { [ "$*" = 'id -u dev' ] || [ "$*" = 'id -g dev' ] || exit 99; printf '1000\n'; }
+"$operation"
+'''
+        with tempfile.TemporaryDirectory(prefix='subyard-broker-disable-', dir='/tmp') as temporary:
+            for operation in ('disable_default_broker', 'cleanup_default_broker'):
+                for failure in ('none', 'native', 'unit', 'wiring', 'status', 'connection'):
+                    case = Path(temporary)/operation/failure
+                    result = subprocess.run(['bash', '-c', script, 'fixture', str(case), failure, operation], capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0 if failure == 'none' else 23 if failure == 'native' else 2, result.stderr)
+                    self.assertEqual((case/'calls').read_text().splitlines()[0], 'profile disable github --yes')
+                    if failure == 'none': self.assertEqual((case/'github/connection.json').read_bytes(), b'protected connection\n')
+
     def test_guest_cleanup_reports_failure_independently_of_native_exit_three(self):
-        source = GUEST.with_name('acceptance.sh').read_text()
-        start = source.index('\ncleanup() {')+1
-        cleanup = source[start:source.index('\n}\n',start)+3]
+        cleanup = source_fixture('broker-fixture.sh')
         script = cleanup + r'''
 set -euo pipefail
 MODE=--cleanup UNIT_FILE='' HERMES_PROJECT=owned PROJECT='' STATE='' CHECKPOINT=/missing
 failure=$2
 cleanup_hermes() { [ "$failure" != hermes ]; }
 cleanup_unit() { [ "$failure" != unit ]; }
-cleanup "$1"
+broker_guest_cleanup "$1"
 '''
         for native in (0,3,23):
             for failure in ('none','hermes','unit'):
@@ -123,6 +136,110 @@ cleanup "$1"
                     self.assertEqual(result.returncode,expected,result.stderr)
                     self.assertIn(f'original_exit_code={native} cleanup_exit_code={cleanup_rc} final_exit_code={expected}',result.stderr)
 
+    def test_disable_then_scoped_lifecycle_consumes_explicit_retained_hashes(self):
+        script = source_fixture('broker-fixture.sh')+r'''
+set -euo pipefail
+STATE=$1 failure=$2
+SUBYARD_KEYS_CONSUMER_ROOT=$STATE UNIT_FILE=$STATE/unit HERMES_UNIT=neighbor.service
+mkdir -p "$STATE/github"
+printf 'protected connection\n' > "$STATE/github/connection.json"
+chmod 0600 "$STATE/github/connection.json"
+printf 'operator git identity\n' > "$STATE/gitconfig"
+printf 'opaque neighboring data\n' > "$STATE/opaque"
+printf 'synthetic github\n' > "$STATE/profiles"
+touch "$UNIT_FILE" "$STATE/wiring" "$STATE/running"
+connection_before_lifecycle="$(sha256sum "$STATE/github/connection.json" | awk '{print $1}')"
+opaque_before="$(sha256sum "$STATE/opaque" | awk '{print $1}')"
+die() { printf '%s\n' "$*" >&2; exit 2; }
+setting() { [ "$*" = ENVIRONMENT_PROFILES ] || exit 99; cat "$STATE/profiles"; }
+assert_removed() { [ ! -e "$UNIT_FILE" ] && [ ! -e "$STATE/wiring" ] || die 'wiring survived'; }
+assert_wiring() { [ -e "$UNIT_FILE" ] && [ -e "$STATE/wiring" ] || die 'wiring missing'; }
+wait_status() { [ "$*" = '{"configured":true}' ] || exit 99; }
+systemctl_user() {
+  [ "$*" = 'show neighbor.service -p MainPID --value' ] || exit 99
+  if [ "$failure" = neighbor-restart ] && [ -e "$STATE/scoped-disabled" ]; then printf '322\n'; else printf '321\n'; fi
+}
+hermes_status() {
+  if [ "$failure" = neighbor-disconnect ] && [ -e "$STATE/scoped-disabled" ]; then
+    printf '{"configured":false}'
+  else printf '{"configured":true}'; fi
+}
+hermes_dev() { [ "$1" = sha256sum ] && [ "$2" = "$STATE/opaque" ] || exit 99; sha256sum "$2"; }
+guest() {
+  case "$*" in
+    'mv /home/dev/.gitconfig /home/dev/.gitconfig-scoped-fixture') mv "$STATE/gitconfig" "$STATE/gitconfig-stash" ;;
+    'test ! -e /home/dev/.gitconfig') test ! -e "$STATE/gitconfig" ;;
+    'mv /home/dev/.gitconfig-scoped-fixture /home/dev/.gitconfig') mv "$STATE/gitconfig-stash" "$STATE/gitconfig" ;;
+    *) exit 99 ;;
+  esac
+}
+yard() {
+  printf '%s\n' "$*" >> "$STATE/calls"
+  case "$*" in
+    'profile disable github --yes')
+      rm -f "$UNIT_FILE" "$STATE/wiring" "$STATE/enabled"
+      printf 'synthetic\n' > "$STATE/profiles"
+      if [ -e "$STATE/scoped" ]; then
+        touch "$STATE/scoped-disabled"
+        case "$failure" in
+          connection) printf changed > "$STATE/github/connection.json" ;;
+          neighboring-selection) printf foreign > "$STATE/profiles" ;;
+        esac
+      fi
+      ;;
+    'profile enable github --yes')
+      if [ ! -e "$STATE/running" ]; then
+        [ "$failure" != stopped-accepted ] || return 0
+        [ "$failure" != stopped-selection ] || printf foreign > "$STATE/profiles"
+        return 17
+      fi
+      [ "$failure" != native-enable ] || return 23
+      [ "$failure" != native-enable-three ] || return 3
+      touch "$UNIT_FILE" "$STATE/wiring" "$STATE/enabled"
+      printf 'synthetic github\n' > "$STATE/profiles"
+      [ "$failure" != git-drift ] || printf changed > "$STATE/gitconfig"
+      ;;
+    'profile status github --json')
+      if [ ! -e "$STATE/running" ]; then
+        if [ "$failure" = stopped-status ]; then
+          printf '{"configured":true,"runtime":"ready","ready":true}'
+        else printf '{"configured":true,"runtime":"unavailable","ready":false}'; fi
+      elif [ -e "$STATE/enabled" ]; then
+        printf '{"enabled":true,"configured":true,"runtime":"ready","ready":true}'
+      else printf '{"enabled":false,"configured":true,"runtime":"removed","ready":false}'; fi
+      ;;
+    'stop --yes') rm "$STATE/running" ;;
+    'profile setup github --yes') : ;;
+    'start --yes') touch "$STATE/running"; [ "$failure" != opaque ] || printf changed > "$STATE/opaque" ;;
+    *) exit 99 ;;
+  esac
+}
+unset connection_hash
+disable_default_broker
+[ -z "${connection_hash+x}" ]
+[ "$failure" != pre-scoped-connection ] || printf changed > "$STATE/github/connection.json"
+touch "$STATE/scoped"
+verify_scoped_broker_lifecycle "$connection_before_lifecycle" "$STATE/opaque" "$opaque_before"
+[ -z "${connection_hash+x}" ]
+cmp -s <(printf 'operator git identity\n') "$STATE/gitconfig"
+'''
+        with tempfile.TemporaryDirectory(prefix='subyard-scoped-broker-', dir='/tmp') as temporary:
+            for failure in ('none', 'native-enable', 'native-enable-three', 'git-drift', 'neighboring-selection',
+                            'neighbor-restart', 'neighbor-disconnect', 'connection',
+                            'pre-scoped-connection', 'stopped-accepted', 'stopped-selection', 'stopped-status', 'opaque'):
+                with self.subTest(failure=failure):
+                    case = Path(temporary)/failure
+                    result = subprocess.run(['bash', '-c', script, 'fixture', str(case), failure],
+                                            capture_output=True, text=True, timeout=5)
+                    expected = {'none':0, 'native-enable':23, 'native-enable-three':3}.get(failure, 2)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if failure == 'none':
+                        self.assertEqual((case/'github/connection.json').read_bytes(), b'protected connection\n')
+                        self.assertEqual((case/'profiles').read_text(), 'synthetic github\n')
+                        calls = (case/'calls').read_text().splitlines()
+                        self.assertEqual(calls.count('profile enable github --yes'), 4)
+                        self.assertIn('profile setup github --yes', calls)
+
     def test_empty_python_selection_is_not_green(self):
         result = subprocess.run(['python3','-B',__file__,'-k','__absent_required_case__'],
                                 capture_output=True,text=True,timeout=5)
@@ -130,9 +247,7 @@ cleanup "$1"
         self.assertIn('empty or skipped required fixture selection',result.stderr)
 
     def test_broker_controller_cleanup_preserves_original_and_reports_release_failure(self):
-        source = GUEST.with_name('acceptance.sh').read_text()
-        start = source.index('  controller_cleanup() {')
-        cleanup = source[start:source.index('\n  }\n',start)+5]
+        cleanup = source_fixture('broker-fixture.sh')
         script = cleanup + r'''
 set -euo pipefail
 prepared=0 cleanup_failed=0 LEASE_KEEPER_PID='' LOCAL_TEMP=''
@@ -140,9 +255,9 @@ declare -A GUEST_DIRS=()
 phase_end() { :; }
 phase_marker() { :; }
 release_lease() { return 7; }
-controller_cleanup "$1"
+broker_controller_cleanup "$1"
 '''
-        for native in (0,23,124,130,143):
+        for native in (0,3,23,124,130,143):
             with self.subTest(native=native):
                 result = subprocess.run(['bash','-c',script,'fixture',str(native)],
                                         capture_output=True,text=True,timeout=5)
@@ -150,9 +265,7 @@ controller_cleanup "$1"
                 self.assertIn('cleanup_exit_code=3',result.stderr)
 
     def test_actual_controller_cleanup_preserves_failure_timeout_and_signal(self):
-        source = GUEST.with_name('connection-sync.sh').read_text()
-        start = source.index('cleanup_acceptance() {')
-        cleanup = source[start:source.index('\n}\n', start)+3]
+        cleanup = source_fixture('connection-fixture.sh')
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             script = cleanup + r'''
 set -euo pipefail
@@ -162,7 +275,7 @@ fixture() { return 7; }
 cleanup_on_exit() { exit "$2"; }
 cleanup_acceptance "$2"
 '''
-            for native in (0, 23, 124, 130, 143):
+            for native in (0, 3, 23, 124, 130, 143):
                 with self.subTest(native=native):
                     result = subprocess.run(['bash', '-c', script, 'fixture', temporary, str(native)],
                                             capture_output=True, text=True, timeout=5)
@@ -210,18 +323,13 @@ cleanup_acceptance "$2"
 
 class ActivationTimingTest(unittest.TestCase):
     def test_actual_readiness_and_cleanup_preserve_exit_and_privacy(self):
-        source = GUEST.read_text()
-        functions = [next(line for line in source.splitlines() if line.startswith('stage() {'))]
-        functions.append(next(line for line in source.splitlines() if line.startswith('READY_STATE=not-started ')))
-        for name in ('ready', 'cleanup'):
-            start = source.index(name+'() {')
-            functions.append(source[start:source.index('\n}\n', start)+3])
+        functions = source_fixture('release-activation-fixture.sh')+'release_activation_initialize_readiness\n'
         with tempfile.TemporaryDirectory(prefix='subyard-release-activation.', dir='/tmp') as temporary:
             root = Path(temporary)
             canary = 'PRIVATE_READINESS_CANARY'
             malformed_exit = subprocess.run(['jq', '-e', '.outcome.status == "ready"'],
                                             input=canary, capture_output=True, text=True).returncode
-            script = '\n'.join(functions) + r'''
+            script = functions + r'''
 set -euo pipefail
 STATE=$1/state calls=$1/calls case_name=$2
 mkdir -m 0700 "$STATE"
@@ -244,7 +352,7 @@ yard() {
     *) printf '{"outcome":{"status":"ready","code":"ready","warnings":null},"message":"PRIVATE_READINESS_CANARY"}' ;;
   esac
 }
-trap cleanup EXIT
+trap release_activation_cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 if [ "$case_name" = closed-stderr ]; then exec 2>&-; exit 7; fi
@@ -284,9 +392,7 @@ ready
 
 class ConnectionFixtureInitTest(unittest.TestCase):
     def test_auto_sync_failure_capture_preserves_start_exit_and_privacy(self):
-        source = (Path(__file__).parent/'e2e/connection-sync-guest.sh').read_text()
-        start = source.index('start_auto_sync() {')
-        function = source[start:source.index('\n}\n', start)+3]
+        function = source_fixture('connection-fixture.sh')
         with tempfile.TemporaryDirectory(prefix='subyard-connection-auto-', dir='/tmp') as temporary:
             root = Path(temporary)
             calls = root/'calls'
@@ -378,10 +484,6 @@ start_auto_sync
                             self.assertIn('exit_code='+('124' if case == 'timeout' else '17'), result.stderr)
 
     def test_user_manager_group_membership_requires_verified_native_snapshot(self):
-        source = (Path(__file__).parent/'e2e/connection-sync-guest.sh').read_text()
-        program = source.split("<<'PY' >&2", 1)[1].split('\n', 1)[1].split('\nPY\n', 1)[0]
-        function = next(node for node in ast.parse(program).body
-                        if isinstance(node, ast.FunctionDef) and node.name == 'manager_group')
         uid = os.getuid()
         for case, groups, expected in (
                 ('present', '111 222', True), ('absent', '222', False),
@@ -397,10 +499,10 @@ start_auto_sync
                 elif case == 'different-manager':
                     collect.side_effect = [({'capture':'ok'}, b'42\n'), ({'capture':'ok'}, b'43\n')]
                 reader = mock.mock_open(read_data=f'Name:\tsystemd\nUid:\t{uid} {uid} {uid} {uid}\nGroups:\t{groups}\n')
-                namespace = {'collect':collect, 'os':os, 'open':reader,
-                             'grp':mock.Mock(getgrnam=mock.Mock(return_value=mock.Mock(gr_gid=111)))}
-                exec(compile(ast.Module(body=[function], type_ignores=[]), '<fixture>', 'exec'), namespace)
-                self.assertEqual(namespace['manager_group'](), expected)
+                with mock.patch.object(diagnostic, 'collect', collect), \
+                     mock.patch.object(diagnostic, 'open', reader, create=True), \
+                     mock.patch.object(diagnostic.grp, 'getgrnam', return_value=mock.Mock(gr_gid=111)):
+                    self.assertEqual(diagnostic.manager_group(), expected)
                 for call in collect.call_args_list:
                     self.assertEqual(call.args[0], ['systemctl', 'show', f'user@{uid}.service',
                                                    '--property=MainPID', '--value'])
@@ -408,14 +510,6 @@ start_auto_sync
                     reader.assert_not_called()
 
     def test_installer_requires_reconciled_platform_and_refreshed_native_api(self):
-        source = (Path(__file__).parent/'e2e/connection-sync-guest.sh').read_text()
-        start = source.index('fresh() {' if 'fresh() {' in source else 'yard() {')
-        wrapper = source[start:source.index('\n}\n', start)+3]
-        start = source.index('    # The supported installer activates')
-        prepare = source[start:source.index('\n    context\n', start)]
-        version_declaration = next((line for line in source.splitlines() if line.startswith('VERSION=')), '')
-        package = next(line for line in source.splitlines() if '"$ROOT/dev/package-engine.sh"' in line)
-        guard = next(line for line in source.splitlines() if 'case "$runtime" in' in line)
         with tempfile.TemporaryDirectory(prefix='subyard-connection-platform-', dir='/tmp') as temporary:
             root = Path(temporary)
             (root/'dev/e2e').mkdir(parents=True)
@@ -452,22 +546,30 @@ elif name in ('incus', 'subyard-install.sh'):
     else:
         assert os.environ['YARD_RELEASE_VERSION'] == (root/'version').read_text()
         (root/'installed').touch()
+        runtime=root/'data/runtime/releases'/(os.environ['YARD_RELEASE_VERSION']+'-fixture')
+        (runtime/'bin').mkdir(parents=True,exist_ok=True)
+        (runtime/'bin/yard').write_text('installed launcher')
+        import hashlib
+        (runtime/'runtime-files.sha256').write_text(hashlib.sha256(b'installed launcher').hexdigest()+'  bin/yard\\n')
+        (root/'bin/yard').symlink_to(runtime/'bin/yard')
 else: sys.exit(99)
 ''')
             driver.chmod(0o700)
             for name in ('id', 'sg', 'incus', 'subyard-install.sh'):
                 (root/'bin'/name).symlink_to(driver)
             (root/'dev/package-engine.sh').symlink_to(driver)
-            prepare = prepare.replace('/usr/bin/incus', str(root/'bin/incus'))
             environment = dict(os.environ, FIXTURE_ROOT=str(root), PATH=str(root/'bin')+':/usr/bin:/bin')
             for failure, status, expected in (('', 0, ['platform', 'incus', 'subyard-install.sh']),
                     ('platform', 23, ['platform']), ('api', 37, ['platform', 'incus'])):
                 with self.subTest(failure=failure):
-                    for name in ('calls', 'platform', 'installed'):
+                    for name in ('calls', 'platform', 'installed', 'bin/yard'):
                         (root/name).unlink(missing_ok=True)
-                    script = ('set -euo pipefail\nROOT="$FIXTURE_ROOT" STATE="$FIXTURE_ROOT" RELEASE="$FIXTURE_ROOT/bin"\n'
-                        'fail() { exit 43; }\n'+version_declaration+'\n'+wrapper+package+'\n'+prepare
-                        +'\nruntime="$STATE/data/runtime/releases/$(cat "$FIXTURE_ROOT/version")-fixture/bin/yard"\n'+guard)
+                    script = (source_fixture('connection-fixture.sh')+
+                        'set -euo pipefail\nROOT="$FIXTURE_ROOT" STATE="$FIXTURE_ROOT" RELEASE="$FIXTURE_ROOT/bin"\n'
+                        'VERSION=0.21.2-github-connection-e2e\n'
+                        'fail() { exit 43; }\ncontext() { :; }\n'
+                        '"$ROOT/dev/package-engine.sh" --output-dir "$RELEASE" --version "$VERSION" --arch amd64\n'
+                        'prepare_connection_runtime "$FIXTURE_ROOT/bin/incus"\n')
                     result = subprocess.run(['bash', '-c', script],
                         env=dict(environment, FIXTURE_FAILURE=failure), capture_output=True, text=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
@@ -480,11 +582,8 @@ else: sys.exit(99)
                     self.assertTrue(numbers > (0, 11, 0) or (numbers == (0, 11, 0) and '-' not in version))
 
     def test_fresh_repeat_and_failed_init_ownership(self):
-        source = (Path(__file__).parent/'e2e/connection-sync-guest.sh').read_text()
-        start = source.index('init() {')
-        init = source[start:source.index('\n}\n', start) + 3]
-        start = source.index('  cleanup)\n')
-        cleanup = 'case cleanup in\n' + source[start:source.index("\n  *) fail 'unknown fixture phase'", start)] + '\nesac\n'
+        init = source_fixture('connection-fixture.sh')
+        cleanup = '\ncleanup_connection_fixture\n'
         with tempfile.TemporaryDirectory(prefix='subyard-connection-init-', dir='/tmp') as temporary:
             for failure in (0, 23):
                 with self.subTest(failure=failure):
