@@ -11,16 +11,39 @@ cp "$ROOT/tests/helpers/release-candidate.sh" "$root/tests/helpers/release-candi
 cat > "$root/dev/package-engine.sh" <<'SH'
 #!/usr/bin/env bash
 touch "$ANDROID_CANDIDATE_TEST_BUILD_MARKER"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --version ]; then printf '%s\n' "$2" > "$ANDROID_CANDIDATE_TEST_VERSION"; break; fi
+  shift
+done
 exit 17
 SH
 chmod 0755 "$root/dev/package-engine.sh"
 export ANDROID_CANDIDATE_TEST_BUILD_MARKER="$tmp/built"
+export ANDROID_CANDIDATE_TEST_VERSION="$tmp/fallback-version"
 rc=0
 android_candidate_install "$root" "$tmp/state" > "$tmp/output" 2> "$tmp/error" || rc=$?
 [ "$rc" -eq 17 ]
 [ -f "$tmp/built" ]
 [ ! -s "$tmp/output" ]
 [ ! -e "$tmp/state/runtime" ]
+# Execute the product source-version policy against the helper's selected version.
+cat > "$tmp/source-version_test.go" <<'GO'
+package releaseruntime
+import ("os"; "testing")
+func TestAndroidFixtureSourceVersion(t *testing.T) {
+    if supportedSourceVersion("0.1.0-android.e2e") { t.Fatal("retired fixture version was admitted") }
+    if !supportedSourceVersion(os.Getenv("ANDROID_CANDIDATE_FIXTURE_VERSION")) { t.Fatal("Android fixture version is below the supported source floor") }
+}
+GO
+python3 - "$ROOT" "$tmp" <<'PY'
+import json, pathlib, sys
+root, temporary = map(pathlib.Path, sys.argv[1:])
+(temporary/'overlay.json').write_text(json.dumps({'Replace': {
+    str(root/'internal/adapters/releaseruntime/android_fixture_source_version_test.go'): str(temporary/'source-version_test.go')}}))
+PY
+chmod 0600 "$tmp/source-version_test.go" "$tmp/overlay.json"
+(cd "$ROOT" && ANDROID_CANDIDATE_FIXTURE_VERSION="$(cat "$tmp/fallback-version")" \
+  go test -overlay "$tmp/overlay.json" ./internal/adapters/releaseruntime -run '^TestAndroidFixtureSourceVersion$' -count=1 -v)
 rm "$tmp/built"
 # A supplied invalid candidate must never silently rebuild from source.
 printf '{}' > "$root/.subyard-acceptance/candidate.json"

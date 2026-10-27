@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "architecture": "x86_64",
+  "android_api": "36",
+  "build_tools": "36.0.0",
+  "image_policy": "latest-stable",
+  "jdk": {
+    "major": "17",
+    "version": "17.0.21+9",
+    "url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.21_9.tar.gz",
+    "digest_algorithm": "sha256",
+    "digest": "8b9b611d917e3dfd8419d3566b5949226f69b052fed7e109c1368add1dfe8711"
+  },
+  "sdk": {
+    "platforms;android-36": {
+      "version": "2.0.0",
+      "url": "https://dl.google.com/android/repository/platform-36_r02.zip",
+      "digest_algorithm": "sha1",
+      "digest": "2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576"
+    },
+    "platforms;android-35": {
+      "version": "2.0.0",
+      "url": "https://dl.google.com/android/repository/platform-35_r02.zip",
+      "digest_algorithm": "sha1",
+      "digest": "0bb560a90a7a2cbd0dd8348224d518b638fe7949"
+    },
+    "platforms;android-34": {
+      "version": "2.0.0",
+      "url": "https://dl.google.com/android/repository/platform-34-ext7_r02.zip",
+      "digest_algorithm": "sha1",
+      "digest": "f09b07da8aea238a81b71d6fedb815e13aa13e58"
+    },
+    "build-tools;36.0.0": {
+      "version": "36.0.0",
+      "url": "https://dl.google.com/android/repository/build-tools_r36_linux.zip",
+      "digest_algorithm": "sha1",
+      "digest": "b0b6376977657e8ad9b969bacf4093601da2c6fb"
+    },
+    "cmdline-tools;latest": {
+      "version": "23.0.0",
+      "url": "https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip",
+      "digest_algorithm": "sha1",
+      "digest": "e025545c62a8e64c7559119566a569fb1dec5f60"
+    },
+    "platform-tools": {
+      "version": "37.0.1",
+      "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip",
+      "digest_algorithm": "sha1",
+      "digest": "477254aa5f903c15cf51001717bdf347fb6b53e0"
+    },
+    "emulator": {
+      "version": "37.2.12",
+      "url": "https://dl.google.com/android/repository/emulator-linux_x64-16428233.zip",
+      "digest_algorithm": "sha1",
+      "digest": "cd7362ea55dfb86a418958138dc396e74165dd01"
+    }
+  }
+}

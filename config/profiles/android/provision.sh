@@ -12,16 +12,20 @@ case "${1:-}" in
 esac
 [ "$#" -eq 0 ] || { printf 'android provision: unexpected argument\n' >&2; exit 2; }
 
-ANDROID_API="${ANDROID_API:-36}"
-JDK_VERSION="${JDK_VERSION:-17}"
-BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-36.0.0}"
+PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_MANIFEST="$PROFILE_DIR/toolchain.json"
+# Selected defaults come from profile configuration, including direct hook invocations.
+selection="$(python3 "$PROFILE_DIR/toolchain.py" defaults "$TOOLCHAIN_MANIFEST")"
+IFS=$'\t' read -r ANDROID_API JDK_VERSION <<< "$selection"
+export ANDROID_API JDK_VERSION
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/srv/cache/android-sdk}"
 # profile.conf's GRADLE_USER_HOME is for L2; L1 agents share this yard-local cache.
 GRADLE_USER_HOME="${YARD_GRADLE_USER_HOME:-/srv/cache/gradle}"
 DEV_USER="${DEV_USER:-dev}"
 JDK_HOME="/opt/jdk-${JDK_VERSION}"
 PUBLIC_ROOT="${ANDROID_PUBLIC_ROOT:-$ANDROID_SDK_ROOT/.subyard}"
-PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Validate the complete selection before any provision side effects.
+toolchain_plan="$(python3 "$PROFILE_DIR/toolchain.py" plan "$TOOLCHAIN_MANIFEST")"
 emulator_libraries=(libpulse0 libnss3)
 skill_delivery() {
   local helper="$PROFILE_DIR/agent-skills.py"
@@ -48,12 +52,7 @@ if [ "$check_only" -eq 1 ]; then
   jdk_home="$(rooted "$JDK_HOME")"
   sdk_root="$(rooted "$ANDROID_SDK_ROOT")"
   gradle_root="$(rooted "$GRADLE_USER_HOME")"
-  [ -x "$jdk_home/bin/java" ] || changed=1
-  [ -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ] || changed=1
-  [ -x "$sdk_root/platform-tools/adb" ] || changed=1
-  [ -d "$sdk_root/platforms/android-${ANDROID_API}" ] || changed=1
-  [ -d "$sdk_root/build-tools/${BUILD_TOOLS_VERSION}" ] || changed=1
-  [ -x "$sdk_root/emulator/emulator" ] || changed=1
+  python3 "$PROFILE_DIR/toolchain.py" check "$TOOLCHAIN_MANIFEST" "$root_prefix" || changed=1
   expected_owner="$(id -u "$DEV_USER"):$(id -g "$DEV_USER")"
   [ -d "$gradle_root" ] && [ ! -L "$gradle_root" ] \
     && [ "$(stat -c '%u:%g' "$gradle_root" 2>/dev/null)" = "$expected_owner" ] || changed=1
@@ -92,7 +91,7 @@ try:
     actual = json.loads(pathlib.Path(path).read_text())
     expected = dict(sdk_root=sdk, state_root='/var/lib/subyard-android', public_root=public,
                     size=int(size), api=int(api), device=device, variant=variant, abi=abi,
-                    gpu=gpu, dev_user=user, runtime_user='subyard-android', java_home=java)
+                    gpu=gpu, dev_user=user, runtime_user='subyard-android', java_home=java, image_policy='latest-stable')
     if actual != expected:
         raise ValueError('configuration drift')
 except (OSError, ValueError):
@@ -130,11 +129,15 @@ android_download() {
     curl --fail --silent --location --retry 3 --retry-all-errors --retry-delay 1 \
       --connect-timeout 15 --max-time 120 --retry-max-time 300 \
       --output "$2" "$1" || status=$?
-  [ "$status" -ne 0 ] || return 0
   # This is the final attempt's output, not aggregate progress across retries.
   if [ -f "$2" ] && [ ! -L "$2" ]; then
     output_bytes="$(stat -c %s -- "$2" 2>/dev/null)" || output_bytes=unknown
     case "$output_bytes" in ''|*[!0-9]*) output_bytes=unknown ;; esac
+  fi
+  if [ "$status" -eq 0 ]; then
+    printf 'android provision: download stage=%s state=complete elapsed_seconds=%s archive_bytes=%s\n' \
+      "$stage" "$((SECONDS - started))" "$output_bytes" >&2
+    return 0
   fi
   printf 'android provision: download stage=%s state=failed exit=%s elapsed_seconds=%s last_output_bytes=%s\n' \
     "$stage" "$status" "$((SECONDS - started))" "$output_bytes" >&2
@@ -164,51 +167,31 @@ exec 9>/run/lock/subyard-android/sdk.lock
 flock -w 30 9 || { printf 'android provision: SDK is in use; retry after leases finish\n' >&2; exit 1; }
 export SUBYARD_ANDROID_SDK_LOCKED=1
 
-# 1. JDK — Debian 13 has no openjdk-17; Temurin from Adoptium (redirects to the current GA).
-if [ ! -x "$JDK_HOME/bin/java" ]; then
-  rm -rf "$JDK_HOME"; mkdir -p "$JDK_HOME"
-  android_download \
-    "https://api.adoptium.net/v3/binary/latest/${JDK_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse" /tmp/jdk.tgz jdk
-  tar -xzf /tmp/jdk.tgz -C "$JDK_HOME" --strip-components=1; rm -f /tmp/jdk.tgz
-fi
-export JAVA_HOME="$JDK_HOME" PATH="$JDK_HOME/bin:$PATH"
-
-# 2. Shared SDK is a root-owned build input; Gradle remains the developer cache.
+# Selected archives converge under the same exclusive lock used by image/read leases.
+# A receipt alone is insufficient: the helper verifies installed revision and payload bytes.
 if [ -e "$ANDROID_SDK_ROOT" ] && { [ -L "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; }; then
   printf 'android provision: SDK root is not a managed directory\n' >&2; exit 1
 fi
 install -d -o root -g root "$ANDROID_SDK_ROOT"
 install -d -o "$DEV_USER" -g "$DEV_USER" "$GRADLE_USER_HOME"
+export JAVA_HOME="$JDK_HOME" PATH="$JDK_HOME/bin:$PATH"
 export ANDROID_HOME="$ANDROID_SDK_ROOT" ANDROID_SDK_ROOT
-
-# 3. cmdline-tools — CMDLINE_TOOLS_URL, else newest from Google's manifest (numeric sort, not lexical).
-if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-  tmp="$(mktemp -d)"
-  url="${CMDLINE_TOOLS_URL:-}"
-  if [ -z "$url" ]; then
-    android_download https://dl.google.com/android/repository/repository2-3.xml "$tmp/repository.xml" catalog \
-      || { status=$?; rm -rf -- "$tmp"; exit "$status"; }
-    rev="$(grep -oE 'commandlinetools-linux-[0-9]+_latest\.zip' "$tmp/repository.xml" | sort -t- -k3 -n | tail -1)"
-    url="https://dl.google.com/android/repository/${rev}"
+started=$SECONDS
+tmp="$(mktemp -d)"
+trap 'rm -rf -- "$tmp"' EXIT
+while IFS=$'\t' read -r component url; do
+  if python3 "$PROFILE_DIR/toolchain.py" component-check "$TOOLCHAIN_MANIFEST" "$component"; then
+    printf 'android provision: component=%s state=reused\n' "$component" >&2
+    continue
   fi
-  android_download "$url" "$tmp/clt.zip" cmdline-tools \
-    || { status=$?; rm -rf -- "$tmp"; exit "$status"; }
-  unzip -q "$tmp/clt.zip" -d "$tmp/x"
-  install -d "$ANDROID_SDK_ROOT/cmdline-tools"
-  mv "$tmp/x/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"; rm -rf "$tmp"
-fi
-SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-
-# 4. Licenses + components (idempotent).
-packages=()
-[ -x "$ANDROID_SDK_ROOT/platform-tools/adb" ] || packages+=(platform-tools)
-[ -d "$ANDROID_SDK_ROOT/platforms/android-${ANDROID_API}" ] || packages+=("platforms;android-${ANDROID_API}")
-[ -d "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" ] || packages+=("build-tools;${BUILD_TOOLS_VERSION}")
-[ -x "$ANDROID_SDK_ROOT/emulator/emulator" ] || packages+=(emulator)
-if [ "${#packages[@]}" -ne 0 ]; then
-  yes 2>/dev/null | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-  "$SDKMANAGER" "${packages[@]}" >/dev/null
-fi
+  android_download "$url" "$tmp/archive" "$component"
+  python3 "$PROFILE_DIR/toolchain.py" install "$TOOLCHAIN_MANIFEST" "$component" "$tmp/archive"
+  rm -f -- "$tmp/archive"
+done <<< "$toolchain_plan"
+printf 'android provision: toolchain elapsed_seconds=%s installed_bytes=%s\n' \
+  "$((SECONDS - started))" "$(du -sb "$ANDROID_SDK_ROOT" "$JDK_HOME" | awk '{total += $1} END {print total}')" >&2
+rm -rf -- "$tmp"
+trap - EXIT
 
 # 5. sdkmanager runs as root; leases download system images into private state instead.
 chown -R root:root "$ANDROID_SDK_ROOT" "$JDK_HOME"

@@ -19,7 +19,7 @@ The tooling program never changes which exact release owns a transition.
 
 ## Toolchain
 
-`go.mod` is authoritative: the module's minimum language baseline is Go 1.25.6 and its `toolchain`
+`go.mod` is authoritative: the module's minimum language baseline is Go 1.26.0 and its `toolchain`
 directive selects Go 1.26.6 for development and CI. A recent Go bootstrap can fetch that toolchain
 automatically. CI uses `actions/setup-go` with `go-version-file: go.mod`; it does not carry a second
 version constant.
@@ -181,9 +181,10 @@ and serialize publication with setup, updates, and full uninstall.
 `subyard-<version>-linux-<arch>.tar.gz` runtime under `.build/release/`, each with a detached SHA-256,
 compatibility manifest and provenance. Runtime releases use the
 [prepare → accept → publish flow](reference/release-publication.md): CI builds exact assets,
-acceptance checks core and every shipped profile on disposable VMs, and publication verifies the
-immutable release. [Live external checks](reference/release-publication.md#external-checks) are
-optional; required VM checks remain mandatory. `yard update`
+acceptance defaults to host-free/local checks, and publication verifies the immutable release.
+Long core/profile VM checks run only on explicit request (`accept --with-vms --slots N` or a
+collector `--only` selection); unrequested checks stay `not-run`.
+[Live external checks](reference/release-publication.md#external-checks) are optional. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable
 release directory and atomically rotates
 `current`/`previous`. See [release migrations](control-plane.md#release-migrations) for the runtime

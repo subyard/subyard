@@ -358,6 +358,34 @@ def attribution(args):
     return dict(yard=yard, project=project, run=secrets.token_hex(8), purpose=args.purpose)
 
 
+def telemetry_correlation(owner, allocation=None, token=None):
+    """An optional local observer; no telemetry field changes the native request."""
+    if not os.environ.get('SUBYARD_AGENT_RUN_ID') or not os.environ.get('SUBYARD_TELEMETRY_DATA_DIR'):
+        return
+    helper = Path('/usr/local/lib/subyard-telemetry/broker-correlation.py')
+    if not helper.is_file():
+        return
+    try:
+        body = dict(kind='android', owner_id=owner['yard'], yard_id=owner['yard'],
+                    project_id=owner['project'], correlation_id=owner['run'], phase='held' if allocation else 'request')
+        if allocation:
+            import hashlib
+            route = dict(control=CONTROL, capability=hashlib.sha256(
+                ('subyard-observer/v1:' + token).encode()).hexdigest())
+            command = transport()
+            if command:
+                if (len(command) == 9 and command[0:2] == ['incus', 'exec'] and command[3] == '--project'
+                        and command[5:] == ['--', 'python3', '/usr/local/lib/subyard-android/client.py', '_wire']):
+                    route.update(instance=command[2], project=command[4])
+                else:
+                    return  # A transport requiring a new capability is explicitly unsupported.
+            body.update(slot_id=allocation['slot_id'], resource_generation=allocation['generation'], transport=route)
+        subprocess.run([sys.executable, '-B', str(helper)], input=json.dumps(body).encode(), timeout=0.5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def requester_identity(pid):
     if pid <= 1:
         return None
@@ -374,6 +402,7 @@ def acquire(args, token, requester_alive=lambda: True):
                if (value := getattr(args, key, None)) is not None}
     deadline = time.monotonic() + args.wait
     owner = attribution(args)
+    telemetry_correlation(owner)
     while True:
         if not requester_alive():
             raise Error('owner', 'requesting session ended')
@@ -397,6 +426,7 @@ def acquire(args, token, requester_alive=lambda: True):
             rpc('renew', token=token)
             last_renew = args.last_renew = time.monotonic()
         if result['state'] == 'held':
+            telemetry_correlation(owner, result, token)
             return result
         time.sleep(0.5)
 

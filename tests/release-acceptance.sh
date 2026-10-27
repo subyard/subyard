@@ -27,7 +27,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture_checkout(directory):
+def fixture_checkout(directory, optional_vms=False):
     checkout = directory / "checkout"
     for name in ("dev/agent-e2e.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = checkout / name
@@ -63,6 +63,8 @@ for filename in (f"yard-{version}-linux-ARCH", f"subyard-{version}-linux-ARCH.ta
 (directory / "subyard-install.sh").write_text("fixture installer\\n")
 PY_PROVENANCE
 '''.replace("ARCH", {"x86_64": "amd64", "aarch64": "arm64"}[m.platform.machine()]))
+    if optional_vms:
+        shutil.copy2(root / "dev/release-acceptance.py", checkout / "dev/release-acceptance.py")
     return checkout
 
 
@@ -103,6 +105,147 @@ class TestAcceptance(unittest.TestCase):
             m.save(output, receipt)
             result = subprocess.run(['bash',str(runner),'--preflight'], env=env, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
+
+    def test_fast_default_keeps_vm_inventory_honest_and_source_bound(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory, optional_vms=True)
+            output = directory / "candidate"
+            source, receipt = prepare_fixture(checkout, output)
+            live = [name for name in receipt["checks"] if m.is_live(name)]
+            self.assertTrue(live)
+            self.assertTrue(all(receipt["checks"][name] == m.OPTIONAL_VM_NOT_RUN for name in live))
+            frozen = (output / "receipt.json").read_bytes()
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                report = m.preflight(output, slots=[1])
+                requested = m.preflight(output, slots=[1], with_vms=True)
+            self.assertEqual((output / "receipt.json").read_bytes(), frozen)
+            self.assertTrue(all(not item["selected"] and not item["required"] for item in report["checks"] if item["physical"]))
+            self.assertTrue(all(item["selected"] and item["required"] for item in requested["checks"] if item["physical"]))
+            self.assertEqual(report["capacity_summary"]["planning"], "not-required")
+            calls, execute = [], m.execute
+            def local(name, command, root, output, env, slot=None):
+                self.assertFalse(m.is_live(name), "slots alone dispatched a VM")
+                calls.append(name)
+                result = execute(name, ["true"], root, output, env)
+                result["command"] = m.command_identity(command, root)
+                return result
+            with patch.object(m, "execution_environment", return_value=receipt["environment"]), patch.object(m, "execute", side_effect=local):
+                self.assertEqual(m.run_checks(output, [1], [], False), 0)
+                self.assertEqual(m.run_checks(output, [1], [], False, exclude=live), 0)
+                self.assertEqual(m.run_checks(output, [], ["verify"], False), 0)
+            self.assertEqual(calls, ["verify", "shellcheck", "local-adapters", "compatibility"])
+            _, receipt = m.load_bound(output)
+            self.assertEqual(receipt["result"], "passed")
+            self.assertTrue(all(receipt["checks"][name] == m.OPTIONAL_VM_NOT_RUN for name in live))
+            self.assertEqual(set(receipt["profile_results"].values()), {"not-run"})
+            for name, broken in ((live[0], {**m.OPTIONAL_VM_NOT_RUN, "log_sha256": "a" * 64}),
+                                 ("verify", m.OPTIONAL_VM_NOT_RUN.copy())):
+                original = receipt["checks"][name]
+                receipt["checks"][name] = broken
+                m.save(output, receipt)
+                with self.assertRaisesRegex(ValueError, "optional VM"):
+                    m.load_bound(output)
+                receipt["checks"][name] = original
+            m.save(output, receipt)
+            # Historical source cannot gain the new policy by editing its receipt.
+            legacy = fixture_checkout(directory / "legacy")
+            legacy_output = directory / "legacy-candidate"
+            _, old = prepare_fixture(legacy, legacy_output)
+            old["checks"][live[0]] = m.OPTIONAL_VM_NOT_RUN.copy()
+            m.save(legacy_output, old)
+            with self.assertRaisesRegex(ValueError, "frozen policy"):
+                m.load_bound(legacy_output)
+
+    def test_optional_vm_reset_cannot_erase_retained_attempt_or_request(self):
+        for state in ("failed", "attempt-only", "requested", "requested-excluded"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                checkout = fixture_checkout(directory, optional_vms=True)
+                runner = checkout / "config/profiles/sample/tests/e2e/acceptance.sh"
+                runner.write_text("#!/bin/bash\nexit 23\n")
+                output = directory / "candidate"
+                source, receipt = prepare_fixture(checkout, output)
+                name = "profile:sample/one"
+                if state in ("failed", "attempt-only"):
+                    command = m.commands(source, "test", receipt["profiles"])[name]
+                    result = m.execute(name, command, source, output, m.clean_environment())
+                    self.assertEqual(result["exit_code"], 23)
+                    result["execution_environment"] = receipt["environment"]
+                    result["original_attempt"] = m.completed_attempt(output, source, receipt, name, result)
+                    receipt["checks"][name] = result
+                    m.save(output, receipt)
+                else:
+                    with patch.object(m, "execution_environment", return_value=receipt["environment"]):
+                        m.STOP.set()
+                        try:
+                            self.assertEqual(m.run_checks(output, [1], [name], False,
+                                exclude=[name] if state == "requested-excluded" else []), 1)
+                        finally:
+                            m.STOP.clear()
+                    receipt = m.load_bound(output)[1]
+                    self.assertEqual(receipt["checks"][name], {"status": "pending"})
+                    (output / "events.jsonl").unlink()  # The invocation alone retains this request.
+                if state == "attempt-only":
+                    (output / result["log"]).unlink()
+                    (output / "events.jsonl").unlink()
+                receipt["checks"][name] = m.OPTIONAL_VM_NOT_RUN.copy()
+                m.save(output, receipt)
+                before = (output / "receipt.json").read_bytes()
+                with self.assertRaisesRegex(ValueError, "optional VM.*(request|execution|attempt)"):
+                    m.load_bound(output)
+                self.assertEqual((output / "receipt.json").read_bytes(), before)
+
+    def test_optional_vm_history_fails_closed_on_corrupt_retained_records(self):
+        name = "profile:sample/one"
+        for filename, value in (("events.jsonl", "[]\n"), ("events.jsonl", '{"checks":null}\n'),
+                                ("runs/sample.json", '{"schema_version":1,"selected":null}'),
+                                ("runs/sample.json", '{"schema_version":1,"selected":[],"requested":42}'),
+                                ("attempts/sample.json", "{}"), ("events.jsonl", '{"event":')):
+            with self.subTest(filename=filename, value=value), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                path = output / filename
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(value)
+                with self.assertRaises(ValueError):
+                    m.validate_optional_vm_history(output, {name})
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            m.event(output, "run-start", checks=[name])
+            with self.assertRaisesRegex(ValueError, "previous request"):
+                m.validate_optional_vm_history(output, {name})
+
+    def test_requested_vm_remains_required_after_stop_exclusion_or_failed_attempt(self):
+        # Scheduler fixture: the real binding and immutable attempts are covered above and below.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        for mode in ("only", "with-vms", "first", "excluded", "failed", "blocked", "running", "malformed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                name = "p0-release-smoke"
+                vm = m.OPTIONAL_VM_NOT_RUN.copy()
+                if mode in ("failed", "blocked", "running"):
+                    vm = {"status": mode}
+                elif mode == "malformed":
+                    vm["exit_code"] = 0
+                receipt = {"version": "test", "source_fingerprint": "a" * 64,
+                    "candidate_bundle_sha256": "b" * 64, "profiles": {}, "external_obligations": {},
+                    "environment": {}, "checks": {"verify": {"status": "passed"}, name: vm}}
+                with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                     patch.object(m, "execution_environment", return_value={}), \
+                     patch.object(m, "commands", return_value={key: ["true"] for key in receipt["checks"]}), \
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "execute", side_effect=AssertionError("stopped/unrequested VM ran")):
+                    if mode in ("only", "with-vms", "first", "excluded"):
+                        m.STOP.set()
+                    try:
+                        self.assertEqual(m.run_checks(output, [1], [name] if mode == "only" else [], False,
+                            first=[name] if mode == "first" else [], exclude=[name] if mode in ("excluded", "failed", "blocked", "running", "malformed") else [],
+                            with_vms=mode in ("with-vms", "excluded")), 1)
+                    finally:
+                        m.STOP.clear()
+                saved = json.loads((output / "receipt.json").read_text())
+                self.assertNotEqual(saved["checks"][name], m.OPTIONAL_VM_NOT_RUN)
+                self.assertNotEqual(saved["result"], "passed")
 
     def test_optional_process_coverage_preserves_frozen_required_evidence(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -159,7 +302,7 @@ class TestAcceptance(unittest.TestCase):
             with patch.object(m, "load_bound", return_value=(output, receipt)), patch.object(m, "execution_environment", return_value={}), \
                  patch.object(m, "commands", return_value={name: ["true"] for name in receipt["checks"]}), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), patch.object(m, "execute", side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1], [], False), 0)
+                self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
                 self.assertEqual(calls, ["p0-release-smoke"])
                 self.assertEqual(m.run_checks(output, [], ["process-coverage"], False), 0)
                 self.assertEqual(calls, ["p0-release-smoke", "process-coverage"])
@@ -1230,7 +1373,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                  patch.object(m, "execute", side_effect=execute), \
                  patch.dict(os.environ, {"SUBYARD_E2E_CANDIDATE_BUNDLE": "ambient",
                                          "SUBYARD_E2E_CONTROLLER_WORKSPACE": "ambient"}):
-                self.assertEqual(m.run_checks(output, [1], [], False), 0)
+                self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
             self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", observed["verify"])
             self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", observed["verify"])
             self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
@@ -1379,7 +1522,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
                  patch.object(m, "execute", side_effect=AssertionError("execution")), \
                  patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "1", "--types", "subyard-pair"]), redirect_stdout(io.StringIO()):
+                                          "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
 
@@ -1414,7 +1557,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
                 self.assertEqual(m.run_checks(output, [1, 2], [], False,
-                    first=["profile:sample/one", "profile:sample/two"], exclude=["profile:sample/three"]), 1)
+                    first=["profile:sample/one", "profile:sample/two"], exclude=["profile:sample/three"], with_vms=True), 1)
                 self.assertEqual([name for name, slot in started[:2]], ["verify", "compatibility"])
                 self.assertEqual([name for name, slot in started[2:]], ["profile:sample/one", "profile:sample/two", "p0-release-smoke"])
                 self.assertEqual(started[3][1], started[4][1])
@@ -1463,7 +1606,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, 'load_bound', return_value=(output, receipt)), \
                  patch.object(m, 'commands', return_value=checks), patch.object(m, 'save'), \
                  patch.object(m, 'execute', side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1, 2], [], False), 1)
+                self.assertEqual(m.run_checks(output, [1, 2], [], False, with_vms=True), 1)
             self.assertEqual(executed, ['verify'])
 
     def test_capacity_phase_heartbeat_and_interruption_evidence(self):
@@ -1651,7 +1794,7 @@ while True: time.sleep(1)
                  patch.object(m, "execution_environment", return_value={"system": "Linux", "machine": "new-machine", "go": "new-toolchain"}), \
                  patch.object(m, "execute", side_effect=AssertionError("check executed")):
                 with self.assertRaisesRegex(ValueError, "environment changed"):
-                    m.run_checks(output, [1], [], False)
+                    m.run_checks(output, [1], [], False, with_vms=True)
 
     def test_provenance_generation_time_only_reuse_preserves_raw_identities(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1817,7 +1960,7 @@ while True: time.sleep(1)
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=observe):
-                    self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                     self.assertEqual(calls, [(blocked, 1), (following, 1)])
                     persisted = json.loads((output / "receipt.json").read_text())
                     self.assertEqual(persisted["result"], "incomplete")
@@ -1865,7 +2008,7 @@ while True: time.sleep(1)
                 with patch.object(m, "load_bound", return_value=(output, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64):
-                    self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                 persisted = json.loads((output / "receipt.json").read_text())
                 attempt = persisted["checks"][blocked]
                 self.assertEqual(attempt["status"], "failed")
@@ -1901,7 +2044,7 @@ while True: time.sleep(1)
                  patch.object(m, "commands", return_value=checks), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                 self.assertEqual(calls, ["profile:sample/one"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "pending")
@@ -1911,7 +2054,7 @@ while True: time.sleep(1)
                     m.STOP.set()
                     return {"status": "interrupted", "exit_code": -15, "duration_seconds": 0.7}
                 with patch.object(m, "execute", side_effect=interrupt):
-                    self.assertEqual(m.run_checks(output, [1], [], False), 1)
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["profile:sample/one"]["status"], "interrupted")
                 self.assertEqual(persisted["checks"]["profile:sample/one"]["duration_seconds"], 0.7)
@@ -2010,7 +2153,7 @@ while True: time.sleep(1)
                         if case == "stopped":
                             m.STOP.set()
                         self.assertEqual(m.run_checks(output, [1], selected, case in ("rerun", "blocked", "interrupted", "stopped"),
-                                                      exclude=["compatibility"] if case == "excluded" else []), 1)
+                                                      exclude=["compatibility"] if case == "excluded" else [], with_vms=True), 1)
                     finally:
                         m.STOP.clear()
                 invocation = json.loads(next((output / "runs").glob("*.json")).read_text())

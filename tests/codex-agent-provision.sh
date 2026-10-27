@@ -9,7 +9,7 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing test dependency: $1"; 
 for command in cc jq sha256sum tar; do need "$command"; done
 [ -x "$HOOK" ] || fail "Codex provision hook is not executable"
 
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d /tmp/subyard-codex-provision.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 releases="$tmp/releases"
 fake_bin="$tmp/fake-bin"
@@ -88,8 +88,29 @@ case "$url" in
 esac
 CURL
 chmod +x "$fake_bin/curl"
+cat > "$fake_bin/bwrap" <<'BWRAP'
+#!/usr/bin/env bash
+[ -f "$CODEX_TEST_BWRAP_READY" ] || exit 1
+[ "$*" = --version ] || exit 2
+printf 'bubblewrap 0.11.0\n'
+BWRAP
+cat > "$fake_bin/apt-get" <<'APT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$CODEX_TEST_APT_LOG"
+[ "${CODEX_TEST_APT_FAIL:-0}" = 0 ] || exit 1
+case "$*" in
+  'update -qq') ;;
+  'install -y -qq --no-install-recommends bubblewrap') touch "$CODEX_TEST_BWRAP_READY" ;;
+  *) exit 90 ;;
+esac
+APT
+chmod +x "$fake_bin/bwrap" "$fake_bin/apt-get"
 original_path="$PATH"
+export PATH="$fake_bin:$original_path"
 export CODEX_TEST_CURL_LOG="$curl_log" CODEX_TEST_RELEASES="$releases"
+export CODEX_TEST_BWRAP_READY="$tmp/bwrap-ready" CODEX_TEST_APT_LOG="$tmp/apt.log"
+touch "$CODEX_TEST_BWRAP_READY"
 
 fetch_count() {
   if [ -f "$curl_log" ]; then wc -l < "$curl_log"; else printf '0\n'; fi
@@ -159,7 +180,14 @@ fi
 
 # Each rerun resolves current metadata; only a newer release fetches an artifact.
 cp "$check" "$tmp/initial-check"
+rm "$CODEX_TEST_BWRAP_READY"
+if CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null 2>&1; then
+  fail "missing bubblewrap dependency passed readiness"
+fi
 run_hook amd64 "$root" >/dev/null
+[ -f "$CODEX_TEST_BWRAP_READY" ] || fail "current native install did not repair bubblewrap"
+[ "$(wc -l < "$CODEX_TEST_APT_LOG")" -eq 2 ] || fail "dependency repair did not install only bubblewrap"
+CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "repaired sandbox dependency failed readiness"
 [ "$(fetch_count)" -eq 3 ] || fail "same-version rerun did not only resolve metadata"
 set_latest 0.148.0 "$sha_148_amd64" "$sha_148_arm64"
 run_hook amd64 "$root" >/dev/null
@@ -174,6 +202,14 @@ run_hook amd64 "$root" >/dev/null
 
 # Artifact failures preserve the previous working runtime and authorization.
 before="$(sha256sum "$runtime" | cut -d' ' -f1)"
+rm "$CODEX_TEST_BWRAP_READY"
+count="$(fetch_count)"
+if run_hook amd64 "$root" CODEX_TEST_APT_FAIL=1 >/dev/null 2>"$tmp/dependency.err"; then
+  fail "failed sandbox dependency installation unexpectedly succeeded"
+fi
+[ "$(fetch_count)" -eq "$count" ] || fail "failed dependency repair fetched a release"
+[ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "dependency failure replaced the runtime"
+touch "$CODEX_TEST_BWRAP_READY"
 zeros="$(printf '0%.0s' {1..64})"
 set_latest 0.149.0 "$zeros" "$sha_148_arm64"
 if run_hook amd64 "$root" >/dev/null 2>"$tmp/checksum.err"; then
@@ -295,6 +331,16 @@ for drift in missing policy permissions directory; do
   run_hook amd64 "$root" >/dev/null
   cmp "$requirements" "$tmp/expected-requirements" || fail "requirements were not repaired"
 done
+
+# A fresh standalone binary install also reconciles its OS sandbox dependency.
+rm "$CODEX_TEST_BWRAP_READY"
+apt_before="$(wc -l < "$CODEX_TEST_APT_LOG")"
+fresh_sandbox="$tmp/fresh-sandbox"
+run_hook amd64 "$fresh_sandbox" >/dev/null
+[ -f "$CODEX_TEST_BWRAP_READY" ] || fail "fresh native install left bubblewrap unavailable"
+[ "$(wc -l < "$CODEX_TEST_APT_LOG")" -eq "$((apt_before + 2))" ] || fail "fresh sandbox dependency was not installed"
+run_hook amd64 "$fresh_sandbox" >/dev/null
+[ "$(wc -l < "$CODEX_TEST_APT_LOG")" -eq "$((apt_before + 2))" ] || fail "ready sandbox dependency was reinstalled"
 
 # Production invocation is root-only.
 nonroot_err="$tmp/nonroot.err"

@@ -483,7 +483,7 @@ func TestBrokerEventsKeepProducerOrderAtTheSameTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	dataHome := t.TempDir()
-	if err := (&HostSink{DataHome: dataHome, OperatorGID: -1}).Ingest(batch); err != nil {
+	if err := (&HostSink{DataHome: dataHome, OperatorGID: -1, Now: recorder.Now}).Ingest(batch); err != nil {
 		t.Fatal(err)
 	}
 	events, err := ReadHostBrokerEvents(

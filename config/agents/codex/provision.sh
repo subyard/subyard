@@ -166,6 +166,8 @@ run_as_dev() {
     runuser -u "\$dev_user" -- env HOME="\$dev_home" CODEX_HOME="\$dev_home/.codex" "\$@"
   fi
 }
+run_as_dev bwrap --version >/dev/null 2>&1 \
+  || die "bubblewrap sandbox runtime is unavailable; run yard init"
 output="\$(run_as_dev "\$runtime" --version 2>/dev/null)" || die "runtime version check failed"
 [[ "\$output" =~ ^codex-cli\ ([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)\$ ]] \
   || die "runtime version response is invalid"
@@ -185,6 +187,16 @@ publish_command() {
   [ "$(readlink "$BIN_LINK")" = "$RUNTIME_PATH" ] \
     || die "canonical command verification failed"
 }
+
+# The standalone upstream archive does not contain codex-resources/bwrap.
+# Reconcile this on current-version reruns as well as fresh binary installs.
+if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --version >/dev/null 2>&1; then
+  command -v apt-get >/dev/null 2>&1 || die 'apt-get is required to install the bubblewrap sandbox runtime'
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq --no-install-recommends bubblewrap
+  command -v bwrap >/dev/null 2>&1 && bwrap --version >/dev/null 2>&1 \
+    || die 'bubblewrap sandbox runtime is unavailable after package installation'
+fi
 
 install -d -m 0755 "$INSTALL_ROOT"
 if [ "$(id -u)" -eq 0 ]; then chown 0:0 "$INSTALL_ROOT"; fi

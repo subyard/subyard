@@ -3995,7 +3995,7 @@ while IFS=: read -r caller_path caller_line caller_source; do
   case "$caller_kind" in
     runner)
       case "$caller_source" in
-        *--slot*|*--prepare*|*--status*|*--logs*|*--incident*|*--help*) ;;
+        *--slot*|*--prepare*|*--status*|*--logs*|*--incident*|*--observe*|*--help*) ;;
         *) slotless_public_callers+="${caller_path}:${caller_line}:${caller_source}"$'\n' ;;
       esac
       ;;

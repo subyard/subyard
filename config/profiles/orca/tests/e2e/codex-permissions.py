@@ -51,10 +51,11 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     else:
                         flattened.append(tool)
                 names = [t.get('name') for t in flattened]
+                command_timeout = getattr(fixture, 'command_timeout_ms', 10000)
                 if 'shell' in names:
-                    name, arguments = 'shell', {'command': ['bash', '-lc', command], 'workdir': str(fixture.workspace), 'timeout_ms': 10000}
+                    name, arguments = 'shell', {'command': ['bash', '-lc', command], 'workdir': str(fixture.workspace), 'timeout_ms': command_timeout}
                 elif 'shell_command' in names:
-                    name, arguments = 'shell_command', {'command': command, 'workdir': str(fixture.workspace), 'timeout_ms': 10000}
+                    name, arguments = 'shell_command', {'command': command, 'workdir': str(fixture.workspace), 'timeout_ms': command_timeout}
                 elif 'exec_command' in names:
                     name, arguments = 'exec_command', {'cmd': command, 'workdir': str(fixture.workspace), 'yield_time_ms': 1000}
                 else:

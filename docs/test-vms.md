@@ -473,6 +473,13 @@ It skips the separate L2 builds, concurrent device lifecycle and expiry checks; 
 source-specific evidence when those paths are unchanged. The default remains the small SDK/build/removal
 gate. Android fixtures emit bounded `E2E_PHASE` durations and exit codes. Diagnostic lanes also emit
 validated numeric tool versions, capture observations and read-only numeric monitor samples.
+The default SDK/build lane repeats provisioning and rejects another toolchain archive download.
+Image-bearing runtime lanes repeat API 36 preparation after verifying its catalog cache entry.
+They report preparation durations, installed image bytes and nested-yard `eth0` receive counters
+before and after provisioning and image preparation. Counter differences include apt and metadata
+traffic; missing counters are `unknown`, not zero. The smaller `--lane sdk-images` diagnostic
+retains the same image cache measurement without booting an emulator.
+
 Unknown, incomplete or timed-out display queries remain unknown. Scrcpy download and extraction
 are measured separately; these timings do not establish a reusable dependency cache.
 
@@ -558,7 +565,8 @@ network policy only inside the disposable VM and does not enable isolation on th
 The skill's risk criteria determine whether the focused network lane needs broader lifecycle coverage.
 
 `dev/e2e/p0-acceptance.sh --slot N` runs the release smoke; `--lane full` runs the exhaustive
-compatibility and recovery matrix. The skill defines when each applies. GitHub workflows do not
+compatibility and recovery matrix. Release collection requests these long VM runs explicitly;
+its default performs host-free/local checks without allocating. The skill defines when each applies. GitHub workflows do not
 receive pool access or run these checks automatically. `--list-lanes` does not acquire and needs no slot.
 
 During the full owner compatibility chain, before current `yard init`, VM1 seeds the legacy
@@ -906,8 +914,8 @@ runs the real recipe, validates a new base, boots a singleton, checks SSH and a 
 releases and proves available without pending work. Candidate engine/recipe, base fingerprint and
 native terminal/cleanup evidence are printed by the shared staging fixture. This changes only the
 leased stage; the operator-owned allocation broker stays independent. Default profile acceptance
-runs this lane and full-uninstall; release collection requires both, alongside existing synthetic
-migration/rollback gates.
+runs this lane and full-uninstall. Release collection runs these VM checks only when explicitly
+requested; synthetic host-free migration/rollback gates remain part of the default release checks.
 
 For GitHub/native-helper release activation, the owning singleton controller requires the same
 frozen public bundle used by supported candidate transport. Include its normal

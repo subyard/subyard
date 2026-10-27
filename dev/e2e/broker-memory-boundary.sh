@@ -8,12 +8,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && sudo -n test -f /run/subyard-e2e-lease.json \
   || { printf 'broker-memory-boundary: run on allocated VM1 through dev/agent-e2e.sh\n' >&2; exit 2; }
+TELEMETRY_ONLY=0
+HELD_DIAGNOSTIC=0
+TELEMETRY_FLAG=--telemetry-resources
+case "${1:-}" in
+  --telemetry-resources) TELEMETRY_ONLY=1; shift ;;
+  --telemetry-held-diagnostic) TELEMETRY_ONLY=1; HELD_DIAGNOSTIC=1; TELEMETRY_FLAG="$1"; shift ;;
+esac
+if [ "$HELD_DIAGNOSTIC" = 1 ]; then
+  [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ] && [ -n "${SUBYARD_AGENT_RUN_ID:-}" ] && [ -n "${SUBYARD_TELEMETRY_DATA_DIR:-}" ] || {
+    printf 'broker-memory-boundary: held diagnostic requires the managed telemetry observer\n' >&2; exit 2;
+  }
+fi
 TOKEN="${1:-$(date +%s)$$}"
 
 # Reuse the marker-owned owner bootstrap without executing its P0 dispatcher.
 # ROOT stays this checkout's root when the helper is sourced through /dev/fd.
+# Its cleanup must use the same runtime as this fixture's init.
 # shellcheck disable=SC1090
-. <(sed '/^  case "$MODE" in/,$d; /^ROOT=/d' "$ROOT/dev/e2e/p0-guest.sh") memory-boundary "$TOKEN"
+. <(sed '/^  case "$MODE" in/,$d; /^ROOT=/d; /^owner_cleanup() {/,/^}/ s|\./bin/yard|fixture_yard|' \
+  "$ROOT/dev/e2e/p0-guest.sh") memory-boundary "$TOKEN"
 
 PROJECT=subyard-test-yard
 INSTANCE=yard-test-yard
@@ -21,6 +35,7 @@ DEVICE=subyard-host-memory
 TELEMETRY=/var/lib/subyard/host-meminfo
 ENGINE=/usr/local/libexec/subyard/test-vms-inner
 HOLDER_PID=''
+ORPHAN_WORKER_PID=''
 PRESSURE_PID=''
 STATE_PARENT=''
 HOLDER_STARTED_PID=''
@@ -42,12 +57,31 @@ YARD=test-yard
 die() { printf 'broker-memory-boundary: %s\n' "$*" >&2; exit 2; }
 outer_exec() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 runtime_yard() { "$SUBYARD_HOME/runtime/current/bin/yard" "$@"; }
+fixture_yard() {
+  if [ "$TELEMETRY_ONLY" = 1 ]; then runtime_yard "$@"; else ./bin/yard "$@"; fi
+}
+
+prepare_native_route() {
+  local route_dir="$STATE_PARENT/native-route" host_key
+  p0_capacity_prepare_subtree "$route_dir"
+  host_key="$(normalized_ed25519 "$(outer_exec cat /etc/ssh/ssh_host_ed25519_key.pub)")" \
+    || die 'broker fixture host key is unavailable'
+  printf 'telemetry-broker-fixture %s\n' "$host_key" > "$route_dir/known_hosts"
+  printf 'Host yard-test-yard\n    HostName 127.0.0.1\n    Port 2224\n    HostKeyAlias telemetry-broker-fixture\n    UserKnownHostsFile "%s"\n    GlobalKnownHostsFile /dev/null\n    StrictHostKeyChecking yes\n    BatchMode yes\n' \
+    "$route_dir/known_hosts" > "$route_dir/ssh_config"
+  chmod 0600 "$route_dir/known_hosts" "$route_dir/ssh_config"
+  export SUBYARD_E2E_ROUTE_CONFIG="$route_dir/ssh_config"
+}
 
 # An installer that grants incus-admin membership must resume this narrow fixture,
 # never the shared helper's broader owner lane. Keep its existing ownership token.
 reexec_with_incus_group() {
   local command
-  printf -v command 'exec bash %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+  if [ "$TELEMETRY_ONLY" = 1 ]; then
+    printf -v command 'exec bash %q %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TELEMETRY_FLAG" "$TOKEN"
+  else
+    printf -v command 'exec bash %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+  fi
   exec sg incus-admin -c "$command"
 }
 
@@ -62,6 +96,12 @@ cleanup() {
   if [ -n "$HOLDER_PID" ]; then
     : > "$STATE_PARENT/holder.release"
     stop_holder_child "$HOLDER_PID" || rc=3
+  fi
+  if [ -n "$ORPHAN_WORKER_PID" ]; then
+    stop_holder_child "$ORPHAN_WORKER_PID" || rc=3
+  fi
+  if [ "$rc" = 0 ] && [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+    python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind vm --stage final --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" || rc=1
   fi
   # owner_cleanup performs exact marker checks before teardown and file removal.
   (exit "$rc")
@@ -574,11 +614,17 @@ PY
 }
 
 assert_orphan_expiry() {
-  local owner keeper heartbeat expiry now state attempt generation prior_epoch stale_rc guest fresh_config
+  local owner keeper heartbeat expiry now state attempt generation prior_generation prior_epoch stale_rc guest fresh_config worker_rc
   prior_epoch="$(runtime_yard -Y test-yard test-vms status --json | jq -er '.pool.slots[] | select(.slot_id == "slot-001") | .lease_epoch')"
+  prior_generation="$(runtime_yard -Y test-yard test-vms status --json | jq -er '.pool.slots[] | select(.slot_id == "slot-001") | .resource_generation')"
   for guest in 1 2; do
     ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- touch /root/subyard-owner-death-marker
   done
+  start_holder_child ssh -F "$HELD_CONFIG" -T -o ConnectTimeout=10 e2e-vm-1 -- \
+    "sh -eu -c 'echo ready; exec sleep 1800'" > "$STATE_PARENT/orphan-worker.log" 2>&1
+  ORPHAN_WORKER_PID="$HOLDER_STARTED_PID"
+  timeout 15 bash -c 'until grep -Fxq ready "$1"; do sleep 0.1; done' _ "$STATE_PARENT/orphan-worker.log" \
+    || die 'live orphan SSH worker did not become ready'
   IFS=$'\t' read -r owner keeper < "$STATE_PARENT/holder.processes"
   [[ "$owner:$keeper" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || die 'holder process identities unavailable'
   kill -0 "$owner" && kill -0 "$keeper" || die 'holder or keeper exited before the owner-death check'
@@ -611,10 +657,17 @@ print(int(stamp(slot["expires_at"])))
     [ "$now" -le "$((expiry + 180))" ] || die 'expired orphan allocation was not cleaned up'
     if [ "$state" = held ]; then
       [ "$(held_heartbeat)" = "$heartbeat" ] || die 'orphan requester lease was renewed'
+      [ "$now" -ge "$expiry" ] || kill -0 "$ORPHAN_WORKER_PID" \
+        || die 'live SSH worker exited before natural expiry'
     fi
     [ "$((attempt % 12))" -ne 0 ] || printf '  [ .. ] orphan state=%s expiry_remaining_seconds=%s\n' "$state" "$((expiry - now))"
     sleep 5
   done
+  ! kill -0 "$ORPHAN_WORKER_PID" 2>/dev/null || die 'expired lease retained its live SSH worker'
+  worker_rc=0
+  wait "$ORPHAN_WORKER_PID" || worker_rc=$?
+  ORPHAN_WORKER_PID=''
+  [ "$worker_rc" -ne 0 ] || die 'orphan SSH worker completed before expiry fencing'
   assert_memory_accounting
   outer_exec incus list --project subyard-e2e-vms-slot-1 --format json | jq -e 'length == 0' >/dev/null \
     || die 'expired allocation retained a disposable guest'
@@ -624,6 +677,21 @@ print(int(stamp(slot["expires_at"])))
   [ "$stale_rc" = 255 ] && grep -Fq 'Permission denied (publickey)' "$STATE_PARENT/stale-data.log" \
     || die 'expired lease data account did not reject its former key'
   printf '  [ ok ] requester death stopped renew; natural expiry removed both disposable guests\n'
+  if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+    python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind vm --stage final --data-dir "$SUBYARD_TELEMETRY_DATA_DIR"
+    python3 -B - "$SUBYARD_TELEMETRY_DATA_DIR" "$prior_generation" "$prior_epoch" <<'PY_ORPHAN'
+import json, pathlib, sqlite3, sys
+with sqlite3.connect((pathlib.Path(sys.argv[1])/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
+    rows = [json.loads(row[0]) for row in db.execute("SELECT body FROM records WHERE kind='allocation' AND json_extract(body,'$.object_kind')='vm' AND json_extract(body,'$.resource_generation')=? AND json_extract(body,'$.lease_epoch')=?", (int(sys.argv[2]), int(sys.argv[3])))]
+    objects = {row['object_id'] for row in rows}
+    assert len(objects) == 2
+    for object_id in objects:
+        assert {'draining', 'available'} <= {row['state'] for row in rows if row['object_id'] == object_id}
+        assert db.execute("SELECT 1 FROM samples WHERE object_id=? AND json_extract(body,'$.phase')='pre_stop'", (object_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM gaps WHERE object_id=? AND json_extract(body,'$.reason')='final_tail_missing'", (object_id,)).fetchone()
+print(json.dumps(dict(check='orphan-expiry-archive', draining=True, pre_stop=True, final_gap=True)), flush=True)
+PY_ORPHAN
+  fi
 
   SUBYARD_E2E_STATE_DIR="$STATE_PARENT/reuse" "$RUNNER" --yard test-yard --prepare >/dev/null
   start_holder_child hold_lease reuse memory-boundary-reuse slot-001 > "$STATE_PARENT/reuse.log" 2>&1
@@ -635,10 +703,10 @@ print(int(stamp(slot["expires_at"])))
   done
   [ -s "$STATE_PARENT/reuse.ready" ] || die 'fresh lease did not become ready'
   IFS=$'\t' read -r _ fresh_config _ _ _ generation _ < "$STATE_PARENT/reuse.ready"
-  runtime_yard -Y test-yard test-vms status --json | jq -e --argjson previous "$prior_epoch" --argjson generation "$generation" '
+  runtime_yard -Y test-yard test-vms status --json | jq -e --argjson previous "$prior_epoch" --argjson prior_generation "$prior_generation" --argjson generation "$generation" '
     .pool.slots[] | select(.slot_id == "slot-001") |
-      .state == "held" and .lease_epoch > $previous and .resource_generation == $generation' >/dev/null \
-    || die 'fresh allocation did not advance the lease epoch'
+      .state == "held" and .lease_epoch > $previous and .resource_generation > $prior_generation and .resource_generation == $generation' >/dev/null \
+    || die 'fresh allocation did not advance generation and lease epoch'
   for guest in 1 2; do
     ssh -F "$fresh_config" -T -o ConnectTimeout=10 "e2e-vm-$guest" -- test ! -e /root/subyard-owner-death-marker \
       || die 'fresh allocation retained former guest data'
@@ -672,7 +740,10 @@ printf '  [ .. ] preparing marker-owned broker on disposable VM1\n'
 prepare_owner_go_cache
 STATE_PARENT="$OWNER_ROOT/memory-boundary"
 p0_capacity_prepare_subtree "$STATE_PARENT"
-YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+if [ "$TELEMETRY_ONLY" = 0 ]; then
+  YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+  dev/build-profiles.sh >/dev/null
+fi
 ensure_owner_incus
 # Consumed by the sourced marker-owned cleanup and registration functions.
 # shellcheck disable=SC2034
@@ -683,7 +754,9 @@ ensure_owner_base_image
 # shellcheck disable=SC2034
 OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
 install_owner_runtime
-prepare_broker_recovery_update
+[ -x "$SUBYARD_HOME/runtime/current/config/profiles/github/bin/broker" ] \
+  || die 'installed owner runtime lacks its required native GitHub helper'
+if [ "$TELEMETRY_ONLY" = 0 ]; then prepare_broker_recovery_update; fi
 prepare_owner_image_cache_project "$PROJECT"
 write_owner_registration test-yard test-vms 2224 1
 REGISTRATION="$OWNER_YARD_DIR/test-yard.env"
@@ -697,15 +770,97 @@ E2E_VM_OVERHEAD=512MiB
 E2E_DISK_RESERVE=512MiB
 E2E_CACHE_BUDGET=4GiB
 CONFIG
-p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+p0_retry_init_after_plan_stale fixture_yard -Y test-yard init --yes
+# Init canonicalizes a flat registration and archives its original file.
+REGISTRATION="$OWNER_YARD_DIR/test-yard.env"
+if [ -e "$OWNER_YARD_DIR/test-yard/config.env" ] || [ -L "$OWNER_YARD_DIR/test-yard/config.env" ]; then
+  REGISTRATION="$OWNER_YARD_DIR/test-yard/config.env"
+fi
+# Fresh ownership follows owner_release_contract, not the legacy revision suffix.
+if ! {
+  [ "$PROJECT" = subyard-test-yard ] && [ "$INSTANCE" = yard-test-yard ] \
+    && [ -f "$REGISTRATION" ] && [ ! -L "$REGISTRATION" ] && [ -O "$REGISTRATION" ] \
+    && [ "$(grep -Fxc -- "# $MARKER" "$REGISTRATION")" -eq 1 ] \
+    && [ "$(grep -Fxc 'YARD_TEMPLATE=test-vms' "$REGISTRATION")" -eq 1 ] \
+    && [ "$(incus project get "$PROJECT" restricted 2>/dev/null)" = true ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.managed --project "$PROJECT" 2>/dev/null)" = true ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.name --project "$PROJECT" 2>/dev/null)" = test-yard ] \
+    && [ "$(incus config get "$INSTANCE" user.subyard.initialized --project "$PROJECT" 2>/dev/null)" = true ];
+}; then
+  python3 -B - "$PROJECT" "$INSTANCE" "$MARKER" "$REGISTRATION" "$OWNER_YARD_DIR/test-yard/config.env" 2>/dev/null <<'PY_OWNER_GUARD' || printf '{"diagnostic_unavailable":true}\n'
+import fnmatch, json, os, pathlib, subprocess, sys
+project, instance, marker, registration, canonical = sys.argv[1:]
+path = pathlib.Path(registration)
+facts = dict(registration_exists=os.path.exists(path), regular=os.path.isfile(path),
+             not_symlink=not os.path.islink(path), owned=False,
+             canonical_expected_path_selected=registration == canonical)
+try:
+    facts['owned'] = path.stat().st_uid == os.geteuid()
+except OSError:
+    pass
+lines = []
+if facts['regular'] and facts['not_symlink'] and facts['owned']:
+    try:
+        lines = path.read_bytes().split(b'\n')
+    except OSError:
+        pass
+facts['marker_line_count_one'] = lines.count(('# '+marker).encode()) == 1
+facts['template_exact_line'] = lines.count(b'YARD_TEMPLATE=test-vms') == 1
+def value(*args):
+    try:
+        result = subprocess.run(['incus', *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
+        return result.stdout.decode().rstrip('\n') if result.returncode == 0 else ''
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ''
+facts['project_restricted'] = value('project', 'get', project, 'restricted') == 'true'
+for key, property_name, expected in [('instance_managed', 'managed', 'true'), ('instance_name_expected', 'name', 'test-yard'), ('instance_initialized', 'initialized', 'true')]:
+    facts[key] = value('config', 'get', instance, 'user.subyard.'+property_name, '--project', project) == expected
+facts['legacy_revision_shape_valid'] = fnmatch.fnmatchcase(value('config', 'get', instance, 'user.subyard.test_vms_revision', '--project', project), '1:*:test-yard')
+print(json.dumps(facts, sort_keys=True), flush=True)
+PY_OWNER_GUARD
+  die 'broker fixture registration or managed yard identity is unproven'
+fi
+yard_info="$(fixture_yard -Y test-yard _info)"
+jq -e '.yardName == "test-yard" and .accessKind == "local" and
+  .yardInstanceName == "yard-test-yard" and .incusProject == "subyard-test-yard" and
+  .sshHost == "yard-test-yard"' <<<"$yard_info" >/dev/null \
+  || die 'broker fixture owner context is wrong'
+unexpected="$(incus list --project "$PROJECT" --format csv -c n \
+  | awk -v expected="$INSTANCE" '$0 != expected { print }')"
+[ -z "$unexpected" ] || die 'broker fixture project contains a foreign instance'
+unexpected="$(incus storage volume list default --project "$PROJECT" --format csv -c t,n \
+  | awk -F, -v expected_instance="$INSTANCE" -v expected_volume=yard-srv-test-yard '
+    ! (($1 == "container" && $2 == expected_instance) ||
+       ($1 == "custom" && $2 == expected_volume)) { print }
+  ')"
+[ -z "$unexpected" ] || die 'broker fixture project contains a foreign storage volume'
+[ "$(incus project get "$PROJECT" user.subyard.installation)" = 1 ] \
+  && [ "$(incus project get "$PROJECT" user.subyard.operator_uid)" = "$(id -u)" ] \
+  && [ "$(incus project get "$PROJECT" user.subyard.data_home)" = "$SUBYARD_HOME" ] \
+  && [ "$(incus project get "$PROJECT" user.subyard.config_home)" = "$OWNER_CONFIG_HOME" ] \
+  || die 'broker fixture project does not belong to this installation'
+if [ "$TELEMETRY_ONLY" = 1 ]; then
+  runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null \
+    || die 'telemetry resource fixture requires an installed ready candidate'
+  [ "$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')" = \
+    "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | awk '{print $1}')" ] \
+    || die 'telemetry resource backend differs from its installed candidate'
+fi
+project_marker="$(incus project get "$PROJECT" user.subyard.p0-image-cache)"
+[ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ] \
+  || die 'broker fixture project has a foreign P0 marker'
+incus project set "$PROJECT" user.subyard.p0-image-cache="$MARKER"
+[ "$(incus project get "$PROJECT" user.subyard.p0-image-cache)" = "$MARKER" ] \
+  || die 'broker fixture project lost its P0 marker'
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"
 assert_memory_accounting
+if [ "$TELEMETRY_ONLY" = 0 ]; then
 remove_owned_device
 assert_unverified_source_rejected
 reject_snapshot_source
 printf '  [ ok ] missing and ordinary snapshot sources fail closed in engine and public status\n'
-p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+p0_retry_init_after_plan_stale fixture_yard -Y test-yard init --yes
 assert_owned_device
 assert_outer_unchanged
 live_pressure
@@ -723,6 +878,7 @@ printf '  [ ok ] telemetry survives fixture container boot\n'
 assert_native_worker_lifetime
 assert_native_namespace_waiter_lifetime
 assert_launch_memory_bound yes
+fi
 
 # Free compiler cache before reserving the nested pair's disks on the allocated VM.
 p0_capacity_remove_build_cache
@@ -740,7 +896,21 @@ SUBYARD_E2E_WORKSPACES_ROOT="$(dirname "$(dirname "$ROOT")")"
 export SUBYARD_E2E_PROJECT_LABEL=Subyard-2
 export SUBYARD_E2E_PROJECT_YARD=test-yard
 export SUBYARD_E2E_YARD=test-yard
+prepare_native_route
 SUBYARD_E2E_STATE_DIR="$STATE_PARENT/holder" "$RUNNER" --yard test-yard --prepare >/dev/null
+if [ "$HELD_DIAGNOSTIC" = 0 ] && [ -n "${SUBYARD_E2E_NATIVE_EXERCISE:-}" ]; then
+  SUBYARD_E2E_STATE_DIR="$STATE_PARENT/holder" python3 -B "$SUBYARD_E2E_NATIVE_EXERCISE" --exercise \
+    --state "$STATE_PARENT/telemetry-native" --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" --source "$ROOT" --kind vm -- \
+    bash "$RUNNER" --yard test-yard --slot 1 --vm-count 1 --purpose telemetry-native-tool --vm 1 -- bash -c 'sleep 2'
+fi
+if [ "$HELD_DIAGNOSTIC" = 0 ] && [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+  SUBYARD_E2E_STATE_DIR="$STATE_PARENT/holder" python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" \
+    --kind vm --stage storage-failure --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" \
+    --evidence "$STATE_PARENT/telemetry-storage" --native-command \
+    bash "$RUNNER" --yard test-yard --slot 1 --vm-count 1 --purpose telemetry-storage-failure --vm 1 -- bash -c 'sleep 2'
+  runtime_yard -Y test-yard test-vms status --json | jq -e \
+    'all(.pool.slots[]; .state == "available")' >/dev/null || die 'storage fault left a native lease active'
+fi
 start_holder_child hold_lease holder memory-boundary slot-001 > "$STATE_PARENT/holder.log" 2>&1
 HOLDER_PID="$HOLDER_STARTED_PID"
 for ((attempt=0; attempt<1800; attempt++)); do
@@ -760,14 +930,25 @@ for guest in 1 2; do
 done
 assert_held_ram_released
 assert_memory_accounting
-assert_guests_outside_broker_budget
-assert_launch_memory_bound
+if [ "$TELEMETRY_ONLY" = 0 ]; then
+  assert_guests_outside_broker_budget
+  assert_launch_memory_bound
+fi
 runtime_yard -Y test-yard test-vms status --json | jq -e '
   .pool.slots[] | select(.slot_id == "slot-001") |
     .environment.vm_count == 2 and .environment.memory_per_vm == "2GiB"' >/dev/null \
   || die 'guest allocation exceeding the broker process budget was not held'
 printf '  [ ok ] ready guests release startup RAM promises to host accounting\n'
+if [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ]; then
+  python3 -B "$SUBYARD_E2E_RESOURCE_OBSERVER" --kind vm --stage held --data-dir "$SUBYARD_TELEMETRY_DATA_DIR"
+fi
+if [ "$HELD_DIAGNOSTIC" = 1 ]; then
+  printf 'ok: telemetry held-pair evidence; releasing through ordinary final-observer cleanup\n'
+  exit
+fi
 
+
+if [ "$TELEMETRY_ONLY" = 0 ]; then
 release="$(dirname "$P0_BROKER_RECOVERY_UPDATE_ARTIFACT")"
 runtime_root="$SUBYARD_HOME/runtime"
 old_hash="$(outer_exec sha256sum "$ENGINE" | awk '{print $1}')"
@@ -798,6 +979,7 @@ assert_memory_accounting
 runtime_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null \
   || die 'ordinary rollback did not reach release readiness'
 printf '  [ ok ] ordinary rollback preserves telemetry, held lease, guests and yard\n'
+fi
 
 HEARTBEAT_BEFORE="$(held_heartbeat)"
 for ((attempt=0; attempt<165; attempt++)); do
@@ -806,11 +988,15 @@ for ((attempt=0; attempt<165; attempt++)); do
   sleep 2
 done
 [ "$(held_heartbeat)" != "$HEARTBEAT_BEFORE" ] \
-  || die 'held heartbeat did not advance across update and rollback'
+  || die 'held heartbeat did not advance'
 assert_held_unchanged
-printf '  [ ok ] held lease renewal continues after update and rollback\n'
+printf '  [ ok ] held lease renewal continues\n'
 
 assert_orphan_expiry
+if [ "$TELEMETRY_ONLY" = 1 ]; then
+  printf 'ok: telemetry native VM allocation, renewal, orphan expiry and clean reuse\n'
+  exit
+fi
 printf 'evidence: original_engine_sha256=%s candidate_engine_sha256=%s held_identity_sha256=%s\n' \
   "$old_hash" "$new_hash" "$HELD_BEFORE"
 printf 'ok: broker memory bounds, process budget, boot, held update/rollback and orphan expiry\n'

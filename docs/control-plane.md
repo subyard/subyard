@@ -1253,6 +1253,7 @@ DASHBOARD="http HOST_SETTING PORT_SETTING /path" # optional browser endpoint met
 ENDPOINT_DEFAULTS="tailscale-self 6768" # optional automatic owner endpoint policy
 BOOTSTRAP=profile                 # optional profile selection and init on bring-up
 CONTROLLER_SESSION="view"         # optional session verbs run on the controller for remote yards
+CONTEXT_ENV="SAMPLE_RUN_CONTEXT"   # optional inherited nonsecret metadata for resource apply
 ```
 
 `ACTION` is repeatable and is the source of the public verb list. Its assessment and recovery classes
@@ -1277,6 +1278,15 @@ declared controller session and launches the handler in `wire` mode with
 `SUBYARD_RESOURCE_VERB`. The profile owns its wire protocol and resource authentication; core owns
 route selection, SSH trust, session environment and cancellation. GUI environment variables
 remain on the controller. Controller routing is rejected for non-session actions.
+
+`CONTEXT_ENV` explicitly allows up to 16 unique uppercase environment names (at most 64 characters
+each) into that resource's apply process. Without a declaration, existing environment filtering
+is unchanged. Preparation and help do not inherit these values. Shell/loader variables, interactive
+environment and core runtime, config and transport selector namespaces cannot be declared. Prepared
+context and catalog settings always take precedence. Missing values, values over 4096 bytes and
+values containing NUL, escape, CR or LF are omitted without changing the native resource operation.
+Values are passed directly as process environment entries and are never rendered into commands or
+diagnostics. This metadata grants no resource authority and does not change the profile's wire protocol.
 
 Registry validation rejects unknown descriptor fields, path traversal, duplicate names/commands or
 local action IDs, collisions with core commands, invalid actions, and missing executables. The handler
@@ -1631,6 +1641,13 @@ and live acceptance belong to profile runners. Release verification aggregates t
 specified in [testing](testing.md).
 
 ### Profile settings and installed runtime hooks
+
+The optional `telemetry` profile owns agent-run semantics, native exporter settings,
+process sampling and SQLite persistence outside the control plane. Generic VM owner
+observation and Android's owning observer expose bounded read-only resource records;
+they do not acknowledge another consumer's event journal. Existing broker acquire
+correlation IDs retain their meaning. See the [telemetry guide](telemetry.md) and
+[collection contracts](reference/agent-telemetry.md).
 
 The shipped `config/profiles/*/profile.json` v1 descriptors may declare `settings`, `runtime`
 and `guest_environment`. These extend the existing profile registry; operator configuration cannot

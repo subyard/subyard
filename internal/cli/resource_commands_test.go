@@ -9,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -204,6 +206,67 @@ func TestResourceCommandNoOpMutationDoesNotPromptOrApply(t *testing.T) {
 	}
 	if _, err := os.Stat(applyLog); !os.IsNotExist(err) {
 		t.Fatalf("prepared no-op reached mutation apply: %v", err)
+	}
+}
+
+func TestResourceApplyInheritsDeclaredContext(t *testing.T) {
+	root, environment, _ := resourceCommandFixture(t)
+	descriptor := filepath.Join(root, "config/profiles/fixture/resources/demo.res")
+	data, err := os.ReadFile(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, descriptor, string(data)+"CONTEXT_ENV=FIXTURE_RUN_CONTEXT FIXTURE_DATA_CONTEXT\n", 0o600)
+	handlerPath := filepath.Join(root, "config/profiles/fixture/resources/demo/handler.sh")
+	handler, err := os.ReadFile(handlerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlerText := strings.Replace(string(handler), "  apply)\n", "  apply)\n    printf '%s|%s\\n' \"${FIXTURE_RUN_CONTEXT:-}\" \"${FIXTURE_DATA_CONTEXT:-}\" >\"$SUBYARD_REPOSITORY_ROOT/context.log\"\n", 1)
+	handlerText = strings.Replace(handlerText, "  prepare)\n", "  prepare)\n    [ -z \"${FIXTURE_RUN_CONTEXT:-}${FIXTURE_DATA_CONTEXT:-}\" ] || exit 91\n", 1)
+	writeCLIFile(t, handlerPath, handlerText, 0o700)
+	environment = append(environment, "FIXTURE_RUN_CONTEXT=managed-run", "FIXTURE_DATA_CONTEXT=/tmp/context with $literal")
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"demo", "view"},
+		Environment: environment, WorkingDir: root, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if got := readResourceApplyLog(t, filepath.Join(root, "context.log")); got != "managed-run|/tmp/context with $literal\n" {
+		t.Fatalf("inherited context=%q", got)
+	}
+	if strings.Contains(stderr.String(), "managed-run") || strings.Contains(stderr.String(), "$literal") {
+		t.Fatal("context rendered into diagnostics")
+	}
+}
+
+func TestResourceContextEnvironmentCannotOverrideAuthorityOrCarryInvalidValues(t *testing.T) {
+	program := &CLI{baseEnv: map[string]string{
+		"SUBYARD_HOME": "forged", "SUBYARD_OPERATION_ID": "forged", "ENVIRONMENT_PROFILES": "forged",
+		"FIXTURE_LONG": strings.Repeat("x", 4097), "FIXTURE_BREAK": "private\nvalue", "FIXTURE_NUL": "x\x00y",
+		"FIXTURE_ESCAPE": "x\x1by", "FIXTURE_VALID": strings.Repeat("x", 4096),
+	}}
+	definition := resource.Definition{ContextEnvironment: []string{"SUBYARD_HOME", "SUBYARD_OPERATION_ID", "ENVIRONMENT_PROFILES",
+		"FIXTURE_LONG", "FIXTURE_BREAK", "FIXTURE_NUL", "FIXTURE_ESCAPE", "FIXTURE_VALID"}}
+	loaded := config.Loaded{Environment: map[string]string{}}
+	values := environmentMap(program.resourceApplyEnvironment(loaded, definition, "view", "operation", domain.ActionSession))
+	if len(loaded.Environment) != 0 {
+		t.Fatal("context mutated loaded configuration")
+	}
+	if values["SUBYARD_HOME"] != "" || values["SUBYARD_OPERATION_ID"] != "operation" || values["ENVIRONMENT_PROFILES"] != "" || values["FIXTURE_VALID"] != strings.Repeat("x", 4096) {
+		t.Fatal("context changed prepared authority or lost valid metadata")
+	}
+	for _, name := range []string{"FIXTURE_LONG", "FIXTURE_BREAK", "FIXTURE_NUL", "FIXTURE_ESCAPE"} {
+		if _, exists := values[name]; exists {
+			t.Errorf("invalid context forwarded: %s", name)
+		}
+	}
+	values = environmentMap(program.resourceApplyEnvironment(config.Loaded{}, resource.Definition{}, "view", "operation", domain.ActionSession))
+	if _, exists := values["FIXTURE_VALID"]; exists {
+		t.Fatal("undeclared context forwarded")
 	}
 }
 

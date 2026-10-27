@@ -33,6 +33,45 @@ lifecycle = load('tests/e2e/android-pool-lifecycle')
 
 
 class ClientBridge(unittest.TestCase):
+    def test_native_acquire_registers_managed_context_over_existing_owner_route(self):
+        with tempfile.TemporaryDirectory(prefix='android-managed-correlation-', dir='/tmp') as name:
+            data = Path(name) / 'telemetry'
+            owner = dict(yard='fixture-owner', project='fixture-project', run='native-acquire-run', purpose='fixture')
+            allocation = dict(state='held', slot_id='slot-001', generation=7)
+            requests = []
+            callbacks = []
+            original_run = subprocess.run
+
+            def rpc(operation, **values):
+                requests.append(dict(operation=operation, **values))
+                return allocation if operation == 'allocation' else None
+
+            def callback(command, **values):
+                callbacks.append(json.loads(values['input']))
+                self.assertEqual(values['timeout'], .5)
+                return original_run([*command[:-1], str(ROOT / 'config/profiles/telemetry/broker-correlation.py')], **values)
+
+            args = SimpleNamespace(device=None, api=36, variant=None, abi=None, wait=0)
+            with patch.dict(os.environ, SUBYARD_AGENT_RUN_ID='managed-native-run', SUBYARD_TELEMETRY_DATA_DIR=str(data),
+                            SUBYARD_RESOURCE_SESSION_TRANSPORT='', SUBYARD_EMU_INSTANCE='fixture-instance',
+                            SUBYARD_EMU_PROJECT='fixture-incus-project'), \
+                    patch.object(client.Path, 'is_file', return_value=True), \
+                    patch.object(client, 'attribution', return_value=owner), patch.object(client, 'rpc', side_effect=rpc), \
+                    patch.object(client.subprocess, 'run', side_effect=callback):
+                self.assertEqual(client.acquire(args, 'a' * 64), allocation)
+                self.assertEqual([body['phase'] for body in callbacks], ['request', 'held'])
+                intent = json.loads(next((data / 'sources/intents').glob('intent-*.json')).read_text())
+                self.assertEqual(intent['agent_run_id'], 'managed-native-run')
+                self.assertEqual(intent['request']['correlation_id'], owner['run'])
+                self.assertEqual(intent['request']['transport']['instance'], 'fixture-instance')
+                self.assertEqual(intent['request']['transport']['project'], 'fixture-incus-project')
+                self.assertEqual(intent['request']['resource_generation'], 7)
+                with patch.object(client.subprocess, 'run', side_effect=OSError('observer unavailable')):
+                    self.assertEqual(client.acquire(args, 'a' * 64), allocation)
+            expected = [dict(operation='reserve', token='a' * 64, request=dict(api=36), owner=owner),
+                        dict(operation='allocation', token='a' * 64)]
+            self.assertEqual(requests, expected * 2)  # Native wire has no managed-context fields.
+
     def test_coalesced_process_ack_and_payload_are_delivered_before_eof(self):
         payload = b'\x00synthetic-stream-payload\xff'
         output = b'{"ok":true,"result":{}}\n' + payload
@@ -273,6 +312,78 @@ class Leases(unittest.TestCase):
                 return token, allocation
             time.sleep(0.01)
         self.fail('provisioning did not complete')
+
+    def test_observer_cursor_survives_release_and_never_authorizes_mutation(self):
+        def sample(slot):
+            return dict(slot_id=slot['slot_id'], resource_generation=slot['generation'],
+                        selector='emulator', state=slot['state'], cpu_ns=123,
+                        memory_bytes=456, missing=['io_read_bytes'], final_complete=False)
+        self.runtime.observe = sample
+        token, allocation = self.acquire()
+        capability = self.pool.observer_capability(token)
+        before = self.pool.state_path.read_bytes()
+        page = self.pool.observe(capability, '-', 1)
+        self.assertEqual(len(page['events']), 1)
+        self.assertTrue(page['more'])
+        self.assertEqual(page['observations'][0]['cpu_ns'], 123)
+        self.assertEqual(self.pool.state_path.read_bytes(), before)
+        again = self.pool.observe(capability, '-', 1)
+        self.assertEqual(page['events'], again['events'])
+        self.assertEqual(page['next_cursor'], again['next_cursor'])
+        self.assertEqual(self.pool.observe('c' * 64)['events'], [])
+        self.pool.release(capability)  # Unknown cancellation is idempotent; it cannot stop this lease.
+        self.assertEqual(self.pool.allocation(token)['state'], 'held')
+        self.pool.release(token)
+        page = self.pool.observe(capability)
+        self.assertEqual(page['observations'], [])
+        phases = [event['phase'] for event in page['events']]
+        self.assertIn('baseline', phases)
+        self.assertIn('pre_stop', phases)
+        self.assertIn('stopped', phases)
+        stopped = next(event for event in page['events'] if event['phase'] == 'stopped')
+        self.assertEqual(stopped['allocation']['owner'], self.owner)
+        self.assertEqual(stopped['allocation']['state'], 'available')
+        old_files = sorted((self.pool.root / 'observations').glob('*/*.json'))
+        old_files[0].unlink()
+        self.assertTrue(self.pool.observe(capability, again['next_cursor'])['gap'])
+        token2, successor = self.acquire()
+        self.assertGreater(successor['generation'], allocation['generation'])
+        self.assertEqual(self.pool.observe(capability)['observations'], [])
+        self.assertNotIn(token, json.dumps(page))
+        self.assertNotIn(capability, json.dumps(page))
+
+    def test_optional_journal_failure_does_not_block_native_lifecycle(self):
+        (self.pool.root / 'observations').write_text('unavailable')
+        token, _ = self.acquire()
+        self.pool.release(token)
+        self.assertTrue(all(slot['state'] == 'available' for slot in self.pool.slots))
+
+    def test_runtime_observer_uses_only_generation_owned_cgroup(self):
+        runtime = poolmod.Runtime(self.config)
+        slot = dict(slot_id='001', generation=2, state='held')
+        group = self.root / 'cgroup/system.slice' / runtime.unit(slot)
+        group.mkdir(parents=True)
+        boot = self.root / 'proc/sys/kernel/random/boot_id'
+        boot.parent.mkdir(parents=True)
+        boot.write_text('fixture-boot')
+        for name, value in {'cpu.stat': 'usage_usec 123\n', 'memory.current': '456',
+                            'memory.peak': '789', 'memory.swap.current': '0',
+                            'io.stat': '8:0 rbytes=10 wbytes=20 rios=1 wios=2\n'}.items():
+            (group / name).write_text(value)
+        good = ('ControlGroup=/system.slice/' + runtime.unit(slot) + '\nActiveState=active\nMainPID=42\n').encode()
+        with patch.object(poolmod, 'run', return_value=SimpleNamespace(stdout=good)) as runner:
+            result = runtime.observe(slot, cgroup_root=self.root / 'cgroup', proc_root=self.root / 'proc')
+            self.assertEqual(result['cpu_ns'], 123000)
+            self.assertEqual(result['memory_bytes'], 456)
+            self.assertEqual(result['io_write_bytes'], 20)
+            self.assertEqual(result['missing'], [])
+            self.assertFalse(result['final_complete'])
+            self.assertEqual(runner.call_args.args[0][0:2], ['systemctl', 'show'])
+        foreign = good.replace(runtime.unit(slot).encode(), b'foreign.service')
+        with patch.object(poolmod, 'run', return_value=SimpleNamespace(stdout=foreign)):
+            result = runtime.observe(slot, cgroup_root=self.root / 'cgroup', proc_root=self.root / 'proc')
+            self.assertIsNone(result['cpu_ns'])
+            self.assertIsNone(result['counter_generation'])
 
     def test_two_slots_busy_redaction_and_fencing(self):
         first, one = self.acquire(dict(device='phone', api=34))
@@ -1713,6 +1824,20 @@ os.write(1, result.stdout)
             client.CONTROL = previous
             server.shutdown()
             server.server_close()
+
+    def test_image_policy_selects_latest_stable_revision_independent_of_order(self):
+        images = poolmod.Images(self.root / 'policy-images', self.root / 'sdk')
+        def package(major, channel='channel-0', preview=''):
+            return f"""<remotePackage path="system-images;android-35;google_apis;x86_64">
+                <revision><major>{major}</major>{preview}</revision><channelRef ref="{channel}"/>
+                <archives><archive><complete><url>fixture.zip</url><size>16</size>
+                <checksum>{'a' * 40}</checksum></complete></archive></archives></remotePackage>"""
+        (images.root / 'google_apis.xml').write_text('<repository>' + package(2) + package(1)
+            + package(9, 'channel-1') + package(10, preview='<preview>1</preview>') + '</repository>')
+        selected = images.resolve(dict(api=35, variant='google_apis', abi='x86_64'))
+        self.assertEqual(selected['revision'], '2.0.0')
+        with self.assertRaisesRegex(poolmod.PoolError, 'unsupported Android image policy'):
+            poolmod.Images(self.root / 'invalid-policy', self.root / 'sdk', image_policy='preview')
 
     @patch.object(poolmod.shutil, 'disk_usage', return_value=SimpleNamespace(free=64 * 1024**3))
     def test_sdk_installer_failure_diagnostics_are_bounded_private_and_atomic(self, _disk):

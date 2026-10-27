@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Android profile's private pool owner. No consumer can select paths or commands."""
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import ipaddress
@@ -87,8 +88,9 @@ def report_failure(exc):
 
 class Images:
     """Only this private directory is pruneable; build SDK and user AVDs are external."""
-    def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3):
+    def __init__(self, root, sdk, java_home='/opt/jdk-17', disk_headroom=1024**3, image_policy='latest-stable'):
         self.root, self.sdk = Path(root), Path(sdk)
+        require(image_policy == 'latest-stable', 'config', 'unsupported Android image policy')
         self.java_home = java_home
         self.disk_headroom = disk_headroom
         self.root.mkdir(parents=True, exist_ok=True)
@@ -136,6 +138,9 @@ class Images:
             if node.tag.rsplit('}', 1)[-1] != 'remotePackage':
                 continue
             # Child elements are unqualified in Google's repository schema.
+            channel = node.find('channelRef')
+            if (channel is not None and channel.get('ref') != 'channel-0') or node.find('revision/preview') is not None:
+                continue
             revision = node.find('revision')
             if revision is None:
                 continue
@@ -152,6 +157,8 @@ class Images:
                 package = node.attrib['path']
                 digest = complete.findtext('checksum', '')
                 if not re.fullmatch('[a-fA-F0-9]{40}', digest):
+                    continue
+                if package in result and tuple(map(int, result[package]['revision'].split('.'))) >= tuple(map(int, revision.split('.'))):
                     continue
                 result[package] = dict(package=package, revision=revision,
                     url=f'https://dl.google.com/android/repository/sys-img/{variant}/{filename}',
@@ -687,7 +694,7 @@ class Runtime:
         namespace = self.create_namespace(slot, directory)
         run(['systemd-run', '--quiet', '--collect', '--unit', self.unit(slot), '--service-type=exec',
              '--property=User=' + account.pw_name, '--property=KillMode=control-group',
-             '--property=Slice=system.slice',
+             '--property=Slice=system.slice', '--property=CPUAccounting=yes', '--property=IOAccounting=yes',
              '--property=NetworkNamespacePath=' + str(namespace), '--property=PrivateTmp=yes', '--property=NoNewPrivileges=yes',
              '--property=ProtectHome=yes', '--property=ProtectSystem=strict',
              '--property=ReadWritePaths=' + str(home),
@@ -849,6 +856,62 @@ class Runtime:
         result = run(['systemctl', 'show', self.unit(slot), '--property=MainPID', '--value'])
         return int(result.stdout.strip() or '0')
 
+    def observe(self, slot, *, cgroup_root=Path('/sys/fs/cgroup'), proc_root=Path('/proc')):
+        """Read only the exact generation-owned runtime; never accept caller paths."""
+        unit = self.unit(slot)
+        result = dict(slot_id=slot['slot_id'], resource_generation=slot['generation'],
+                      selector='emulator', state=slot['state'], phase='periodic',
+                      source_time=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds'), monotonic_ns=time.monotonic_ns(),
+                      counter_generation=None, final_complete=False)
+        names = ('cpu_ns', 'memory_bytes', 'memory_peak_bytes', 'swap_bytes',
+                 'io_read_bytes', 'io_write_bytes', 'io_read_ops', 'io_write_ops')
+        result.update(dict.fromkeys(names))
+        try:
+            properties = run(['systemctl', 'show', unit, '--property=ControlGroup,ActiveState,MainPID'], timeout=2)
+            properties = dict(line.split('=', 1) for line in properties.stdout.decode().splitlines() if '=' in line)
+            group = properties.get('ControlGroup')
+            require(group == '/system.slice/' + unit and properties.get('ActiveState') in ('active', 'activating'),
+                    'observation', 'runtime counters unavailable')
+            root = cgroup_root / group.lstrip('/')
+            before = root.stat().st_ino
+            boot = (proc_root / 'sys/kernel/random/boot_id').read_text().strip()
+            result['boot_id'] = boot
+            result['counter_generation'] = hashlib.sha256(f'{boot}:{unit}:{before}'.encode()).hexdigest()
+            def counter(name):
+                try:
+                    value = (root / name).read_text().strip()
+                    return int(value) if value.isdecimal() else None
+                except OSError:
+                    return None
+            for field, name in [('memory_bytes', 'memory.current'), ('memory_peak_bytes', 'memory.peak'),
+                                ('swap_bytes', 'memory.swap.current')]:
+                result[field] = counter(name)
+            try:
+                cpu = dict(line.split() for line in (root / 'cpu.stat').read_text().splitlines())
+                if cpu.get('usage_usec', '').isdecimal():
+                    result['cpu_ns'] = int(cpu['usage_usec']) * 1000
+            except (OSError, ValueError):
+                pass
+            try:
+                totals = dict(rbytes=0, wbytes=0, rios=0, wios=0)
+                for line in (root / 'io.stat').read_text().splitlines():
+                    for field in line.split()[1:]:
+                        key, value = field.split('=', 1)
+                        if key in totals:
+                            require(value.isdecimal(), 'observation', 'invalid I/O counter')
+                            totals[key] += int(value)
+                for field, key in [('io_read_bytes', 'rbytes'), ('io_write_bytes', 'wbytes'),
+                                   ('io_read_ops', 'rios'), ('io_write_ops', 'wios')]:
+                    result[field] = totals[key]
+            except (OSError, ValueError, PoolError):
+                pass
+            require(root.stat().st_ino == before, 'observation', 'runtime counters changed generation')
+        except (OSError, ValueError, subprocess.SubprocessError, PoolError):
+            result.update(dict.fromkeys(names))
+            result['counter_generation'] = None
+        result['missing'] = [name for name in names if result[name] is None]
+        return result
+
     def stop(self, slot):
         unit = self.unit(slot)
         self.stop_unit(self.network_unit(slot))
@@ -923,7 +986,7 @@ class Pool:
         self.cancelled = {}
         self.runtime = runtime or Runtime(config)
         self.images = images or Images(self.root / 'images', config['sdk_root'],
-                                      config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3)
+                                      config.get('java_home', '/opt/jdk-17'), (2 * config['size'] + 1) * 1024**3, config.get('image_policy', 'latest-stable'))
         self.cancel, self.workers, self.connections, self.sdk_locks = {}, {}, {}, {}
         self.prepare_cancel = threading.Event()
         data = {}
@@ -953,6 +1016,80 @@ class Pool:
         self.generation_floor = max([self.generation_floor] + [slot['generation'] for slot in self.slots])
         atomic(self.state_path, dict(schema=SCHEMA, generation_floor=self.generation_floor, slots=self.slots))
 
+    @staticmethod
+    def observer_capability(token):
+        require(isinstance(token, str) and re.fullmatch('[0-9a-f]{64}', token), 'credential', 'invalid lease credential')
+        return hashlib.sha256(('subyard-observer/v1:' + token).encode()).hexdigest()
+
+    def record_observation(self, slot, phase):
+        # Optional evidence failure never changes resource admission, fencing or cleanup.
+        try:
+            owner = slot.get('observer')
+            if not owner:
+                return
+            snapshot = self.public(dict(slot, state='draining')) if phase == 'stopped' else self.public(slot)
+            snapshot['state'] = slot['state']
+            record = dict(event_id=f'{time.time_ns():020d}-{secrets.token_hex(8)}',
+                          source_time=datetime.datetime.fromtimestamp(self.clock(), datetime.timezone.utc).isoformat(timespec='microseconds'),
+                          kind='allocation', allocation=snapshot)
+            if phase in ('baseline', 'pre_stop'):
+                sample = self.runtime.observe(slot)
+                sample['phase'] = phase
+                record['observations'] = [sample]
+            record['phase'] = phase
+            directory = self.root / 'observations' / owner
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(directory.parent, 0o700)
+            os.chmod(directory, 0o700)
+            atomic(directory / (record['event_id'] + '.json'), record)
+            # Bounded independent journal; never the broker host-sink spool.
+            files = sorted((self.root / 'observations').glob('*/*.json'), key=lambda path: path.name)
+            total = sum(path.stat().st_size for path in files)
+            for path in files:
+                if len(files) <= 4096 and total <= 16 * 1024**2:
+                    break
+                total -= path.stat().st_size
+                path.unlink()
+                files = files[1:]
+        except Exception:
+            pass
+
+    def observe(self, capability, cursor='-', count=100):
+        require(isinstance(capability, str) and re.fullmatch('[0-9a-f]{64}', capability),
+                'request', 'invalid observer capability')
+        require(isinstance(cursor, str) and (cursor == '-' or re.fullmatch('[0-9]{20}-[0-9a-f]{16}', cursor))
+                and type(count) is int and 1 <= count <= 200, 'request', 'invalid observer cursor or count')
+        owner = self.digest(capability)
+        directory = self.root / 'observations' / owner
+        files = sorted(directory.glob('*.json'))
+        gap = cursor != '-' and not any(path.stem == cursor for path in files)
+        events = []
+        for path in files:
+            if not re.fullmatch('[0-9]{20}-[0-9a-f]{16}', path.stem) or (not gap and path.stem <= cursor):
+                continue
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 16384,
+                    'observation', 'unsafe observer record')
+            event = json.loads(path.read_text())
+            require(event.get('event_id') == path.stem, 'observation', 'invalid observer record')
+            events.append(event)
+            if len(events) > count:
+                break
+        with self.lock:
+            slots = [dict(slot) for slot in self.slots if slot.get('observer') == owner and slot['state'] != 'available']
+        samples = [self.runtime.observe(slot) for slot in slots]
+        with self.lock:
+            samples = [sample for sample in samples if any(slot.get('observer') == owner
+                       and slot['slot_id'] == sample['slot_id'] and slot['generation'] == sample['resource_generation']
+                       and slot['state'] != 'available' for slot in self.slots)]
+            allocations = [self.public(slot) for slot in self.slots if slot.get('observer') == owner and slot['state'] != 'available']
+        machine = Path('/etc/machine-id').read_text().strip()
+        require(re.fullmatch('[0-9a-fA-F]{32}', machine), 'observation', 'owner identity unavailable')
+        owner_id = hashlib.sha256((machine + ':' + str(self.root)).encode()).hexdigest()
+        return dict(owner_id=owner_id, observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds'),
+                    allocations=allocations, events=events[:count], next_cursor=events[min(count, len(events)) - 1]['event_id'] if events else cursor,
+                    gap=gap, more=len(events) > count, observations=samples)
+
     def normalize(self, request):
         require(isinstance(request, dict) and set(request) <= {'device', 'api', 'variant', 'abi'},
                 'request', 'allocation accepts only device, api, variant and abi')
@@ -973,6 +1110,8 @@ class Pool:
                     result[key] = slot[key]
             for key in ('acquired_at', 'ready_at', 'last_heartbeat_at', 'expires_at'):
                 result[key] = utc(slot.get(key))
+        if 'request' in slot:
+            result['reserved_memory_bytes'] = (PRESETS[slot['request']['device']][3] + RUNTIME_OVERHEAD_MIB) * 1024**2
         result['lease'] = dict(contract='resource-lease/v1', resource_type='android-emulator',
                                resource_id='emulator', slot_id=slot['slot_id'],
                                generation=slot['generation'], state=('draining' if slot['state'] in ('provisioning', 'held')
@@ -986,7 +1125,7 @@ class Pool:
         with self.lock:
             result = dict(schema=SCHEMA, schema_version=1, resource_type='android-emulator', resource_id='emulator',
                         defaults=self.normalize({}), graphics_mode=self.config.get('gpu', 'host'), heartbeat_seconds=HEARTBEAT,
-                        ttl_seconds=TTL, slots=[self.public(s) for s in self.slots])
+                        ttl_seconds=TTL, capabilities=['resource-observe-v1'], slots=[self.public(s) for s in self.slots])
             try:
                 capacity = self.runtime.memory_capacity()
                 capacity['pending_bytes'] = sum(self.runtime.budget(s['request']) for s in self.slots
@@ -1059,11 +1198,12 @@ class Pool:
                 raise PoolError('busy', 'Android SDK maintenance is in progress')
             self.sdk_locks[slot['slot_id']] = sdk_lock
             slot.update(state='provisioning', generation=slot['generation'] + 1,
-                        credential=digest, request=request, image=image, owner=owner,
+                        credential=digest, observer=self.digest(self.observer_capability(token)), request=request, image=image, owner=owner,
                         acquired_at=self.clock(), last_heartbeat_at=self.clock(), expires_at=self.clock() + TTL)
             slot.pop('failure', None)
             slot.pop('failure_message', None)
             self.save()
+            self.record_observation(slot, 'acquired')
             cancel = self.cancel[slot['slot_id']] = threading.Event()
             worker = threading.Thread(target=self.provision, args=(slot, cancel), daemon=True)
             self.workers[slot['slot_id']] = worker
@@ -1081,6 +1221,7 @@ class Pool:
                 require(slot['state'] == 'provisioning' and not cancel.is_set(), 'cancelled', 'allocation cancelled')
                 slot.update(state='held', ready_at=self.clock())
                 self.save()
+                self.record_observation(slot, 'baseline')
         except Exception as exc:
             report_failure(exc)
             with self.lock:
@@ -1130,11 +1271,15 @@ class Pool:
                 process.wait(timeout=3)
         slot['state'] = 'draining'
         self.save()
+        self.record_observation(slot, 'draining')
 
     def finish_stop(self, slot):
         try:
+            self.record_observation(slot, 'pre_stop')
             self.runtime.stop(slot)
             with self.lock:
+                stopped = dict(slot, state='available')
+                self.record_observation(stopped, 'stopped')
                 # Keep last credential hash solely for idempotent release until next allocation.
                 for key in list(slot):
                     if key not in ('slot_id', 'generation', 'credential', 'failure', 'failure_message'):
@@ -1148,6 +1293,7 @@ class Pool:
             with self.lock:
                 slot.update(state='quarantined', failure='stop_unconfirmed')
                 self.save()
+                self.record_observation(slot, 'quarantined')
 
     def stop_slot(self, slot, expected_generation=None):
         with self.lock:
@@ -1315,7 +1461,10 @@ class Handler(socketserver.StreamRequestHandler):
                 self.connection.settimeout(None)
                 pool.tunnel(request.get('token'), self.connection)
                 return
-            if operation == 'status':
+            if operation == 'observe-v1':
+                require(set(request) <= {'operation', 'capability', 'cursor', 'count'}, 'request', 'invalid observer request')
+                result = pool.observe(request.get('capability'), request.get('cursor', '-'), request.get('count', 100))
+            elif operation == 'status':
                 result = pool.status()
             elif operation == 'catalog':
                 result = pool.catalog()

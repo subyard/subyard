@@ -101,6 +101,7 @@ Usage:
   dev/agent-e2e.sh [--yard NAME] --prepare
   dev/agent-e2e.sh [--yard NAME] --status [--json]
   dev/agent-e2e.sh [--yard NAME] --logs [--slot N] [-n 1..200] [--json]
+  dev/agent-e2e.sh [--yard NAME] --observe CURSOR|-
   dev/agent-e2e.sh [--yard NAME] --incident ID
   dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
   dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
@@ -369,6 +370,34 @@ read_agent_logs() {
     jq -ce '.events | select(type == "array") | .[]' <<<"$response" \
       || { [ "$(jq -c '.events' <<<"$response")" = '[]' ] || die 'invalid lease log response'; }
   fi
+}
+
+read_agent_observations() {
+  local cursor="$1" client status
+  [[ "$cursor" = - || "$cursor" =~ ^[0-9]{20}-[0-9a-f]{16}$ ]] || die 'invalid observer cursor'
+  [ -f "$STATE_ROOT/client-id" ] && [ ! -L "$STATE_ROOT/client-id" ] || die 'no controller lease history'
+  [ "$(stat -c '%a' "$STATE_ROOT/client-id")" = 600 ] || die 'unsafe controller identity mode'
+  read -r client < "$STATE_ROOT/client-id"
+  [[ "$client" =~ ^[0-9a-f]{32}$ ]] || die 'invalid controller identity'
+  status="$(facade_request status)" || die 'test environment unavailable'
+  jq -e '.schema_version == 1 and .status == "ok" and ((.capabilities // []) | index("resource-observe-v1") != null)' <<<"$status" >/dev/null || die 'resource observations unsupported'
+  facade_request "observe-v1 $client $cursor 100"
+}
+
+telemetry_correlation() {
+  local phase="$1" helper=/usr/local/lib/subyard-telemetry/broker-correlation.py
+  [ -n "${SUBYARD_AGENT_RUN_ID:-}" ] && [ -n "${SUBYARD_TELEMETRY_DATA_DIR:-}" ] || return 0
+  [ -f "$helper" ] || helper="$REPO_ROOT/config/profiles/telemetry/broker-correlation.py"
+  [ -f "$helper" ] || return 0
+  jq -cn --arg phase "$phase" --arg owner "$E2E_YARD" --arg yard "$LEASE_YARD" \
+    --arg project "$LEASE_PROJECT" --arg run "$LEASE_RUN" --arg slot "$LEASE_SLOT" \
+    --arg generation "$LEASE_GENERATION" --arg epoch "$LEASE_EPOCH" \
+    --arg script "$REPO_ROOT/dev/agent-e2e.sh" --arg state "$STATE_BASE" --arg yard_state "$STATE_ROOT" \
+    --arg identity "$IDENTITY" --arg route "$BASTION_ROUTE" \
+    --arg route_config "${SUBYARD_E2E_ROUTE_CONFIG:-$HOME/.ssh/config}" \
+    '{kind:"vm",phase:$phase,owner_id:$owner,yard_id:$yard,project_id:$project,correlation_id:$run,
+      slot_id:$slot,resource_generation:$generation,lease_epoch:$epoch,transport:{script:$script,yard:$owner,state_dir:$state,yard_state_dir:$yard_state,identity:$identity,route:$route,route_config:$route_config}}' \
+    | timeout 1 python3 -B "$helper" >/dev/null 2>&1 || true
 }
 
 bounded_context_label() {
@@ -798,6 +827,7 @@ acquire_lease() {
   [ -n "$LEASE_RUN" ] || LEASE_RUN="$(new_run_id)"
   [[ "$LEASE_RUN" =~ ^[0-9a-f]{8}$ ]] || die "invalid E2E run identity"
   [ -n "$LEASE_PURPOSE" ] || LEASE_PURPOSE=agent-e2e
+  telemetry_correlation request
   if ! status_response="$(facade_request status)"; then
     die "broker capability probe failed"
   fi
@@ -847,6 +877,7 @@ acquire_lease() {
         die "broker returned a slot other than the exact requested slot"
       fi
       resolve_lease_generation
+      telemetry_correlation held
       write_client_config
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
@@ -1369,7 +1400,7 @@ main() {
   local selector=all root bundle bundle_hash vm guest_rc run_failed=0 cleanup_failed=0
   local mode=run ssh_vm='' ssh_stdin=0 wait_value purpose_override='' status_json=0 slot_value=''
   local log_count=50 log_count_set=0 incident_id='' diagnostic_mode=''
-  local status_response
+  local status_response observer_cursor=''
   local -a selected=() command=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1398,6 +1429,9 @@ main() {
         ssh_stdin=1
         shift 2
         ;;
+      --observe)
+        [ "$#" -ge 2 ] && [ -z "$diagnostic_mode" ] || die '--observe needs one cursor'
+        mode=observe; diagnostic_mode=observe; observer_cursor="$2"; shift 2 ;;
       --status) mode=status; shift ;;
       --logs)
         [ -z "$diagnostic_mode" ] || die 'choose one diagnostic mode'
@@ -1456,6 +1490,11 @@ main() {
   [ "$status_json" = 0 ] || [ "$mode" = status ] || [ "$mode" = logs ] || die "--json is valid only with --status or --logs"
   [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || die '-n is valid only with --logs'
   [ -z "$incident_id" ] || [ "$mode" = incident ] || die '--incident cannot be combined with another mode'
+  if [ "$mode" = observe ]; then
+    [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
+    read_agent_observations "$observer_cursor"
+    return
+  fi
   if [ "$mode" = logs ] || [ "$mode" = incident ]; then
     [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
       || die 'diagnostic reads do not accept allocation options'

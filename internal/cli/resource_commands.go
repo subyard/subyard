@@ -484,6 +484,13 @@ func (cli *CLI) resourceApplyEnvironment(
 	effect domain.ActionEffect,
 ) []string {
 	values := environmentMap(cli.resourceEnvironment(loaded, definition, "apply", localAction, operationID))
+	for _, name := range definition.ContextEnvironment {
+		_, prepared := values[name]
+		_, setting := loaded.Catalog.LookupSetting(name)
+		if value, exists := cli.baseEnv[name]; exists && !prepared && !setting && len(value) <= 4096 && !strings.ContainsAny(value, "\x00\x1b\r\n") {
+			values[name] = value
+		}
+	}
 	if effect == domain.ActionSession {
 		for _, name := range resourceSessionEnvironment {
 			if value, ok := cli.baseEnv[name]; ok {
