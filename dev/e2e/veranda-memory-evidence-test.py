@@ -2629,10 +2629,8 @@ class EvidenceChecks(unittest.TestCase):
                              and call.func.id == 'prepare_ime' for call in ast.walk(node)))
         body = next(node.body for node in ast.walk(tree) if isinstance(node, ast.With) and setup in node.body)
         start = body.index(setup)
-        stop = next(index for index in range(start, len(body))
-                    if isinstance(body[index], ast.Assign)
-                    and any(isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
-                            and target.slice.value == 'lifetimes' for target in body[index].targets))
+        window_manager = next(node for node in body[start:] if isinstance(node, ast.If)
+                              and isinstance(node.test, ast.Attribute) and node.test.attr == 'x11')
         now = [0.0]; live = SimpleNamespace(poll=lambda: None); setup_calls = []
         def delayed_setup(*args): setup_calls.append(True); now[0] += 15
         namespace = dict(vars(short), args=SimpleNamespace(ime=True, x11=True, remote=False, owner_focus=False, ui=False),
@@ -2641,7 +2639,7 @@ class EvidenceChecks(unittest.TestCase):
         with patch.object(short.time, 'monotonic', side_effect=lambda: now[0]), \
              patch.object(short.fixture, 'private_log', side_effect=lambda path: contextlib.nullcontext(io.StringIO())), \
              patch.object(short.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='4\n', stderr='')) as query:
-            exec(compile(ast.Module(body=body[start:stop], type_ignores=[]), 'actual-ime-wm-startup', 'exec'), namespace)
+            exec(compile(ast.Module(body=[setup, window_manager], type_ignores=[]), 'actual-ime-wm-startup', 'exec'), namespace)
         self.assertEqual(setup_calls, [True])
         self.assertEqual(namespace['x11_deadline'] - now[0], 10)
         self.assertEqual(query.call_args.args[0], ['xdotool', 'get_num_desktops'])
@@ -2667,7 +2665,13 @@ class EvidenceChecks(unittest.TestCase):
             def get_state_set(self): return SimpleNamespace(contains=lambda state: state in self.states)
         for scenario in ('connect', 'owner-focus', 'remote-restore', 'local-restore'):
             branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
-                          and ast.unparse(node.test) == 'scenario == ' + repr(scenario))
+                          and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
+                          and node.test.left.id == 'scenario'
+                          and scenario in (ast.literal_eval(node.test.comparators[0])
+                              if isinstance(node.test.ops[0], ast.In) else (ast.literal_eval(node.test.comparators[0]),))
+                          and any(isinstance(item, ast.Expr) and isinstance(item.value, ast.Call)
+                                  and isinstance(item.value.func, ast.Name) and item.value.func.id == 'wait_scope'
+                                  for item in node.body))
             restoring = scenario in ('remote-restore', 'local-restore')
             stop = (next(index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
                          and any(isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
@@ -3142,7 +3146,7 @@ class EvidenceChecks(unittest.TestCase):
                     'time':short.time,'deadline':0,'capture_input_watchdog':short.capture_input_watchdog,
                     'lifetime':lifetime,'app':SimpleNamespace(pid=77,poll=lambda:None),'gui_identity':identity,
                     'result':{'backend':'x11'},'env':{'DISPLAY':':99'},'state':state,'args':SimpleNamespace(remote=True),
-                    'workload_seconds':600,'checkpoint':checkpoint}
+                    'workload_seconds':600,'checkpoint':checkpoint,'observations':None}
                 with patch.object(short.time,'monotonic',return_value=1), \
                      patch.object(short.input_driver,'process_identity',return_value=(999,123,4,5) if fault=='process' else identity), \
                      patch.object(short.probe,'X11Toplevel',side_effect=window_probe), \
