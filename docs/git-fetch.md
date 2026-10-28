@@ -4,9 +4,9 @@ The `git-fetch` profile is off by default and installs a systemd service and tim
 inside the yard. Enable it from the owner host for an existing running yard:
 
 ```sh
-yard -Y demo profile enable git-fetch --yes
-yard -Y demo profile status git-fetch
-yard -Y demo profile disable git-fetch --yes
+yard -Y default profile enable git-fetch --yes
+yard -Y default profile status git-fetch
+yard -Y default profile disable git-fetch --yes
 ```
 
 A cycle starts five minutes after boot, then five minutes after the previous cycle
@@ -23,9 +23,9 @@ and `.git`, `.build`, `.cache`, `node_modules`, `vendor`, `.venv`, `venv` and
 `__pycache__` directories. Worktrees sharing a Git common directory are fetched
 once per cycle. Discovery keeps no persistent state and is independent of Orca.
 
-When the effective Git setting selects `GITHUB_GIT_MODE=broker-first`, the worker uses ordinary
-Git and the [GitHub router](github.md#ordinary-git-with-original-authentication-fallback), including
-its original-authentication fallback. With routing off, the existing `subyard-github run` wrapper
+When the effective Git setting selects `GITHUB_GIT_MODE=broker-first` or `broker-last`, the worker uses ordinary
+Git and the [GitHub router](github.md#ordinary-git-with-original-authentication-fallback), following
+the selected authentication order. With routing off, the existing `subyard-github run` wrapper
 supplies GitHub HTTPS authorization when installed. SSH uses the developer's existing forwarded-agent socket and known
 host trust. Authentication is noninteractive. Journal diagnostics contain counts
 and generic failures, without remote URLs or Git output.

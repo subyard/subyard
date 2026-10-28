@@ -26,7 +26,7 @@ remote=/usr/local/bin/git-remote-subyard-github
 remote_source="$(dirname "$0")/bin/git-remote-subyard-github"
 wiring_source="$(dirname "$0")/git_wiring.py"
 git_mode="${GITHUB_GIT_MODE:-off}"
-case "$git_mode" in off|broker-first) ;; *) printf 'github provision: invalid Git mode\n' >&2; exit 2 ;; esac
+case "$git_mode" in off|broker-first|broker-last) ;; *) printf 'github provision: invalid Git mode\n' >&2; exit 2 ;; esac
 wiring() { python3 "$wiring_source" "$DEV_HOME" "$git_mode" "$1"; }
 remote_body() { cat "$remote_source"; }
 skill_delivery() {

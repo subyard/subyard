@@ -9,7 +9,7 @@ yard config fields
 yard config fields SSH_PORT
 yard config show
 yard config show SSH_PORT
-yard -Y demo config show
+yard -Y default config show
 yard config paths
 ```
 
@@ -90,10 +90,10 @@ Common portable values may go in `overrides/shared/config.env` only when `config
 DEV_SUDO=1
 ```
 
-A named yard has its own settings:
+Each yard has its own settings, including `default`:
 
 ```sh
-# ~/.config/subyard/yards/demo/config.env
+# ~/.config/subyard/yards/default/config.env
 SSH_PORT=2223
 YARD_TEMPLATE=test-vms
 ```
@@ -107,7 +107,7 @@ shipped defaults, named-yard derivations and selected shipped profile
   -> current command environment
 ```
 
-The default yard also accepts scalar overrides in `yards/default/config.env`, after host-wide
+The default yard accepts scalar overrides in `yards/default/config.env`, after host-wide
 settings. Its optional override file does not register another yard or apply to named yards.
 `yard config set NAME VALUE --scope yard` selects this layer when `-Y` is omitted.
 A command environment value is temporary and has the
@@ -202,9 +202,9 @@ the current document or printing its contents.
 
 ```sh
 yard integration status --json
-yard -Y demo integration enable codex
-yard -Y demo integration disable codex
-yard -Y demo integration status codex
+yard -Y default integration enable codex
+yard -Y default integration disable codex
+yard -Y default integration status codex
 ```
 
 `CODING_TOOL_INTEGRATIONS` selects the complete requested set through profiles and
@@ -279,7 +279,7 @@ integration is not selected, so `yard integration cleanup <name>` can inspect or
 disabled integration without changing the requested set. Cleanup sources use the same trusted
 regular, non-symbolic-link file contract and scopes as provisioning hooks.
 
-To inspect recovery, run `yard -Y <yard> integration cleanup <name> --check`. Run the same command
+To inspect recovery, run `yard -Y default integration cleanup <name> --check`. Run the same command
 without `--check` to review and confirm its consequences. Cleanup refuses integrations that are
 still selected, including dependencies of selected integrations. Hooks must keep cleanup bounded
 and reversible, preserve user data, and support safe retries after interruption.
@@ -395,6 +395,11 @@ these requirements. Incompatible overrides such as `never` or automatic review c
 The home config supplies the existing `danger-full-access` yard sandbox default; stricter sandbox
 choices remain available. Use **Custom** in clients that offer permission presets: unrestricted
 filesystem access and mandatory command approval are separate settings.
+
+The home rules explicitly allow `rm`, including recursive cleanup of build fixtures. Without a
+matching allow rule, Codex can still request approval for removal commands under `on-request`,
+even with `danger-full-access`. The allow rule relies on the yard as the isolation boundary;
+it does not limit removal to the current project. Managed commit/push prompts remain in force.
 
 After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
 Existing sessions must be restarted to load the policy. `codex-policy-check` checks the installed policy's
@@ -537,8 +542,8 @@ Choose the desired value explicitly; verified installed or separately staged too
 source repair before those gates:
 
 ```sh
-yard -Y demo config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --check
-yard -Y demo config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --yes
+yard -Y default config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --check
+yard -Y default config repair-alias ENVIRONMENT_PROFILES '' --scope yard --local --yes
 ```
 
 Repair accepts one to four explicit canonical setting/value pairs in one local scope/file, limited to
@@ -558,8 +563,8 @@ An optional activation hook can fail after migrations have completed. To reduce 
 selection while that activation remains unfinished, preview an explicit local source change:
 
 ```sh
-yard -Y demo config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --check
-yard -Y demo config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local
+yard -Y default config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local --check
+yard -Y default config reduce-selection CODING_TOOL_INTEGRATIONS '' --scope yard --local
 yard migrate --check
 yard migrate
 ```

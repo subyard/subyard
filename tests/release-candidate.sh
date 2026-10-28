@@ -179,6 +179,9 @@ printf '{"version":"test","runtime_file":"runtime.tar.gz","runtime_sha256":"%s"}
 ! release_candidate_prepare "$root" >/dev/null
 printf 'ok: release candidate helper validates packaged runtime\n'
 printf 'ok: fresh release fixture installs isolated entrypoints and requires unselected migration readiness\n'
+python3 -B "$ROOT/tests/helpers/skills-transport-test.py" "$ROOT"
+python3 -B "$ROOT/tests/helpers/release-candidate-test.py"
+python3 -B "$ROOT/tests/helpers/evidence-oracle-test.py"
 
 # Compatibility controls bind the native runtime and bound owned scratch lifetime
 # without changing deliberate interruption or shared fixture ownership.

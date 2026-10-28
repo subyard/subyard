@@ -4,24 +4,57 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/Subyard/Subyard/internal/ports"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/ports"
 )
 
 // Sources stay with their package. This inventory only binds static delivery bytes;
 // provider registration in the guest proves successful capability provisioning.
 func (runtime Runtime) agentSkillSources() ([]string, error) {
-	if _, err := os.Stat(filepath.Join(runtime.RepositoryRoot, "scripts/refresh-agent-skills.sh")); os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, "scripts/refresh-agent-skills.sh")); os.IsNotExist(err) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	}
 	paths := []string{"scripts/refresh-agent-skills.sh"}
+	validate := func(relative string) error {
+		if filepath.IsAbs(relative) || relative == "." || relative == "" {
+			return fs.ErrInvalid
+		}
+		path := runtime.RepositoryRoot
+		for _, part := range strings.Split(filepath.ToSlash(relative), "/") {
+			if part == ".." {
+				return fs.ErrInvalid
+			}
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && !info.Mode().IsRegular() {
+				return fs.ErrInvalid
+			}
+		}
+		return nil
+	}
+	if err := validate(paths[0]); err != nil {
+		return nil, err
+	}
+	if info, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, paths[0])); err != nil || !info.Mode().IsRegular() {
+		return nil, fs.ErrInvalid
+	}
 	addTree := func(relative string) error {
+		if err := validate(relative); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
 		return filepath.WalkDir(filepath.Join(runtime.RepositoryRoot, relative), func(path string, entry fs.DirEntry, err error) error {
 			if os.IsNotExist(err) {
 				return nil
@@ -29,10 +62,13 @@ func (runtime Runtime) agentSkillSources() ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if entry.IsDir() && (entry.Name() == "tests" || entry.Name() == "__pycache__") {
+			if entry.IsDir() && (entry.Name() == "tests" || entry.Name() == "__pycache__" || strings.HasSuffix(entry.Name(), ".pyc")) {
 				return filepath.SkipDir
 			}
 			if !entry.IsDir() && !strings.HasSuffix(entry.Name(), ".pyc") {
+				if !entry.Type().IsRegular() {
+					return fs.ErrInvalid
+				}
 				relative, err := filepath.Rel(runtime.RepositoryRoot, path)
 				if err != nil {
 					return err
@@ -42,7 +78,13 @@ func (runtime Runtime) agentSkillSources() ([]string, error) {
 			return nil
 		})
 	}
+	if err := validate("config/skills"); err != nil {
+		return nil, err
+	}
 	if err := addTree("config/skills"); err != nil {
+		return nil, err
+	}
+	if err := validate("config/profiles"); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	packages, err := filepath.Glob(filepath.Join(runtime.RepositoryRoot, "config/profiles/*"))
@@ -51,10 +93,16 @@ func (runtime Runtime) agentSkillSources() ([]string, error) {
 	}
 	for _, directory := range packages {
 		relative, _ := filepath.Rel(runtime.RepositoryRoot, directory)
+		if err := validate(relative); err != nil {
+			return nil, err
+		}
 		if err := addTree(filepath.Join(relative, "skills")); err != nil {
 			return nil, err
 		}
 		manifest := filepath.Join(directory, "skills.json")
+		if err := validate(filepath.Join(relative, "skills.json")); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
 		payload, err := os.ReadFile(manifest)
 		if os.IsNotExist(err) {
 			continue
@@ -69,7 +117,17 @@ func (runtime Runtime) agentSkillSources() ([]string, error) {
 		paths = append(paths, filepath.ToSlash(filepath.Join(relative, "skills.json")))
 		for _, files := range declarations {
 			for _, source := range files {
-				if filepath.IsAbs(source) || source == ".." || strings.HasPrefix(filepath.Clean(source), "../") {
+				if filepath.IsAbs(source) || source == "" || slices.Contains(strings.Split(filepath.ToSlash(source), "/"), "..") {
+					return nil, fs.ErrInvalid
+				}
+				if err := validate(filepath.Join(relative, source)); err != nil {
+					return nil, err
+				}
+				if slices.Contains(strings.Split(filepath.ToSlash(source), "/"), "tests") || slices.Contains(strings.Split(filepath.ToSlash(source), "/"), "__pycache__") || strings.HasSuffix(source, ".pyc") {
+					continue
+				}
+				info, err := os.Lstat(filepath.Join(directory, source))
+				if err != nil || !info.Mode().IsRegular() {
 					return nil, fs.ErrInvalid
 				}
 				paths = append(paths, filepath.ToSlash(filepath.Join(relative, source)))

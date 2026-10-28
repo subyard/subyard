@@ -81,8 +81,8 @@ request a mobile link on the owner host:
 ```sh
 yard orca up
 yard orca pair --mobile
-# For another registered yard:
-yard -Y <yard> orca pair --mobile
+# With an explicit selector for the default yard:
+yard -Y default orca pair --mobile
 ```
 
 Install [Orca Mobile](https://www.onorca.dev/docs/mobile) on iOS or Android and
@@ -206,6 +206,13 @@ loopback endpoint. Then run `yard orca pair` on the server and import its link i
 Desktop as described above.
 
 ## Projects and lifecycle
+
+Orca's Fetch, Pull and Push actions use the yard developer's ordinary Git configuration.
+The service keeps Orca's app profile at `/srv/agents/orca/config/orca` while Git reads
+`~/.config/git/config` and `~/.gitconfig`. To use the GitHub broker for these actions,
+enable [`GITHUB_GIT_MODE=broker-first` or `broker-last`](github.md#ordinary-git-with-original-authentication-fallback)
+on the owner host (`broker-last` tries existing Git/SSH access first); enabling the `github`
+profile alone leaves ordinary Git routing off.
 
 Repository discovery runs periodically in the yard, including ignored directories and
 `.build`. Status, project hooks and release activation validate known repository roots

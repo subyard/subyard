@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Owning host-free behavior checks; installed systemd evidence belongs to E2E.
 set -euo pipefail
+umask 0022
 export TMPDIR=/tmp
 profile="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 root="$(cd "$profile/../../.." && pwd)"
@@ -15,3 +16,5 @@ bash -n "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profil
 shellcheck -S warning "$profile/owner.sh" "$profile/runtime.sh" "$profile/tests/"*.sh "$profile/tests/e2e/"*.sh
 bash "$profile/tests/e2e/acceptance.sh" --help >/dev/null
 bash "$profile/tests/e2e/acceptance.sh" --preflight
+
+python3 -B "$profile/tests/native-loss-test.py"

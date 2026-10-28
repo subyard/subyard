@@ -11,9 +11,11 @@ build:
 	@PATH="$$(dirname "$$(command -v $(GO))"):$${PATH}" ./dev/package-engine.sh --runtime-dir .build/runtime --engine .build/yard --version "$(VERSION)"
 
 test:
-	$(MAKE) build VERSION="$(TEST_VERSION)"
-	TMPDIR=/tmp $(GO) test -count=1 -timeout=20m ./cmd/... ./internal/...
-	bash dev/test-profiles.sh
+	bash dev/test-profiles.sh --permissions-only
+	bash tests/agent-skills.sh
+	umask 0022 && $(MAKE) build VERSION="$(TEST_VERSION)"
+	umask 0022 && TMPDIR=/tmp $(GO) test -count=1 -timeout=20m ./cmd/... ./internal/...
+	bash dev/test-profiles.sh --after-permissions
 
 cli-docs: build
 	python3 dev/generate-cli-docs.py
@@ -22,8 +24,9 @@ cli-docs-check: build
 	python3 dev/generate-cli-docs.py --check
 
 verify:
+	bash dev/test-profiles.sh --permissions-only
 	./tests/run.sh
-	bash dev/test-profiles.sh
+	bash dev/test-profiles.sh --after-permissions
 
 verify-veranda:
 	$(PYTHON) dev/check-veranda.py

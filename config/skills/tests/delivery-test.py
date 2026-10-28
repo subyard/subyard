@@ -58,6 +58,8 @@ class Delivery(unittest.TestCase):
     def test_permissions_and_broken_links(self):
         self.run_mode('apply')
         path = self.installed/'SKILL.md'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.installed.stat().st_mode & 0o777, 0o755)
         path.chmod(0o600)
         self.assertEqual(self.run_mode('check'), 10)
         self.run_mode('apply')

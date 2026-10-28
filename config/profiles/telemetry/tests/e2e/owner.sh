@@ -24,6 +24,7 @@ if [ "$delegated" = 0 ]; then
   esac
   [[ "${SUBYARD_E2E_RUN_ID:-}" =~ ^[a-f0-9]{8}$ ]] || exit 2
   fixture_seconds=4200
+  [ "$mode" != all ] || fixture_seconds=7200
   [ "$mode" != --held-diagnostic ] || fixture_seconds=1140
   [ "$mode" != --scope-diagnostic ] || fixture_seconds=240
   [ "$mode" != --native-only ] || fixture_seconds=600
@@ -39,13 +40,16 @@ if [ "$delegated" = 0 ]; then
     --property="RuntimeMaxSec=$fixture_seconds" --wait --pipe --collect --expand-environment=no \
     --working-directory="$ROOT" "${fixture_env[@]}" bash config/profiles/telemetry/tests/e2e/owner.sh --delegated-fixture "$mode"
 fi
-asset="$ROOT/.subyard-acceptance/assets/subyard-telemetry"
-[ -x "$asset" ] && [ -f "$asset.sha256" ] || { printf 'missing frozen telemetry binary and checksum\n' >&2; exit 2; }
-(cd "$(dirname "$asset")" && sha256sum --check --status subyard-telemetry.sha256)
-for command in python3 curl jq tar sha256sum systemctl incus; do command -v "$command" >/dev/null; done
+for command in python3 curl jq tar sha256sum systemctl incus go; do command -v "$command" >/dev/null; done
 state="$(mktemp -d /tmp/subyard-telemetry-acceptance.XXXXXX)"
 chmod 0700 "$state"
 trap 'printf "telemetry disposable evidence: %s\n" "$state"' EXIT
+# shellcheck source=config/profiles/telemetry/tests/e2e/assets.sh
+. "$ROOT/config/profiles/telemetry/tests/e2e/assets.sh"
+fixture_assets="$state/assets"
+telemetry_prepare_assets "$ROOT" "$fixture_assets"
+export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
+asset="$fixture_assets/subyard-telemetry"
 mkdir "$state/source"
 cp config/profiles/telemetry/*.py "$state/source/"
 cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
@@ -191,7 +195,7 @@ wait_for_finals() {
 }
 if [ "$mode" = --scope-diagnostic ]; then
   python3 -B config/profiles/telemetry/tests/e2e/process-scope.py --nested-only --state "$state" --data-dir /var/lib/subyard/telemetry
-  python3 -B config/profiles/telemetry/tests/e2e/measure.py --stack --assets .subyard-acceptance/assets --output "$state/overhead" --idle 1 --load 1
+  python3 -B config/profiles/telemetry/tests/e2e/measure.py --stack --assets "$fixture_assets" --output "$state/overhead" --idle 1 --load 1
   wait_for_finals
   exit
 fi
@@ -215,7 +219,7 @@ if [ "$mode" = --resources ]; then
   python3 -B config/profiles/telemetry/tests/e2e/process-scope.py --nested-only --different-gid --state "$state" --data-dir /var/lib/subyard/telemetry
 fi
 if [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_only" = 0 ]; then
-  python3 -B config/profiles/telemetry/tests/e2e/measure.py --stack --assets .subyard-acceptance/assets --output "$state/overhead" --idle 60 --load 90
+  python3 -B config/profiles/telemetry/tests/e2e/measure.py --stack --assets "$fixture_assets" --output "$state/overhead" --idle 60 --load 90
   python3 -B config/profiles/telemetry/tests/e2e/process-scope.py --state "$state" --data-dir /var/lib/subyard/telemetry
 fi
 python3 -B config/profiles/telemetry/tests/e2e/native-signals.py --state "$state" --data-dir /var/lib/subyard/telemetry --source "$ROOT"

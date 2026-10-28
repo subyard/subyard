@@ -14,8 +14,9 @@ const FIXTURE_DIR: &str = concat!(
 const OWNER: &str = r#"
 import datetime, json, os, struct, subprocess, sys, time
 mode, pid_file, fixtures = sys.argv[1:]
-with open(pid_file, 'w', encoding='ascii') as output:
+with open(pid_file + '.tmp', 'w', encoding='ascii') as output:
     output.write(str(os.getpid()))
+os.replace(pid_file + '.tmp', pid_file)
 
 def read():
     prefix = sys.stdin.buffer.read(4)
@@ -848,6 +849,7 @@ fn correlation_actual_transport_invalid_event_never_calls_classifier() {
     assert_eq!(observer.counts().received, 0);
     assert_eq!(observer.correlation().unwrap().counts.valid_raw, 0);
     rpc.close();
+    #[cfg(unix)]
     owner.assert_child_reaped();
 }
 
@@ -923,6 +925,7 @@ fn correlation_actual_transport_failure_duplicate_and_empty_data_still_dispatch(
             .is_none());
     }
     rpc.close();
+    #[cfg(unix)]
     owner.assert_child_reaped();
 }
 
@@ -989,6 +992,7 @@ fn correlation_actual_transport_classifies_when_ticket_admission_is_full() {
         .iter()
         .all(|row| row.ticket.is_none() && row.admission == CorrelationAdmission::Overflow));
     rpc.close();
+    #[cfg(unix)]
     owner.assert_child_reaped();
 }
 
@@ -1045,6 +1049,7 @@ fn correlation_framed_seal_retains_validated_receipt_during_held_classifier() {
         .map(|_| receiver.recv_timeout(Duration::from_secs(3)))
         .collect();
     rpc.close();
+    #[cfg(unix)]
     owner.assert_child_reaped();
     let called = called.unwrap();
     assert!(called.is_ok());

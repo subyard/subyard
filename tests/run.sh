@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One host-free entrypoint used locally and in CI.
 set -euo pipefail
+umask 0022
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Disposable fixtures must not become workspace repositories in Orca.
@@ -90,7 +91,7 @@ check_build_layout() {
 check_manifests() {
   mapfile -t actual_tests < <(find "$ROOT/tests" -maxdepth 1 -type f -name '*.sh' ! -name run.sh -printf '%f\n' | sort)
   mapfile -t declared_tests < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
-    "$ROOT"/tests/suites/{unit,contract,integration}.list | sort)
+    "$ROOT"/tests/suites/{preflight,unit,contract,integration}.list | sort)
   [ "${#actual_tests[@]}" -eq "${#declared_tests[@]}" ] \
     || { printf 'FAIL: test suite manifests omit or duplicate a top-level test\n' >&2; exit 1; }
   for i in "${!actual_tests[@]}"; do
@@ -127,6 +128,10 @@ check_go_race() {
 }
 
 run_check syntax check_syntax
+while IFS= read -r test_name; do
+  case "$test_name" in '' | '# '*) continue ;; esac
+  run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
+done < "$ROOT/tests/suites/preflight.list"
 run_check go-toolchain command -v go
 CURRENT_SUITE=go
 printf 'SUITE go\n'

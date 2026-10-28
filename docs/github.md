@@ -12,9 +12,9 @@ For a fresh yard, run `yard init` once to create its core configuration. For an 
 yard, enable or disable the broker independently:
 
 ```sh
-yard -Y <yard> profile enable github
-yard -Y <yard> profile status github --json
-yard -Y <yard> profile disable github
+yard -Y default profile enable github
+yard -Y default profile status github --json
+yard -Y default profile disable github
 ```
 
 Enable preserves the other entries in the yard's effective `ENVIRONMENT_PROFILES` and writes the
@@ -39,12 +39,12 @@ binary; the core invokes it through the [profile extension contract](control-pla
 
 ## First-time setup
 
-Run `yard -Y <yard> profile enable github` in a terminal **on the owner host**. If the App
+Run `yard -Y default profile enable github` in a terminal **on the owner host**. If the App
 connection is missing, enable offers a short setup conversation before its single confirmation.
 To prepare the connection separately, including while the yard is stopped, run:
 
 ```sh
-yard -Y <yard> profile setup github
+yard -Y default profile setup github
 ```
 
 Setup does not select the profile or change the yard runtime. The connection is shared by enabled
@@ -166,16 +166,17 @@ SSH session. The profile also installs the short local skill for supported agent
 
 ## Ordinary Git with original-authentication fallback
 
-The opt-in yard setting `GITHUB_GIT_MODE=broker-first` routes ordinary system Git `clone`,
-`fetch`, `pull`, `push` and `ls-remote` for canonical `https://github.com/owner/repo`,
+The opt-in yard modes `GITHUB_GIT_MODE=broker-first` and `GITHUB_GIT_MODE=broker-last` route
+ordinary system Git `clone`, `fetch`, `pull`, `push` and `ls-remote` for canonical `https://github.com/owner/repo`,
 `git@github.com:owner/repo` and `ssh://git@github.com/owner/repo` URLs (with optional `.git`).
+Choose `broker-first` to prefer App authentication, or `broker-last` to prefer existing Git/SSH access.
 Enable the profile on the owner for a running yard, then set the mode and authorize runtime repair:
 
 ```sh
-yard -Y <yard> profile enable github
-yard -Y <yard> config set GITHUB_GIT_MODE broker-first --scope yard
-yard -Y <yard> migrate
-yard -Y <yard> profile status github --json
+yard -Y default profile enable github
+yard -Y default config set GITHUB_GIT_MODE broker-last --scope yard
+yard -Y default migrate
+yard -Y default profile status github --json
 ```
 
 Inside the yard, `subyard-github status --git` reports the effective Git mode and whether a
@@ -183,8 +184,8 @@ custom global-config location overrides the managed wiring. This local check min
 To turn routing off while retaining the broker and `gh` wrapper:
 
 ```sh
-yard -Y <yard> config set GITHUB_GIT_MODE off --scope yard
-yard -Y <yard> migrate
+yard -Y default config set GITHUB_GIT_MODE off --scope yard
+yard -Y default migrate
 ```
 
 Changing the mode changes the desired installed runtime. Run `yard migrate` after setting it;
@@ -201,11 +202,17 @@ custom `XDG_CONFIG_HOME` can bypass this standard XDG location; inspect `status 
 same environment as the affected command. Command and repository configuration retain Git's
 ordinary precedence. Aliases and other hosts are outside this routing scope.
 
-At ref discovery, the broker checks the selected repository's installation and effective token
+With `broker-last`, ref discovery first tries the original transport, including ordinary HTTPS
+credentials or anonymous access, and SSH keys/configuration. Successful original discovery never
+requests broker access or a token. Only failed discovery tries the broker; cancellation stops
+selection. If that broker attempt fails, the command fails without retrying the original transport.
+
+When tried, the broker checks the selected repository's installation and effective token
 permissions through `/git-access/v1`; legacy `/token` is unchanged. Reads require Contents read
 or write. Every push conservatively requires both Contents write and Workflows write, including
 code-only pushes. Missing or unknown grants, an unavailable/unconfigured broker, an old broker,
-or failed read-only broker discovery choose the original transport before refs reach parent Git.
+or failed read-only broker discovery choose the original transport in `broker-first` before refs
+reach parent Git.
 Targeted requests never retry the default installation, and token scope remains installation-wide.
 
 Broker HTTPS uses stock Git with an ephemeral credential helper isolated from ordinary helpers,
@@ -215,7 +222,7 @@ Git and the developer's SSH command, config, agent and host trust. Saved remote 
 and refspecs are unchanged. After publishing refs, the selected identity stays fixed: rejection,
 partial push, cancellation or a lost response is an error, with no automatic replay under another
 identity. Atomic pushes, explicit leases and push options retain native Git semantics.
-Fallback prints a fixed reason without upstream details. Tentative broker discovery is silent;
+Switching authentication prints a fixed reason without upstream details. Tentative discovery is silent;
 after selection, native progress and errors are shown with broker credentials redacted.
 
 Parent Git runs `pre-push` once, but its second argument is the effective
@@ -226,7 +233,7 @@ is unsupported. Git's pack engine remains native. Submodules allow only the narr
 `subyard-github` protocol; the profile never broadly enables arbitrary protocols. Live GitHub
 permission policy and external authentication still require verification with the intended account.
 
-Explicit `subyard-github run -- git ...` retains its earlier policy even in this mode: HTTPS uses
+Explicit `subyard-github run -- git ...` retains its earlier policy in either mode: HTTPS uses
 only the broker and SSH uses its original transport. `gh` wrapper behavior is unchanged.
 
 ## Use and verify access
@@ -278,12 +285,12 @@ Use matching owner and guest profile versions for repository routing. A new clie
 against an older broker that accepts only empty token requests; it never retries against the
 default installation. Existing empty requests retain their default-installation behavior.
 
-`yard -Y <yard> profile disable github` removes the profile wiring and service. Tokens already
+`yard -Y default profile disable github` removes the profile wiring and service. Tokens already
 issued remain valid until GitHub expiry or [explicit GitHub revocation](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token). The owner service loads the
 protected connection for each request, so materializing a new revision takes effect on
 the next request without placing credentials in the yard.
 
-For transport failures, inspect `systemctl --user status subyard-github-<YARD>.service` on the
-owner host. For installed-runtime drift, run `yard -Y <yard> migrate` with fresh authorization;
-repeat `yard -Y <yard> profile enable github` to resume profile installation when release readiness permits it.
+For transport failures, inspect `systemctl --user status subyard-github-default.service` on the
+owner host. For installed-runtime drift, run `yard -Y default migrate` with fresh authorization;
+repeat `yard -Y default profile enable github` to resume profile installation when release readiness permits it.
 Remote controllers use the same `init` path on the owner; no App credential belongs on the controller.

@@ -72,7 +72,7 @@ if [ "$ACTION" = compat ]; then
   systemctl daemon-reload
   test "$(cat /tmp/producer-legacy/canary)" = old
   echo updated >/tmp/producer-legacy/canary
-  python3 -c 'from pathlib import Path; assert Path("/tmp").stat().st_dev == Path("/var/lib/subyard/profile-operation/data/tmp").stat().st_dev'
+  python3 -c 'from pathlib import Path; assert Path("/tmp").stat().st_dev == Path("/var/lib/subyard/profile-operation-v4/data/tmp").stat().st_dev'
 fi
 printf 'hook output\\n'
 printf 'hook error\\n' >&2
@@ -115,6 +115,7 @@ exit "$STATUS"
         result = subprocess.run(adapter(7, "compat"), env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 7 and result.stderr == "hook error\n", result
         assert guest("cat", "/tmp/producer-legacy/canary") == "updated"
+        guest("sh", "-c", "printf preserve >/var/lib/subyard/profile-operation/data/preserved")
         for invalid in ("/tmp/.", "/tmp//", "/var/tmp/.", "/dev/shm/."):
             (profile / "provision-tmp-paths").write_text(invalid + "\n")
             result = subprocess.run(adapter(), env=env, capture_output=True, text=True, timeout=30)
@@ -139,7 +140,8 @@ exit "$STATUS"
                     guest("rm", "/root/producer-child")
                     recovery = subprocess.run(adapter(), env=env, capture_output=True, timeout=30)
                     assert recovery.returncode == 0, recovery
-                    assert guest("find", "/var/lib/subyard/profile-operation/data", "-mindepth", "1", "-print", "-quit") == ""
+                    assert guest("find", "/var/lib/subyard/profile-operation-v4/data", "-mindepth", "1", "-print", "-quit") == ""
+                    assert guest("cat", "/var/lib/subyard/profile-operation/data/preserved") == "preserve"
                 finally:
                     if process.poll() is None:
                         process.kill()
@@ -155,7 +157,8 @@ exit "$STATUS"
             assert json.loads(before)["pid"] != json.loads(after)["pid"]
             recovery = subprocess.run(adapter(), env=env, capture_output=True, timeout=30)
             assert recovery.returncode == 0, recovery
-            assert guest("find", "/var/lib/subyard/profile-operation/data", "-mindepth", "1", "-print", "-quit") == ""
+            assert guest("find", "/var/lib/subyard/profile-operation-v4/data", "-mindepth", "1", "-print", "-quit") == ""
+            assert guest("cat", "/var/lib/subyard/profile-operation/data/preserved") == "preserve"
         print("ok: real Incus status, runuser, external proc, legacy tmp, stderr, busy, controller TERM/SIGKILL and recovery")
     finally:
         assert call("incus", "config", "get", name, "user.subyard-producer-fixture") == name

@@ -184,6 +184,11 @@ func observeProfileRuntime(ctx context.Context, platform ports.InitPlatform, id 
 	if coreInstalledRuntimeID(id) {
 		return platform.ObserveInstalledRuntime(ctx, id)
 	}
+	if observer, ok := platform.(interface {
+		ObserveProfileRuntime(context.Context, string) (ports.RuntimeObservation, error)
+	}); ok {
+		return observer.ObserveProfileRuntime(ctx, id)
+	}
 	observations, err := platform.ObserveProfileRuntimes(ctx)
 	if err != nil {
 		return ports.RuntimeObservation{}, err

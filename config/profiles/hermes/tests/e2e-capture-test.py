@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual Hermes capture and cleanup with disposable transport."""
 import json
+import shlex
 import os
 from pathlib import Path
 import shutil
@@ -13,27 +14,97 @@ SOURCE = Path(__file__).resolve().parent / 'e2e'
 DIAGNOSTIC = b'controlled broker failure: connection refused; token=private-fixture\n'
 
 
+def check_runtime_wait_and_route():
+    with tempfile.TemporaryDirectory(prefix='subyard-hermes-runtime-', dir='/tmp') as temporary:
+        root = Path(temporary)
+        engine = root/'yard'
+        engine.write_text(r'''#!/usr/bin/python3
+import json, os, pathlib, sys
+root=pathlib.Path(__file__).parent
+assert sys.argv[1:] == ['-Y', 'fixture', 'profile', 'status', 'github', '--json']
+calls=root/'calls'
+count=int(calls.read_text())+1 if calls.exists() else 1
+calls.write_text(str(count))
+mode=os.environ['WAIT_MODE']
+print('PRIVATE_RUNTIME_CANARY', file=sys.stderr)
+if mode == 'invalid': print('PRIVATE_RUNTIME_CANARY')
+else: print(json.dumps({'runtime':'ready' if mode in ('ready','native','timeout') or mode == 'retry' and count == 3 else 'pending', 'ready':False}))
+raise SystemExit(23 if mode == 'native' else 124 if mode == 'timeout' else 0)
+''')
+        engine.chmod(0o700)
+        script = r'''set -euo pipefail
+. "$1"
+YARD=fixture YARD_BIN=$2 STATE=$3
+before=$(pwd; set +o; trap -p)
+. "$1"
+[ "$before" = "$(pwd; set +o; trap -p)" ]
+SECONDS=0
+timeout() { [ "$1 $2 $3" = '--signal=TERM --kill-after=2 5' ] || exit 99; shift 3; "$@"; }
+sleep() { SECONDS=$((SECONDS + 200)); }
+hermes_capture_release_readiness() { printf '%s\n' "$1" > "$STATE/capture"; return 59; }
+hermes_wait_github_runtime_or_report 600
+'''
+        parser_exit = subprocess.run(['jq', '-e', '.runtime == "ready"'], input=b'PRIVATE_RUNTIME_CANARY\n', capture_output=True).returncode
+        for mode, expected, count in (('ready',0,1), ('retry',0,3), ('stale',1,3), ('native',23,3), ('timeout',124,3), ('invalid',parser_exit,3)):
+            (root/'calls').unlink(missing_ok=True)
+            (root/'capture').unlink(missing_ok=True)
+            result = subprocess.run(['bash', '-c', script, 'fixture', str(SOURCE/'failure-capture.sh'), str(engine), str(root)],
+                env=dict(os.environ, WAIT_MODE=mode), capture_output=True, timeout=5)
+            assert result.returncode == expected, (mode, result.returncode, result.stderr)
+            assert b'PRIVATE_RUNTIME_CANARY' not in result.stdout+result.stderr
+            assert (root/'calls').read_text() == str(count)
+            assert (root/'capture').exists() == bool(expected)
+            if expected: assert (root/'capture').read_text() == str(expected)+'\n'
+        route = r'''set -euo pipefail
+. "$1"
+STATE=$2 mode=$3 YARD=fixture TAILSCALE_IP=100.127.1.1 dashboard_port=34123
+hermes_capture_release_readiness() { printf 'capture %s\n' "$1" >> "$STATE/route"; return 59; }
+yard() {
+  printf '%s\n' "$*" >> "$STATE/route"
+  case "$*" in
+    'fixture config set HERMES_DASHBOARD_ADVERTISE_HOST 100.127.1.1 --scope yard --yes') [ "$mode" != first ] || return 23 ;;
+    'fixture config set HERMES_DASHBOARD_HOST_PORT 34123 --scope yard --yes') [ "$mode" != second ] || return 37 ;;
+    *) exit 99 ;;
+  esac
+}
+hermes_configure_dashboard_route
+'''
+        for mode, expected, setters in (('success',0,2), ('first',23,1), ('second',37,2)):
+            (root/'route').unlink(missing_ok=True)
+            result = subprocess.run(['bash', '-c', route, 'fixture', str(SOURCE/'failure-capture.sh'), str(root), mode], capture_output=True, timeout=5)
+            assert result.returncode == expected
+            lines=(root/'route').read_text().splitlines()
+            assert sum(' config set ' in line for line in lines) == setters
+            if expected: assert lines[-1] == 'capture '+str(expected)
+
+
 def check_repeat_init_diagnostic():
-    source = (SOURCE/'hermes-profile.sh').read_text()
-    start = source.index('yard "$YARD" start --yes\n')
-    repeat = source[start:source.index("\nprintf '  [ .. ] provisioning only", start)]
+    repeat = 'hermes_repeat_init\n'
     with tempfile.TemporaryDirectory(prefix='subyard-hermes-readiness-', dir='/tmp') as temporary:
         root = Path(temporary)
         engine = root/'yard'
         engine.write_text('''#!/usr/bin/python3
-import os, pathlib, sys, time
+import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
-assert sys.argv[1:] == ['migrate', '--check', '--json']
+args = sys.argv[1:]
+with (root/'calls').open('a') as output: output.write(json.dumps(args)+'\\n')
+assert args[:2] == ['-Y', 'fixture']
+if args[2:] == ['profile', 'status', 'github', '--json']:
+    if os.environ['READINESS_MODE'] == 'timeout': time.sleep(2)
+    print(json.dumps(dict(runtime='ready' if len((root/'calls').read_text().splitlines()) > 1 else 'unavailable', configured=False, ready=False)))
+    raise SystemExit()
+assert args[2:] == ['migrate', '--check', '--json']
 (root/'called').touch()
 print('PRIVATE_SENTINEL', file=sys.stderr)
-if os.environ['READINESS_MODE'] == 'timeout': time.sleep(2)
+if os.environ['READINESS_MODE'] == 'timeout' and not os.environ.get('WAIT_ONLY'): time.sleep(2)
 print((root/'response').read_text())
 raise SystemExit(17 if os.environ['READINESS_MODE'] == 'native-failure' else 0)
 ''')
         engine.chmod(0o700)
         bound = root/'timeout'
         bound.write_text('''#!/bin/sh
-test "$1 $2 $3" = '--signal=TERM --kill-after=2 15' || exit 99
+test "$1 $2" = '--signal=TERM --kill-after=2' || exit 99
+case "$3" in 1|2|3|4|5|15) ;; *) exit 99 ;; esac
 shift 3
 exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
 ''')
@@ -70,14 +141,46 @@ yard() {
             if not original:
                 assert result.stdout == '' and result.stderr == ''
                 continue
-            expected = f'HERMES_REPEAT_INIT_DIAGNOSTIC original_exit_code={original} native_exit_code={native} capture_exit_code={capture}'
+            expected = f'HERMES_RELEASE_DIAGNOSTIC original_exit_code={original} native_exit_code={native} capture_exit_code={capture}'
             assert expected in result.stdout, 'inspection native/capture exits were conflated'
             if capture == 0:
-                line, = [line for line in result.stdout.splitlines() if line.startswith('HERMES_REPEAT_INIT_READINESS=')]
+                line, = [line for line in result.stdout.splitlines() if line.startswith('HERMES_RELEASE_READINESS=')]
                 value = json.loads(line.split('=', 1)[1])
                 assert value['changed_activation_owners'] == ['activation.github-runtime']
                 assert value['other_changed_decisions'] == 1
                 assert value['blocker_codes'] == {'dependency-unavailable': 1}
+
+        (root/'response').write_text(json.dumps(report))
+        wait = 'hermes_wait_github_runtime_or_report\n'
+        route = 'hermes_configure_dashboard_route\n'
+        script = '''set -euo pipefail
+. "$1"
+YARD=fixture YARD_BIN="$2" TAILSCALE_IP=100.127.254.20 dashboard_port=19119
+sleep() { SECONDS=$((SECONDS + 10)); }
+yard() { printf '%s\\n' "$*" >>"$YARD_BIN.route-calls"; return 23; }
+'''
+        for mode in ('reconnect', 'timeout', 'route-failure'):
+            (root/'calls').unlink(missing_ok=True)
+            started = time.monotonic()
+            result = subprocess.run(['bash', '-c', script + (route if mode == 'route-failure' else wait),
+                'fixture', str(SOURCE/'failure-capture.sh'), str(engine)], capture_output=True, text=True,
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, WAIT_ONLY='1'), timeout=7)
+            assert result.returncode == {'reconnect': 0, 'timeout': 124, 'route-failure': 23}[mode]
+            assert time.monotonic() - started < 5, 'reconnect wait was not bounded'
+            assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr
+            calls = [json.loads(line)[2:] for line in (root/'calls').read_text().splitlines()]
+            if mode == 'reconnect':
+                assert calls == [['profile', 'status', 'github', '--json']]*2
+                assert not result.stdout and not result.stderr
+            else:
+                assert calls[-1] == ['migrate', '--check', '--json']
+                assert '"changed_activation_owners": ["activation.github-runtime"]' in result.stdout
+            route_calls = root/'yard.route-calls'
+            if mode == 'route-failure':
+                assert route_calls.read_text().splitlines() == [
+                    'fixture config set HERMES_DASHBOARD_ADVERTISE_HOST 100.127.254.20 --scope yard --yes']
+            else:
+                assert not route_calls.exists(), 'runtime wait performed a mutation'
 
 
 def check(original=23, cleanup=0, fault=''):
@@ -118,8 +221,6 @@ esac
 exec bash -c "$6"
 ''')
         transport.chmod(0o700)
-        guest_cleanup = (SOURCE / 'hermes-profile.sh').read_text().split('\ncleanup() {\n', 1)[1].split('\n}\n', 1)[0]
-        (root / 'guest-cleanup.sh').write_text('cleanup() {\n' + guest_cleanup + '\n}\n')
         (root / 'guest.sh').write_text('''set -euo pipefail
 ROOT="$FIXTURE_ROOT/worktree/src"
 . "$ROOT/config/profiles/hermes/tests/e2e/failure-capture.sh"
@@ -133,12 +234,10 @@ touch "$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
 setting() { printf '%s\\n' controlled; }
 yard() { return "$FIXTURE_CLEANUP"; }
 cleanup_fixture_pool() { find "$STATE" -depth -delete; return "$FIXTURE_CLEANUP"; }
-. "$FIXTURE_ROOT/guest-cleanup.sh"
-trap cleanup EXIT
+trap hermes_cleanup EXIT
 exit "$FIXTURE_ORIGINAL"
 ''')
-        quote_function = (SOURCE.parents[4] / 'dev/agent-e2e.sh').read_text().split('\nquote_ssh_command() {\n', 1)[1].split('\n}\n', 1)[0]
-        (root / 'dev/agent-e2e.sh').write_text('''LEASE_KEEPER_PID=''
+        (root / 'dev/agent-e2e.sh').write_text('. '+shlex.quote(str(SOURCE.parents[4] / 'dev/agent-e2e.sh'))+'\n'+'''LEASE_KEEPER_PID=''
 CLIENT_CONFIG="$FIXTURE_ROOT/client-config"
 declare -A GUEST_DIRS=()
 set_requested_slot() { test "$1" = 7; }
@@ -166,7 +265,7 @@ cleanup_guest() {
   return "$FIXTURE_CLEANUP"
 }
 release_lease() { touch "$FIXTURE_ROOT/released"; return "$FIXTURE_CLEANUP"; }
-''' + 'quote_ssh_command() {\n' + quote_function + '\n}\n')
+''')
         environment = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                            FIXTURE_ROOT=str(root), FIXTURE_DIAGNOSTIC=str(diagnostic),
                            FIXTURE_ORIGINAL=str(original), FIXTURE_CLEANUP=str(cleanup),
@@ -201,6 +300,7 @@ release_lease() { touch "$FIXTURE_ROOT/released"; return "$FIXTURE_CLEANUP"; }
             assert not archive_path.exists()
 
 
+check_runtime_wait_and_route()
 check_repeat_init_diagnostic()
 for mask in (0o002, 0o077):
     previous = os.umask(mask)

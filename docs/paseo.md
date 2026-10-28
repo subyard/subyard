@@ -8,14 +8,14 @@ agent defaults.
 
 Add `paseo` to the complete `CODING_TOOL_INTEGRATIONS` setting through the typed configuration
 writer. Inspect the current value first, then submit that full list with `paseo` added. Use host scope
-for the default yard and host-wide fallback, or yard scope for one named yard:
+for the default yard and host-wide fallback, or yard scope for the selected yard:
 
 ```sh
 yard config show CODING_TOOL_INTEGRATIONS
 yard config set CODING_TOOL_INTEGRATIONS "claude codex opencode pi paseo" --scope host
 
-yard -Y demo config show CODING_TOOL_INTEGRATIONS
-yard -Y demo config set CODING_TOOL_INTEGRATIONS "codex paseo" --scope yard
+yard -Y default config show CODING_TOOL_INTEGRATIONS
+yard -Y default config set CODING_TOOL_INTEGRATIONS "codex paseo" --scope yard
 ```
 
 Paseo declares Codex as a required provider. Subyard expands the dependency automatically and
@@ -26,8 +26,7 @@ The quoted lists are examples; preserve the integrations reported by `config sho
 writer for the intended scope, then apply the result with the normal provisioning command:
 
 ```sh
-yard init
-yard -Y demo init
+yard -Y default init
 ```
 
 Provisioning installs the pinned headless runtime, starts it as the yard's `dev` user, checks its
@@ -38,7 +37,6 @@ connection in Paseo Desktop:
 
 ```sh
 ssh yard -- paseo-pair
-ssh yard-<name> -- paseo-pair
 ```
 
 Scan the QR code or paste the printed offer into Paseo Desktop. The SSH command then exits; normal
@@ -76,7 +74,6 @@ Run the package check from the yard when Desktop cannot connect:
 
 ```sh
 ssh yard -- paseo-check
-ssh yard-<name> -- paseo-check
 ```
 
 The check runs directly as the SSH `dev` user, verifies the Subyard-managed Codex package and its

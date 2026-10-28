@@ -100,6 +100,7 @@ list_lanes() {
     power-systemd \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
+  printf 'producer-reboot\tdiagnostic-only\n'
 }
 parse_arguments() {
   local lane_seen=0 slot_seen=0
@@ -126,7 +127,7 @@ parse_arguments() {
     esac
   done
   case "$P0_LANE" in
-    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
+    smoke|boundary|nested-teardown|full-uninstall|transport|dependencies|real-incus|profile-resource|producer-reboot|release|source-upgrade|power-systemd|reboot-verify|release-smoke|peer|peer-cleanup|cleanup|full) ;;
     *) die "unknown lane '$P0_LANE'" ;;
   esac
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
@@ -1310,6 +1311,11 @@ case "$P0_LANE" in
     ;;
   profile-resource)
     run_phase profile-resource run_vm 1 profile-resource
+    run_phase cleanup run_vm 1 capacity-verify-cleanup
+    ;;
+  producer-reboot)
+    run_phase producer-reboot-platform run_vm 1 fixture-platform
+    run_phase producer-reboot run_power_systemd_vm 1 dev/e2e/bind-resource-profile.sh --producer-reboot
     run_phase cleanup run_vm 1 capacity-verify-cleanup
     ;;
   release)

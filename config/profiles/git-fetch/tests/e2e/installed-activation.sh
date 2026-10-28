@@ -227,60 +227,8 @@ if [ -n "$NATIVE_LOSS" ]; then
   printf 'subyard-profile-native-loss-v1\n' > "$loss_case/.marker"
   # BASH_ENV pauses the actual shipped Python entry only after its archive has
   # arrived, before its original generation claim and lifecycle-lock acquisition.
-  guest bash -se -- "$guest_loss" <<'SH'
-set -euo pipefail
-root=$1
-install -d -m 0700 "$root"
-printf 'subyard-git-fetch-loss-v1\n' > "$root/.marker"
-printf -v quoted '%q' "$root"
-printf 'loss_root=%s\n' "$quoted" > "$root/environment"
-cat >> "$root/environment" <<'BASH_ENV'
-python3() {
-  local argument refresh=0 status
-  for argument in "$@"; do [ "$argument" != custody-refresh ] || refresh=1; done
-  if [ "$refresh" = 1 ]; then
-    printf '%s %s\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" > "$loss_root/paused"
-    while [ ! -e "$loss_root/release" ]; do sleep .05; done
-    if command python3 "$@"; then status=0; else status=$?; fi
-    printf '%s\n' "$status" > "$loss_root/terminal"
-    return "$status"
-  fi
-  command python3 "$@"
-}
-BASH_ENV
-chmod 0600 "$root/environment"
-SH
-  python3 - "$loss_case" "$guest_loss" "$INSTANCE" "$PROJECT" <<'PY'
-from pathlib import Path
-import shlex,sys
-case,guest,instance,project=sys.argv[1:]
-script='#!/bin/bash\nset -euo pipefail\n'+''.join(key+'='+shlex.quote(value)+'\n' for key,value in
-    [('case',case),('guest',guest),('instance',instance),('project',project)])+r'''
-refresh=0
-for argument in "$@"; do [ "$argument" != custody-refresh ] || refresh=1; done
-if [ "$refresh" = 1 ]; then
-  printf 'custody-refresh\n' >> "$case/calls"
-  if [ ! -e "$case/paused" ]; then
-    arguments=("$@")
-    for index in "${!arguments[@]}"; do
-      if [ "${arguments[$index]}" = -- ]; then
-        arguments=("${arguments[@]:0:$index}" --env "BASH_ENV=$guest/environment" "${arguments[@]:$index}")
-        break
-      fi
-    done
-    /usr/bin/incus "${arguments[@]}" <&0 & client=$!
-    while ! /usr/bin/incus exec "$instance" --project "$project" -- test -f "$guest/paused" </dev/null; do sleep .05; done
-    printf '%s\n' "$$" > "$case/paused"
-    while [ ! -e "$case/release" ]; do sleep .05; done
-    /usr/bin/incus exec "$instance" --project "$project" -- touch "$guest/release" </dev/null
-    wait "$client"
-    exit "$?"
-  fi
-fi
-exec /usr/bin/incus "$@"
-'''
-path=Path(case)/'bin/incus';path.write_text(script);path.chmod(0o700)
-PY
+  guest bash -se -- "$guest_loss" < "$ROOT/config/profiles/git-fetch/tests/e2e/native-loss-guest.sh"
+  python3 -B "${ROOT}/config/profiles/git-fetch/tests/e2e/native-loss-wrapper.py" "$loss_case" "$guest_loss" "$INSTANCE" "$PROJECT"
   drift
   generation_before="$(guest cat /var/lib/subyard/.git-fetch.native-custody.json | jq -er .generation)"
   loss_observe() {

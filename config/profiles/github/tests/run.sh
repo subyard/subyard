@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Broker and integration checks owned by the GitHub profile.
 set -euo pipefail
+umask 0022
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 preflight=0
@@ -51,6 +52,8 @@ if required-passed or not count:
     raise SystemExit('FAIL: required GitHub protocol cases absent: '+','.join(sorted(required-passed)))
 print(f'GitHub Go tests: passed={count} required_protocol_cases={len(required)} skips=0(required)')
 PY
+bash "$ROOT/tests/profile-native-loss.sh"
+python3 -B "$ROOT/config/profiles/github/tests/native-loss-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/skills-test.py"
 python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace-test.py"
@@ -77,5 +80,4 @@ python3 -B "$ROOT/config/profiles/github/tests/git-wiring-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/git-remote-test.py"
 python3 "$ROOT/config/profiles/github/tests/runtime-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/release-observation-test.py"
-python3 -B "$ROOT/config/profiles/github/tests/native-loss-test.py"
 bash "$ROOT/config/profiles/github/tests/runner-permissions.sh"

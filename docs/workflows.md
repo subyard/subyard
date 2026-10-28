@@ -40,8 +40,8 @@ an existing project.
 `yard clone` probes and clones the repository with ordinary Git as the selected yard's developer,
 using that user's Git configuration and authentication inside the yard. An active
 [managed SSH grant](ssh-agent.md#git-access) supplies SSH access; the opt-in
-[GitHub broker-first mode](github.md#ordinary-git-with-original-authentication-fallback) also applies
-through the yard's ordinary Git configuration. Clone does not enable that mode automatically.
+[GitHub broker-first and broker-last modes](github.md#ordinary-git-with-original-authentication-fallback) also apply
+through the yard's ordinary Git configuration. Clone does not enable either mode automatically.
 Credentials available only in an interactive shell or a controller's SSH session are not guaranteed
 to be available to clone; configure access for ordinary Git inside the selected yard.
 
@@ -133,12 +133,11 @@ One owner host can run several independent local yards, each with its own instan
 to select one:
 
 ```bash
-yard -Y openclaw init
-yard @openclaw status
-yard status
+yard -Y default init
 yard @default status
+yard status
 yard space
-yard @openclaw space --refresh
+yard @default space --refresh
 ```
 
 Without a selector, most commands use the default yard. Bare `yard status` and `yard list` are
@@ -190,7 +189,7 @@ To enable a profile and prepare its tools in one operation, run:
 
 ```sh
 yard provision android
-yard -Y demo provision subyard-dev
+yard -Y default provision subyard-dev
 ```
 
 An explicit profile is appended to the selected yard's local `ENVIRONMENT_PROFILES`, including

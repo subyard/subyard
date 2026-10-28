@@ -3,12 +3,14 @@
 
 import argparse
 import ctypes
+from dataclasses import asdict, dataclass
 import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import runpy
 import select
 import signal
@@ -193,10 +195,30 @@ def selected_baseline_archives(args, release, arch):
     return archives
 
 
-def write_observation_incus(shims, control, unexpected, package_roots=(), activation_failure=None):
+def skills_transport_contract(root):
+    """Describe the current transport from explicit package assets, never shell text."""
+    package = runpy.run_path(str(root / 'config/skills/package.py'))
+    members = {}
+    for name in package['archive_members'](root):
+        path = root / name
+        members[name] = ('directory', 0o700, None) if path.is_dir() else ('file', 0o600, digest(path))
+    program = (root / 'config/skills/refresh.sh').read_text().rstrip('\n')
+    prefix = ['exec', 'yard', '--project', 'subyard', '--env', 'DEV_USER=dev',
+              '--env', 'ENVIRONMENT_PROFILES=', '--env', 'ALLOWS_CODING_TOOLS=true',
+              '--', 'bash', '-eu', '-c', program, '--']
+    return [(tuple(prefix + [mode]), members) for mode in ('apply', 'check')]
+
+
+def write_observation_incus(shims, control, unexpected, package_roots=(), activation_failure=None, *, skills_roots=None):
     source = Path(__file__).resolve().parent.parent
     probes = {}
     host_probes = {}
+    stdin_probes = []
+    skills = {}
+    for package_root in ((source, *package_roots) if skills_roots is None else skills_roots):
+        if (package_root / 'config/skills/package.py').is_file():
+            for command, members in skills_transport_contract(package_root):
+                skills.setdefault(command, []).append(members)
     fixtures = [fixture for owner in ("agents", "profiles", "retired-integrations")
                 for fixture in source.glob(f"config/{owner}/*/tests/release-observation.py")]
     for fixture in sorted(fixtures):
@@ -216,6 +238,13 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                 require(key not in probes or probes[key] == (response, code),
                         "package observation fixtures disagree on an exact command")
                 probes[key] = (response, code)
+            for arguments, payload, response, code, digest_command in provider.get("read_only_stdin_commands", lambda _: [])(package):
+                require(arguments.count(None) == 1 and all(isinstance(arg, str) or arg is None for arg in arguments)
+                        and isinstance(payload, bytes) and isinstance(response, str)
+                        and type(code) is int and 0 <= code <= 255
+                        and isinstance(digest_command, list) and all(isinstance(arg, str) for arg in digest_command),
+                        "package stdin observation fixture is invalid")
+                stdin_probes.append((arguments, payload, response, code, digest_command))
             for program, arguments, response, code in provider.get("read_only_host_commands", lambda _: [])(package):
                 require(program in ("sudo", "systemctl") and type(code) is int and 0 <= code <= 255,
                         "package host observation fixture is invalid")
@@ -224,8 +253,8 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                         "package host observation fixtures disagree on an exact command")
                 host_probes[key] = (response, code)
     incus = shims / "incus"
-    # Exact canned observations only; no command or guest script is executed.
-    incus.write_text("#!/usr/bin/python3\nimport json, pathlib, sys\n"
+    # Exact observations only; profile digest helpers never execute guest input.
+    incus.write_text("#!/usr/bin/python3\nimport hashlib, json, pathlib, subprocess, sys, tarfile\n"
                      "arguments = sys.argv[1:]\n"
                      f"probes = {probes!r}\n"
                      f"activation_failure = {str(activation_failure) if activation_failure else None!r}\n"
@@ -237,11 +266,43 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "        pathlib.Path(journal['marker']).write_text('controlled activation observation failure after migration effects\\n')\n"
                      "        sys.stderr.write('controlled activation observation failure after migration effects\\n')\n"
                      "        sys.exit(65)\n"
+                     f"skills = {skills!r}\n"
+                     "if tuple(arguments) in skills:\n"
+                     "    inventories = skills[tuple(arguments)]\n"
+                     "    actual = {}\n"
+                     "    seen = set()\n"
+                     "    valid = True\n"
+                     "    try:\n"
+                     "        with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:\n"
+                     "            for member in archive:\n"
+                     "                kind = 'directory' if member.isdir() else 'file' if member.isfile() else 'unsafe'\n"
+                     "                valid = valid and (not member.isdir() or member.size == 0)\n"
+                     "                digest = hashlib.sha256(archive.extractfile(member).read()).hexdigest() if member.isfile() else None\n"
+                     "                valid = valid and member.name not in seen\n"
+                     "                actual[member.name] = (kind, member.mode, digest)\n"
+                     "                seen.add(member.name)\n"
+                     "        valid = valid and actual in inventories\n"
+                     "    except (OSError, ValueError, tarfile.TarError):\n"
+                     "        valid = False\n"
+                     "    if valid: sys.exit(0)\n"
+                     f"    pathlib.Path({str(unexpected)!r}).write_text('skill transport rejected')\n"
+                     "    sys.exit(99)\n"
                      "if arguments == ['query', '/1.0/instances/yard?project=subyard']:\n"
                      f"    observation = json.loads(pathlib.Path({str(control)!r}).read_text())\n"
                      "    if not observation.get('instances'): sys.exit(1)\n"
                      "    print(json.dumps(observation['instances'][0]['info']))\n"
                      "    sys.exit(0)\n"
+                     f"stdin_probes = {stdin_probes!r}\n"
+                     "incoming = None\n"
+                     "for expected, payload, response, code, digest_command in stdin_probes:\n"
+                     "    if len(arguments) != len(expected): continue\n"
+                     "    dynamic = expected.index(None)\n"
+                     "    if arguments[:dynamic] != expected[:dynamic] or arguments[dynamic+1:] != expected[dynamic+1:]: continue\n"
+                     "    digest = subprocess.run(digest_command, capture_output=True, text=True)\n"
+                     "    if incoming is None: incoming = sys.stdin.buffer.read()\n"
+                     "    if digest.returncode == 0 and arguments[dynamic] == digest.stdout.strip() and incoming == payload:\n"
+                     "        sys.stdout.write(response)\n"
+                     "        sys.exit(code)\n"
                      "if tuple(arguments) in probes:\n"
                      "    sys.stdin.buffer.read()\n"
                      "    response, code = probes[tuple(arguments)]\n"
@@ -253,11 +314,6 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "    sys.exit(0)\n"
                      "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
                      "    sys.exit(3)\n"
-                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
-                     "    command = arguments[arguments.index('--') + 1:]\n"
-                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
-                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
-                     "        sys.exit(0)\n"
                      f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
                      f"pathlib.Path({str(unexpected) + '.argv.json'!r}).write_text(json.dumps(['incus', *arguments]))\n"
                      "sys.exit(99)\n")
@@ -1054,7 +1110,7 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
     # Each phase needs its own observed interruption. A prior fixture's marker
     # must never kill this session before it has published its own journal.
     interrupted.unlink(missing_ok=True)
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     observed_config = run_process([str(fixture.old_launcher), "config", "status"], fixture.env, timeout=30)
     require(observed_config.returncode == 1 and "drift" in observed_config.stdout + observed_config.stderr,
@@ -1336,7 +1392,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     shims = fixture.root / "commands"
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     interrupted = Path(str(control) + ".held")
     if interrupted.exists():
@@ -1652,7 +1708,7 @@ def verify_completed_source_selection(fixture, root):
     shims = fixture.root / "selection-commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-selection-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     gate = json.loads(fixture.run([launcher, "migrate", "--check", "--json"]))
     require(gate["outcome"]["status"] == "migration-required" and not gate.get("blockers")
@@ -1729,7 +1785,8 @@ def verify_migration_owner_replacement(release, version, baseline, source_baseli
     shims = fixture.root / "commands"
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected,
+                            [fixture.old_launcher.parent.parent, fixture.runtime / official_release])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     fixture.env["YARD_RELEASE_BASE_URL"] = baseline.as_uri()
     marker = Path(str(control) + ".held")
@@ -1866,7 +1923,10 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
     fixture = Fixture(root / ("direct-" + baseline_version), release, version,
                       baseline, arch, baseline_version)
     host = fixture.config / "config.env"
-    host.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    # The running fixture has no materialized guest config. Seed an empty
+    # selection so the released owner can verify its completed source before
+    # the candidate's independent post-migration activation failure.
+    host.write_text("CODING_TOOL_INTEGRATIONS=\n")
     host.chmod(0o600)
     fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
     source = json.loads(fixture.journal.read_text())
@@ -1902,9 +1962,14 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
         unexpected = fixture.root / "unexpected-host-command"
         failure_control = fixture.root / "activation-failure.json"
         failure_marker = fixture.root / "activation-failure-observed"
-        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
-        write_observation_incus(shims, control, unexpected, activation_failure=failure_control)
+        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent],
+                                activation_failure=failure_control)
         fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+        source_inspection = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+        require(source_inspection["outcome"]["status"] == "ready" and not source_inspection.get("blockers")
+                and not unexpected.exists(),
+                "released direct source is not current before candidate activation")
+        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
         transactions = fixture.config / "release-transition/v2/transactions"
         require((transactions / source_transaction).is_dir(), "direct fixture omitted retained terminal evidence")
         result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],
@@ -1960,6 +2025,91 @@ def history_snapshot(root):
             for path in root.rglob("*") if path.is_file()}
 
 
+@dataclass(frozen=True)
+class PublishedEvidence:
+    relative_path: str
+    mode: int
+    inode: int
+    mtime_ns: int
+    digest: str
+
+
+@dataclass(frozen=True)
+class StagedEvidence:
+    destination: str
+    mode: int
+    inode: int
+    captured_prefix: bytes
+
+
+def history_evidence_destinations(journal, *, transaction_prefix=True):
+    prefix = Path(journal['transaction']) if transaction_prefix else Path()
+    return {str(prefix / 'evidence' / (step['id']+'.'+phase+'.json'))
+            for step in journal['steps'] for phase in ('captured', 'applied', 'verified')}
+
+
+def capture_history_evidence(root, allowed_destinations=()):
+    """Capture published identity separately from resumable private staging.
+
+    The pending and checkpoint names are the writer's persistence format here.
+    Full record validity remains the ordinary transition validator's responsibility.
+    """
+    root = Path(root)
+    allowed = set(allowed_destinations)
+    for destination in allowed:
+        path = Path(destination)
+        require(not path.is_absolute() and all(part not in ('.', '..') and not part.startswith('.') for part in path.parts)
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.(captured|applied|verified)\.json', path.name),
+                'invalid evidence staging destination')
+    records = {}
+    if not root.exists() and not root.is_symlink():
+        return records
+    require(stat.S_ISDIR(root.lstat().st_mode), 'unsafe evidence root')
+    paths = []
+    for directory, directories, files in os.walk(root, followlinks=False,
+            onerror=lambda error: require(False, 'cannot inspect evidence directory')):
+        for name in directories:
+            path = Path(directory) / name
+            require(not name.startswith('.') and stat.S_ISDIR(path.lstat().st_mode), 'unsafe evidence directory')
+        for name in files:
+            path = Path(directory) / name
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'unsafe evidence file')
+            paths.append((path, info))
+    names = {str(path.relative_to(root)) for path, _ in paths}
+    for path, info in paths:
+        relative = str(path.relative_to(root))
+        mode = stat.S_IMODE(info.st_mode)
+        if path.name.startswith('.'):
+            require(path.name.endswith('.pending') and len(path.name) > len('.pending')+1,
+                    'unknown hidden evidence file')
+            destination = str(path.relative_to(root).with_name(path.name[1:-len('.pending')]))
+            require(destination in allowed and destination not in names, 'unknown or colliding evidence staging')
+            records[relative] = StagedEvidence(destination, mode, info.st_ino, path.read_bytes())
+        else:
+            require(not path.name.endswith('.pending'), 'unknown evidence staging file')
+            records[relative] = PublishedEvidence(relative, mode, info.st_ino, info.st_mtime_ns, digest(path))
+    return records
+
+
+def verify_history_evidence(root, before, allowed_destinations=()):
+    """Verify retention after a successful retry, permitting staging publication."""
+    allowed = set(allowed_destinations)
+    after = capture_history_evidence(root, allowed)
+    require(not any(isinstance(record, StagedEvidence) for record in after.values()), 'completed retry left evidence staging')
+    for name, record in before.items():
+        if isinstance(record, PublishedEvidence):
+            require(after.get(name) == record, 'retry changed published evidence identity: '+name)
+        elif isinstance(record, StagedEvidence):
+            published = after.get(record.destination)
+            require(record.destination in allowed and isinstance(published, PublishedEvidence)
+                    and published.mode == record.mode and published.inode == record.inode
+                    and (Path(root) / record.destination).read_bytes().startswith(record.captured_prefix),
+                    'retry replaced or changed captured staging: '+name)
+        else:
+            require(False, 'unknown captured evidence state')
+
+
 def history_links(fixture):
     return tuple((os.readlink(path), path.lstat().st_mode, path.lstat().st_ino, path.lstat().st_mtime_ns)
                  if path.is_symlink() else None
@@ -2002,7 +2152,7 @@ def history_chain(release, version, arch, root, baselines, checkpointed, name):
             and all(step["checkpoint"] == "verified" for step in prior_journal["steps"]),
             "authentic predecessor did not complete its original migration graph")
     transactions = fixture.config / "release-transition/v2/transactions"
-    prior_evidence = history_snapshot(transactions)
+    prior_evidence = capture_history_evidence(transactions)
     require(len(prior_evidence) == 6, "authentic predecessor has no complete evidence triples")
     if HISTORY_EVIDENCE is not None:
         shutil.copytree(fixture.config, HISTORY_EVIDENCE / (name + "-closed-source"))
@@ -2040,6 +2190,11 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
     history["target"] = fixture.version + "-" + digest(bundle)[:12]
     inventory = (Path(__file__).resolve().parent.parent / "internal/adapters/reconcileruntime/integration_inventory.py").read_text()
     history["inventoryProgramSHA256"] = hashlib.sha256(inventory.replace("@STATE_ROOT@", "/var/lib/subyard/integrations").replace("@STATE_UID@", "0").encode()).hexdigest()
+    package_root = Path(__file__).resolve().parent.parent
+    package = runpy.run_path(str(package_root / 'config/skills/package.py'))
+    history['skills'] = {'files': {name: digest(package_root / name) for name in package['source_files'](package_root)},
+                         'programSHA256': digest(package_root / 'config/skills/probe.py'),
+                         'user': 'dev', 'profiles': '', 'coding': True}
     shims = fixture.root / "commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-host-command"
@@ -2050,9 +2205,9 @@ def history_materialized_fixture(fixture, root, control, fail_once=True):
 
 
 def history_preserves_evidence(fixture, before):
-    after = history_snapshot(fixture.config / "release-transition/v2/transactions")
-    changed = sorted(name for name, value in before.items() if after.get(name) != value)
-    require(not changed, "migration retry replayed or removed retained historical evidence: " + ",".join(changed))
+    journal = json.loads(fixture.journal.read_text())
+    verify_history_evidence(fixture.config / 'release-transition/v2/transactions', before,
+                            history_evidence_destinations(journal))
 
 
 def history_protocol(fixture, request):
@@ -2168,7 +2323,7 @@ def verify_history_source_admission(fixture, control, checkpointed, phase, mutat
 
 def verify_history_fresh_repair(fixture, control, history, guest, checkpointed):
     journal = json.loads(fixture.journal.read_text())
-    preserved = history_snapshot(fixture.config / "release-transition/v2/transactions")
+    preserved = capture_history_evidence(fixture.config / "release-transition/v2/transactions")
     guest.write_text("known fresh runtime drift\n")
     history["migrations"] = []
     set_fixture_observation(control, "Running", history=history)
@@ -2203,6 +2358,21 @@ def verify_history_fresh_repair(fixture, control, history, guest, checkpointed):
 
 
 
+def history_final_pending_migration(bundle, ledger_path):
+    """Bind the ledger observer to the last pending edge in packaged registry order."""
+    with tarfile.open(bundle, 'r:gz') as archive:
+        members = [member for member in archive if member.name.removeprefix('./') == 'config/release-transition.json']
+        require(len(members) == 1 and members[0].isfile(), 'candidate migration registry is unavailable or ambiguous')
+        payload = archive.extractfile(members[0]).read((1 << 20)+1)
+        require(len(payload) <= 1 << 20, 'candidate migration registry exceeds its bound')
+        registry = json.loads(payload)
+    ledger = json.loads(ledger_path.read_text())
+    pending = [migration for migration in registry['migrations']
+               if migration['toEpoch'] > ledger['domains'][migration['domain']]['epoch']]
+    require(pending, 'ledger-cut fixture has no pending migration')
+    return pending[-1]['id']
+
+
 def verify_history_process_cuts(release, version, arch, root, baselines):
     observer = Path(__file__).resolve().parent / "e2e/release-transition-post-cas-observer.py"
     for cut in ("ledger", "checkpoint"):
@@ -2216,7 +2386,11 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
                    "--source-transaction", original["transaction"], "--candidate-target", target,
                    "--marker", str(marker), "--timeout", "90"]
         if cut == "checkpoint": command += ["--checkpoint", str(checkpoint)]
-        else: command += ["--ledger", str(checkpoint.parent / "ledger.json"), "--migration", "introduce-owner-publication-state-v1"]
+        else:
+            ledger = checkpoint.parent / 'ledger.json'
+            # Earlier edges can already be superseded when inotify is delivered.
+            # The last pending CAS remains observable through activation readiness.
+            command += ['--ledger', str(ledger), '--migration', history_final_pending_migration(bundle, ledger)]
         command += ["--", str(fixture.old_launcher), "update", "--version", version, "--yes"]
         result = run_process(command, fixture.env, timeout=120)
         require(result.returncode == -signal.SIGKILL and marker.exists(),
@@ -2226,7 +2400,9 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
         shutil.copytree(fixture.config, HISTORY_EVIDENCE / (cut + "-stopped-config"))
         (HISTORY_EVIDENCE / (cut + "-stopped-links.json")).write_text(json.dumps(history_links(fixture)) + "\n")
         stopped = json.loads(fixture.journal.read_text())
-        stopped_evidence = history_snapshot(checkpoint.parent / "transactions" / stopped["transaction"])
+        evidence_root = checkpoint.parent / 'transactions' / stopped['transaction']
+        allowed_destinations = history_evidence_destinations(stopped, transaction_prefix=False)
+        stopped_evidence = capture_history_evidence(evidence_root, allowed_destinations)
         binding = tuple(stopped[key] for key in ("transaction", "authorizationPlan", "resumePlan", "observationScope"))
         if cut == "ledger": require(not checkpoint.exists(), "history converted before activation readiness")
         before = snapshot(fixture.config)
@@ -2243,9 +2419,7 @@ def verify_history_process_cuts(release, version, arch, root, baselines):
             (HISTORY_EVIDENCE / (cut + "-failed-links.json")).write_text(json.dumps(history_links(fixture)) + "\n")
             raise
         complete = json.loads(fixture.journal.read_text())
-        after_evidence = history_snapshot(checkpoint.parent / "transactions" / stopped["transaction"])
-        require(all(after_evidence.get(name) == value for name, value in stopped_evidence.items()),
-                "process retry rewrote retained migration evidence")
+        verify_history_evidence(evidence_root, stopped_evidence, allowed_destinations)
         require(tuple(complete[key] for key in ("transaction", "authorizationPlan", "resumePlan", "observationScope")) == binding,
                 "process cut lost the durable authorization or scope")
         (HISTORY_EVIDENCE / (cut + "-cut.json")).write_bytes(marker.read_bytes())
@@ -2306,9 +2480,8 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
             require(effects_after_apply.startswith(effects_before_apply), "apply rewrote prior fixture effects")
             effects = [json.loads(line) for line in effects_after_apply[len(effects_before_apply):].splitlines()]
             failed_apply = [event for event in effects if event.get("exit") == 37]
-            fixture_source = (Path(__file__).resolve().parent.parent /
-                              "internal/testkit/cmd/empty-incus/migration_history.go").read_text()
-            apply_script = fixture_source.split("const configWriteScript = `", 1)[1].split("`", 1)[0]
+            apply_script = (Path(__file__).resolve().parent.parent /
+                            "internal/testkit/cmd/empty-incus/config-write.sh").read_text()
             require(len(failed_apply) == 1
                     and failed_apply[0].get("command") == ["sh", "-eu", "-c", apply_script,
                                                            "subyard", history["destination"], "1000"]
@@ -2318,8 +2491,10 @@ def verify_migration_history(release, version, arch, root, baselines, evidence, 
             if checkpointed: require(projection.read_bytes() == projection_before, "checkpoint authority changed the frozen projection")
             history_preserves_evidence(fixture, prior_evidence)
             verify_history_safety(fixture, control, checkpointed)
-            migration_evidence = history_snapshot(fixture.config / "release-transition/v2/transactions")
-            (evidence / (label + "-evidence-before-retry.json")).write_text(json.dumps(migration_evidence, indent=2) + "\n")
+            migration_evidence = capture_history_evidence(fixture.config / "release-transition/v2/transactions",
+                                                         history_evidence_destinations(journal))
+            (evidence / (label + "-evidence-before-retry.json")).write_text(json.dumps(migration_evidence, indent=2,
+                default=lambda record: record.hex() if isinstance(record, bytes) else asdict(record)) + "\n")
             shutil.copytree(fixture.config, evidence / (label + "-before-retry-config"))
             inspection = history_inspect(fixture, control)
             require(inspection["outcome"]["status"] == "recovering" and not inspection.get("blockers"),

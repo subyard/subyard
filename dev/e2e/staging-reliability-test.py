@@ -694,9 +694,15 @@ assert exported.returncode == 0, exported
 actor_context = exported.stdout.splitlines(); assert len(actor_context) == 4
 with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
-    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid','supported-purpose','foreign-matching-purpose')]:
+    for scope,failed in [('owner_container',case) for case in ('','symlink','busy','linked','linked-lock','special','config')]+[('outer_vm',case) for case in ('','lease','project','run','slot','purpose','marker','marker-mode','lease-link','lease-symlink','du-timeout','du-invalid','supported-purpose','foreign-matching-purpose',
+        'archive-config','archive-symlink','archive-owner','archive-mode','archive-link','archive-hardlink','archive-special','archive-entry-owner','archive-linked-lock','archive-busy','clean-failure','clean-timeout','clean-lock-replaced')]:
         case = root/(scope+'-'+(failed or 'success')); lists = case/'var/lib/apt/lists'; lists.mkdir(parents=True)
         locks = [case/name for name in ['var/lib/dpkg/lock-frontend','var/lib/dpkg/lock','var/lib/apt/lists/lock']]
+        archives=case/'var/cache/apt/archives'; archives.mkdir(parents=True); archives.chmod(0o755)
+        archive_partial=archives/'partial'; archive_partial.mkdir(mode=0o700); archive_partial.chmod(0o700)
+        archive_files=[archives/'fixture.deb',archive_partial/'download.deb']
+        for path in archive_files: path.write_bytes(b'private downloaded package'); path.chmod(0o600)
+        if scope=='outer_vm': locks.append(archives/'lock')
         for lock in locks: lock.parent.mkdir(parents=True, exist_ok=True); lock.touch()
         inodes = [lock.stat().st_ino for lock in locks]
         index = lists/'repository_Packages'; index.write_text('reproducible index')
@@ -706,6 +712,12 @@ with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as dir
         if failed == 'linked': os.link(foreign, lists/'late-link')
         if failed == 'linked-lock': os.link(locks[0],case/'linked-lock')
         if failed == 'special': os.mkfifo(lists/'late-fifo')
+        if failed == 'archive-symlink': archives.rename(archives.with_name('original-archives')); archives.symlink_to(archives.with_name('original-archives'))
+        if failed == 'archive-mode': archives.chmod(0o777)
+        if failed == 'archive-link': (archives/'late-link').symlink_to(foreign)
+        if failed == 'archive-hardlink': os.link(foreign,archives/'late-link')
+        if failed == 'archive-special': os.mkfifo(archives/'late-fifo')
+        if failed == 'archive-linked-lock': os.link(archives/'lock',case/'linked-lock')
         state=case/'state';state.mkdir(mode=0o711);state.chmod(0o711)
         marker=state/'.subyard-p0-marker';marker.write_text(('foreign' if failed=='marker' else 'fixture')+'\n');marker.chmod(0o600)
         current_context=list(actor_context)
@@ -716,42 +728,69 @@ with tempfile.TemporaryDirectory(prefix='subyard-apt-index-', dir='/tmp') as dir
         if failed=='marker-mode':marker.chmod(0o644)
         if failed=='lease-link':os.link(lease,case/'lease-copy')
         if failed=='lease-symlink':lease.rename(case/'lease-original');lease.symlink_to(case/'lease-original')
-        # Real paths/locks/deletion; only native root ownership and apt-config are leaves.
+        native_calls=case/'native-calls'
+        # Real paths/locks/index deletion; native APT is always intercepted.
+        # Never let this host-free actor call host apt-get, sudo or another leaf.
         setup=f"""import os,pathlib,pwd,subprocess
 actual_lstat=pathlib.PosixPath.lstat;actual_fstat=os.fstat
 caller_uid=os.getuid()
-def owner(item,marker=False,apt=False):
- values=list(item);values[4]=42 if apt else caller_uid if marker else 0;return os.stat_result(values)
-pathlib.PosixPath.lstat=lambda path:owner(actual_lstat(path),path.is_relative_to(pathlib.Path({str(state)!r})),path.is_relative_to(pathlib.Path({str(partial)!r})))
+def owner(item,marker=False,apt=False,foreign=False):
+ values=list(item);values[4]=77 if foreign else 42 if apt else caller_uid if marker else 0;return os.stat_result(values)
+pathlib.PosixPath.lstat=lambda path:owner(actual_lstat(path),path.is_relative_to(pathlib.Path({str(state)!r})),path.is_relative_to(pathlib.Path({str(partial)!r})) or path.is_relative_to(pathlib.Path({str(archive_partial)!r})),({failed!r}=='archive-owner' and path==pathlib.Path({str(archives)!r})) or ({failed!r}=='archive-entry-owner' and path==pathlib.Path({str(archive_files[0])!r})))
 os.fstat=lambda fd:owner(actual_fstat(fd))
 os.geteuid=lambda:0
 pwd.getpwnam=lambda name:type('APTUser',(),{{'pw_uid':42}})()
 actual_output=subprocess.check_output
+actual_run=subprocess.run
+def run(args,**kwargs):
+ if args[0]=='apt-get':
+  assert args==['apt-get','clean'] and kwargs==dict(check=True,timeout=20,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL),(args,kwargs)
+  path=pathlib.Path({str(native_calls)!r});path.write_text('apt-get clean\\n');path.chmod(0o600)
+  if {failed!r}=='clean-failure':raise subprocess.CalledProcessError(100,args,stderr=b'private APT archive bytes')
+  if {failed!r}=='clean-timeout':raise subprocess.TimeoutExpired(args,20,stderr=b'private APT archive bytes')
+  for name in {list(map(str,archive_files))!r}:pathlib.Path(name).unlink()
+  if {failed!r}=='clean-lock-replaced':
+   replacement=pathlib.Path({str(archives/'replacement')!r});replacement.write_bytes(b'');replacement.replace({str(archives/'lock')!r})
+  return subprocess.CompletedProcess(args,0)
+ assert args[:4]==['du','-sx','-B1','--'] and args[4] in {list(map(str,[lists,archives]))!r},args
+ return actual_run(args,**kwargs)
+subprocess.run=run
 def command(args,**kwargs):
- if args[0]=='apt-config':return b"LISTS='/foreign/lists/'\\n" if {failed!r}=='config' else ('LISTS='+{str(lists)!r}+'/').encode()
+ if args==['apt-config','shell','LISTS','Dir::State::lists/d']:return b"LISTS='/foreign/lists/'\\n" if {failed!r}=='config' else ('LISTS='+{str(lists)!r}+'/').encode()
+ if args==['apt-config','shell','ARCHIVES','Dir::Cache::archives/d']:return b"ARCHIVES='/foreign/archives/'\\n" if {failed!r}=='archive-config' else ('ARCHIVES='+{str(archives)!r}+'/').encode()
+ assert args[:4]==['du','-sx','-B1','--'],args
  if {failed!r}=='du-timeout':raise subprocess.TimeoutExpired(args,2,output=b'private APT index bytes')
  return b'private APT index bytes' if {failed!r}=='du-invalid' else actual_output(args,**kwargs)
 subprocess.check_output=command
 """
-        payload=apt_indexes.replace('/var/lib/',str(case/'var/lib')+'/').replace('/run/subyard-e2e-lease.json',str(lease))
+        payload=apt_indexes.replace('/var/lib/',str(case/'var/lib')+'/').replace('/var/cache/',str(case/'var/cache')+'/').replace('/run/subyard-e2e-lease.json',str(lease))
         held = None
-        if failed == 'busy':
+        if failed in ('busy','archive-busy'):
             import fcntl
-            held = locks[0].open('r+'); fcntl.lockf(held, fcntl.LOCK_EX|fcntl.LOCK_NB)
+            held = locks[-1 if failed=='archive-busy' else 0].open('r+'); fcntl.lockf(held, fcntl.LOCK_EX|fcntl.LOCK_NB)
         context = ['foreign-'+key if failed == key else value
             for key,value in zip(('project','run','slot','purpose'),current_context)]
         result = subprocess.run(['python3', '-c', setup+payload,scope,str(state),'fixture',str(os.getuid()),
             *context], capture_output=True, text=True, timeout=5)
         if held: held.close()
-        refused=bool(failed) and not failed.startswith('du-') and failed!='supported-purpose'
-        assert (result.returncode != 0) == refused, (scope,failed,result)
+        native_failure=failed in ('clean-failure','clean-timeout')
+        post_native_failure=native_failure or failed=='clean-lock-replaced'
+        refused=bool(failed) and not failed.startswith('du-') and failed!='supported-purpose' and not post_native_failure
+        assert (result.returncode != 0) == (refused or post_native_failure), (scope,failed,result)
         assert index.exists() == refused and (partial/'index').exists() == refused and foreign.read_text() == 'foreign bytes', result
+        assert native_calls.exists()==(scope=='outer_vm' and not refused),(scope,failed,result)
+        assert all(path.exists()==(scope!='outer_vm' or refused or native_failure) for path in archive_files),(scope,failed,result)
         rows=[json.loads(line.split('=',1)[1]) for line in result.stdout.splitlines()]
-        assert len(rows)==(0 if refused else 2) and 'private APT index bytes' not in result.stdout+result.stderr,result
+        assert len(rows)==(0 if refused else 1 if post_native_failure else 2) and not any(value in result.stdout+result.stderr for value in ('private APT index bytes','private APT archive bytes')),result
+        if failed=='clean-failure': assert 'exit 100' in result.stderr,result
+        if failed=='clean-timeout': assert 'deadline' in result.stderr,result
         if rows:
-            assert [row['phase'] for row in rows]==['before_reclaim','after_reclaim'] and all(row['scope']==scope and set(row)=={'phase','scope','apt_lists_bytes'} for row in rows),rows
-            assert all(row['apt_lists_bytes'] is None for row in rows) if failed.startswith('du-') else rows[0]['apt_lists_bytes']>rows[1]['apt_lists_bytes']>=0,rows
-        assert [lock.stat().st_ino for lock in locks] == inodes, 'APT lock inode changed'
+            keys={'phase','scope','apt_lists_bytes'} | ({'apt_archives_bytes'} if scope=='outer_vm' else set())
+            assert [row['phase'] for row in rows]==(['before_reclaim'] if post_native_failure else ['before_reclaim','after_reclaim']) and all(row['scope']==scope and set(row)==keys for row in rows),rows
+            assert all(row['apt_lists_bytes'] is None for row in rows) if failed.startswith('du-') else post_native_failure or rows[0]['apt_lists_bytes']>rows[1]['apt_lists_bytes']>=0,rows
+            if scope=='outer_vm':
+                assert all(row['apt_archives_bytes'] is None for row in rows) if failed.startswith('du-') else post_native_failure or rows[0]['apt_archives_bytes']>rows[1]['apt_archives_bytes']>=0,rows
+        assert ([lock.stat().st_ino for lock in locks] != inodes)==(failed=='clean-lock-replaced'), 'APT lock inode changed'
     reclaim_apt = re.search(r'^reclaim_owner_apt_indexes\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
     for owned, installed in [(0,1),(1,0)]:
         script = f'''set -euo pipefail

@@ -19,6 +19,7 @@ fixture="$tmp/source with spaces"
 mkdir -p "$fixture"/{bin,cmd,internal,scripts,dev,config/profiles,config/agents,tests/suites,tests/helpers} "$tmp/tools"
 cp "$ROOT/tests/run.sh" "$fixture/tests/run.sh"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
+cp "$ROOT/tests/helpers/permission-umasks.sh" "$fixture/tests/helpers/permission-umasks.sh"
 printf '#!/usr/bin/env bash\n' > "$fixture/bin/yard"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/go"
 cp "$tmp/tools/go" "$tmp/tools/gofmt"
@@ -84,9 +85,9 @@ ln -sfn releases/fixture "$root/.build/runtime/current"
 SH
 chmod +x "$fixture/dev/package-engine.sh"
 
-for suite in unit contract integration; do
+for suite in preflight unit contract integration; do
   printf '%s.sh\n' "$suite" > "$fixture/tests/suites/$suite.list"
-  printf '#!/usr/bin/env bash\nprintf "hidden successful output\\n"\n' > "$fixture/tests/$suite.sh"
+  printf '#!/usr/bin/env bash\n[ "$(umask)" = 0022 ] || exit 30\nprintf "hidden successful output\\n"\n' > "$fixture/tests/$suite.sh"
 done
 # A child that reads stdin must not consume the remaining manifest entries.
 printf 'contract.sh\nafter-input.sh\n' > "$fixture/tests/suites/contract.list"
@@ -101,7 +102,7 @@ run_fixture() {
 summary_path() { sed -n 's/^RESULTS //p' "$tmp/$1.out"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-run_fixture success
+(umask 0077; run_fixture success)
 awk '$1 != "0002" && $1 != "0022" && $1 != "0077" { exit 1 }
   !/-count=1/ { exit 1 }
   $1 == "0022" && /-run / { exit 1 }
@@ -114,7 +115,8 @@ summary="$(summary_path success)"
 awk -F '\t' '
   NR == 1 { if ($0 != "kind\tsuite\tcheck\tstatus\texit_code\tduration_seconds\tlog") exit 1; next }
   $4 != "passed" || $5 != 0 || $6 !~ /^[0-9]+$/ { exit 1 }
-  $1 == "check" && $3 == "build" { native=NR }
+  $1 == "check" && $3 == "tests/preflight.sh" { preflight=NR }
+  $1 == "check" && $3 == "build" { if (!preflight || preflight >= NR) exit 1; native=NR }
   $1 == "check" && $3 == "go-race" { if (!native || native >= NR) exit 1; race++ }
   $1 == "check" && $3 ~ /^tests\// { suites[$2]++ }
   $1 == "run" { completed++ }
@@ -126,8 +128,16 @@ while IFS=$'\t' read -r kind _ _ _ _ _ log; do
 done < "$summary"
 unit_log="$(awk -F '\t' '$3 == "tests/unit.sh" { print $7 }' "$summary")"
 grep -q 'hidden successful output' "$(dirname "$summary")/$unit_log" || fail 'successful log was lost'
-run_fixture second
+(umask 0002; run_fixture second)
 [ "$(summary_path second)" != "$summary" ] && [ -f "$summary" ] || fail 'second run overwrote first run'
+
+# Permission failures stop before any expensive Go/build stages.
+printf '#!/usr/bin/env bash\nexit 31\n' > "$fixture/tests/preflight.sh"
+rc=0
+run_fixture preflight-failure || rc=$?
+[ "$rc" -eq 31 ] || fail 'preflight hid its native failure'
+! grep -Fxq 'RUN go-toolchain' "$tmp/preflight-failure.out" || fail 'preflight did not stop before Go'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/tests/preflight.sh"
 
 # Native prerequisites must fail before any Go race checks, preserving their exit.
 rc=0
@@ -281,9 +291,10 @@ cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
 mkdir -p "$fixture/config/profiles/example/tests"
 printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
-TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh" > "$tmp/profiles.out" 2>&1
+(umask 0002; TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh") > "$tmp/profiles.out" 2>&1
 grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not discovered'
 cp "$ROOT/Makefile" "$fixture/Makefile"
+cp "$fixture/tests/preflight.sh" "$fixture/tests/agent-skills.sh"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_BASIC_GO_LOG="$tmp/make-test.go" \
   make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
 grep -Fxq 'test -count=1 -timeout=20m ./cmd/... ./internal/...' "$tmp/make-test.go" \
@@ -293,8 +304,8 @@ grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped prof
 # The Go helper is also a supported direct entrypoint, without the profile wrapper.
 mkdir -p "$fixture/tests/helpers"
 cp "$ROOT/tests/helpers/profile-go.sh" "$fixture/tests/helpers/profile-go.sh"
-TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/profile-go.log" \
-  bash "$fixture/tests/helpers/profile-go.sh" example > "$tmp/profile-go.out" 2>&1
+(umask 0077; TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/profile-go.log" \
+  bash "$fixture/tests/helpers/profile-go.sh" example) > "$tmp/profile-go.out" 2>&1
 [ "$(wc -l < "$tmp/profile-go.log")" -eq 1 ] \
   || fail 'standalone profile Go checks did not complete with isolated fixtures'
 grep -q '^0022 .*test -race -count=1 ./config/profiles/example/tests$' "$tmp/profile-go.log" \
@@ -308,10 +319,11 @@ mkdir -p "$fixture/config/profiles/example/tests/e2e"
 cat > "$fixture/config/profiles/example/tests/e2e/acceptance.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${EXPECTED_TMPDIR:-}" ] || [ "$TMPDIR" = "$EXPECTED_TMPDIR" ] || exit 26
+[ -z "${EXPECTED_UMASK:-}" ] || [ "$(umask)" = "$EXPECTED_UMASK" ] || exit 30
 printf 'profile e2e %s\n' "$*"
 SH
-TMPDIR="$fixture/.build" EXPECTED_TMPDIR="$fixture/.build" \
-  bash "$fixture/dev/test-profiles.sh" --e2e --slot 7 > "$tmp/profiles-e2e.out" 2>&1
+(umask 0002; TMPDIR="$fixture/.build" EXPECTED_TMPDIR="$fixture/.build" EXPECTED_UMASK=0002 \
+  bash "$fixture/dev/test-profiles.sh" --e2e --slot 7) > "$tmp/profiles-e2e.out" 2>&1
 grep -Fxq 'profile e2e --slot 7' "$tmp/profiles-e2e.out" \
   || fail 'profile E2E selection or arguments were lost'
 bash "$fixture/dev/test-profiles.sh" --e2e --list > "$tmp/profiles-list.out"
@@ -353,4 +365,71 @@ cp "$ROOT/dev/test-profiles.sh" "$empty/dev/test-profiles.sh"
 rc=0
 bash "$empty/dev/test-profiles.sh" > "$tmp/profiles-empty.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail 'empty profile discovery passed'
+# Generic profile preflight ordering and split phases preserve a single invocation.
+rm "$fixture/config/profiles/undeclared/tests/e2e/acceptance.sh"
+rm "$fixture/config/profiles/undeclared/tests/e2e/acceptance.not-applicable"
+rmdir "$fixture/config/profiles/undeclared/tests/e2e" "$fixture/config/profiles/undeclared/tests" "$fixture/config/profiles/undeclared"
+cat > "$fixture/config/profiles/example/tests/permissions.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$(umask)" = 0022 ] || exit 30
+printf 'permission preflight\n'
+exit "${RUNNER_PERMISSION_FAILURE:-0}"
+SH
+cat > "$fixture/config/profiles/example/tests/run.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$(umask)" = 0022 ] || exit 30
+[ "$1" = --after-permissions ] || exit 32
+printf 'remaining profile checks\n'
+SH
+(umask 0077; bash "$fixture/dev/test-profiles.sh") > "$tmp/profile-order.out"
+[ "$(grep -c '^permission preflight$' "$tmp/profile-order.out")" -eq 1 ] || fail 'profile preflight repeated'
+[ "$(tail -n 1 "$tmp/profile-order.out")" = 'remaining profile checks' ] || fail 'profile ordering lost'
+bash "$fixture/dev/test-profiles.sh" --permissions-only > "$tmp/profile-split.out"
+bash "$fixture/dev/test-profiles.sh" --after-permissions >> "$tmp/profile-split.out"
+[ "$(grep -c '^permission preflight$' "$tmp/profile-split.out")" -eq 1 ] || fail 'split preflight repeated'
+rc=0
+RUNNER_PERMISSION_FAILURE=33 bash "$fixture/dev/test-profiles.sh" > "$tmp/profile-permission-fail.out" 2>&1 || rc=$?
+[ "$rc" -eq 33 ] || fail 'profile preflight hid native exit'
+! grep -q '^remaining profile checks$' "$tmp/profile-permission-fail.out" || fail 'failed preflight ran profile suite'
+rc=0
+bash "$fixture/dev/test-profiles.sh" --e2e --permissions-only > /dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail 'host-free preflight changed E2E execution'
+
+# The selected matrix uses real children/masks, rejects empty/missing checks,
+# and preserves the first operation failure before later masks.
+cat > "$tmp/permission-check.py" <<'PYCASE'
+import os
+import unittest
+class Permission(unittest.TestCase):
+    def test_actual_mask(self):
+        mask = os.umask(0)
+        os.umask(mask)
+        self.assertIn(mask, (0o22, 0o2, 0o77))
+        print(f'actual-mask={mask:04o}')
+PYCASE
+cat > "$tmp/permission-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'shell-mask=%s\n' "$(umask)"
+exit "${RUNNER_PERMISSION_FAILURE:-0}"
+SH
+bash "$fixture/tests/helpers/permission-umasks.sh" "$tmp/permission-check.py" "$tmp/permission-check.sh" > "$tmp/matrix.out" 2>&1
+for mask in 0022 0002 0077; do
+  grep -Fxq "actual-mask=$mask" "$tmp/matrix.out" || fail 'Python matrix mask overridden'
+  grep -Fxq "shell-mask=$mask" "$tmp/matrix.out" || fail 'Shell matrix mask overridden'
+done
+for selection in empty missing zero; do
+  args=()
+  case "$selection" in
+    missing) args=("$tmp/missing.py") ;;
+    zero) printf 'import unittest\n' > "$tmp/zero.py"; args=("$tmp/zero.py") ;;
+  esac
+  rc=0
+  bash "$fixture/tests/helpers/permission-umasks.sh" "${args[@]}" > "$tmp/matrix-$selection.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "matrix accepted $selection selection"
+done
+rc=0
+RUNNER_PERMISSION_FAILURE=34 bash "$fixture/tests/helpers/permission-umasks.sh" "$tmp/permission-check.sh" > "$tmp/matrix-failed.out" 2>&1 || rc=$?
+[ "$rc" -eq 34 ] || fail 'matrix hid native Shell exit'
+! grep -q 'umask=0002' "$tmp/matrix-failed.out" || fail 'matrix continued after operation failed'
+
 printf 'ok: runners preserve results, logs, fail-fast and failure exit codes\n'

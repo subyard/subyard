@@ -17,7 +17,8 @@ import threading
 
 LIBC = ctypes.CDLL(None, use_errno=True)
 LIBC.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p)
-VERSION = "subyard-producer-v3"
+VERSION = "subyard-producer-v4"
+LEGACY_VERSION = "subyard-producer-v3"
 
 
 def report_failure(error):
@@ -84,6 +85,114 @@ def write_state(fd, state):
 def inode(fd):
     info = os.fstat(fd)
     return [info.st_dev, info.st_ino]
+
+
+def durable_inode(fd):
+    try:
+        filesystem = os.fstatvfs(fd).f_fsid
+    except AttributeError as error:
+        raise ValueError("filesystem identity unavailable") from error
+    if type(filesystem) is not int or filesystem <= 0:
+        raise ValueError("filesystem identity unavailable")
+    return [filesystem, os.fstat(fd).st_ino]
+
+
+def validate_state(state, kind, version):
+    if state.get("version") != version or state.get("kind") != kind:
+        raise ValueError("foreign operation storage")
+    for name in ("root", "owner", "data"):
+        identity = state.get(name)
+        if not isinstance(identity, list) or len(identity) != 2 or any(type(value) is not int or value < 0 for value in identity):
+            raise ValueError("invalid operation receipt")
+    if "active" not in state:
+        raise ValueError("invalid operation receipt")
+    identity = state["active"]
+    if identity is not None and (not isinstance(identity, list) or len(identity) != 3
+            or type(identity[0]) is not int or not 1 < identity[0] < 2**31
+            or not isinstance(identity[1], str) or not re.fullmatch(r"[0-9]{1,20}", identity[1])
+            or not isinstance(identity[2], str) or not re.fullmatch(r"[a-f0-9-]{36}", identity[2])):
+        raise ValueError("invalid operation receipt")
+
+
+def verify_paths(parent, name, control, lock, data):
+    for directory_fd, entry, fd in ((parent, name, control), (control, ".owner", lock), (control, "data", data)):
+        current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+        if inode(fd) != [current.st_dev, current.st_ino]:
+            raise ValueError("operation path replaced; preserved")
+
+
+class Storage:
+    def __init__(self, path, kind, legacy=False):
+        self.path, self.kind = path, kind
+        self.version = LEGACY_VERSION if legacy else VERSION
+        self.identity = inode if legacy else durable_inode
+        self.parent = directory(str(path.parent), create=True)
+        try:
+            os.mkdir(path.name, 0o700, dir_fd=self.parent)
+            os.chmod(path.name, 0o700, dir_fd=self.parent, follow_symlinks=False)
+            created = True
+        except FileExistsError:
+            created = False
+        self.control = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.parent)
+        info = os.fstat(self.control)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe operation directory")
+        fs = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(path)], text=True).strip()
+        if fs not in ("ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "bcachefs"):
+            raise ValueError("operation scratch requires verified disk storage")
+        if created:
+            self.lock = os.open(".owner", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.control)
+            os.fchmod(self.lock, 0o600)
+            os.mkdir("data", 0o700, dir_fd=self.control)
+            os.chmod("data", 0o700, dir_fd=self.control, follow_symlinks=False)
+            self.data = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.control)
+            write_state(self.lock, dict(version=self.version, kind=kind, root=self.identity(self.control),
+                        owner=self.identity(self.lock), data=self.identity(self.data), active=None))
+        else:
+            self.lock = os.open(".owner", os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=self.control)
+            self.data = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.control)
+        info = os.fstat(self.data)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe operation directory")
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("producer busy")
+        state = self.read()
+        self.authenticated = self.matches(state)
+        if not legacy and not self.authenticated:
+            raise ValueError("foreign operation storage")
+        if active(state.get("active")):
+            raise ValueError("producer busy while namespace exits")
+        self.verify()
+
+    def read(self):
+        state = read_state(self.lock)
+        validate_state(state, self.kind, self.version)
+        return state
+
+    def matches(self, state):
+        return all(state[name] == self.identity(fd) for name, fd in
+                   (("root", self.control), ("owner", self.lock), ("data", self.data)))
+
+    def verify(self):
+        verify_paths(self.parent, self.path.name, self.control, self.lock, self.data)
+
+    def bridge(self):
+        return [self.parent, self.path.name, self.control, self.lock, self.data, self.authenticated]
+
+
+def write_bridge_active(bridge, kind, identity):
+    parent, name, control, lock, data, authenticated = bridge
+    verify_paths(parent, name, control, lock, data)
+    state = read_state(lock)
+    validate_state(state, kind, LEGACY_VERSION)
+    matches = all(state[key] == inode(fd) for key, fd in (("root", control), ("owner", lock), ("data", data)))
+    if matches != authenticated:
+        raise ValueError("foreign operation storage")
+    if authenticated:
+        state["active"] = identity
+        write_state(lock, state)
 
 
 def clear(fd):
@@ -159,7 +268,7 @@ def extract(mode):
     return ["/bin/bash", str(target / "provision.sh"), *(["--check"] if mode == "check" else [])]
 
 
-def worker(kind, lock, data, original_ns, bindings, command):
+def worker(kind, lock, data, original_ns, bindings, bridge, command):
     if os.getpid() != 1:
         raise ValueError("private PID namespace missing")
     # Inherited directory FDs pin the parent's mount namespace. Reopen and check
@@ -176,6 +285,7 @@ def worker(kind, lock, data, original_ns, bindings, command):
     outer_pid = int(Path("/proc/self/stat").read_text().split(" ", 1)[0])
     state = read_state(lock)
     state["active"] = [outer_pid, fields[19], Path("/proc/sys/kernel/random/boot_id").read_text().strip()]
+    write_bridge_active(bridge, kind, state["active"])
     write_state(lock, state)
     for name, target in (("tmp", "/tmp"), ("var-tmp", "/var/tmp"), ("shm", "/dev/shm")):
         os.mkdir(name, 0o777, dir_fd=data)
@@ -219,56 +329,18 @@ def worker(kind, lock, data, original_ns, bindings, command):
 
 def launch(source, kind, root, command):
     root = str(Path(root).resolve()) if root else ""
-    storage = Path(root) / f".build/paseo-operation-{os.getuid()}" if kind == "paseo" else Path("/var/lib/subyard/profile-operation")
+    legacy_path = Path(root) / f".build/paseo-operation-{os.getuid()}" if kind == "paseo" else Path("/var/lib/subyard/profile-operation")
+    storage_path = legacy_path.with_name(f"paseo-operation-v4-{os.getuid()}" if kind == "paseo" else "profile-operation-v4")
     parent = os.getppid()
     pdeath(parent)
-    parent_fd = directory(str(storage.parent), create=True)
+    # The genuine v3 slot remains an interoperable lock and active-process fence.
+    # Its old data is opaque: a v4 operation never cleans or adopts it.
     try:
-        os.mkdir(storage.name, 0o700, dir_fd=parent_fd)
-        os.chmod(storage.name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
-        created = True
-    except FileExistsError:
-        created = False
-    try:
-        control = os.open(storage.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-        info = os.fstat(control)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise ValueError("unsafe operation directory")
-        fs = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "-T", str(storage)], text=True).strip()
-        if fs not in ("ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "bcachefs"):
-            raise ValueError("operation scratch requires verified disk storage")
-        if created:
-            lock = os.open(".owner", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=control)
-            os.fchmod(lock, 0o600)
-            os.mkdir("data", 0o700, dir_fd=control)
-            os.chmod("data", 0o700, dir_fd=control, follow_symlinks=False)
-            data = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=control)
-            write_state(lock, dict(version=VERSION, kind=kind, root=inode(control), owner=inode(lock), data=inode(data), active=None))
-        else:
-            lock = os.open(".owner", os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=control)
-            data = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=control)
+        legacy = Storage(legacy_path, kind, legacy=True)
+        storage = Storage(storage_path, kind)
     except (OSError, ValueError) as error:
-        raise ValueError(f"preserved operation storage {storage}: {error}; inspect the state before retrying") from error
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise ValueError("producer busy")
-    try:
-        state = read_state(lock)
-        if state.get("version") != VERSION or state.get("kind") != kind or state.get("root") != inode(control) or state.get("owner") != inode(lock) or state.get("data") != inode(data):
-            raise ValueError("foreign operation storage")
-    except (OSError, ValueError) as error:
-        raise ValueError(f"preserved operation storage {storage}: {error}; inspect the state before retrying") from error
-    def verify_paths():
-        for parent, name, fd in ((parent_fd, storage.name, control), (control, ".owner", lock), (control, "data", data)):
-            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if inode(fd) != [current.st_dev, current.st_ino]:
-                raise ValueError("operation path replaced; preserved")
-    # The receipt also fences the brief exit_files -> PID namespace teardown
-    # interval after SIGKILL, when the flock can already have been released.
-    if active(state.get("active")):
-        raise ValueError("producer busy while namespace exits")
-    verify_paths()
+        raise ValueError("preserved operation storage; inspect the state before retrying") from error
+    lock, data = storage.lock, storage.data
     clear(data)
     original_ns = os.open("/proc/self/ns/pid", os.O_RDONLY)
     bindings = []
@@ -290,11 +362,12 @@ def launch(source, kind, root, command):
             except FileNotFoundError:
                 continue
             bindings.append((path, fd))
-    inherited = (lock, data, original_ns, *(fd for _, fd in bindings))
+    bridge = legacy.bridge()
+    inherited = (lock, data, original_ns, legacy.parent, legacy.control, legacy.lock, legacy.data, *(fd for _, fd in bindings))
     args = ["unshare", *(["--user", "--map-root-user"] if os.getuid() else []),
             "--mount", "--pid", "--fork", "--kill-child=SIGKILL",
             "/usr/bin/python3", "-B", "-c", source, "worker", kind, str(lock), str(data), str(original_ns),
-            json.dumps(bindings), *command]
+            json.dumps(bindings), json.dumps(bridge), *command]
     owner = os.getpid()
     process = subprocess.Popen(args, pass_fds=inherited, preexec_fn=lambda: pdeath(owner))
     cancelled = 0
@@ -309,11 +382,25 @@ def launch(source, kind, root, command):
     status = code(process.wait())
     if cancelled:
         status = 128 + cancelled
+    return finish(storage, legacy, status)
+
+
+def finish(storage, legacy, status):
     try:
-        verify_paths()
-        clear(data)
+        storage.verify()
+        legacy.verify()
+        state = storage.read()
+        if not storage.matches(state):
+            raise ValueError("foreign operation storage")
+        # Killing unshare can complete its wait before namespace PID1 exits.
+        # Preserve both durable fences and data until the actual owner is gone.
+        if active(state.get("active")) or active(legacy.read().get("active")):
+            raise ValueError("producer busy while namespace exits")
+        clear(storage.data)
+        storage.verify()
         state["active"] = None
-        write_state(lock, state)
+        write_state(storage.lock, state)
+        write_bridge_active(legacy.bridge(), storage.kind, None)
     except (OSError, ValueError) as error:
         report_failure(error)
         return status or 125
@@ -528,7 +615,7 @@ def main():
         inside()
         return 0
     if action == "worker":
-        return worker(args[0], int(args[1]), int(args[2]), int(args[3]), json.loads(args[4]), args[5:])
+        return worker(args[0], int(args[1]), int(args[2]), int(args[3]), json.loads(args[4]), json.loads(args[5]), args[6:])
     if action == "capture":
         return capture(args[0], args[1], args[2:])
     if action == "launch":

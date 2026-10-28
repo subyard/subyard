@@ -98,7 +98,7 @@ done
   for P0_LANE in smoke full peer; do
     [ "$(lane_vm_count)" = 2 ] || fail "two-host P0 lane lost its pair: $P0_LANE"
   done
-  for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource release \
+  for P0_LANE in boundary nested-teardown transport dependencies real-incus profile-resource producer-reboot release \
     source-upgrade power-systemd reboot-verify peer-cleanup cleanup full-uninstall; do
     [ "$(lane_vm_count)" = 1 ] || fail "single-host P0 lane requested a pair: $P0_LANE"
   done
@@ -1475,11 +1475,79 @@ set -e
 [ "$bounded_timeout_rc" = 137 ] \
   && grep -Fq 'injected exceeded the 1s command deadline' <<<"$bounded_timeout" \
   || fail "nested teardown bounded command masked its deadline: rc=$bounded_timeout_rc output=$bounded_timeout"
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/bind-resource-profile.sh" producer_reboot_probe)"
+  # shellcheck disable=SC2034
+  profile=fixture-provision project=synthetic-project instance=synthetic-vm
+  for scenario in success provision start init check fpr; do
+    producer_calls=() checks=0
+    yard() {
+      producer_calls+=("$1")
+      [ "$scenario" != "$1" ] || return 23
+    }
+    incus() {
+      case "$*" in
+        *boot_id) cat "$TMP/producer-boot"; printf 'next\n' >"$TMP/producer-boot" ;;
+        *) : ;;
+      esac
+    }
+    producer_reboot_check() {
+      checks=$((checks + 1)); producer_calls+=(check)
+      [ "$scenario:$checks" != check:3 ] || return 7
+    }
+    bash() { producer_calls+=(fpr); [ "$scenario" != fpr ] || return 17; }
+    printf 'before\n' >"$TMP/producer-boot"
+    rc=0
+    producer_reboot_probe >"$TMP/producer-reboot-$scenario.log" || rc=$?
+    case "$scenario" in
+      success) expected=0; trace='provision check stop start check init check fpr init check' ;;
+      provision) expected=23; trace=provision ;;
+      start) expected=23; trace='provision check stop start' ;;
+      init) expected=23; trace='provision check stop start check init' ;;
+      check) expected=7; trace='provision check stop start check init check' ;;
+      fpr) expected=17; trace='provision check stop start check init check fpr' ;;
+    esac
+    [ "$rc:${producer_calls[*]}" = "$expected:$trace" ] || fail "producer reboot masked $scenario result or continued after failure"
+  done
+) || fail 'generic producer reboot dispatch contract failed'
+(
+  # Execute the diagnostic configuration block against an owned /tmp fixture.
+  # shellcheck disable=SC2034
+  mode=producer-reboot SUBYARD_CONFIG_HOME="$TMP/producer-config" YARD_NAME=fixture
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
+  install -m 0600 /dev/null "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+  incus() { [ "$*" = 'list --project default --format=json' ]; }
+  eval "$(sed -n '/^# Diagnostic VM topology/,/^fi$/p' "$ROOT/dev/e2e/bind-resource-profile.sh")"
+  # shellcheck disable=SC1090
+  . "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
+  [ "$YARD_KIND:$LIMITS_CPU:$LIMITS_MEMORY:$ROOT_DISK_SIZE:$SRV_VOLUME_TYPE:$SRV_VOLUME_SIZE:$VM_FREE_PAGE_REPORTING:$HOST_MOUNTS:$HOST_LINKS" = 'vm:2:1GiB:10GiB:block:2GiB:1::' ] \
+    || fail 'producer diagnostic did not declare the bounded block-storage and FPR topology'
+) || fail 'producer diagnostic configuration contract failed'
+(
+  eval "$(fixture_functions "$ROOT/dev/e2e/bind-resource-profile.sh" producer_reboot_check)"
+  # shellcheck disable=SC2034
+  STATE="$TMP/producer-check" fixture_launcher=fixture YARD_NAME=fixture
+  mkdir "$STATE"
+  timeout() { printf '%s\n' '{"profiles":[{"name":"fixture-provision","convergence":"'"$convergence"'"}]}'; return "$native"; }
+  for scenario in current:0 unknown:0 current:23; do
+    convergence="${scenario%:*}" native="${scenario#*:}" rc=0
+    producer_reboot_check || rc=$?
+    case "$scenario" in current:0) expected=0 ;; unknown:0) expected=1 ;; current:23) expected=23 ;; esac
+    [ "$rc" = "$expected" ] || fail 'producer reboot lost convergence or native failure'
+  done
+) || fail 'producer reboot convergence check failed'
+(
+  run_phase() { printf '%s\n' "$*"; }
+  dispatch="$(sed -n '/^  producer-reboot)/,/^    ;;/p' "$ROOT/dev/e2e/p0-acceptance.sh" | sed '1d;$d')"
+  [ "$(eval "$dispatch")" = $'producer-reboot-platform run_vm 1 fixture-platform\nproducer-reboot run_power_systemd_vm 1 dev/e2e/bind-resource-profile.sh --producer-reboot\ncleanup run_vm 1 capacity-verify-cleanup' ] \
+    || fail 'producer reboot controller changed its one-VM setup or cleanup'
+) || fail 'producer reboot lane dispatch failed'
 lane_inventory="$("$ROOT/dev/e2e/p0-acceptance.sh" --list-lanes)"
 lane_table="$(sed -n '/^| Lane |/,/^$/p' "$ROOT/docs/test-vms.md")"
 while IFS= read -r lane; do
   case "$lane" in
     full$'\t'*) continue ;;
+    producer-reboot$'\t'diagnostic-only) continue ;;
   esac
   grep -Fq "\`$lane\`" <<<"$lane_table" \
     || fail "public P0 lane table omitted $lane"
@@ -2897,6 +2965,53 @@ wait "$checkpoint_observer_pid" || checkpoint_observer_rc=$?
   || fail 'checkpoint observer did not interrupt its atomic publication'
 flock -n "$v0111_observer_probe/checkpoint-child.lock" true \
   || fail 'checkpoint observer left a delegated child alive after interruption'
+ledger_observer_probe="$TMP/v0111-ledger-queued"
+prepare_v0111_observer_probe "$ledger_observer_probe"
+python3 - "$ledger_observer_probe" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+steps = []
+for position, migration in enumerate(('introduce-owner-publication-state-v1', 'localize-ssh-port-settings-v3')):
+    payload = json.dumps({'schemaVersion': 2, 'domains': {'settings': {'epoch': position+2, 'applied': []}}}).encode()+b'\n'
+    (root/('ledger-'+str(position))).write_bytes(payload)
+    steps.append({'id': migration+'.ledger', 'migration': migration,
+                  'desiredFingerprint': hashlib.sha256(payload).hexdigest(), 'checkpoint': 'verified'})
+(root/'prepared-journal').write_text(json.dumps({'transaction': 'candidate', 'checkpoint': 'migrating',
+    'goal': {'target': '0.11.2-candidate'}, 'steps': steps}))
+PY
+ledger_observer_rc=0
+run_v0111_observer "$ledger_observer_probe" --ledger "$ledger_observer_probe/ledger.json" \
+  --migration localize-ssh-port-settings-v3 -- \
+  sh -c '
+    flock "$1/child.lock" sh -c '\''touch "$1/child.ready"; sleep 10'\'' _ "$1" &
+    while [ ! -f "$1/child.ready" ]; do sleep 0.01; done
+    touch "$1/ready"
+    while [ ! -f "$1/release" ]; do sleep 0.01; done
+    for position in 0 1; do
+      cp "$1/ledger-$position" "$1/ledger.next"
+      mv "$1/ledger.next" "$1/ledger.json"
+    done
+    cp "$1/prepared-journal" "$1/journal.next"
+    mv "$1/journal.next" "$1/journal.json"
+    touch "$1/done"
+    sleep 10
+  ' _ "$ledger_observer_probe" > /dev/null 2>"$ledger_observer_probe/stderr" &
+ledger_observer_pid=$!
+for _ in $(seq 1 100); do [ ! -f "$ledger_observer_probe/ready" ] || break; sleep 0.01; done
+[ -f "$ledger_observer_probe/ready" ] || fail 'queued ledger updater did not start'
+kill -STOP "$ledger_observer_pid"
+touch "$ledger_observer_probe/release"
+for _ in $(seq 1 100); do [ ! -f "$ledger_observer_probe/done" ] || break; sleep 0.01; done
+kill -CONT "$ledger_observer_pid"
+[ -f "$ledger_observer_probe/done" ] || fail 'queued ledger updater did not publish both CAS values'
+wait "$ledger_observer_pid" || ledger_observer_rc=$?
+[ "$ledger_observer_rc" = 137 ] \
+  && jq -e --arg desired "$(sha256sum "$ledger_observer_probe/ledger-1" | awk '{print $1}')" \
+    '.transaction == "candidate" and .checkpoint == "migrating" and .ledgerFingerprint == $desired' \
+    "$ledger_observer_probe/observed.json" >/dev/null \
+  && flock -n "$ledger_observer_probe/child.lock" true \
+  || fail 'ledger observer missed queued CAS values or retained a delegated child'
 v0111_unisolated_rc=0
 python3 "$v0111_observer" \
   --runtime-root "$v0111_observer_probe/runtime" \

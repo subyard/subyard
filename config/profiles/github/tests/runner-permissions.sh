@@ -20,6 +20,7 @@ fixture="$tmp/source with spaces"
 mkdir -p "$fixture/config/profiles/github/tests/e2e" "$fixture/tests/helpers" "$tmp/tools"
 cp "$ROOT/config/profiles/github/tests/run.sh" "$fixture/config/profiles/github/tests/run.sh"
 cp "$ROOT/tests/helpers/go-permission-umasks.sh" "$fixture/tests/helpers/go-permission-umasks.sh"
+printf '# Isolated permission fixture.\n' > "$fixture/tests/profile-native-loss.sh"
 # Only the permission runner is under test here; its other owning checks run for real
 # through the outer entrypoint. Include every shell/Python child, including this one.
 for check in "$ROOT/config/profiles/github/tests/"*.sh "$ROOT/config/profiles/github/tests/"*.py; do
@@ -45,8 +46,8 @@ esac
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/gofmt"
 chmod 0755 "$tmp/tools/go" "$tmp/tools/gofmt"
-TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
-  bash "$fixture/config/profiles/github/tests/run.sh" > "$tmp/github-go.out" 2>&1
+(umask 0077; TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
+  bash "$fixture/config/profiles/github/tests/run.sh") > "$tmp/github-go.out" 2>&1
 # GitHub repeats protected broker inputs, not its client/issuer/SSH suites.
 awk '!/-count=1/ { exit 1 }
   $1 == "0022" { if (/-run / || !/\.\/config\/profiles\/github\/\.\.\./) exit 1; full++ }

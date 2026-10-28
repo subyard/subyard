@@ -187,6 +187,9 @@ for required in \
   scripts/install-ssh-relay.sh \
   scripts/install-test-vms-host-sink.sh \
   scripts/reconcile-integrations.sh \
+  scripts/refresh-agent-skills.sh \
+  config/skills/package.py \
+  config/skills/refresh.sh \
   scripts/prepare-preview-route.sh \
   config/systemd/subyard-test-vms-host-sink.service.in \
   config/systemd/subyard-test-vms-host-sink.timer.in \

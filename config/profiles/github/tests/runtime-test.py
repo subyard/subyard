@@ -187,9 +187,11 @@ class RuntimeTest(unittest.TestCase):
 
     def test_git_mode_binds_runtime_assessment(self):
         old, _ = runtime.observe()
-        os.environ['GITHUB_GIT_MODE'] = 'broker-first'
-        changed, _ = runtime.observe()
-        self.assertNotEqual(old['desired'], changed['desired'])
+        for mode in ('broker-first', 'broker-last', 'off'):
+            os.environ['GITHUB_GIT_MODE'] = mode
+            changed, _ = runtime.observe()
+            self.assertNotEqual(old['desired'], changed['desired'])
+            old = changed
 
     def test_implicit_default_and_disabled_nested_selection_match_descriptor(self):
         os.environ['SUBYARD_YARD'] = 'default'

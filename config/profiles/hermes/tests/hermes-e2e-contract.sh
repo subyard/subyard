@@ -42,6 +42,8 @@ for scenario in free busy occupied-address; do
     # shellcheck disable=SC2034
     instance=fixture project=fixture ssh_port=32123
     TAILSCALE_IP=''
+    # shellcheck source=config/profiles/hermes/tests/e2e/failure-capture.sh
+    . "$PROFILE/tests/e2e/failure-capture.sh"
     native_timeout="$(command -v timeout)"
     native_sleep="$(command -v sleep)"
     die() { fail "$@"; }

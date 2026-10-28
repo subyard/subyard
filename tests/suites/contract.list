@@ -1,6 +1,5 @@
 # CLI, context, registry, convergence and policy contracts.
 agent-e2e.sh
-agent-skills.sh
 cli-contract.sh
 command-registry.sh
 create-subyard-docker-apparmor.sh
@@ -27,3 +26,4 @@ workflow-real-adapter-gate.sh
 yard-extras-convergence.sh
 yard-usage.sh
 installed-runtime-refresh.sh
+profile-native-loss.sh

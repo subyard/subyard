@@ -34,8 +34,11 @@ hold_seconds=$((10#$hold_seconds))
 state="$(mktemp -d /var/tmp/subyard-android-pool-runtime.XXXXXX)"
 printf '%s\n' subyard-android-pool-runtime-v1 > "$state/.marker"
 token="$(printf '%s' "${state##*.}" | tr '[:upper:]' '[:lower:]')"; YARD_NAME="android-e2e-$token"
-export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
+export SUBYARD_OPERATOR_HOME="$state/operator-home" SUBYARD_CONFIG_HOME="$state/config" SUBYARD_HOME="$state/data"
 export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
+# Migration reloads settings, so isolate their defaults through the operator home.
+unset SUBYARD_KEYS_SYSTEMD_DIR
+install -d -m 0700 "$SUBYARD_OPERATOR_HOME"
 incus() {
   if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
     sudo -n /usr/bin/incus "$@"

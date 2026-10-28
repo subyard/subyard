@@ -14,6 +14,56 @@ owner = (pathlib.Path(sys.argv[1])/'owner.sh').read_text()
 compile(owner.split("<<'PY_UNITS'\n", 1)[1].split('\nPY_UNITS', 1)[0], 'owner.sh:OTLP-unit-probe', 'exec')
 # Execute only the real closed mode-dispatch blocks, with fixture operations
 # replaced by assertions. No lease, installation or workload is launched.
+acceptance = (pathlib.Path(sys.argv[1])/'acceptance.sh').read_text()
+controller = 'fixture_timeout='+acceptance.rsplit('\nfixture_timeout=', 1)[1]
+delegation = 'if [ "$delegated" = 0 ]; then\n'+owner.split('if [ "$delegated" = 0 ]; then\n', 1)[1].split('\nfi', 1)[0]+'\nfi'
+budgets = [('all', '125m', 7200), ('--held-diagnostic', '20m', 1140),
+           ('--native-only', '10m', 600), ('--resources', '70m', 4200),
+           ('--local', '70m', 4200), ('--android', '70m', 4200),
+           ('--android-resources', '70m', 4200), ('--scope-diagnostic', None, 240)]
+with tempfile.TemporaryDirectory(prefix='telemetry-budget-', dir='/tmp') as temporary:
+    stub = pathlib.Path(temporary)/'sudo'
+    stub.write_text('#!/usr/bin/python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+    stub.chmod(0o700)
+    grant = {'YARD': 'fixture', 'PROJECT': 'fixture', 'RUN_ID': '1234abcd', 'PURPOSE': 'fixture',
+             'SLOT': '3', 'GENERATION': '1', 'TYPE': 'android-test', 'VM_COUNT': '1',
+             'CPU_PER_VM': '4', 'MEMORY_PER_VM': '4GiB', 'DISK_PER_VM': '80GiB',
+             'BASE_FINGERPRINT': 'fixture', 'VM': '1'}
+    environment = {'PATH': temporary+os.pathsep+os.environ['PATH'],
+                   **{'SUBYARD_E2E_'+name: value for name, value in grant.items()}}
+    for mode, timeout, seconds in budgets:
+        if timeout is not None:
+            probe = '''set -eu
+mode="$1"; ROOT=/fixture; set -- --slot 3
+bash() { printf '%s\\0' "$@"; }
+'''
+            result = subprocess.run(['bash', '-c', probe+controller, 'probe', mode],
+                                    capture_output=True, check=True)
+            assert result.stdout.split(b'\0')[:-1] == [value.encode() for value in [
+                '/fixture/dev/agent-e2e.sh', '--slot', '3', '--type', 'android-test', '--vm-count', '1',
+                '--purpose', 'telemetry-acceptance', '--vm', '1', '--', 'timeout', '--signal=TERM',
+                '--kill-after=120s', timeout, 'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', mode]]
+        for memory, limit in (('4GiB', '3G'), ('8GiB', '6G')):
+            environment['SUBYARD_E2E_MEMORY_PER_VM'] = memory
+            probe = 'set -eu; delegated=0; mode="$1"; ROOT=/fixture\n'
+            result = subprocess.run(['bash', '-c', probe+delegation, 'probe', mode],
+                                    env=environment, text=True, capture_output=True, check=True)
+            assert json.loads(result.stdout) == [
+                '-n', 'systemd-run', '--quiet', '--unit=subyard-telemetry-acceptance-1234abcd.service',
+                '--uid=dev', '--service-type=exec', '--property=Delegate=cpu memory io pids',
+                '--property=DelegateSubgroup=caller', '--property=TasksMax=1024',
+                '--property=MemoryMax='+limit, '--property=ExitType=cgroup',
+                '--property=RuntimeMaxSec='+str(seconds), '--wait', '--pipe', '--collect',
+                '--expand-environment=no', '--working-directory=/fixture', 'env', '-i',
+                'HOME=/home/dev', 'USER=dev', 'LOGNAME=dev', 'LANG=C.UTF-8', 'TMPDIR=/tmp',
+                'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                *['SUBYARD_E2E_'+name+'='+environment['SUBYARD_E2E_'+name] for name in grant],
+                'bash', 'config/profiles/telemetry/tests/e2e/owner.sh', '--delegated-fixture', mode]
+    for invalid in ({'SUBYARD_E2E_MEMORY_PER_VM': '16GiB'}, {'SUBYARD_E2E_RUN_ID': 'foreign'}):
+        result = subprocess.run(['bash', '-c', probe+delegation, 'probe', 'all'],
+                                env={**environment, **invalid}, capture_output=True)
+        assert result.returncode == 2 and not result.stdout, 'invalid grant reached native command'
+print('ok: only full telemetry receives 120-minute delegation and 125-minute controller budgets; narrow budgets and delegation guards preserved')
 held = 'if [ "$mode" = --held-diagnostic ]; then\n' + owner.split('if [ "$mode" = --held-diagnostic ]; then\n', 1)[1].split('\nfi', 1)[0] + '\nfi'
 assert owner.index(held) < owner.index('python3 -B config/profiles/telemetry/tests/e2e/native-signals.py')
 probe = '''set -eu
@@ -62,7 +112,7 @@ for command, calls in (('storage-failure.py --binary', 1), ('measure.py --stack 
     start = owner.rfind('\nif ', 0, position)+1
     block = owner[start:owner.index('\nfi', position)+3]
     for mode, expected in (('--android', 0), ('--android-resources', 0), ('all', calls)):
-        result = subprocess.run(['bash','-c', 'set -eu; mode="$1"; asset=fixture; state=fixture\npython3() { printf "called\\n"; }\n'+android_mode+block,'probe',mode], text=True, capture_output=True, check=True)
+        result = subprocess.run(['bash','-c', 'set -eu; mode="$1"; asset=fixture; state=fixture; fixture_assets=fixture\npython3() { printf "called\\n"; }\n'+android_mode+block,'probe',mode], text=True, capture_output=True, check=True)
         assert len(result.stdout.splitlines()) == expected
 profile = 'if [ "$mode" != --android-resources ]; then\n'+owner.split('if [ "$mode" != --android-resources ]; then\n',1)[1].split('\nfi',1)[0]+'\nfi'
 for mode in ('all','--android','--android-resources'):
@@ -134,6 +184,7 @@ for path in pathlib.Path(sys.argv[1]).glob('*.py'):
         print('ok: compiled all three scope commands and their nested child commands; no workloads launched')
 PY
   python3 -B "$ROOT/config/profiles/telemetry/tests/e2e/storage-failure.py" --preflight
+  python3 -B "$ROOT/config/profiles/telemetry/tests/assets-test.py"
   printf 'ok: telemetry acceptance syntax; checksum-frozen candidate assets and native prerequisites checked on disposable stage\n'
   exit 0
 fi
@@ -146,6 +197,7 @@ case "${1:-}" in --held-diagnostic|--resources|--local|--native-only|--android|-
   printf 'telemetry acceptance requires a frozen candidate bundle and SHA256\n' >&2; exit 2;
 }
 fixture_timeout=70m
+[ "$mode" != all ] || fixture_timeout=125m
 [ "$mode" != --held-diagnostic ] || fixture_timeout=20m
 [ "$mode" != --native-only ] || fixture_timeout=10m
 bash "$ROOT/dev/agent-e2e.sh" --slot "$2" --type android-test --vm-count 1 --purpose telemetry-acceptance --vm 1 -- \

@@ -198,7 +198,7 @@ journal and observed facts.
 
 Native Paseo builds share public npm downloads through `SUBYARD_NPM_PUBLIC_CACHE`
 when configured by the profile. HOME, npm configuration and logs remain isolated. Other
-downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-<uid>`. A private temporary mount catches direct
+downloads and temporary files stay in operation-owned disk scratch under `.build/paseo-operation-v4-<uid>`. A private temporary mount catches direct
 `/tmp`, `/var/tmp` and `/dev/shm` writes. One build runs per checkout and user;
 completion removes scratch, and the next invocation removes leftovers with a valid
 durable ownership receipt after SIGKILL or reboot. Incomplete initialization or
@@ -208,11 +208,19 @@ retries remain bounded; version, integrity and native-module failures stop the b
 The build needs Linux user/mount/PID namespace support and verified disk storage.
 
 Profile extraction uses the same lifecycle in guest disk storage under
-`/var/lib/subyard/profile-operation`, with one operation per guest. Controller stderr
+`/var/lib/subyard/profile-operation-v4`, with one operation per guest. Controller stderr
 is drained with a 64 KiB capture limit. An optional profile `provision-tmp-paths`
 file lists exact existing temporary directories needed by migration hooks; symlinks
 are refused. Other temporary files remain private. The original guest `/proc` stays
 visible for guards that inspect existing workloads.
+Version 4 receipts bind opened filesystem IDs and inodes across reboot; live descriptor/path
+checks still bind device IDs and inodes. Filesystems without a usable filesystem ID refuse.
+The previous v3 directory remains a coordination bridge: both versions share its lock, and an
+exactly authenticated v3 receipt mirrors the worker's durable active-process identity. Its data
+is never cleared by v4. A valid v3 receipt whose device identity changed is preserved unchanged;
+v4 uses its independently owned directory without adopting the old data. Old helpers remain
+usable when their original v3 ownership checks pass. No receipt is reset to repair ambiguous
+ownership, and incomplete initialization remains a refusal.
 Hooks that call `systemctl` need the guest's existing system bus; the worker sets
 the [documented `SYSTEMCTL_FORCE_BUS=1` route](https://github.com/systemd/systemd/blob/v257.13/docs/ENVIRONMENT.md)
 across the PID namespace, preserving
@@ -246,6 +254,28 @@ Verify a built candidate with the unmodified supported updater before release:
 ```sh
 python3 dev/verify-release-upgrades.py --release-dir .build/release --version <candidate-version>
 ```
+
+Build those assets from the current public worktree with `dev/package-engine.sh`, using the
+same version and output directory supplied to the verifier. Its pinned historical inputs are
+self-contained; earlier temporary fixture directories are unnecessary. A pass on a published
+baseline does not establish acceptance of a dirty or untracked current candidate.
+
+Small contracts precede that full gate. `tests/agent-skills.sh` and `tests/release-candidate.sh`
+cover delivery and the actual wrapper's strict transport. Native source-inventory parity and
+prepared-source tests remain in `internal/adapters/reconcileruntime`;
+`TestHistoryReadinessContract` in `internal/testkit/cmd/empty-incus` connects the actual public
+readiness producer to its nonexecuting migration-history consumer. The package-local
+`config/skills/package.py` owns Python inventory and canonical transport modes: directories
+`0700`, regular files `0600`, independent of checkout, private installed or frozen `0500`
+source modes. Native Go admission keeps its independent inventory.
+
+`TestEvidenceOracleContract` in `internal/releasetransition` connects real POSIX writer cuts
+to the Python compatibility oracle through a bounded process handshake. Published evidence
+retains its complete identity. A captured `.pending` file may complete only at its allowed
+journal step/checkpoint destination with its inode, mode and prefix preserved; successful
+retry removes staging. The normal transition validator still proves the full record's content.
+These local contracts complement the complete packaged compatibility gate below. Native ARM
+acceptance remains a CI result; cross-building does not establish it.
 
 This Linux check needs Python 3 and Go to build the local empty-instance Incus API fixture. It
 downloads checksum-pinned v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0, v0.11.2, v0.17.3, v0.18.1, v0.18.6 and v0.19.0 runtimes for the local architecture

@@ -264,9 +264,11 @@ def main(argv=None):
         require(bool(os.environ.get('SUBYARD_AGENT_RUN_ID')), 'requires explicit managed-run context')
         if args.stage == 'storage-failure':
             require(args.evidence and args.native_command, 'storage proof needs evidence and native lifecycle argv')
-            root = Path(__file__).resolve().parents[5]
+            require(bool(os.environ.get('SUBYARD_TELEMETRY_FIXTURE_ASSETS')), 'storage proof needs prepared fixture assets')
+            binary = Path(os.environ['SUBYARD_TELEMETRY_FIXTURE_ASSETS'])/'subyard-telemetry'
+            require(binary.is_file() and os.access(binary, os.X_OK), 'prepared telemetry executable is missing')
             subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('storage-failure.py')),
-                            '--binary', str(root/'.subyard-acceptance/assets/subyard-telemetry'),
+                            '--binary', str(binary),
                             '--evidence', str(args.evidence), '--native-command', *args.native_command], check=True)
             print(json.dumps(dict(check='resource-owner-storage-failure', kind=args.kind, passed=True)))
             return 0

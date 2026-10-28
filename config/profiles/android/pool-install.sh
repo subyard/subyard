@@ -2,6 +2,8 @@
 # Converge the profile-owned pool only after active leases release their SDK read locks.
 set -euo pipefail
 PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config/profiles/android/provision-helpers.sh
+. "$PROFILE_DIR/provision-helpers.sh"
 selection="$(python3 "$PROFILE_DIR/toolchain.py" defaults "$PROFILE_DIR/toolchain.json")"
 IFS=$'\t' read -r ANDROID_API jdk_major <<< "$selection"
 SDK_ROOT="${ANDROID_SDK_ROOT:-/srv/cache/android-sdk}"
@@ -101,10 +103,7 @@ EOF
 # Remove only the retired clients in the profile-owned SDK directory.
 rm -f -- "$PUBLIC_ROOT/bin/yard" "$PUBLIC_ROOT/bin/yard-emu"
 # Retire the old staged entrypoints without touching any user AVD or unknown process.
-if [ -d /tmp/subyard-android ] && [ ! -L /tmp/subyard-android ]; then
-  install -m 0755 "$PROFILE_DIR/emulator-run.sh" /tmp/subyard-android/emulator-run.sh
-  install -m 0755 "$PROFILE_DIR/emulator-control.sh" /tmp/subyard-android/emulator-control.sh
-fi
+android_refresh_legacy_helpers /tmp/subyard-android "$PROFILE_DIR"
 systemctl daemon-reload
 systemctl enable subyard-android-pool.service >/dev/null
 systemctl start subyard-android-pool.service

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
+from contextlib import closing
+import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import processes
+spec = importlib.util.spec_from_file_location('process_scope', Path(__file__).parent/'e2e/process-scope.py')
+scope_fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scope_fixture)
 
 
 def proc(root, pid, parent, start, cpu=10):
@@ -35,6 +41,32 @@ def cg(path, cpu, populated):
 
 
 class ProcessTest(unittest.TestCase):
+    def test_short_run_waits_for_both_objects_baseline_and_final_samples(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as writer:
+                writer.execute('CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT)')
+                def sample(suffix, at, final):
+                    writer.execute('INSERT INTO samples VALUES(?,?,?)',
+                                   ('run'+suffix, at, json.dumps(dict(populated=False, final=final))))
+                    writer.commit()
+                sample(':scope', 0, False)
+                sample(':scope', 1, True)
+                pending = iter(((1, True), (0, False)))
+                def commit_workload(_seconds):
+                    sample(':workload', *next(pending))
+                with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 1, 2)), \
+                     patch.object(scope_fixture.time, 'sleep', side_effect=commit_workload) as sleep:
+                    scope_fixture.wait_for_short_run_samples(data, 'run')
+                self.assertEqual(sleep.call_count, 2, 'scope final must not admit a missing workload endpoint')
+                writer.execute("DELETE FROM samples WHERE object_id='run:workload' AND source_time=1")
+                writer.commit()
+                with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 40)), \
+                     patch.object(scope_fixture.time, 'sleep') as sleep:
+                    with self.assertRaisesRegex(AssertionError, 'short-run baseline and final samples were not committed'):
+                        scope_fixture.wait_for_short_run_samples(data, 'run')
+                sleep.assert_called_once_with(0.2)
+
     def test_start_identity_reads_stat_but_detail_requires_namespaces(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)

@@ -317,17 +317,19 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path("/var/lib/subyard/telemetry"))
     args = parser.parse_args()
     assert all(getattr(args, key) > 0 for key in ("repetitions", "warmup", "idle", "load", "rate"))
-    if args.stack:
-        measure_stack(args)
-        return
     assets = args.assets.resolve()
     binaries = {key: assets / filename for key, filename in (
-        ("standalone", "subyard-telemetry"), ("minimal_collector", "otelcol-minimal"), ("driver", "otlp-load"))}
-    assert all(path.is_file() and os.access(path, os.X_OK) for path in binaries.values()), "build comparison assets first"
-    snapshot(os.getpid(), Path("/tmp"))
+        ("standalone", "subyard-telemetry"), ("driver", "otlp-load"))}
+    if not args.stack:
+        binaries["minimal_collector"] = assets / "otelcol-minimal"
+    assert all(path.is_file() and os.access(path, os.X_OK) for path in binaries.values()), "required measurement assets are missing"
     if args.preflight:
         print(json.dumps({"preflight": "PASS", "assets": {key: digest(path) for key, path in binaries.items()}}))
         return
+    if args.stack:
+        measure_stack(args)
+        return
+    snapshot(os.getpid(), Path("/tmp"))
     assert os.environ.get("SUBYARD_E2E_SLOT") and os.environ.get("SUBYARD_E2E_GENERATION"), "requires leased disposable VM"
     output = args.output or Path(tempfile.mkdtemp(prefix="subyard-telemetry-measure-", dir="/var/tmp"))
     output.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -14,23 +14,10 @@ toolchain = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(toolchain)
 
 
-def fixture(directory, name, entry):
-    directory.mkdir(parents=True, exist_ok=True)
-    executable = directory / entry['executable']
-    executable.parent.mkdir(parents=True, exist_ok=True)
-    executable.write_text('#!/bin/sh\nprintf "%s\\n" "' + entry['version'] + '"\n')
-    executable.chmod(0o755)
-    if name == 'jdk':
-        (directory / 'release').write_text('JAVA_RUNTIME_VERSION="' + entry['version'] + '"\nOS_ARCH="x86_64"\n')
-    else:
-        metadata = 'Pkg.Revision=' + entry['version'] + '\n'
-        if name.startswith('platforms;android-'):
-            metadata += 'AndroidVersion.ApiLevel=' + name.removeprefix('platforms;android-') + '\n'
-        (directory / 'source.properties').write_text(metadata)
-    (directory / 'supporting.jar').write_bytes(b'verified supporting payload')
-    (directory / '.subyard-toolchain.json').write_text(json.dumps(dict(archive=entry['digest'],
-        algorithm=entry['digest_algorithm'], version=entry['version'],
-        payload_sha256=toolchain.payload_digest(directory))))
+spec = importlib.util.spec_from_file_location('toolchain_fixture', PROFILE / 'tests/toolchain-fixture.py')
+fixture_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture_module)
+fixture = fixture_module.fixture
 
 
 def rejected(call):
@@ -42,13 +29,10 @@ def rejected(call):
 
 
 def selected_checks():
-    entries = toolchain.selected(PROFILE / 'toolchain.json')
-    with patch.dict('os.environ', {'ANDROID_API': '35'}):
-        assert 'platforms;android-35' in toolchain.selected(PROFILE / 'toolchain.json')
-    with patch.dict('os.environ', {'ANDROID_API': '99'}):
-        rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json'))
-    with patch.dict('os.environ', {'JDK_VERSION': '21'}):
-        rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json'))
+    entries = toolchain.selected(PROFILE / 'toolchain.json', environment={}, architecture='x86_64')
+    assert 'platforms;android-35' in toolchain.selected(PROFILE / 'toolchain.json', environment={'ANDROID_API':'35'}, architecture='x86_64')
+    rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json', environment={'ANDROID_API':'99'}, architecture='x86_64'))
+    rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json', environment={'JDK_VERSION':'21'}, architecture='x86_64'))
     with tempfile.TemporaryDirectory(prefix='subyard-android-toolchain-', dir='/tmp') as temporary:
         root = Path(temporary)
         # One SDK exercises shared receipt/payload checks; provision covers all components.
@@ -92,7 +76,7 @@ def selected_checks():
         updated['sdk']['platform-tools'].update({key: replacement[key] for key in ('version', 'digest', 'digest_algorithm')})
         updated_path = root / 'updated.json'
         updated_path.write_text(json.dumps(updated))
-        configured = toolchain.selected(updated_path)['platform-tools']
+        configured = toolchain.selected(updated_path, environment={}, architecture="x86_64")['platform-tools']
         toolchain.install(archive, destination, 'platform-tools', configured)
         assert toolchain.verify(destination, 'platform-tools', replacement)
         assert not toolchain.verify(destination, 'platform-tools', entry)
@@ -114,24 +98,21 @@ def selected_checks():
             changed_jdk['jdk'].update(major=major, version=version)
             next_path = root / 'jdk-next.json'
             next_path.write_text(json.dumps(changed_jdk))
-            with patch.dict('os.environ', {'JDK_VERSION': major}):
-                next_jdk = toolchain.selected(next_path)['jdk']
-                assert next_jdk['destination'] == '/opt/jdk-' + major
+            next_jdk = toolchain.selected(next_path, environment={'JDK_VERSION':major}, architecture='x86_64')['jdk']
+            assert next_jdk['destination'] == '/opt/jdk-' + major
         path = root / 'invalid.json'
         for update in ({'digest': 'broken'}, {'url': 'https://invalid.example/archive.zip'}, {'version': '21.0.1+1'}):
             invalid = copy.deepcopy(manifest)
             invalid['jdk'].update(update)
             path.write_text(json.dumps(invalid))
-            rejected(lambda: toolchain.selected(path))
+            rejected(lambda: toolchain.selected(path, environment={}, architecture="x86_64"))
     print('ok: Android selected revisions, byte identity and verified staged replacement')
 
 
 def main():
-    # Production remains x86_64-only; host-free fixture coverage also runs on ARM CI.
-    with patch.object(toolchain.platform, 'machine', return_value='aarch64'):
-        rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json'))
-    with patch.object(toolchain.platform, 'machine', return_value='x86_64'):
-        selected_checks()
+    # Production remains x86_64-only; synthetic coverage also runs on ARM CI.
+    rejected(lambda: toolchain.selected(PROFILE / 'toolchain.json', environment={}, architecture='aarch64'))
+    selected_checks()
 
 
 if __name__ == '__main__':

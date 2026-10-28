@@ -404,6 +404,12 @@ func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *
 func TestProfileRuntimeActivationRepairsAllLocalInstalledContracts(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	writeRuntimeProfileFixture(t, root)
+	unrelated := filepath.Join(root, "config", "profiles", "unrelated")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(unrelated, "profile.json"), `{"schema_version":1,"runtime":{"activation_id":"unrelated-runtime","handler":"runtime.sh"}}`, 0o600)
+	writeCLIFile(t, filepath.Join(unrelated, "runtime.sh"), "#!/bin/sh\nprintf 'called\\n' >> \"$SUBYARD_CONFIG_HOME/unrelated-observed\"\nexit 9\n", 0o700)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	home := filepath.Join(root, "state")
 	seedCurrentReleaseLedger(t, root, home)
@@ -525,6 +531,9 @@ esac
 	applied, err := os.ReadFile(filepath.Join(home, "sample-applied"))
 	if err != nil || string(applied) != "default\nnamed\n" {
 		t.Fatalf("scope/retry/no-op: %q, %v", applied, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "unrelated-observed")); !os.IsNotExist(err) {
+		t.Fatalf("selected owner invoked an unrelated runtime handler: %v", err)
 	}
 }
 

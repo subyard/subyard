@@ -123,10 +123,6 @@ func (runtime Runtime) integrationCleanupDiagnostic(id string) (string, string) 
 	return ". If this integration is no longer needed, inspect its profile-owned cleanup plan on the owner host:\n" +
 		check + "\nThen run with confirmation:\n" + shellquote.Command(command), check
 }
-func (runtime Runtime) integrationCleanupHint(id string) string {
-	hint, _ := runtime.integrationCleanupDiagnostic(id)
-	return hint
-}
 
 func (runtime Runtime) retireIntegrationServices(ctx context.Context) error {
 	_, _, err := runtime.integrationServices(ctx, "apply")

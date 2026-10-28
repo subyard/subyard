@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-free checks owned by the hermes profile.
 set -euo pipefail
+umask 0022
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 bash "$ROOT/tests/helpers/profile-go.sh" hermes

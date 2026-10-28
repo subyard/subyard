@@ -9,18 +9,62 @@ Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow
 for both adding tests and choosing which existing checks to run.
 
 Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
-fixture roots. Keep raw calls for creation-semantics tests. The full core Go race suite runs
-uncached once under umask `0022`. The explicit file-creation and permission selection in
-[`tests/run.sh`](../tests/run.sh) also runs uncached under `0002` and `0077` in separate
-processes. This covers private persistence and public output modes, while fixtures that
-explicitly chmod unsafe inputs keep their ordinary full-suite coverage. The shared
-[`go-permission-umasks.sh`](../tests/helpers/go-permission-umasks.sh) checks that every selected
-test exists before running the additional masks; update the selection when renaming a test
-or adding a distinct creation-mode boundary.
+fixture roots. Shell/Python fixtures can use `install -m`, `chmod` on fixture inputs,
+or `tempfile.TemporaryDirectory`. Keep raw creation calls when creation is the operation
+under test; do not chmod its outputs to make an assertion pass.
 
+The normal host-free entrypoints (`make test`, `make verify`, `./tests/run.sh`,
+`bash dev/test-profiles.sh` and each profile's `tests/run.sh`) use baseline umask `0022`,
+including their Shell/Python checks. This changes only the runner's process and children.
+Live `dev/test-profiles.sh --e2e` keeps the caller's environment and mask.
+
+Short permission checks run before builds and Go suites. Core owns
+[`tests/suites/preflight.list`](../tests/suites/preflight.list); profiles can own a
+`tests/permissions.sh` hook, discovered by the existing profile runner. The hook's checks
+must be omitted from the later normal profile loop. `make test` and `make verify` first
+run `bash dev/test-profiles.sh --permissions-only`, then core checks, then
+`bash dev/test-profiles.sh --after-permissions`. These two modes split a single invocation's
+work; use `--after-permissions` only after that same unchanged checkout's preflight passed.
+Ordinary profile discovery runs both phases itself; a direct profile runner runs its own
+preflight. There is no persistent PASS marker.
+
+[`permission-umasks.sh`](../tests/helpers/permission-umasks.sh) runs only the supplied short
+Shell/Python checks under `0022`, `0002` and `0077` in separate processes. It prints each
+actual mask and selection. It rejects empty/missing selections; Python unittest modules
+must contain cases and finish without failures or skips. A renamed/deleted module or an
+empty module fails before expensive checks. Run one owning regression directly, for example:
+
+```sh
+bash config/profiles/telemetry/tests/permissions.sh
+bash tests/agent-skills.sh
+```
+
+| Contract | Existing owner and selected coverage | Remaining baseline coverage |
+| --- | --- | --- |
+| Private root and durable private files, exact `0700`/`0600`, idempotent replacement | Telemetry `records-test.py` (6 cases), `resources-test.py` (24 cases): real record emission and missing-root `request → held`, durable intent retry | Launcher admission and guest initialization remain in the normal Telemetry suite |
+| Public `0644`/`0755`, private receipt, replacement/repair and unsafe existing objects retained | Shared synthetic `config/skills/tests/delivery-test.py` (13 cases), already checked under all three masks | Full packaging and installer contracts remain in core |
+| Unsafe mode, owner, symlink and hardlink refusal | Existing owning Go permission selections and profile suites; selected shared delivery and Telemetry cases retain their refusals | Explicitly prepared unsafe fixtures retain full-suite assertions; a matrix is not a replacement for these |
+
+The two Telemetry modules are a small selection from its full suite (30 cases per mask);
+keeping these modules together preserves their existing fixtures without another case registry.
+The shared skills module keeps its existing three-mask coverage. Neither selection repeats
+later in the same normal run. Together these checks normally take seconds, without installed
+services, credentials or VM allocation.
+
+Telemetry's `records.private_directory` guarantees and validates only its leaf. Its parents
+must already satisfy their owning contract; recursive `mkdir` does not guarantee private
+intermediate directories and never repairs unsafe existing parents. The real correlation
+regression starts with an absent data root: `request` initializes it before `held` creates
+nested sources/intents. Isolated held fixtures must explicitly provide the private data root.
+
+The full core Go race suite runs uncached once under `0022`. Its explicit file-creation
+selection in [`tests/run.sh`](../tests/run.sh) repeats only under `0002` and `0077`, preserving
+private persistence and public output checks. The existing
+[`go-permission-umasks.sh`](../tests/helpers/go-permission-umasks.sh) validates every selected
+test name; update that selection when renaming a case or adding a distinct creation boundary.
 Profile settings/descriptor Go checks run once under `0022` through `profile-go.sh`.
-The GitHub profile runs its full Go race suite under `0022` and repeats only its explicit
-broker protected-file checks under `0002` and `0077`.
+The GitHub profile repeats only its explicit broker protected-file checks under the extra masks.
+Baseline runners do not wrap the selected-matrix children, so they cannot overwrite those masks.
 
 ## Coverage ownership
 
@@ -59,7 +103,12 @@ than repeating their logical matrices in P0.
 | Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
 | Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.19 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
 | Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Existing source-upgrade/full-uninstall lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
-| Fixture preparation and retry | GitHub `release-activation-test.py`: metadata/version/architecture/checksum shape, actual archive/refusal/retry, synthetic successor, marker/init retry and partial cleanup behavior | Existing `--preflight` includes the production Incus installer's package-only base-image call without installation identity; normal install still refuses missing/empty identity before writes. Release activation also executes its local probe and verifies frozen bundle checksum, engine identity and successor before allocation | Existing owning activation lane | Fixture/helper/artifact changes; Go/Python/jq/ShellCheck and exact artifact inputs, T0/T1 before T3 |
+| Static skill inventory, transport and readiness | `go:adapters/reconcileruntime`: `TestAgentSkillSourcesParityWithCapturedReadiness`, unsafe-source refusal and prepared helper/source drift; `tests/agent-skills.sh`: delivery under three umasks | `tests/release-candidate.sh`: actual wrapper against a strict nonexecuting shim, independent synthetic inventory, all checkout/private/frozen layouts and umasks, exact member/command mutants; `go:internal/testkit/cmd/empty-incus`: `TestHistoryReadinessContract` connects public runtime readiness through the native Incus adapter to the migration-history responder | `config/profiles/android/tests/e2e/acceptance.sh --slot N --lane skills`: packaged delivery, repeat refresh, discovery repair and disable with unrelated content retained | Shared skill producer, helpers, source admission or transport changes; local contracts before T3 |
+| Published evidence and resumable staging | `go:releasetransition`: existing pending/store recovery and unsafe-link/refusal cases; independent Python oracle negatives | `TestEvidenceOracleContract`: actual POSIX publication cuts, Python-owned snapshot/handshake, public completion and no-op retry; published mode/inode/mtime/digest remain fixed while allowed staging retains its inode/mode/prefix | Complete packaged migration-history compatibility; existing source-upgrade lanes when production transition behavior changes | Evidence writer, recovery or compatibility-oracle changes; prefix retention does not prove complete-record validity |
+| Profile native-loss instrumentation | `tests/profile-native-loss.sh`: synthetic runtime/successor identity, no-replay and actual OFD predicates | GitHub, Orca and git-fetch own their generated-wrapper tests: native command stubs, pause order, quoting, stdin and original exits; Bash syntax and ShellCheck run on the generated files. GitHub preflight retains the generic predicates before allocation | Existing owning `--native-loss owner\|helper\|group` modes when pause bytes/order or custody behavior changes | Profile instrumentation changes; an equivalent relocation alone does not add a VM matrix |
+| Android toolchain selection and provision boundaries | Owning `toolchain-test.py`: explicit environment/architecture selection, pinned archives and retained-byte validation | Owning `tests/run.sh` executes the actual provision shell/Python CLI with ordinary and polluted caller environments/TMPDIR; shared fixture selection, native HTTP reset/retry/timeout tests and callable legacy-helper refresh preserve unrelated files | Existing owning Android acceptance lanes | Android selection, download, installation or helper-refresh changes; production architecture admission remains native x86_64-only |
+| Fixture preparation and retry | Core `tests/release-candidate.sh` owns archive/refusal/retry; GitHub `release-activation-test.py` owns metadata/version/architecture/checksum shape, synthetic successor, marker/init retry and partial cleanup | Existing `--preflight` includes the production Incus installer's package-only base-image call without installation identity; normal install still refuses missing/empty identity before writes. Release activation also executes its local probe and verifies frozen bundle checksum, engine identity and successor before allocation | Existing owning activation lane | Fixture/helper/artifact changes; Go/Python/jq/ShellCheck and exact artifact inputs, T0/T1 before T3 |
+| Profile fixture lifecycle and private diagnostics | GitHub `release-activation-test.py` sources release/broker/connection operations and imports connection diagnostics; Hermes `e2e-capture-test.py` sources its operations and the existing SSH transport helper | Supported scoped disable retains connection bytes; failure/timeout/signal and cleanup exits stay distinct, including original exit 3. Hermes checks bounded runtime-only readiness, ordered scoped setters, capture-before-cleanup, private modes and native transport deadlines | GitHub broker acceptance, GitHub `--installed-worker`, and Hermes acceptance own their respective operations | Lifecycle/cleanup behavior changes require the owning lane; connection installer/refresh boundaries require installed-worker |
 | Controller outcome and allocation ordering | `tests/agent-e2e.sh`, `tests/release-acceptance.sh` | Actual controller failure injection: missing/skipped/empty required cases stop before broker; native failure/signal/timeout and cleanup remain separate | Affected existing controller lane, preserving lease ownership and cleanup | Controller, phase, transport or cleanup changes; T1 before T3 |
 | Guest temporary storage | `go:adapters/reconcileruntime`: `TestDiskTmpGuestPolicy`, `TestDiskTmpPolicyWaitsForGuestBoot`, `TestDiskTmpReadinessDistinguishesReboot` | `tests/create-subyard-docker-apparmor.sh`: ordinary creation, post-restart boot completion before VM network inspection, remote fixture image inputs in an isolated project, configured cloud-image user provisioning and existing-yard preservation; `tests/release-candidate.sh`: fresh native bootstrap context, failed inspection refusal and container/VM restart identities | `dev/e2e/disk-tmp-acceptance.sh`: installed minimal container/VM creation, safe active-tmpfs transition, native reboot and policy rollback | Common guest storage policy/readiness changes |
 | Evidence reuse and gate completeness | `tests/release-acceptance.sh`: command/source/assets/helper/environment binding, tamper, incomplete and inherited-chain refusal | Existing `import`/`transfer`, validated by `load_bound`; execution prints direct/inherited reuse reason | Required fresh/continuous/full gates remain separate | Evidence/runner/dependency changes; T1; an equal executable alone is insufficient |

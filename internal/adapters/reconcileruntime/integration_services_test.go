@@ -35,7 +35,7 @@ func TestIntegrationCleanupHintSurvivesCandidateDescriptorClose(t *testing.T) {
 		Environment:    []string{"AGENT_paseo_CLEANUP=config/agents/paseo/cleanup.sh"},
 		Yard:           domain.Context{YardName: "example"},
 	}
-	hint := runtime.integrationCleanupHint("paseo")
+	hint, _ := runtime.integrationCleanupDiagnostic("paseo")
 	command := shellquote.Command([]string{engine, "-Y", "example", "integration", "cleanup", "paseo", "--check"})
 	if !strings.Contains(hint, "\n"+command+"\n") || strings.Contains(hint, "/proc/") {
 		t.Fatalf("candidate hint must name its persistent engine: %s", hint)

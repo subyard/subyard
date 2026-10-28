@@ -398,7 +398,7 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	}
 	// Declared packages add source binding to the historical artifact grammar.
 	// Declaration-free recovery identity remains frozen above.
-	entries, err := runtime.integrationArtifacts()
+	entries, err := runtime.integrationArtifactsPhase("inspect")
 	if err != nil {
 		t.Fatal(err)
 	}

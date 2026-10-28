@@ -22,6 +22,7 @@ configure_yard_scope() { :; }
 main --observe - | jq -e '.status == "ok" and .observation.events == []' >/dev/null
 if (main --observe invalid) >"$tmp/refusal" 2>&1; then exit 1; fi
 export SUBYARD_AGENT_RUN_ID=fixture-agent-run SUBYARD_TELEMETRY_DATA_DIR="$tmp/data"
+install -d -m 0700 "$SUBYARD_TELEMETRY_DATA_DIR"
 # Consumed by the native correlation function sourced above.
 # shellcheck disable=SC2034
 LEASE_YARD=yard LEASE_PROJECT=project LEASE_RUN=12345678 LEASE_SLOT=slot-001 LEASE_GENERATION=2 LEASE_EPOCH=3

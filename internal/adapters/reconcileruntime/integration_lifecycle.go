@@ -69,13 +69,6 @@ func (runtime Runtime) integrationPackageBindingWithSourceReader(definition prof
 	}{source, values})
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
-func (runtime Runtime) integrationSourceBinding() (string, error) {
-	return runtime.integrationSourceBindingPhase("inspect")
-}
-func (runtime Runtime) integrationSourceBindingPhase(phase string) (string, error) {
-	binding, _, err := runtime.integrationSourceBindingsPhase(phase)
-	return binding, err
-}
 func (runtime Runtime) integrationSourceBindingsPhase(phase string) (string, map[string]string, error) {
 	return runtime.integrationSourceBindingsWithSourceReader(phase, runtime.SourceReader)
 }

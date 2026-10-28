@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -12,33 +14,31 @@ import (
 )
 
 type historyControl struct {
-	Journal         string   `json:"journal"`
-	Runtime         string   `json:"runtime"`
-	Target          string   `json:"target"`
-	Source          string   `json:"source"`
-	Guest           string   `json:"guest"`
-	InitialDrift    string   `json:"initialDrift"`
-	Destination     string   `json:"destination"`
-	Migrations      []string `json:"migrations"`
-	FailOnce        bool     `json:"failOnce"`
-	InventorySHA256 string   `json:"inventoryProgramSHA256"`
+	Journal         string         `json:"journal"`
+	Runtime         string         `json:"runtime"`
+	Target          string         `json:"target"`
+	Source          string         `json:"source"`
+	Guest           string         `json:"guest"`
+	InitialDrift    string         `json:"initialDrift"`
+	Destination     string         `json:"destination"`
+	Migrations      []string       `json:"migrations"`
+	FailOnce        bool           `json:"failOnce"`
+	InventorySHA256 string         `json:"inventoryProgramSHA256"`
+	Skills          *historySkills `json:"skills,omitempty"`
+}
+
+type historySkills struct {
+	Files         map[string]string `json:"files"`
+	ProgramSHA256 string            `json:"programSHA256"`
+	User          string            `json:"user"`
+	Profiles      string            `json:"profiles"`
+	Coding        bool              `json:"coding"`
 }
 
 var historyMu sync.Mutex
 
-const configWriteScript = `
-destination=$1
-uid=$2
-directory=${destination%/*}
-install -d -m 0755 -o "$uid" -g "$uid" "$directory"
-temporary=$(mktemp "$directory/.subyard-config.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-cat > "$temporary"
-chown "$uid:$uid" "$temporary"
-chmod 0644 "$temporary"
-mv -f -- "$temporary" "$destination"
-trap - EXIT HUP INT TERM
-`
+//go:embed config-write.sh
+var configWriteScript string
 
 func historyResponder(control historyControl, path string) func(testkit.IncusServerExecCall) testkit.IncusServerExecStep {
 	return func(call testkit.IncusServerExecCall) testkit.IncusServerExecStep {
@@ -54,6 +54,34 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		programSHA := ""
 		if len(command) > 3 {
 			programSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(command[3])))
+		}
+		if control.Skills != nil && len(command) == 4 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && programSHA == control.Skills.ProgramSHA256 {
+			return testkit.IncusServerExecStep{Stdout: []byte("skills-current\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
+				var input struct {
+					Files    map[string][]byte `json:"files"`
+					User     *string           `json:"user"`
+					Profiles *string           `json:"profiles"`
+					Coding   *bool             `json:"coding"`
+				}
+				decoder := json.NewDecoder(bytes.NewReader(actual.Stdin))
+				decoder.DisallowUnknownFields()
+				if decoder.Decode(&input) != nil || input.User == nil || *input.User != control.Skills.User || input.Profiles == nil || *input.Profiles != control.Skills.Profiles || input.Coding == nil || *input.Coding != control.Skills.Coding || len(input.Files) != len(control.Skills.Files) {
+					reject()
+					return 99
+				}
+				if decoder.Decode(new(any)) != io.EOF {
+					reject()
+					return 99
+				}
+				for name, digest := range control.Skills.Files {
+					payload, ok := input.Files[name]
+					if !ok || fmt.Sprintf("%x", sha256.Sum256(payload)) != digest {
+						reject()
+						return 99
+					}
+				}
+				return 0
+			}}
 		}
 		if len(command) == 4 && command[0] == "test" && command[1] == "!" && command[2] == "-e" && command[3] == "/var/lib/subyard/integrations/inventory.json" {
 			return testkit.IncusServerExecStep{ExitCode: 1}
