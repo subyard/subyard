@@ -175,25 +175,35 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		if err != nil {
 			return false, err
 		}
-		activationIDs := make([]string, 0, len(observations))
-		for activationID := range observations {
-			activationIDs = append(activationIDs, activationID)
-		}
-		sort.Strings(activationIDs)
-		for _, activationID := range activationIDs {
-			observation := observations[activationID]
-			if observation.State == ports.RuntimeStateDeferred {
-				runtime.reportProfileRuntimeDeferred(activationID)
-			}
-			if observation.State == ports.RuntimeStateStale {
-				return false, nil
-			}
-		}
-		return true, nil
+		return runtime.profileRuntimesConverged(observations), nil
 	default:
 		return false, fmt.Errorf("unknown reconcile stage %q", stage)
 	}
 	return probeConverged(err)
+}
+
+// PreparedProfileRuntimesConverged reads only the initial captured contracts.
+// Fresh approval and execution checks must continue to observe native state.
+func (runtime Runtime) PreparedProfileRuntimesConverged(plan *ProfileRuntimePlan) bool {
+	return runtime.profileRuntimesConverged(plan.approved)
+}
+
+func (runtime Runtime) profileRuntimesConverged(observations map[string]ports.RuntimeObservation) bool {
+	activationIDs := make([]string, 0, len(observations))
+	for activationID := range observations {
+		activationIDs = append(activationIDs, activationID)
+	}
+	sort.Strings(activationIDs)
+	for _, activationID := range activationIDs {
+		observation := observations[activationID]
+		if observation.State == ports.RuntimeStateDeferred {
+			runtime.reportProfileRuntimeDeferred(activationID)
+		}
+		if observation.State == ports.RuntimeStateStale {
+			return false
+		}
+	}
+	return true
 }
 
 func (runtime Runtime) ObserveStage(ctx context.Context, stage ports.ReconcileStageID) (ports.ReconcileStageObservation, error) {

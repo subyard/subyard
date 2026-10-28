@@ -410,6 +410,54 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 	return result, nil
 }
 
+func (execution *initExecution) prepareStages(ctx context.Context, stages []application.ReconcileStage) error {
+	_, nativeRuntime := execution.platform.(reconcileruntime.Runtime)
+	runtimeStage := slices.IndexFunc(stages, func(stage application.ReconcileStage) bool { return stage.ID == ports.ReconcileStageProfileRuntimes })
+	prepareRuntimeStage := nativeRuntime && execution.mode != initReset && runtimeStage > 0 && runtimeStage == len(stages)-1 && stages[runtimeStage].Label != ""
+	planningStages := stages
+	if prepareRuntimeStage {
+		planningStages = stages[:len(stages)-1]
+	}
+	if execution.mode == initReset {
+		execution.plan.Steps = make([]application.ReconcileStep, 0, len(stages))
+		for _, stage := range stages {
+			execution.plan.Steps = append(execution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
+		}
+	} else {
+		var err error
+		execution.plan, err = (application.Reconciler{Stages: planningStages, Runner: execution.platform}).Plan(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	execution.approvedFinalize = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.FinalizeStage(), Conditional: true}}}
+	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
+		unavailable := len(execution.plan.Steps) != 0 && !execution.plan.Steps[0].Converged
+		dependent := slices.ContainsFunc(execution.plan.Steps, func(step application.ReconcileStep) bool {
+			return step.Stage.ID == ports.ReconcileStageProvision && !step.Converged
+		})
+		var err error
+		execution.runtimePlan, err = runtime.PrepareProfileRuntimes(ctx, unavailable, execution.mode == initReset, dependent)
+		if err != nil {
+			if prepareRuntimeStage && execution.plan.Pending() == 0 {
+				return fmt.Errorf("check init stage %q: %w", ports.ReconcileStageProfileRuntimes, err)
+			}
+			return err
+		}
+		if prepareRuntimeStage {
+			step := application.ReconcileStep{Stage: stages[len(stages)-1], Conditional: execution.plan.Pending() != 0}
+			if !step.Conditional {
+				step.Converged = runtime.PreparedProfileRuntimesConverged(execution.runtimePlan)
+			}
+			execution.plan.Steps = append(execution.plan.Steps, step)
+		}
+		runtime.RuntimePlan = execution.runtimePlan
+		execution.platform = runtime
+	}
+	execution.approvedPlan = application.ReconcilePlan{Steps: slices.Clone(execution.plan.Steps)}
+	return nil
+}
+
 func (cli *CLI) prepareInitExecution(
 	ctx context.Context,
 	loaded config.Loaded,
@@ -504,32 +552,13 @@ func (cli *CLI) prepareInitExecution(
 		execution.configsChanged = !converged
 		return execution, nil
 	}
-	stages := application.InitStages(loaded.Context)
-	if mode == initReset {
-		execution.plan.Steps = make([]application.ReconcileStep, 0, len(stages))
-		for _, stage := range stages {
-			execution.plan.Steps = append(execution.plan.Steps, application.ReconcileStep{Stage: stage, Conditional: true})
-		}
-	} else {
-		execution.plan, err = (application.Reconciler{Stages: stages, Runner: execution.platform}).Plan(ctx)
-		if err != nil {
-			return nil, err
-		}
+	if err := execution.prepareStages(ctx, application.InitStages(loaded.Context)); err != nil {
+		return nil, err
 	}
-	execution.approvedPlan = application.ReconcilePlan{Steps: slices.Clone(execution.plan.Steps)}
-	execution.approvedFinalize = application.ReconcilePlan{Steps: []application.ReconcileStep{{Stage: application.FinalizeStage(), Conditional: true}}}
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
-		unavailable := len(execution.plan.Steps) != 0 && !execution.plan.Steps[0].Converged
-		dependent := slices.ContainsFunc(execution.approvedPlan.Steps, func(step application.ReconcileStep) bool {
-			return step.Stage.ID == ports.ReconcileStageProvision && !step.Converged
-		})
-		execution.runtimePlan, err = runtime.PrepareProfileRuntimes(ctx, unavailable, mode == initReset, dependent)
-		if err != nil {
-			return nil, err
-		}
-		runtime.RuntimePlan = execution.runtimePlan
 		// An approved instance repair can temporarily boot an intentionally stopped
 		// yard. Capture bounded conditional hooks before that prerequisite runs.
+		unavailable := len(execution.plan.Steps) != 0 && !execution.plan.Steps[0].Converged
 		temporaryPower := slices.ContainsFunc(execution.approvedPlan.Steps, func(step application.ReconcileStep) bool {
 			return step.Stage.ID == ports.ReconcileStageInstance && !step.Converged
 		})
