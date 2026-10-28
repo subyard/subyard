@@ -40,7 +40,7 @@ func TestIntegrationLifecycleExactApplyAndVerify(t *testing.T) {
 	if err != nil || observation.State != ports.RuntimeStateStale {
 		t.Fatalf("observe = %+v, %v", observation, err)
 	}
-	sources, err := runtime.integrationSourceBinding()
+	sources, _, err := runtime.integrationSourceBindingsPhase("inspect")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestIntegrationLifecycleExactApplyAndVerify(t *testing.T) {
 }
 func TestIntegrationLifecycleRejectsSourceAndReportDrift(t *testing.T) {
 	runtime, definition, actual, desired := lifecycleFixture(t)
-	sources, _ := runtime.integrationSourceBinding()
+	sources, _, _ := runtime.integrationSourceBindingsPhase("inspect")
 	plan := IntegrationPlan{sources: sources, facts: []integrationFact{{Key: "lifecycle:sample", Observed: actual, Desired: desired}}}
 	testkit.WriteFile(t, filepath.Join(definition.Root, "integration.json"), []byte(`{"schema_version":2}`), 0644)
 	if err := runtime.applyIntegrationLifecycles(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) {

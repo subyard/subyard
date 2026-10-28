@@ -388,13 +388,3 @@ func cleanupHostIDRename(configHome string) error {
 	}
 	return syncDirectory(filepath.Dir(path))
 }
-
-func HostIDRenamePendingTarget(configHome string) (string, bool, error) {
-	journal, exists, err := readHostIDRenameJournal(configHome)
-	return journal.NewHostID, exists, err
-}
-
-func HostIDRenamePendingSource(configHome string) (bool, error) {
-	journal, _, err := readHostIDRenameJournal(configHome)
-	return journal.Source != nil, err
-}

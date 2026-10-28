@@ -187,21 +187,3 @@ func (runtime Runtime) FencePreparedHostPowerRuntimeSources(ctx context.Context,
 	}
 	return err
 }
-func (runtime Runtime) ApplyPreparedTestVMBrokerRuntimeSources(ctx context.Context, prepared *PreparedTestVMBroker, sources *PreparedInstalledRuntime) error {
-	if !runtime.Yard.NestedE2EVMs {
-		return runtime.ApplyPreparedTestVMBrokerRuntime(ctx, prepared)
-	}
-	if sources == nil || sources.owner != "test-vms-host-sink" {
-		return domain.ErrPlanStale
-	}
-	execution, err := runtime.hostInstallerExecution(ctx, sources)
-	if err != nil {
-		return err
-	}
-	defer sources.Close()
-	err = runtime.applyPreparedTestVMBrokerRuntime(ctx, prepared, execution)
-	if err != nil && sources.stageBinding != "" {
-		sources.retain.Store(true)
-	}
-	return err
-}

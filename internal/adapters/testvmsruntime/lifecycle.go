@@ -342,13 +342,6 @@ func (runtime *Runtime) DrainAll(ctx context.Context, store LeaseStore, reason s
 	return runtime.ReapExpired(ctx, store)
 }
 
-func (runtime *Runtime) RevokeSlot(ctx context.Context, store LeaseStore, slotID string) error {
-	if err := store.BeginDrainSlot(slotID, "operator revoke"); err != nil {
-		return err
-	}
-	return runtime.ReapExpired(ctx, store)
-}
-
 func (runtime *Runtime) RevokeExpectedSlot(
 	ctx context.Context,
 	store LeaseStore,

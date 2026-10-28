@@ -76,7 +76,7 @@ func TestLifecycleNativeBytesInvalidatePlanBeforeEffects(t *testing.T) {
 	}
 	testkit.WriteFile(t, native, []byte("native-v1"), 0755)
 	runtime.Integrations = []profile.IntegrationDefinition{definition}
-	sources, err := runtime.integrationSourceBinding()
+	sources, _, err := runtime.integrationSourceBindingsPhase("inspect")
 	if err != nil {
 		t.Fatal(err)
 	}

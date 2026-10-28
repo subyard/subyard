@@ -85,16 +85,6 @@ func hostPowerVector(expected []ports.NativeResourceGeneration) (string, error) 
 	raw, err := json.Marshal(expected)
 	return string(raw), err
 }
-func (runtime Runtime) ApplyPreparedHostPowerRuntimeCustody(ctx context.Context, prepared *PreparedHostPower, expected []ports.NativeResourceGeneration, generation string) error {
-	vector, err := hostPowerVector(expected)
-	if err != nil || !profileRuntimeDigest.MatchString(generation) {
-		return domain.ErrPlanStale
-	}
-	return runtime.applyPreparedHostPowerRuntime(ctx, prepared, map[string]string{"SUBYARD_NATIVE_EXPECTED_VECTOR": vector, "SUBYARD_NATIVE_GENERATION": generation})
-}
-func (runtime Runtime) FencePreparedHostPowerRuntime(ctx context.Context, prepared *PreparedHostPower, expected []ports.NativeResourceGeneration, generation, successor string) error {
-	return runtime.fencePreparedHostPowerRuntime(ctx, prepared, expected, generation, successor)
-}
 func (runtime Runtime) fencePreparedHostPowerRuntime(ctx context.Context, prepared *PreparedHostPower, expected []ports.NativeResourceGeneration, generation, successor string, cached ...Runtime) error {
 	vector, err := hostPowerVector(expected)
 	if err != nil || prepared == nil || prepared.runtime != runtime.configRuntimeBinding() || !profileRuntimeDigest.MatchString(generation) || !profileRuntimeDigest.MatchString(successor) || successor == generation || slices.ContainsFunc(expected, func(entry ports.NativeResourceGeneration) bool { return entry.Value == successor }) {

@@ -196,9 +196,6 @@ func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.Insta
 	return state.Instance, nil
 }
 
-func (runtime Runtime) integrationArtifacts() ([]integrationArtifact, error) {
-	return runtime.integrationArtifactsPhase("inspect")
-}
 func (runtime Runtime) integrationArtifactsPhase(phase string) ([]integrationArtifact, error) {
 	return runtime.integrationArtifactsWithSourceReader(phase, runtime.SourceReader)
 }
