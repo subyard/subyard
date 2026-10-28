@@ -67,8 +67,6 @@ controller_main() {
     esac
   done
   [ -n "$slot" ] || { usage; return 2; }
-  # shellcheck source=dev/agent-e2e.sh
-  . "$ROOT/dev/agent-e2e.sh"
   VM_COUNT_REQUESTED=1
   VM_COUNT=1
   set_requested_slot "$slot" --slot
@@ -174,7 +172,11 @@ controller_main() {
 
 case "${SUBYARD_E2E_VM:-}" in
   1|2) ;;
-  *) controller_main "$@"; exit ;;
+  *)
+    # EXIT can run after controller_main unwinds, so keep the sourced arrays global.
+    # shellcheck source=dev/agent-e2e.sh
+    . "$ROOT/dev/agent-e2e.sh"
+    controller_main "$@"; exit ;;
 esac
 
 case "$MODE" in

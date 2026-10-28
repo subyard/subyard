@@ -542,7 +542,7 @@ func productionLeafContracts() map[string]leafContract {
 
 func shellFiles(t *testing.T, root string) []string {
 	t.Helper()
-	return sourceFiles(t, []string{root}, func(path string) bool { return strings.HasSuffix(path, ".sh") })
+	return sourceFiles(t, []string{root}, func(path string) bool { return strings.HasSuffix(path, ".sh") || strings.HasSuffix(path, ".bash") })
 }
 
 func profileTestPath(path string) bool {

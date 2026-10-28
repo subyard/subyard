@@ -291,134 +291,8 @@ install_release() {
   ok "installed verified Orca $ORCA_VERSION release"
 }
 
-registration_host_name() {
-  local name path="$SUBYARD_CONFIG_HOME/host-id"
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] || return 1
-    name="$(cat -- "$path")" || return 1
-  else
-    name="$(hostname)" || return 1
-    name="${name%.}"
-  fi
-  [[ "$name" =~ ^[a-zA-Z0-9._][a-zA-Z0-9._-]*$ ]] &&
-    [ "$name" != . ] && [ "$name" != .. ] || return 1
-  printf '%s\n' "$name"
-}
-
-render_registration_hook() {
-  local version host_name mode="${1:-sync}" settings_command=':'
-  version="$(registration_contract_version)" || return 1
-  host_name="$(registration_host_name)" || return 1
-  if [ "$mode" != discover ]; then
-    settings_command="/usr/bin/python3 -B $ORCA_REGISTRATION/settings.py"
-  fi
-  cat <<SYNC_HEAD
-#!/usr/bin/env bash
-set -euo pipefail
-exec 9<$ORCA_REGISTRATION_LOCK
-flock -s 9
-[ "\$(cat $ORCA_REGISTRATION_DIGEST 2>/dev/null)" = "$version" ] || {
-  printf "Orca project helper is stale or incomplete; run 'yard init' first\n" >&2
-  exit 1
-}
-systemctl is-active --quiet $ORCA_UNIT || exit 0
-if [ -n "\${SUBYARD_PROJECT_HOOK_BINDING:-}" ]; then
-  export SUBYARD_ORCA_REGISTRATION_SCOPE="\$SUBYARD_PROJECT_HOOK_BINDING"
-fi
-status=0
-report="\$(/usr/bin/python3 -B $ORCA_REGISTRATION/main.py $mode --host-name '$host_name')" || status=\$?
-if ! jq -e '(.ready | type == "boolean") and (.errors | type == "array") and (.warnings | type == "array")' <<<"\$report" >/dev/null; then
-  printf 'Orca project registration failed; run yard orca status\n' >&2
-  exit 1
-fi
-jq -r '(.errors[] | "Orca registration error: " + .), (.warnings[] | "Orca registration warning: " + .)' <<<"\$report" >&2
-jq -r '.cleanup[]? | "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction' <<<"\$report" >&2
-jq -r '"Orca checkouts registered: \(.registered)/\(.total)"' <<<"\$report"
-jq -e '.ready' <<<"\$report" >/dev/null || status=1
-[ "\$status" -ne 0 ] || $settings_command
-exit "\$status"
-SYNC_HEAD
-}
-
-render_discovery_service() {
-  cat <<UNIT
-[Unit]
-Description=Subyard Orca repository discovery portion
-After=$ORCA_UNIT
-PartOf=$ORCA_UNIT
-
-[Service]
-Type=oneshot
-User=${DEV_USER:-dev}
-Group=${DEV_USER:-dev}
-Environment=HOME=/home/${DEV_USER:-dev}
-ExecStart=$ORCA_REGISTRATION/discover
-TimeoutStartSec=100
-UMask=0077
-Nice=10
-UNIT
-}
-
-render_discovery_timer() {
-  cat <<UNIT
-[Unit]
-Description=Periodically discover Subyard Orca repositories
-PartOf=$ORCA_UNIT
-
-[Timer]
-OnBootSec=15s
-OnUnitInactiveSec=15s
-AccuracySec=1s
-Unit=$ORCA_DISCOVERY_UNIT
-
-[Install]
-WantedBy=timers.target
-UNIT
-}
-
-render_codex_profile() {
-  cat <<CODEX_PROFILE
-if [ "\${SUBYARD_ORCA_CODEX_CONFIG:-}" = 1 ]; then
-  export PATH=${ORCA_CODEX_BIN%/*}:\$PATH
-  codex() { /usr/bin/python3 -B $ORCA_REGISTRATION/codex_launch.py "\$@"; }
-fi
-CODEX_PROFILE
-}
-
-render_codex_bin() {
-  cat <<CODEX_BIN
-#!/bin/sh
-exec /usr/bin/python3 -B $ORCA_REGISTRATION/codex_appserver.py /usr/local/bin/codex "\$@"
-CODEX_BIN
-}
-
-registration_desired_digest() {
-  local version
-  version="$(registration_contract_version)" || return 1
-  {
-    printf '755 0:0 '
-    render_registration_hook | sha256sum | awk '{print $1}'
-    local source
-    for source in "$RESOURCE_DIR"/registration/*.py; do
-      [ -f "$source" ] || return 1
-      printf '644 0:0 %s ' "${source##*/}"
-      sha256sum "$source" | awk '{print $1}'
-    done
-    printf '755 0:0 discover '
-    render_registration_hook discover | sha256sum | awk '{print $1}'
-    printf '644 0:0 discovery-service '
-    render_discovery_service | sha256sum | awk '{print $1}'
-    printf '644 0:0 discovery-timer '
-    render_discovery_timer | sha256sum | awk '{print $1}'
-    printf '644 0:0 codex-profile '
-    render_codex_profile | sha256sum | awk '{print $1}'
-    printf '755 0:0 codex-bin '
-    render_codex_bin | sha256sum | awk '{print $1}'
-    printf 'enabled discovery-timer\n'
-    printf '644 0:0 lock\n'
-    printf '644 0:0 marker %s\n' "$version"
-  } | sha256sum | awk '{print $1}'
-}
+# shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
+. "$RESOURCE_DIR/registration-contract.sh"
 
 observe_registration_contract() {
   local desired
@@ -428,83 +302,7 @@ observe_registration_contract() {
   yexec bash -se -- "$desired" "$ORCA_SYNC" "$ORCA_REGISTRATION" \
     "$ORCA_REGISTRATION_DIGEST" "$ORCA_REGISTRATION_LOCK" "$ORCA_EXEC" \
     "/etc/systemd/system/$ORCA_UNIT" "/etc/systemd/system/$ORCA_DISCOVERY_UNIT" \
-    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "${names[@]}" <<'YARD'
-set -euo pipefail
-desired="$1"; hook="$2"; directory="$3"; marker="$4"; lock="$5"; executable="$6"; unit="$7"
-discovery_service="$8"; discovery_timer="$9"; shift 9
-codex_profile="$1"; codex_bin="$2"; shift 2
-present=0
-# The package launcher may be a symlink; profile-owned contract paths may not.
-[ ! -e "$executable" ] && [ ! -L "$executable" ] || present=1
-for artifact in "$unit" "$hook" "$directory" "$marker" "$lock" \
-  "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin" "$directory"/*.py; do
-  [ ! -L "$artifact" ] || { echo 'Orca runtime contract contains an unsafe symbolic link' >&2; exit 1; }
-  [ ! -e "$artifact" ] || present=1
-done
-if [ "$present" = 0 ]; then
-  printf '{"state":"absent","actual":"","desired":""}\n'
-  exit 0
-fi
-actual="$({
-  if [ -f "$hook" ]; then
-    printf '%s %s:%s ' "$(stat -c %a "$hook")" "$(stat -c %u "$hook")" "$(stat -c %g "$hook")"
-    sha256sum "$hook" | awk '{print $1}'
-  else printf 'missing\n'; fi
-  for name in "$@"; do
-    if [ -f "$directory/$name" ]; then
-      printf '%s %s:%s %s ' "$(stat -c %a "$directory/$name")" \
-        "$(stat -c %u "$directory/$name")" "$(stat -c %g "$directory/$name")" "$name"
-    else
-      printf '%s ' "$name"
-    fi
-    if [ -f "$directory/$name" ]; then
-      sha256sum "$directory/$name" | awk '{print $1}'
-    else
-      printf 'missing\n'
-    fi
-  done
-  for installed in "$directory"/*.py; do
-    [ -e "$installed" ] || continue
-    case " $* " in
-      *" ${installed##*/} "*) ;;
-      *) printf 'unexpected %s\n' "${installed##*/}" ;;
-    esac
-  done
-  for artifact in "$directory/discover" "$discovery_service" "$discovery_timer" "$codex_profile" "$codex_bin"; do
-    case "$artifact" in
-      "$directory/discover") label=discover ;;
-      "$discovery_service") label=discovery-service ;;
-      "$discovery_timer") label=discovery-timer ;;
-      "$codex_profile") label=codex-profile ;;
-      *) label=codex-bin ;;
-    esac
-    if [ -f "$artifact" ]; then
-      printf '%s %s:%s %s ' "$(stat -c %a "$artifact")" "$(stat -c %u "$artifact")" "$(stat -c %g "$artifact")" "$label"
-      sha256sum "$artifact" | awk '{print $1}'
-    else printf 'missing %s\n' "$label"; fi
-  done
-  if systemctl is-enabled --quiet "${discovery_timer##*/}"; then
-    printf 'enabled discovery-timer\n'
-  else printf 'disabled discovery-timer\n'; fi
-  if [ -f "$lock" ]; then
-    printf '%s %s:%s lock\n' "$(stat -c %a "$lock")" "$(stat -c %u "$lock")" "$(stat -c %g "$lock")"
-  else
-    printf 'missing lock\n'
-  fi
-  if [ -f "$marker" ]; then
-    printf '%s %s:%s marker ' "$(stat -c %a "$marker")" \
-      "$(stat -c %u "$marker")" "$(stat -c %g "$marker")"
-    cat "$marker"
-  else
-    printf 'missing marker\n'
-  fi
-} | sha256sum | awk '{print $1}')"
-state=stale
-if [ "$actual" = "$desired" ]; then
-  state=current
-fi
-printf '{"state":"%s","actual":"%s","desired":"%s"}\n' "$state" "$actual" "$desired"
-YARD
+    "/etc/systemd/system/$ORCA_DISCOVERY_TIMER" "$ORCA_CODEX_PROFILE" "$ORCA_CODEX_BIN" "${names[@]}" < "$RESOURCE_DIR/registration-observer.bash"
 }
 
 stage_registration_contract() {
@@ -900,11 +698,6 @@ projects_synced() {
 }
 
 # A source digest makes a new profile helper invalidate an otherwise intact installed contract.
-registration_contract_version() {
-  local digest
-  digest="$(cd "$RESOURCE_DIR/registration" && sha256sum ./*.py | sha256sum | cut -d ' ' -f 1)" || return 1
-  printf '%s:%s\n' "$ORCA_CONTRACT_VERSION" "$digest"
-}
 
 registration_files() {
   local source
@@ -1172,7 +965,8 @@ stop_discovery() {
 orca_steps_emit() {
   local action="$1" steps="$2" binding
   binding="$( { jq -c '[.[]|{id,target,desired,preconditions,dependsOn,verify}]' <<<"$steps";
-    registration_contract_version; sha256sum "$RESOURCE_DIR/handler.sh" "$ORCA_PROFILE_DIR/release.env" | awk '{print $1}';
+    registration_contract_version; sha256sum "$RESOURCE_DIR/handler.sh" "$RESOURCE_DIR/registration-contract.sh" \
+      "$RESOURCE_DIR/registration-observer.bash" "$ORCA_PROFILE_DIR/release.env" | awk '{print $1}';
     printf '%s\n' "${DEV_USER:-dev}" "$DEV_UID" "$ORCA_GUEST_PORT"; } | sha256sum | awk '{print $1}')"
   jq -cn --arg action "$action" --arg binding "$binding" --argjson steps "$steps" \
     '{schema:"yard.resource-action-assessment.v2",action:$action,binding:$binding,steps:$steps,

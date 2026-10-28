@@ -213,6 +213,7 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
     source = Path(__file__).resolve().parent.parent
     probes = {}
     host_probes = {}
+    stdin_probes = []
     skills = {}
     for package_root in ((source, *package_roots) if skills_roots is None else skills_roots):
         if (package_root / 'config/skills/package.py').is_file():
@@ -237,6 +238,13 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                 require(key not in probes or probes[key] == (response, code),
                         "package observation fixtures disagree on an exact command")
                 probes[key] = (response, code)
+            for arguments, payload, response, code, digest_command in provider.get("read_only_stdin_commands", lambda _: [])(package):
+                require(arguments.count(None) == 1 and all(isinstance(arg, str) or arg is None for arg in arguments)
+                        and isinstance(payload, bytes) and isinstance(response, str)
+                        and type(code) is int and 0 <= code <= 255
+                        and isinstance(digest_command, list) and all(isinstance(arg, str) for arg in digest_command),
+                        "package stdin observation fixture is invalid")
+                stdin_probes.append((arguments, payload, response, code, digest_command))
             for program, arguments, response, code in provider.get("read_only_host_commands", lambda _: [])(package):
                 require(program in ("sudo", "systemctl") and type(code) is int and 0 <= code <= 255,
                         "package host observation fixture is invalid")
@@ -245,8 +253,8 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                         "package host observation fixtures disagree on an exact command")
                 host_probes[key] = (response, code)
     incus = shims / "incus"
-    # Exact canned observations only; no command or guest script is executed.
-    incus.write_text("#!/usr/bin/python3\nimport hashlib, json, pathlib, sys, tarfile\n"
+    # Exact observations only; profile digest helpers never execute guest input.
+    incus.write_text("#!/usr/bin/python3\nimport hashlib, json, pathlib, subprocess, sys, tarfile\n"
                      "arguments = sys.argv[1:]\n"
                      f"probes = {probes!r}\n"
                      f"activation_failure = {str(activation_failure) if activation_failure else None!r}\n"
@@ -284,6 +292,17 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "    if not observation.get('instances'): sys.exit(1)\n"
                      "    print(json.dumps(observation['instances'][0]['info']))\n"
                      "    sys.exit(0)\n"
+                     f"stdin_probes = {stdin_probes!r}\n"
+                     "incoming = None\n"
+                     "for expected, payload, response, code, digest_command in stdin_probes:\n"
+                     "    if len(arguments) != len(expected): continue\n"
+                     "    dynamic = expected.index(None)\n"
+                     "    if arguments[:dynamic] != expected[:dynamic] or arguments[dynamic+1:] != expected[dynamic+1:]: continue\n"
+                     "    digest = subprocess.run(digest_command, capture_output=True, text=True)\n"
+                     "    if incoming is None: incoming = sys.stdin.buffer.read()\n"
+                     "    if digest.returncode == 0 and arguments[dynamic] == digest.stdout.strip() and incoming == payload:\n"
+                     "        sys.stdout.write(response)\n"
+                     "        sys.exit(code)\n"
                      "if tuple(arguments) in probes:\n"
                      "    sys.stdin.buffer.read()\n"
                      "    response, code = probes[tuple(arguments)]\n"
@@ -295,11 +314,6 @@ def write_observation_incus(shims, control, unexpected, package_roots=(), activa
                      "    sys.exit(0)\n"
                      "if len(arguments) == 9 and arguments[:8] == ['exec', 'yard', '--project', 'subyard', '--', 'systemctl', 'is-active', '--quiet'] and arguments[8].endswith('.service'):\n"
                      "    sys.exit(3)\n"
-                     "if arguments and arguments[0] == 'exec' and '--' in arguments:\n"
-                     "    command = arguments[arguments.index('--') + 1:]\n"
-                     "    if command[:3] == ['bash', '-se', '--'] and '\"state\":\"absent\"' in sys.stdin.read():\n"
-                     "        print('{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}')\n"
-                     "        sys.exit(0)\n"
                      f"pathlib.Path({str(unexpected)!r}).write_text('incus operation rejected')\n"
                      f"pathlib.Path({str(unexpected) + '.argv.json'!r}).write_text(json.dumps(['incus', *arguments]))\n"
                      "sys.exit(99)\n")
@@ -1096,7 +1110,7 @@ def verify_activation_only_recovery(release, version, baseline, arch, root,
     # Each phase needs its own observed interruption. A prior fixture's marker
     # must never kill this session before it has published its own journal.
     interrupted.unlink(missing_ok=True)
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     observed_config = run_process([str(fixture.old_launcher), "config", "status"], fixture.env, timeout=30)
     require(observed_config.returncode == 1 and "drift" in observed_config.stdout + observed_config.stderr,
@@ -1378,7 +1392,7 @@ def verify_fresh_activation_recovery(release, version, baseline, arch, root, com
     shims = fixture.root / "commands"
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     interrupted = Path(str(control) + ".held")
     if interrupted.exists():
@@ -1694,7 +1708,7 @@ def verify_completed_source_selection(fixture, root):
     shims = fixture.root / "selection-commands"
     shims.mkdir(mode=0o700)
     unexpected = fixture.root / "unexpected-selection-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     gate = json.loads(fixture.run([launcher, "migrate", "--check", "--json"]))
     require(gate["outcome"]["status"] == "migration-required" and not gate.get("blockers")
@@ -1771,7 +1785,8 @@ def verify_migration_owner_replacement(release, version, baseline, source_baseli
     shims = fixture.root / "commands"
     shims.mkdir()
     unexpected = fixture.root / "unexpected-host-command"
-    write_observation_incus(shims, control, unexpected)
+    write_observation_incus(shims, control, unexpected,
+                            [fixture.old_launcher.parent.parent, fixture.runtime / official_release])
     fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
     fixture.env["YARD_RELEASE_BASE_URL"] = baseline.as_uri()
     marker = Path(str(control) + ".held")
@@ -1908,7 +1923,10 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
     fixture = Fixture(root / ("direct-" + baseline_version), release, version,
                       baseline, arch, baseline_version)
     host = fixture.config / "config.env"
-    host.write_text("CODING_TOOL_INTEGRATIONS=codex\n")
+    # The running fixture has no materialized guest config. Seed an empty
+    # selection so the released owner can verify its completed source before
+    # the candidate's independent post-migration activation failure.
+    host.write_text("CODING_TOOL_INTEGRATIONS=\n")
     host.chmod(0o600)
     fixture.run([str(fixture.old_launcher), "migrate", "--yes"])
     source = json.loads(fixture.journal.read_text())
@@ -1944,9 +1962,14 @@ def verify_direct_019(release, version, baseline, baseline_version, arch, root):
         unexpected = fixture.root / "unexpected-host-command"
         failure_control = fixture.root / "activation-failure.json"
         failure_marker = fixture.root / "activation-failure-observed"
-        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
-        write_observation_incus(shims, control, unexpected, activation_failure=failure_control)
+        write_observation_incus(shims, control, unexpected, [fixture.old_launcher.parent.parent],
+                                activation_failure=failure_control)
         fixture.env["PATH"] = str(shims) + ":/usr/bin:/bin"
+        source_inspection = json.loads(fixture.run([str(fixture.old_launcher), "migrate", "--check", "--json"]))
+        require(source_inspection["outcome"]["status"] == "ready" and not source_inspection.get("blockers")
+                and not unexpected.exists(),
+                "released direct source is not current before candidate activation")
+        failure_control.write_text(json.dumps({"journal": str(fixture.journal), "marker": str(failure_marker)}))
         transactions = fixture.config / "release-transition/v2/transactions"
         require((transactions / source_transaction).is_dir(), "direct fixture omitted retained terminal evidence")
         result = run_process([str(fixture.old_launcher), "update", "--version", version, "--yes"],

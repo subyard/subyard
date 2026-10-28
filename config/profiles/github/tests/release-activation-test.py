@@ -264,6 +264,129 @@ broker_controller_cleanup "$1"
                 self.assertEqual(result.returncode,native or 3,result.stderr)
                 self.assertIn('cleanup_exit_code=3',result.stderr)
 
+    def test_prepared_broker_cleanup_at_exit_preserves_state_and_order(self):
+        script = '. '+shlex.quote(str(GUEST.parents[5]/'dev/agent-e2e.sh'))+'\n' + source_fixture('broker-fixture.sh') + r'''
+set -euo pipefail
+main() {
+  prepared=1 cleanup_failed=0 bundle="$1/work tree's bundle" bundle_hash="hash with ' quote"
+  LOCAL_TEMP="$1/local" LEASE_KEEPER_PID='' rc=0
+  scenario="$2" native="$3" calls=0
+  GUEST_DIRS=([1]=owned [2]=other)
+  mkdir -m 0700 "$LOCAL_TEMP"
+  printf 'marker-owned\n' > "$1/.marker"
+  phase_end() { printf 'phase:%s\n' "$1" >> "$EVENTS"; }
+  phase_marker() { :; }
+  cleanup_guest() {
+    calls=$((calls + 1))
+    printf 'guest:%s:%s\n' "$1" "$2" >> "$EVENTS"
+    [ "$(cat "$STATE/.marker")" = marker-owned ] || return 88
+    if [ "$scenario" = pre ] && [ "$calls" = 1 ]; then return 9; fi
+    if [ "$scenario" = post ] && [ "$calls" = 2 ]; then return 9; fi
+    unset 'GUEST_DIRS[$1]'
+  }
+  run_guest() {
+    if [ "${*: -1}" = --verify-reboot ]; then
+      printf 'primary:%s\n' "$scenario" >> "$EVENTS"
+      return 23
+    fi
+    printf 'fixture\n' >> "$EVENTS"
+    printf '%s\0' "$@" > "$STATE/argv"
+    [ "$(stat -c %a "$LOCAL_TEMP/fixture-cleanup.log")" = 600 ] || return 88
+    GUEST_DIRS[1]=new-owned
+    printf '%s\n' PRIVATE_CLEANUP_CANARY
+    [ "$scenario" != fixture ]
+  }
+  release_lease() { printf 'release\n' >> "$EVENTS"; [ "$scenario" != release ]; }
+  trap broker_controller_cleanup EXIT
+  case "$scenario" in primary-guest|primary-transport)
+    run_guest 1 "$bundle" "$bundle_hash" bash config/profiles/github/tests/e2e/acceptance.sh --verify-reboot ;;
+  esac
+  exit "$native"
+}
+STATE=$1 EVENTS=$1/events
+main "$@"
+'''
+        for scenario in ('success', 'pre', 'fixture', 'post', 'release', 'primary-guest', 'primary-transport'):
+            for native in ((23,) if scenario.startswith('primary-') else (0, 3, 23, 124, 130, 143)):
+                with self.subTest(scenario=scenario, native=native), tempfile.TemporaryDirectory(
+                        prefix='github-cleanup-', dir='/tmp') as temporary:
+                    root = Path(temporary)
+                    result = subprocess.run(['bash', '-c', script, 'fixture', temporary, scenario, str(native)],
+                                            capture_output=True, text=True, timeout=5)
+                    failed = scenario in ('pre', 'fixture', 'post', 'release')
+                    self.assertEqual(result.returncode, native or (3 if failed else 0), result.stderr)
+                    self.assertIn(f'original_exit_code={native} cleanup_exit_code={3 if failed else 0} '
+                                  f'final_exit_code={native or (3 if failed else 0)}', result.stderr)
+                    self.assertNotIn('PRIVATE_CLEANUP_CANARY', result.stdout + result.stderr)
+                    self.assertLess(len(result.stdout + result.stderr), 2048)
+                    events = (root/'events').read_text().splitlines()
+                    if scenario.startswith('primary-'):
+                        self.assertEqual(events.pop(0), f'primary:{scenario}')
+                    self.assertEqual(events[0:2], [f'phase:{native}', 'guest:1:quiet'])
+                    self.assertEqual(events[-1], 'release')
+                    if scenario == 'pre':
+                        self.assertNotIn('fixture', events)
+                        self.assertFalse((root/'argv').exists())
+                    else:
+                        self.assertEqual(events[2:4], ['fixture', 'guest:1:quiet'])
+                        argv = (root/'argv').read_bytes().split(b'\0')[:-1]
+                        self.assertEqual([x.decode() for x in argv], ['1', str(root/"work tree's bundle"),
+                            "hash with ' quote", 'bash', 'config/profiles/github/tests/e2e/acceptance.sh', '--cleanup'])
+                    self.assertIn('guest:2:quiet', events)
+
+    def test_controller_entrypoint_keeps_guest_directory_on_errexit(self):
+        with tempfile.TemporaryDirectory(prefix='github-controller-', dir='/tmp') as temporary:
+            root = Path(temporary)
+            driver = root/'config/profiles/github/tests/e2e/acceptance.sh'
+            driver.parent.mkdir(parents=True)
+            shutil.copyfile(GUEST.with_name('acceptance.sh'), driver)
+            shutil.copyfile(GUEST.with_name('broker-fixture.sh'), driver.with_name('broker-fixture.sh'))
+            (root/'tests/helpers').mkdir(parents=True)
+            (root/'tests/helpers/release-candidate.sh').write_text('release_candidate_prepare() { return 1; }\n')
+            (root/'dev').mkdir()
+            (root/'dev/agent-e2e.sh').write_text(r'''
+. "$REAL_AGENT_E2E"
+set_requested_slot() { :; }
+acquire_lease() { :; }
+start_lease_keeper() { :; }
+build_bundle() { printf 'bundle\n' > "$2"; }
+run_guest() {
+  GUEST_DIRS[1]="owned-$#"
+  printf 'run:%s\n' "${*: -1}" >> "$EVENTS"
+  [ "${*: -1}" != --verify-reboot ] || return 23
+}
+cleanup_guest() {
+  printf 'guest:%s:%s\n' "$1" "${GUEST_DIRS[$1]:-lost}" >> "$EVENTS"
+  [ "$(cat "$MARKER_FILE")" = marker-owned ] || return 88
+  [ -n "${GUEST_DIRS[$1]:-}" ] || return 89
+  unset 'GUEST_DIRS[$1]'
+}
+release_lease() { printf 'release\n' >> "$EVENTS"; }
+timeout() {
+  case " $* " in
+    *'/boot_id '*)
+      if [ -e "$BOOT_MARKER" ]; then printf 'after\n'; else printf 'before\n'; touch "$BOOT_MARKER"; fi ;;
+    *' -- true '*) return 1 ;;
+    *' is-system-running '*) printf 'running\n' ;;
+    *' systemctl show '*) printf 'ExecMainStartTimestampMonotonic=1\nActiveState=inactive\nSubState=dead\nResult=success\nExecMainStatus=0\n' ;;
+    *) : ;;
+  esac
+}
+''')
+            events, marker = root/'events', root/'marker'
+            marker.write_text('marker-owned\n')
+            env = dict(os.environ, REAL_AGENT_E2E=str(GUEST.parents[5]/'dev/agent-e2e.sh'),
+                       EVENTS=str(events), MARKER_FILE=str(marker), BOOT_MARKER=str(root/'boot'), TMPDIR='/tmp')
+            env.pop('SUBYARD_E2E_VM', None)
+            result = subprocess.run(['bash', str(driver), '--slot', '1'], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertIn('original_exit_code=23 cleanup_exit_code=0 final_exit_code=23', result.stderr)
+            self.assertNotIn('lost', events.read_text())
+            self.assertEqual(events.read_text().splitlines(), [
+                'run:--cleanup', 'guest:1:owned-6', 'run:--prepare-reboot', 'guest:1:owned-6',
+                'run:--verify-reboot', 'guest:1:owned-6', 'run:--cleanup', 'guest:1:owned-6', 'release'])
+
     def test_actual_controller_cleanup_preserves_failure_timeout_and_signal(self):
         cleanup = source_fixture('connection-fixture.sh')
         with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
