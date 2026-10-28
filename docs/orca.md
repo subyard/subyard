@@ -207,6 +207,12 @@ Desktop as described above.
 
 ## Projects and lifecycle
 
+Orca's Fetch, Pull and Push actions use the yard developer's ordinary Git configuration.
+The service keeps Orca's app profile at `/srv/agents/orca/config/orca` while Git reads
+`~/.config/git/config` and `~/.gitconfig`. To use the GitHub broker for these actions,
+enable [`GITHUB_GIT_MODE=broker-first`](github.md#ordinary-git-with-original-authentication-fallback)
+on the owner host; enabling the `github` profile alone leaves ordinary Git routing off.
+
 Repository discovery runs periodically in the yard, including ignored directories and
 `.build`. Status, project hooks and release activation validate known repository roots
 without scanning their files. Ordinary cache files do not consume a readiness budget;

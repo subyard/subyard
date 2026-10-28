@@ -631,6 +631,52 @@ mobile_request="$ready_file.mobile-request"
 grep -Fxq 'Environment=SSH_AUTH_SOCK=/home/dev/.ssh/subyard-agent.sock' \
   "$ORCA_TEST_CAPTURE/subyard-orca.service" \
   || fail 'service lacks the fixed yard SSH agent environment'
+python3 - "$TMP" "$ORCA_TEST_CAPTURE/subyard-orca.service" <<'PY'
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+root = Path(sys.argv[1])/'git-environment'
+environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+for line in Path(sys.argv[2]).read_text().splitlines():
+    if line.startswith('Environment='):
+        for assignment in shlex.split(line.removeprefix('Environment=')):
+            key, value = assignment.split('=', 1)
+            environment[key] = value
+profile_path = environment.get('ORCA_USER_DATA_PATH')
+for key in ('HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'):
+    if key in environment:
+        environment[key] = str(root/environment[key].lstrip('/'))
+environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_TERMINAL_PROMPT='0')
+home = root/'home/dev'
+config = home/'.config/git/config'
+config.parent.mkdir(parents=True)
+upstream = root/'upstream'
+config.write_text('[fixture]\n\txdg = visible\n\tprecedence = xdg\n'
+                  f'[url "{upstream.as_uri()}"]\n\tinsteadOf = https://git-fixture.invalid/repo\n')
+(home/'.gitconfig').write_text('[fixture]\n\tprecedence = legacy\n')
+def git(*args, cwd=root):
+    return subprocess.check_output(['git', *map(str, args)], cwd=cwd, env=environment,
+                                   stderr=subprocess.PIPE, text=True).strip()
+
+assert git('config', '--get', 'fixture.xdg') == 'visible', 'Orca Git bypassed developer XDG config'
+assert git('config', '--get', 'fixture.precedence') == 'legacy', 'Orca Git bypassed legacy global config'
+git('init', '--initial-branch=main', upstream)
+(upstream/'fixture').write_text('native fetch\n')
+git('add', 'fixture', cwd=upstream)
+git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-qm', 'Fixture commit', cwd=upstream)
+checkout = root/'checkout'
+git('init', '--initial-branch=main', checkout)
+git('config', 'fixture.precedence', 'repository', cwd=checkout)
+assert git('config', '--get', 'fixture.precedence', cwd=checkout) == 'repository'
+git('remote', 'add', 'origin', 'https://git-fixture.invalid/repo', cwd=checkout)
+git('fetch', '--prune', 'origin', cwd=checkout)
+assert git('rev-parse', 'origin/main', cwd=checkout) == git('rev-parse', 'HEAD', cwd=upstream)
+assert profile_path == '/srv/agents/orca/config/orca', 'Orca app profile moved away from its existing state'
+PY
 grep -Fxq 'tcp:100.64.1.20:17678' "$ORCA_TEST_ROUTE" \
   || fail 'Tailscale mode did not bind the exact owner address'
 grep -Fxq 'tcp:127.0.0.1:6768' "$ORCA_TEST_ROUTE" \

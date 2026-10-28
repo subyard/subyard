@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 
 FIXTURES = Path(__file__).parent / 'fixtures/release-observation'
 
@@ -53,6 +54,9 @@ ORCA_CODEX_BIN=/usr/local/libexec/subyard/orca-codex/codex
 . "$2"
 registration_desired_digest
 '''
+    if not historical:
+        version = re.search(r'^ORCA_CONTRACT_VERSION=(\d+)$', current_handler.read_text(), re.MULTILINE).group(1)
+        script = script.replace('ORCA_CONTRACT_VERSION=5', f'ORCA_CONTRACT_VERSION={version}')
     names = sorted(p.name for p in (resource / 'registration').glob('*.py'))
     if historical:
         inputs = [Path('handler.sh'), *(Path('registration') / name for name in names)]
