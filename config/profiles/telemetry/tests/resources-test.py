@@ -260,13 +260,23 @@ class Resources(unittest.TestCase):
             transport=dict(script='/tmp/fixture/dev/agent-e2e.sh',yard='owner'))
 
     def test_reader_lock_cannot_drop_durable_registration_and_restart_merge(self):
+        # Exercise the normal request -> held flow with an absent data root.
+        # request owns root initialization; held must not be fixture-repaired.
+        self.root = self.root/'data'
+        self.assertFalse(self.root.exists())
+        self.assertTrue(correlation.register(self.root, 'agent-run', dict(self.held(), phase='request')),
+                        'request must initialize the private data root before held')
+        self.assertEqual(f'{stat.S_IMODE(self.root.stat().st_mode):04o}', '0700',
+                         'request data root mode')
         root = records.private_directory(self.root/'sources')
         fd = os.open(root/'.lock',os.O_CREAT|os.O_RDWR,0o600)
         os.fchmod(fd,0o600)
         with os.fdopen(fd,'rb') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             self.assertTrue(correlation.register(self.root,'agent-run',self.held()))
-            intent = next((root/'intents').glob('intent-*.json'))
+            intents = list((root/'intents').glob('intent-*.json'))
+            self.assertEqual(len(intents), 1, 'held must publish one durable intent')
+            intent = intents[0]
             before = intent.read_bytes()
             self.assertEqual(intent.stat().st_mode & 0o777,0o600)
             self.assertTrue(correlation.register(self.root,'agent-run',self.held()))

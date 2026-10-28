@@ -56,6 +56,12 @@ def clean(value):
 
 
 def private_directory(path):
+    """Create/check the private leaf, never repair existing objects.
+
+    Parents must already satisfy their owning contract: mkdir(parents=True) does
+    not make intermediate parents private. Initialize the data root first before
+    creating sources/runs/outbox beneath it (or prepare that root in a fixture).
+    """
     path = Path(path)
     for parent in (path, *path.parents):
         if parent.is_symlink():

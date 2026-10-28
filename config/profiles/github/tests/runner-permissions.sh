@@ -46,8 +46,8 @@ esac
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/tools/gofmt"
 chmod 0755 "$tmp/tools/go" "$tmp/tools/gofmt"
-TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
-  bash "$fixture/config/profiles/github/tests/run.sh" > "$tmp/github-go.out" 2>&1
+(umask 0077; TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_GO_LOG="$tmp/github-go.log" \
+  bash "$fixture/config/profiles/github/tests/run.sh") > "$tmp/github-go.out" 2>&1
 # GitHub repeats protected broker inputs, not its client/issuer/SSH suites.
 awk '!/-count=1/ { exit 1 }
   $1 == "0022" { if (/-run / || !/\.\/config\/profiles\/github\/\.\.\./) exit 1; full++ }

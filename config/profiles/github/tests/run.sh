@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Broker and integration checks owned by the GitHub profile.
 set -euo pipefail
+umask 0022
 export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 preflight=0

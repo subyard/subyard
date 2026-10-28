@@ -4,14 +4,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 suite=run.sh
 list=0
+permissions=normal
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --permissions-only) permissions=only; shift ;;
+    --after-permissions) permissions=passed; shift ;;
     --e2e) suite=e2e/acceptance.sh; shift ;;
     --list) list=1; shift ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
+if [ "$suite" != run.sh ] && [ "$permissions" != normal ]; then
+  printf 'PROFILE TESTS permission modes apply only to host-free checks\n' >&2
+  exit 2
+fi
 if [ "$list" = 1 ] && [ "$#" -gt 0 ]; then
   printf 'PROFILE TESTS --list does not accept runner arguments\n' >&2
   exit 2
@@ -47,6 +54,7 @@ if [ "$list" = 1 ]; then
 fi
 if [ "$suite" = run.sh ]; then
   export TMPDIR=/tmp
+  umask 0022
 fi
 # Check the complete inventory before a live runner can acquire a lease.
 for record in "${records[@]}"; do
@@ -56,7 +64,23 @@ for record in "${records[@]}"; do
     printf 'PROFILE TESTS %s not-applicable: %s\n' "$profile" "$reason"
   fi
 done
+if [ "$suite" = run.sh ] && [ "$permissions" != passed ]; then
+  for runner in "${runners[@]}"; do
+    preflight="${runner%run.sh}permissions.sh"
+    if [ -e "$preflight" ] || [ -L "$preflight" ]; then
+      [ -f "$preflight" ] && [ ! -L "$preflight" ] \
+        || { printf 'PROFILE TESTS unsafe permission preflight: %s\n' "$preflight" >&2; exit 1; }
+      printf 'PROFILE PERMISSIONS %s\n' "${preflight#"$ROOT/"}"
+      bash "$preflight"
+    fi
+  done
+fi
+[ "$permissions" != only ] || exit 0
 for runner in "${runners[@]}"; do
   printf 'PROFILE TESTS %s\n' "${runner#"$ROOT/"}"
-  bash "$runner" "$@"
+  if [ "$suite" = run.sh ] && [ -f "${runner%run.sh}permissions.sh" ]; then
+    bash "$runner" --after-permissions "$@"
+  else
+    bash "$runner" "$@"
+  fi
 done

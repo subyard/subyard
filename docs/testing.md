@@ -9,18 +9,62 @@ Use the skill's [risk-based selection policy](../.agents/skills/subyard-dev-flow
 for both adding tests and choosing which existing checks to run.
 
 Use `testkit.WriteFile` for exact file modes and `testkit.TempDir` for private
-fixture roots. Keep raw calls for creation-semantics tests. The full core Go race suite runs
-uncached once under umask `0022`. The explicit file-creation and permission selection in
-[`tests/run.sh`](../tests/run.sh) also runs uncached under `0002` and `0077` in separate
-processes. This covers private persistence and public output modes, while fixtures that
-explicitly chmod unsafe inputs keep their ordinary full-suite coverage. The shared
-[`go-permission-umasks.sh`](../tests/helpers/go-permission-umasks.sh) checks that every selected
-test exists before running the additional masks; update the selection when renaming a test
-or adding a distinct creation-mode boundary.
+fixture roots. Shell/Python fixtures can use `install -m`, `chmod` on fixture inputs,
+or `tempfile.TemporaryDirectory`. Keep raw creation calls when creation is the operation
+under test; do not chmod its outputs to make an assertion pass.
 
+The normal host-free entrypoints (`make test`, `make verify`, `./tests/run.sh`,
+`bash dev/test-profiles.sh` and each profile's `tests/run.sh`) use baseline umask `0022`,
+including their Shell/Python checks. This changes only the runner's process and children.
+Live `dev/test-profiles.sh --e2e` keeps the caller's environment and mask.
+
+Short permission checks run before builds and Go suites. Core owns
+[`tests/suites/preflight.list`](../tests/suites/preflight.list); profiles can own a
+`tests/permissions.sh` hook, discovered by the existing profile runner. The hook's checks
+must be omitted from the later normal profile loop. `make test` and `make verify` first
+run `bash dev/test-profiles.sh --permissions-only`, then core checks, then
+`bash dev/test-profiles.sh --after-permissions`. These two modes split a single invocation's
+work; use `--after-permissions` only after that same unchanged checkout's preflight passed.
+Ordinary profile discovery runs both phases itself; a direct profile runner runs its own
+preflight. There is no persistent PASS marker.
+
+[`permission-umasks.sh`](../tests/helpers/permission-umasks.sh) runs only the supplied short
+Shell/Python checks under `0022`, `0002` and `0077` in separate processes. It prints each
+actual mask and selection. It rejects empty/missing selections; Python unittest modules
+must contain cases and finish without failures or skips. A renamed/deleted module or an
+empty module fails before expensive checks. Run one owning regression directly, for example:
+
+```sh
+bash config/profiles/telemetry/tests/permissions.sh
+bash tests/agent-skills.sh
+```
+
+| Contract | Existing owner and selected coverage | Remaining baseline coverage |
+| --- | --- | --- |
+| Private root and durable private files, exact `0700`/`0600`, idempotent replacement | Telemetry `records-test.py` (6 cases), `resources-test.py` (24 cases): real record emission and missing-root `request → held`, durable intent retry | Launcher admission and guest initialization remain in the normal Telemetry suite |
+| Public `0644`/`0755`, private receipt, replacement/repair and unsafe existing objects retained | Shared synthetic `config/skills/tests/delivery-test.py` (13 cases), already checked under all three masks | Full packaging and installer contracts remain in core |
+| Unsafe mode, owner, symlink and hardlink refusal | Existing owning Go permission selections and profile suites; selected shared delivery and Telemetry cases retain their refusals | Explicitly prepared unsafe fixtures retain full-suite assertions; a matrix is not a replacement for these |
+
+The two Telemetry modules are a small selection from its full suite (30 cases per mask);
+keeping these modules together preserves their existing fixtures without another case registry.
+The shared skills module keeps its existing three-mask coverage. Neither selection repeats
+later in the same normal run. Together these checks normally take seconds, without installed
+services, credentials or VM allocation.
+
+Telemetry's `records.private_directory` guarantees and validates only its leaf. Its parents
+must already satisfy their owning contract; recursive `mkdir` does not guarantee private
+intermediate directories and never repairs unsafe existing parents. The real correlation
+regression starts with an absent data root: `request` initializes it before `held` creates
+nested sources/intents. Isolated held fixtures must explicitly provide the private data root.
+
+The full core Go race suite runs uncached once under `0022`. Its explicit file-creation
+selection in [`tests/run.sh`](../tests/run.sh) repeats only under `0002` and `0077`, preserving
+private persistence and public output checks. The existing
+[`go-permission-umasks.sh`](../tests/helpers/go-permission-umasks.sh) validates every selected
+test name; update that selection when renaming a case or adding a distinct creation boundary.
 Profile settings/descriptor Go checks run once under `0022` through `profile-go.sh`.
-The GitHub profile runs its full Go race suite under `0022` and repeats only its explicit
-broker protected-file checks under `0002` and `0077`.
+The GitHub profile repeats only its explicit broker protected-file checks under the extra masks.
+Baseline runners do not wrap the selected-matrix children, so they cannot overwrite those masks.
 
 ## Coverage ownership
 

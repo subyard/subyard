@@ -1,0 +1,2 @@
+# Short permission contracts run before builds and Go checks.
+agent-skills.sh

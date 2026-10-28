@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Test VM recipe, publication and cleanup contracts.
 set -euo pipefail
+umask 0022
 PROFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$PROFILE/../../.." && pwd)"
 export PYTHONDONTWRITEBYTECODE=1 TMPDIR=/tmp
