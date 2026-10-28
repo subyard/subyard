@@ -20,7 +20,7 @@ import (
 )
 
 const maxConfigGitDiagnosticBytes = 4096
-const configGitFetchTimeout = 15 * time.Second
+const configGitStatusTimeout = 15 * time.Second
 const configGitCandidatePrefix = ".subyard-config-git-candidate-"
 
 type configGitState struct {
@@ -89,10 +89,8 @@ func (cli *CLI) prepareConfigGitCandidate(
 		candidate.cleanup()
 		return nil, fmt.Errorf("configure isolated Git candidate remote: %w", err)
 	}
-	fetchContext, cancel := context.WithTimeout(ctx, configGitFetchTimeout)
-	defer cancel()
 	if err := cli.configGitRun(
-		fetchContext, candidate.checkout, "fetch", "--quiet", "--prune", "--", "origin",
+		ctx, candidate.checkout, "fetch", "--quiet", "--prune", "--", "origin",
 	); err != nil {
 		candidate.cleanup()
 		return nil, fmt.Errorf("fetch isolated Git candidate: %w", err)
@@ -433,6 +431,8 @@ func (cli *CLI) refreshConfigGitStatus(ctx context.Context, state *configGitStat
 	if state.Problem != nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, configGitStatusTimeout)
+	defer cancel()
 	candidate, err := cli.prepareConfigGitCandidate(ctx, state.Checkout, *state)
 	if err != nil {
 		state.FetchState = "failed"

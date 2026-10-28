@@ -3015,6 +3015,133 @@ exec "$SUBYARD_TEST_REAL_GIT" "$@"
 	}
 }
 
+func TestConfigGitCandidateDeadlineOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name, delayedCommand string
+		budget               time.Duration
+		wantCode             int
+	}{
+		{name: "foreground", delayedCommand: "fetch", budget: 60 * time.Second},
+		{name: "caller cancellation", delayedCommand: "fetch", budget: time.Second, wantCode: 1},
+		{name: "bounded status preparation", delayedCommand: "clone", budget: 30 * time.Second, wantCode: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Fixture repositories and isolated candidates must stay outside the workspace.
+			t.Setenv("TMPDIR", "/tmp")
+			f := newConfigGitAuthoringFixture(t)
+			checkout := filepath.Join(f.home, ".local", "share", "subyard-config")
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := testkit.TempDir(t)
+			candidateRoot := testkit.TempDir(t)
+			fifo := filepath.Join(bin, "delay")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// A shell builtin waits without a descendant retaining Git's output pipes
+			// after CommandContext kills the wrapper on caller cancellation.
+			writeConfigCommandFile(t, filepath.Join(bin, "git"), `#!/bin/bash
+set -eu
+if { [[ "$1" = clone && "$SUBYARD_TEST_DELAY_COMMAND" = clone ]] ||
+     [[ "$1" = -C && "$2" = *".subyard-config-git-candidate-"* && "$3" = "$SUBYARD_TEST_DELAY_COMMAND" ]]; }; then
+    printf '%s\n' "$*" >>"$SUBYARD_TEST_DELAY_LOG"
+    exec 3<>"$SUBYARD_TEST_DELAY_FIFO"
+    read -r -t 16 <&3 || :
+fi
+exec "$SUBYARD_TEST_REAL_GIT" "$@"
+`, 0o700)
+			for key, value := range map[string]string{
+				"PATH":                       bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"TMPDIR":                     candidateRoot,
+				"SUBYARD_TEST_REAL_GIT":      realGit,
+				"SUBYARD_TEST_DELAY_COMMAND": test.delayedCommand,
+				"SUBYARD_TEST_DELAY_LOG":     filepath.Join(bin, "commands"),
+				"SUBYARD_TEST_DELAY_FIFO":    fifo,
+			} {
+				t.Setenv(key, value)
+				f.environment = append(f.environment, key+"="+value)
+			}
+			before := snapshotConfigCheckoutRaw(t, checkout)
+			remoteBefore := configSourceGitOutput(t, f.remote, "for-each-ref", "--format=%(refname):%(objectname)")
+			protected := map[string]configCheckoutPathSnapshot{}
+			for _, path := range []string{configsync.SourceRecordPath(f.configHome), configsync.ManifestPath(f.configHome), filepath.Join(f.configHome, "config.env"), filepath.Join(f.configHome, config.GitSettingsRelativePath, "config.env")} {
+				content, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				protected[path] = configCheckoutPathSnapshot{mode: info.Mode(), content: string(content)}
+			}
+			arguments := []string{"config", "sync", "push", "--yes"}
+			if test.delayedCommand == "clone" {
+				arguments = []string{"config", "sync", "status"}
+			}
+			f.stdout.Reset()
+			f.stderr.Reset()
+			program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,
+				Environment: f.environment, WorkingDir: f.root, Stdout: &f.stdout, Stderr: &f.stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), test.budget)
+			defer cancel()
+			started := time.Now()
+			code := program.Run(ctx)
+			elapsed := time.Since(started)
+			t.Logf("code=%d elapsed=%s stdout=%s stderr=%s", code, elapsed, f.stdout.String(), f.stderr.String())
+			if code != test.wantCode {
+				t.Errorf("exit=%d want=%d", code, test.wantCode)
+			}
+			if test.name == "foreground" && elapsed < 16*time.Second {
+				t.Error("foreground did not wait for the delayed real Git fetch")
+			}
+			limit := 18 * time.Second
+			if test.name == "foreground" {
+				limit = 36 * time.Second
+			}
+			if test.name == "caller cancellation" {
+				limit = 3 * time.Second
+			}
+			if elapsed > limit {
+				t.Errorf("operation exceeded deadline allowance: %s > %s", elapsed, limit)
+			}
+			if test.name == "caller cancellation" && ctx.Err() != context.DeadlineExceeded {
+				t.Error("fetch failed without caller deadline cancellation")
+			}
+			if test.delayedCommand == "clone" && elapsed < 15*time.Second {
+				t.Error("status failed before its refresh budget elapsed")
+			}
+			if test.delayedCommand == "clone" && !strings.Contains(f.stdout.String(), "fetch: failed") {
+				t.Error("status did not report its bounded refresh failure")
+			}
+			if log, err := os.ReadFile(filepath.Join(bin, "commands")); err != nil || len(log) == 0 {
+				t.Errorf("delayed Git command did not run: %v", err)
+			}
+			if after := snapshotConfigCheckoutRaw(t, checkout); !reflect.DeepEqual(before, after) {
+				t.Error("candidate operation changed the registered checkout")
+			}
+			if after := configSourceGitOutput(t, f.remote, "for-each-ref", "--format=%(refname):%(objectname)"); after != remoteBefore {
+				t.Error("candidate operation changed remote refs")
+			}
+			for path, expected := range protected {
+				content, readErr := os.ReadFile(path)
+				info, statErr := os.Stat(path)
+				if readErr != nil || statErr != nil || string(content) != expected.content || info.Mode() != expected.mode {
+					t.Errorf("candidate operation changed protected file %s", path)
+				}
+			}
+			if entries, err := os.ReadDir(candidateRoot); err != nil || len(entries) != 0 {
+				t.Errorf("candidate cleanup left entries: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	remote, publisher := configBareSourceRepository(
