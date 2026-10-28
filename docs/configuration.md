@@ -396,6 +396,11 @@ The home config supplies the existing `danger-full-access` yard sandbox default;
 choices remain available. Use **Custom** in clients that offer permission presets: unrestricted
 filesystem access and mandatory command approval are separate settings.
 
+The home rules explicitly allow `rm`, including recursive cleanup of build fixtures. Without a
+matching allow rule, Codex can still request approval for removal commands under `on-request`,
+even with `danger-full-access`. The allow rule relies on the yard as the isolation boundary;
+it does not limit removal to the current project. Managed commit/push prompts remain in force.
+
 After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
 Existing sessions must be restarted to load the policy. `codex-policy-check` checks the installed policy's
 contents, ownership and permissions; `yard init` repairs managed drift. Provisioning refuses to

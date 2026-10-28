@@ -5,6 +5,14 @@
 # Routine local work (edits, builds, tests,
 # git reset) stays free.
 
+# Full filesystem access alone still leaves rm subject to Codex's dangerous-command fallback.
+# The yard is the isolation boundary, so local file removal needs an explicit allow rule.
+prefix_rule(
+    pattern = ["rm"],
+    decision = "allow",
+    match = ["rm -rf -- .build/fixture-hardening", "rm generated-file"],
+)
+
 prefix_rule(
     pattern = ["git", "commit"],
     decision = "prompt",

@@ -372,6 +372,24 @@ def main():
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)
                 finally:
                     app.close()
+            # Keep the managed-only Git checks above independent of home rules.
+            # A fresh process then checks the delivered local-cleanup allow rule.
+            (codex_home / 'rules').mkdir(exist_ok=True)
+            shutil.copyfile(args.home_rules or args.template.parent / 'rules/repo.rules',
+                            codex_home / 'rules/repo.rules')
+            cleanup = workspace / '.build/fixture-hardening'
+            cleanup.mkdir(parents=True)
+            (cleanup / 'owned').touch()
+            app = App([executable, *FIXTURE_CONFIG, 'app-server'], env, workspace)
+            try:
+                thread = app.request('thread/start', {'cwd': str(workspace)})['thread']['id']
+                app.turn(provider, thread, workspace, 'rm -rf -- .build/fixture-hardening')
+                assert not cleanup.exists(), 'local cleanup did not run'
+                app.turn(provider, thread, workspace, 'git push', 'cancel',
+                         allow_interrupted=True)
+                print('ok: home rules allow local cleanup and retain Git approval', flush=True)
+            finally:
+                app.close()
         finally:
             provider.shutdown()
             provider.server_close()
