@@ -120,7 +120,7 @@ def fetch_repositories(paths):
                 # The existing client selects auth by each actual HTTPS URL, including
                 # remotes from different GitHub installations. SSH remains unchanged.
                 wrapper = GITHUB_CLIENT
-                if git(path, 'config', '--get', 'subyard.githubGitMode') != 'broker-first\n' and wrapper.is_file() and os.access(wrapper, os.X_OK):
+                if git(path, 'config', '--get', 'subyard.githubGitMode') not in ('broker-first\n', 'broker-last\n') and wrapper.is_file() and os.access(wrapper, os.X_OK):
                     arguments = [str(wrapper), 'run', '--', *arguments]
                 if command(arguments, path, FETCH_SECONDS) is None:
                     failed += 1

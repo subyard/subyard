@@ -233,7 +233,7 @@ func brokerConfig(ctx context.Context, helper string) ([]string, error) {
 	return args, nil
 }
 
-func startCurl(ctx context.Context, name, target, token string, options []gitOption, stderr io.Writer) (*curlRemote, error) {
+func startCurl(ctx context.Context, name, target, token string, tentative bool, options []gitOption, stderr io.Writer) (*curlRemote, error) {
 	// git --exec-path locates the stock helper, without a PATH shim or reimplementation.
 	probe := gitCommand(ctx, "--exec-path")
 	data, err := probe.Output()
@@ -272,13 +272,11 @@ func startCurl(ctx context.Context, name, target, token string, options []gitOpt
 		input.Close()
 		return nil, err
 	}
-	var diagnostics *gitDiagnostics
+	diagnostics := &gitDiagnostics{output: stderr, enabled: !tentative}
 	if token != "" {
-		diagnostics = &gitDiagnostics{output: stderr, sensitive: []string{token, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token)), target, strings.Replace(target, "x-access-token@", "", 1)}}
-		cmd.Stderr = diagnostics
-	} else {
-		cmd.Stderr = stderr
+		diagnostics.sensitive = []string{token, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token)), target, strings.Replace(target, "x-access-token@", "", 1)}
 	}
+	cmd.Stderr = diagnostics
 	if err = cmd.Start(); err != nil {
 		input.Close()
 		return nil, err
@@ -494,6 +492,9 @@ func RunGitRemote(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		}
 		explicitClient.SocketPath = context.Socket
 	}
+	modeQuery := gitCommand(ctx, "config", "--get", "subyard.githubGitMode")
+	mode, _ := modeQuery.Output()
+	brokerLast := !explicit && strings.TrimSpace(string(mode)) == "broker-last"
 	options := []gitOption{}
 	var remote *curlRemote
 	defer func() {
@@ -539,23 +540,53 @@ func RunGitRemote(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				operation = "push"
 			}
 			var refs string
+			discoverOriginal := func(diagnostics io.Writer) {
+				if https {
+					remote, err = startCurl(ctx, args[0], args[1], "", brokerLast, options, stderr)
+					if err == nil {
+						refs, err = remote.exchange(line, true)
+					}
+				} else {
+					refs, err = nativeList(ctx, args[1], operation == "push", diagnostics)
+				}
+			}
+			if brokerLast {
+				discoverOriginal(io.Discard)
+				if err != nil {
+					if remote != nil {
+						_ = remote.close()
+						remote = nil
+					}
+					if ctx.Err() != nil {
+						return commandExit(ctx.Err())
+					}
+					refs, err = "", nil
+					fmt.Fprintln(stderr, "subyard-github: original Git ref discovery failed; trying GitHub broker")
+				}
+			}
+			if ctx.Err() != nil {
+				return commandExit(ctx.Err())
+			}
 			if explicit {
 				// Explicit run retains its existing HTTPS-only credential policy.
 				if https {
 					token, tokenErr := explicitClient.token(ctx, repository)
 					err = tokenErr
 					if err == nil {
-						remote, err = startCurl(ctx, args[0], "https://x-access-token@github.com/"+repository+".git", token.Value, options, stderr)
+						remote, err = startCurl(ctx, args[0], "https://x-access-token@github.com/"+repository+".git", token.Value, true, options, stderr)
 					}
 					if err != nil {
 						fmt.Fprintln(stderr, "subyard-github: explicit GitHub broker authorization failed")
 						return commandExit(err)
 					}
 				}
-			} else {
+			} else if refs == "" {
 				access := (Client{}).gitAccess(ctx, repository, operation)
+				if ctx.Err() != nil {
+					return commandExit(ctx.Err())
+				}
 				if access.State == "available" {
-					remote, err = startCurl(ctx, args[0], "https://x-access-token@github.com/"+repository+".git", access.Token.Value, options, stderr)
+					remote, err = startCurl(ctx, args[0], "https://x-access-token@github.com/"+repository+".git", access.Token.Value, true, options, stderr)
 					if err == nil {
 						refs, err = remote.exchange(line, true)
 					}
@@ -564,23 +595,26 @@ func RunGitRemote(ctx context.Context, args []string, stdin io.Reader, stdout, s
 							_ = remote.close()
 							remote = nil
 						}
-						err = nil
-						fmt.Fprintln(stderr, "subyard-github: "+fallbackReason("discovery-failed"))
+						if !brokerLast {
+							err = nil
+							fmt.Fprintln(stderr, "subyard-github: "+fallbackReason("discovery-failed"))
+						}
 					}
+				} else if brokerLast {
+					err = errors.New("GitHub broker authorization unavailable")
+					fmt.Fprintln(stderr, "subyard-github: GitHub broker could not authorize the repository")
 				} else {
 					fmt.Fprintln(stderr, "subyard-github: "+fallbackReason(access.State))
 				}
 			}
-			if refs == "" {
-				if remote == nil && https {
-					remote, err = startCurl(ctx, args[0], args[1], "", options, stderr)
+			if refs == "" && err == nil && !brokerLast {
+				if ctx.Err() != nil {
+					return commandExit(ctx.Err())
 				}
-				if err == nil {
-					if remote != nil {
-						refs, err = remote.exchange(line, true)
-					} else {
-						refs, err = nativeList(ctx, args[1], operation == "push", stderr)
-					}
+				if remote != nil {
+					refs, err = remote.exchange(line, true)
+				} else {
+					discoverOriginal(stderr)
 				}
 			}
 			if err != nil {
@@ -677,7 +711,7 @@ func gitStatus(ctx context.Context, stdout io.Writer) int {
 		return strings.TrimSpace(string(raw))
 	}
 	mode := query("subyard.githubGitMode")
-	if mode != "broker-first" {
+	if mode != "broker-first" && mode != "broker-last" {
 		mode = "off"
 	}
 	state := "current"
@@ -686,7 +720,7 @@ func gitStatus(ctx context.Context, stdout io.Writer) int {
 		state = "overridden"
 	}
 	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
-		if mode == "broker-first" && query("url.subyard-github::"+prefix+".insteadOf") != prefix {
+		if mode != "off" && query("url.subyard-github::"+prefix+".insteadOf") != prefix {
 			state = "overridden"
 		}
 	}

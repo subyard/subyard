@@ -391,15 +391,17 @@ print('ok: age/SOPS receipts match installed bytes, exact versions/archive pins 
 PY
 }
 verify_git_wiring() {
-  guest_dev /usr/local/bin/subyard-github status --git | jq -e '.mode=="broker-first" and .state=="current"' >/dev/null
-  guest_dev git config --get subyard.githubGitMode | grep -Fxq broker-first
+  local mode
+  mode="$(setting GITHUB_GIT_MODE)"
+  guest_dev /usr/local/bin/subyard-github status --git | jq -e --arg mode "$mode" '.mode==$mode and .state=="current"' >/dev/null
+  guest_dev git config --get subyard.githubGitMode | grep -Fxq "$mode"
   [ "$(guest stat -c '%a:%u:%g' /usr/local/bin/git-remote-subyard-github)" = 755:0:0 ] || die 'Git remote helper permissions differ'
   [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/subyard/github-git.conf)" = "644:$FIXTURE_DEV_UID:$(guest id -g dev)" ] || die 'Git fragment permissions differ'
   guest_dev git config --file /home/dev/.config/git/config --get-all include.path | grep -Fxq /home/dev/.config/subyard/github-git.conf
 }
 verify_runtime() {
   local source="$1" wanted preview ccusage
-  if [ "$(setting GITHUB_GIT_MODE)" = broker-first ]; then verify_git_wiring; fi
+  case "$(setting GITHUB_GIT_MODE)" in broker-first|broker-last) verify_git_wiring ;; esac
   wanted="$(hash "$source/config/profiles/github/bin/broker")"
   guest_dev /usr/local/bin/subyard-github status --runtime \
     | jq -e --arg wanted "$wanted" '.protocol==1 and .broker_sha256==$wanted and .client_sha256==$wanted' >/dev/null
@@ -459,14 +461,14 @@ if [ "$MODE" = --local-probe ]; then
     }
     yard() {
       case "$*" in
-        'config set GITHUB_GIT_MODE broker-first --scope yard --yes'|'config set GITHUB_GIT_MODE off --scope yard --yes')
+        'config set GITHUB_GIT_MODE broker-first --scope yard --yes'|'config set GITHUB_GIT_MODE broker-last --scope yard --yes'|'config set GITHUB_GIT_MODE off --scope yard --yes')
           touch "$pending" ;;
         'migrate --yes') [ -f "$pending" ] && rm -- "$pending" ;;
         'profile enable github --yes') [ ! -e "$pending" ] ;;
         *) return 99 ;;
       esac
     }
-    for mode in broker-first off broker-first; do
+    for mode in broker-first broker-last off broker-first; do
       rm -f -- "$STATE/git-mode-claimed"
       set_git_mode "$mode" "$STATE/git-mode-probe"
       [ -f "$STATE/git-mode-claimed" ]
@@ -814,7 +816,7 @@ update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/noop.log" 2>&1
 [ "$stable" = "$(systemctl_user show "$UNIT" -p MainPID --value):$(stat -c '%i' "$SUBYARD_HOME/github-broker/default-engine"):$(guest stat -c '%i' /usr/local/bin/subyard-preview)" ] || die 'no-op activation changed PID/inodes'
 cmp -s "$STATE/ledger-retained" "$ledger" || die 'runtime retry changed completed migrations'
 
-stage broker-first-owned-wiring-lifecycle
+stage broker-modes-owned-wiring-lifecycle
 install -d -m 0700 "$STATE/hook-wrappers"
 install -m 0700 "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace.py" "$STATE/hook-wrappers/bash"
 set_git_mode broker-first "$STATE/git-mode"
@@ -833,10 +835,12 @@ yard profile status github --json | jq -e '.runtime=="pending"' >/dev/null
 yard migrate --yes > "$STATE/git-repair.log" 2>&1
 claim_units
 verify_git_wiring
+set_git_mode broker-last "$STATE/git-last"
+verify_git_wiring
 set_git_mode off "$STATE/git-off"
 guest test ! -e /home/dev/.config/subyard/github-git.conf
 guest_dev git config --global --get user.name | grep -Fxq 'Delivered fixture'
-set_git_mode broker-first "$STATE/git-on"
+set_git_mode broker-last "$STATE/git-on"
 verify_git_wiring
 yard profile disable github --yes > "$STATE/git-disable.log" 2>&1
 claim_units

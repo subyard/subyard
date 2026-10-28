@@ -10,8 +10,8 @@ MARKER = '# subyard-managed-github-git-v1\n'
 PREFIXES = ('https://github.com/', 'git@github.com:', 'ssh://git@github.com/')
 
 
-def fragment():
-    text = MARKER + '[subyard]\n\tgithubGitMode = broker-first\n'
+def fragment(mode):
+    text = MARKER + f'[subyard]\n\tgithubGitMode = {mode}\n'
     text += '[protocol "subyard-github"]\n\tallow = always\n'
     for prefix in PREFIXES:
         text += f'[url "subyard-github::{prefix}"]\n\tinsteadOf = {prefix}\n'
@@ -29,7 +29,7 @@ def safe(path, home):
 
 
 def reconcile(home, mode, action):
-    if mode not in ('off', 'broker-first') or action not in ('apply', 'check', 'remove'):
+    if mode not in ('off', 'broker-first', 'broker-last') or action not in ('apply', 'check', 'remove'):
         raise ValueError('invalid Git wiring action or mode')
     config = home/'.config/git/config'
     owned = home/'.config/subyard/github-git.conf'
@@ -43,7 +43,7 @@ def reconcile(home, mode, action):
                 return True
     for path in (config, owned):
         safe(path, home)
-    enabled = mode == 'broker-first' and action != 'remove'
+    enabled = mode != 'off' and action != 'remove'
     includes = subprocess.run(['git', 'config', '--file', str(config), '--get-all', 'include.path'],
                               capture_output=True, text=True, check=False)
     if includes.returncode not in (0, 1):
@@ -62,7 +62,7 @@ def reconcile(home, mode, action):
             if any(prefix.startswith(value) or value.startswith(prefix) for prefix in PREFIXES):
                 if (key, value) not in {(f'url.subyard-github::{prefix}.insteadof', prefix) for prefix in PREFIXES}:
                     raise ValueError('conflicting GitHub rewrite')
-    current = (count == 1 and exists and owned.read_text() == fragment() and
+    current = (count == 1 and exists and owned.read_text() == fragment(mode) and
                owned.stat().st_mode & 0o777 == 0o644 and owned.stat().st_uid == os.geteuid() and owned.stat().st_nlink == 1) if enabled else (count == 0 and not exists)
     if action == 'check':
         return current
@@ -77,7 +77,7 @@ def reconcile(home, mode, action):
         temp = owned.with_suffix('.tmp')
         safe(temp, home)
         with temp.open('w') as output:
-            output.write(fragment())
+            output.write(fragment(mode))
         temp.chmod(0o644)
         temp.replace(owned)
         subprocess.run(['git', 'config', '--file', str(config), '--add', 'include.path', str(owned)], check=True)

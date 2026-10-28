@@ -84,18 +84,19 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(fetch.fetch_repositories([main]), (1, 0))
         self.assertEqual(git('-C', main, 'rev-parse', 'origin/HEAD'), git('-C', source, 'rev-parse', 'HEAD'))
 
-    def test_broker_first_uses_ordinary_git_without_wrapper_overlays(self):
+    def test_broker_modes_use_ordinary_git_without_wrapper_overlays(self):
         source = self.source()
         main = self.project('router')
         git('clone', '-q', source, main)
-        git('-C', main, 'config', 'subyard.githubGitMode', 'broker-first')
         wrapper = self.base/'must-not-run'
         wrapper.write_text('#!/bin/sh\nexit 99\n')
         wrapper.chmod(0o755)
         git('-C', source, 'commit', '-qm', 'second', '--allow-empty')
-        with patch.object(fetch, 'GITHUB_CLIENT', wrapper):
-            self.assertEqual(fetch.fetch_repositories([main]), (1, 0))
-        self.assertEqual(git('-C', main, 'rev-parse', 'origin/HEAD'), git('-C', source, 'rev-parse', 'HEAD'))
+        for mode in ('broker-first', 'broker-last'):
+            git('-C', main, 'config', 'subyard.githubGitMode', mode)
+            with patch.object(fetch, 'GITHUB_CLIENT', wrapper):
+                self.assertEqual(fetch.fetch_repositories([main]), (1, 0))
+            self.assertEqual(git('-C', main, 'rev-parse', 'origin/HEAD'), git('-C', source, 'rev-parse', 'HEAD'))
 
     def test_folder_scope_pruning_and_metadata_permissions(self):
         main = self.project('main')

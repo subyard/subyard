@@ -166,14 +166,15 @@ SSH session. The profile also installs the short local skill for supported agent
 
 ## Ordinary Git with original-authentication fallback
 
-The opt-in yard setting `GITHUB_GIT_MODE=broker-first` routes ordinary system Git `clone`,
-`fetch`, `pull`, `push` and `ls-remote` for canonical `https://github.com/owner/repo`,
+The opt-in yard modes `GITHUB_GIT_MODE=broker-first` and `GITHUB_GIT_MODE=broker-last` route
+ordinary system Git `clone`, `fetch`, `pull`, `push` and `ls-remote` for canonical `https://github.com/owner/repo`,
 `git@github.com:owner/repo` and `ssh://git@github.com/owner/repo` URLs (with optional `.git`).
+Choose `broker-first` to prefer App authentication, or `broker-last` to prefer existing Git/SSH access.
 Enable the profile on the owner for a running yard, then set the mode and authorize runtime repair:
 
 ```sh
 yard -Y default profile enable github
-yard -Y default config set GITHUB_GIT_MODE broker-first --scope yard
+yard -Y default config set GITHUB_GIT_MODE broker-last --scope yard
 yard -Y default migrate
 yard -Y default profile status github --json
 ```
@@ -201,11 +202,17 @@ custom `XDG_CONFIG_HOME` can bypass this standard XDG location; inspect `status 
 same environment as the affected command. Command and repository configuration retain Git's
 ordinary precedence. Aliases and other hosts are outside this routing scope.
 
-At ref discovery, the broker checks the selected repository's installation and effective token
+With `broker-last`, ref discovery first tries the original transport, including ordinary HTTPS
+credentials or anonymous access, and SSH keys/configuration. Successful original discovery never
+requests broker access or a token. Only failed discovery tries the broker; cancellation stops
+selection. If that broker attempt fails, the command fails without retrying the original transport.
+
+When tried, the broker checks the selected repository's installation and effective token
 permissions through `/git-access/v1`; legacy `/token` is unchanged. Reads require Contents read
 or write. Every push conservatively requires both Contents write and Workflows write, including
 code-only pushes. Missing or unknown grants, an unavailable/unconfigured broker, an old broker,
-or failed read-only broker discovery choose the original transport before refs reach parent Git.
+or failed read-only broker discovery choose the original transport in `broker-first` before refs
+reach parent Git.
 Targeted requests never retry the default installation, and token scope remains installation-wide.
 
 Broker HTTPS uses stock Git with an ephemeral credential helper isolated from ordinary helpers,
@@ -215,7 +222,7 @@ Git and the developer's SSH command, config, agent and host trust. Saved remote 
 and refspecs are unchanged. After publishing refs, the selected identity stays fixed: rejection,
 partial push, cancellation or a lost response is an error, with no automatic replay under another
 identity. Atomic pushes, explicit leases and push options retain native Git semantics.
-Fallback prints a fixed reason without upstream details. Tentative broker discovery is silent;
+Switching authentication prints a fixed reason without upstream details. Tentative discovery is silent;
 after selection, native progress and errors are shown with broker credentials redacted.
 
 Parent Git runs `pre-push` once, but its second argument is the effective
@@ -226,7 +233,7 @@ is unsupported. Git's pack engine remains native. Submodules allow only the narr
 `subyard-github` protocol; the profile never broadly enables arbitrary protocols. Live GitHub
 permission policy and external authentication still require verification with the intended account.
 
-Explicit `subyard-github run -- git ...` retains its earlier policy even in this mode: HTTPS uses
+Explicit `subyard-github run -- git ...` retains its earlier policy in either mode: HTTPS uses
 only the broker and SSH uses its original transport. `gh` wrapper behavior is unchanged.
 
 ## Use and verify access

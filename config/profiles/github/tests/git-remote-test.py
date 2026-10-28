@@ -74,6 +74,8 @@ class NativeGitTest(unittest.TestCase):
         self.broker_requests = []
         self.auth = []
         self.discovery_failure = False
+        self.original_failure = False
+        self.anonymous = False
         self.lose_push_response = False
         self.push_posts = 0
         self.legacy_available = True
@@ -132,7 +134,8 @@ class NativeGitTest(unittest.TestCase):
         self.change(clone, 'two')
         self.git('push', '--atomic', 'origin', 'main', cwd=clone)
         self.assertEqual(hooklog.read_text().splitlines(), ['subyard-github::'+original])
-        self.assertEqual(self.broker_requests[-1]['operation'], 'push')
+        if self.broker_requests:
+            self.assertEqual(self.broker_requests[-1]['operation'], 'push')
         self.assertEqual(self.sshlog.read_text().splitlines()[-2:], ['git-receive-pack']*2)
         current = self.git('rev-parse', 'HEAD', cwd=clone).stdout.strip()
         self.change(clone, 'lease')
@@ -191,7 +194,14 @@ class NativeGitTest(unittest.TestCase):
         if state.exists():
             self.assertIn(state.read_text().rsplit(')', 1)[1].split()[0], ('Z', 'X'))
 
+    def test_broker_last_cancellation_does_not_request_broker(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        self.test_cancellation_drains_native_descendants()
+        self.assertEqual(self.broker_requests, [])
+
     def test_real_openssh_agent_config_worktree_and_submodules(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        self.access = 'available'
         sshd = '/usr/sbin/sshd'
         self.assertTrue(Path(sshd).is_file(), 'native OpenSSH acceptance requires sshd')
         user = subprocess.check_output(['id', '-un'], text=True).strip()
@@ -268,6 +278,9 @@ class NativeGitTest(unittest.TestCase):
         self.git('fetch', 'origin', cwd=linked)
         self.assertEqual(self.git('rev-parse', 'origin/main', cwd=linked).stdout,
                          self.git('rev-parse', 'HEAD', cwd=self.seed).stdout)
+        self.assertEqual(self.broker_requests, [])
+        wiring.reconcile(self.home, 'broker-first', 'apply')
+        self.access = 'unavailable'
         trusted = known.read_text()
         known.write_text('fixture-github '+identity.with_suffix('.pub').read_text())
         denied = self.git('ls-remote', 'origin', cwd=linked, expected=None)
@@ -305,14 +318,17 @@ class NativeGitTest(unittest.TestCase):
         worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
         wrapper = self.bin/'must-not-run'
         wrapper.write_text('#!/bin/sh\nexit 99\n'); wrapper.chmod(0o755)
-        before = len(self.broker_requests)
-        with patch.dict(os.environ, self.env, clear=True), patch.object(worker, 'GITHUB_CLIENT', wrapper):
-            self.assertEqual(worker.fetch_repositories([clone, linked]), (1, 0))
-        self.assertEqual(self.broker_requests[before:], [{'repository':'owner/repo', 'operation':'read'}])
-        self.assertEqual(self.git('rev-parse', 'origin/main', cwd=linked).stdout,
-                         self.git('rev-parse', 'HEAD', cwd=self.seed).stdout)
-        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=linked).stdout, original)
-        self.assertFalse(log.exists())
+        for mode in ('broker-first', 'broker-last'):
+            wiring.reconcile(self.home, mode, 'apply')
+            before = len(self.broker_requests)
+            with patch.dict(os.environ, self.env, clear=True), patch.object(worker, 'GITHUB_CLIENT', wrapper):
+                self.assertEqual(worker.fetch_repositories([clone, linked]), (1, 0))
+            expected = [{'repository':'owner/repo', 'operation':'read'}] if mode == 'broker-first' else []
+            self.assertEqual(self.broker_requests[before:], expected)
+            self.assertEqual(self.git('rev-parse', 'origin/main', cwd=linked).stdout,
+                             self.git('rev-parse', 'HEAD', cwd=self.seed).stdout)
+            self.assertEqual(self.git('rev-parse', 'HEAD', cwd=linked).stdout, original)
+            self.assertEqual(log.exists(), mode == 'broker-last')
 
     def start_https(self):
         certificate = self.work/'cert.pem'
@@ -339,10 +355,12 @@ class NativeGitTest(unittest.TestCase):
             def do_POST(self): self.backend()
             def backend(self):
                 authorization = self.headers.get('Authorization', '')
-                if not authorization:
+                if not authorization and not fixture.anonymous:
                     self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="fixture"'); self.end_headers(); return
-                decoded = base64.b64decode(authorization.split()[1]).decode()
+                decoded = base64.b64decode(authorization.split()[1]).decode() if authorization else ''
                 fixture.auth.append(decoded)
+                if fixture.original_failure and 'synthetic-broker-token' not in decoded:
+                    self.send_response(403); self.end_headers(); return
                 if fixture.discovery_failure and 'synthetic-broker-token' in decoded:
                     self.send_response(403); self.end_headers(); return
                 path, _, query = self.path.partition('?')
@@ -375,6 +393,108 @@ class NativeGitTest(unittest.TestCase):
         credential.chmod(0o755)
         self.git('config', '--global', 'credential.helper', str(credential))
         return log
+
+    def test_broker_last_original_ssh_never_requests_broker_or_replays_push(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        self.access = 'available'
+        # Existing native coverage includes atomic/partial rejection, explicit leases,
+        # hooks, SSH URLs, push options, pull and shallow clone.
+        self.test_native_ssh_commands_options_hooks_and_no_replay()
+        self.assertEqual(self.broker_requests, [])
+
+    def test_broker_last_original_https_and_anonymous_access(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        log = self.start_https()
+        self.access = 'available'
+        header = 'Authorization: Basic '+base64.b64encode(b'original-header:user-auth').decode()
+        self.git('-c', 'http.https://github.com/.extraHeader='+header,
+                 'ls-remote', 'https://github.com/owner/repo.git')
+        self.assertTrue(self.auth and all(value=='original-header:user-auth' for value in self.auth))
+        self.auth.clear()
+        clone = self.work/'original-https'
+        self.git('clone', 'https://github.com/owner/repo.git', clone)
+        self.assertTrue(log.exists())
+        progress = self.remote/'hooks/post-receive'
+        progress.write_text('#!/bin/sh\ncat >/dev/null\nprintf "original-selected-progress\\n" >&2\n')
+        progress.chmod(0o755)
+        self.change(clone, 'original progress')
+        result = self.git('push', 'origin', 'main', cwd=clone)
+        self.assertIn('original-selected-progress', result.stderr)
+        self.change(clone, 'original lost response')
+        before = self.push_posts
+        self.lose_push_response = True
+        result = self.git('push', 'origin', 'main', cwd=clone, expected=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.push_posts-before, 1)
+        self.assertEqual(self.git('--git-dir='+str(self.remote), 'rev-parse', 'main').stdout,
+                         self.git('rev-parse', 'HEAD', cwd=clone).stdout)
+        self.assertTrue(self.auth and all(value=='original:original-password' for value in self.auth))
+        self.assertEqual(self.broker_requests, [])
+        log.unlink()
+        self.anonymous = True
+        self.auth.clear()
+        self.git('ls-remote', 'https://github.com/owner/repo.git')
+        self.assertEqual(self.auth, [''])
+        self.assertFalse(log.exists())
+        self.assertEqual(self.broker_requests, [])
+
+    def test_broker_last_failed_original_uses_broker_for_fetch_and_push(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        log = self.start_https()
+        self.access = 'available'
+        self.original_failure = True
+        self.env['GIT_SSH_COMMAND'] = 'false'
+        for index, original in enumerate(('git@github.com:owner/repo.git', 'https://github.com/owner/repo.git')):
+            clone = self.work/f'last-fallback-{index}'
+            result = self.git('clone', original, clone)
+            self.assertIn('original Git ref discovery failed; trying GitHub broker', result.stderr)
+            self.assertNotIn('403', result.stderr)
+            self.assertEqual((clone/'file').read_text(), 'one\n' if index == 0 else 'broker fallback push 0\n')
+            self.assertEqual(self.broker_requests[-1], {'repository':'owner/repo', 'operation':'read'})
+            self.change(clone, f'broker fallback push {index}')
+            self.git('push', 'origin', 'main', cwd=clone)
+            self.assertEqual(self.broker_requests[-1], {'repository':'owner/repo', 'operation':'push'})
+            self.assertEqual(self.git('config', '--get', 'remote.origin.url', cwd=clone).stdout.strip(), original)
+        self.assertNotIn('synthetic-broker-token', log.read_text())
+        self.assertEqual(self.push_posts, 2)
+
+    def test_broker_last_failed_broker_does_not_retry_original(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
+        self.start_https()
+        attempts = self.work/'original-attempts'
+        ssh = self.bin/'fixture-ssh'
+        ssh.write_text('#!/bin/sh\nprintf "attempt\\n" >> '+shlex.quote(str(attempts))+'\nprintf "tentative-private-diagnostic\\n" >&2\nexit 1\n')
+        for state in ('unavailable', 'no-repo-access', 'insufficient-permissions', 'unknown', 'available'):
+            self.access = state
+            self.discovery_failure = True
+            before = len(self.broker_requests)
+            result = self.git('ls-remote', 'git@github.com:owner/repo.git', expected=None)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('tentative-private-diagnostic', result.stderr)
+            self.assertNotIn('403', result.stderr)
+            self.assertNotIn('synthetic-broker-token', result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(len(self.broker_requests)-before, 1)
+        self.assertEqual(attempts.read_text().splitlines(), ['attempt']*5)
+        wiring.reconcile(self.home, 'broker-first', 'apply')
+        self.access = 'unavailable'
+        self.original_failure = True
+        result = self.git('ls-remote', 'https://github.com/owner/repo.git', expected=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('fatal: unable to access', result.stderr)
+
+    def test_git_status_recognizes_both_modes_and_overrides(self):
+        for mode in ('broker-first', 'broker-last'):
+            wiring.reconcile(self.home, mode, 'apply')
+            result = subprocess.run([str(self.engine), '_github-client', 'status', '--git'],
+                                    env=self.env, text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(result.stdout)['mode'], mode)
+            self.assertEqual(json.loads(result.stdout)['state'], 'current')
+            self.git('config', '--global', 'url.subyard-github::https://github.com/.insteadOf', 'https://other.invalid/')
+            result = subprocess.run([str(self.engine), '_github-client', 'status', '--git'],
+                                    env=self.env, text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(result.stdout)['state'], 'overridden')
+            self.git('config', '--global', '--unset-all', 'url.subyard-github::https://github.com/.insteadOf')
 
     def test_broker_https_isolation_and_original_https_credentials(self):
         log = self.start_https()
@@ -444,6 +564,7 @@ class NativeGitTest(unittest.TestCase):
         if log.exists(): self.assertNotIn('synthetic-broker-token', log.read_text())
 
     def test_explicit_run_isolates_legacy_token_with_custom_socket_and_no_fallback(self):
+        wiring.reconcile(self.home, 'broker-last', 'apply')
         log = self.start_https()
         custom = self.work/'custom.sock'
         (self.home/'.local/share/subyard/github.sock').rename(custom)
