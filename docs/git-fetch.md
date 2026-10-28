@@ -4,9 +4,9 @@ The `git-fetch` profile is off by default and installs a systemd service and tim
 inside the yard. Enable it from the owner host for an existing running yard:
 
 ```sh
-yard -Y demo profile enable git-fetch --yes
-yard -Y demo profile status git-fetch
-yard -Y demo profile disable git-fetch --yes
+yard -Y default profile enable git-fetch --yes
+yard -Y default profile status git-fetch
+yard -Y default profile disable git-fetch --yes
 ```
 
 A cycle starts five minutes after boot, then five minutes after the previous cycle

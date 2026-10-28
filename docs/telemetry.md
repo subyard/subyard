@@ -12,8 +12,8 @@ estimate provider compute, score agents or calculate billing.
 On the owner host, select an existing running yard:
 
 ```sh
-yard -Y my-yard profile enable telemetry --yes
-yard -Y my-yard profile status telemetry --json
+yard -Y default profile enable telemetry --yes
+yard -Y default profile status telemetry --json
 ```
 
 These are operator actions; building and testing the profile does not enable it
@@ -40,7 +40,7 @@ agent is killed to reload exporter settings.
 Disable collection through the same profile family:
 
 ```sh
-yard -Y my-yard profile disable telemetry --yes
+yard -Y default profile disable telemetry --yes
 ```
 
 Disabling restores only unchanged owned native settings and retains the database.

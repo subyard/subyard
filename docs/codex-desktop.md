@@ -8,7 +8,7 @@ No project environment is started.
 ```sh
 yard codex export --check
 yard codex export
-yard -Y <HostID>/<yard> codex open
+yard -Y <HostID>/default codex open
 ```
 
 `export` adds every registered project of exactly one selected yard to the

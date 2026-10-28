@@ -81,8 +81,8 @@ request a mobile link on the owner host:
 ```sh
 yard orca up
 yard orca pair --mobile
-# For another registered yard:
-yard -Y <yard> orca pair --mobile
+# With an explicit selector for the default yard:
+yard -Y default orca pair --mobile
 ```
 
 Install [Orca Mobile](https://www.onorca.dev/docs/mobile) on iOS or Android and

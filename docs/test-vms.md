@@ -104,7 +104,7 @@ release acceptance.
 
 ## Operator setup
 
-Register a yard with the profile:
+Configure the `default` yard with the profile in `~/.config/subyard/yards/default/config.env`:
 
 ```env
 YARD_TEMPLATE=test-vms
@@ -114,9 +114,9 @@ SSH_PORT=2223
 Then initialize it interactively:
 
 ```sh
-yard -Y test-yard init
-yard -Y test-yard status
-yard -Y test-yard test-vms status
+yard -Y default init
+yard -Y default status
+yard -Y default test-vms status
 ```
 
 `test-vms status` prints JSON with indentation and line breaks. Add `--json` for compact
@@ -126,7 +126,7 @@ A `test-vms` initialization also converges a root-owned physical-host log sink a
 timer. The outer yard receives no mount or socket that can write the host log root.
 
 A fresh yard with the effective `test-vms` capability starts with desired power `running`. Later
-`yard -Y test-yard stop` and `start` persist the normal managed power intent. Agent acquire never
+`yard -Y default stop` and `start` persist the normal managed power intent. Agent acquire never
 changes it. Stopping the outer yard drains all active slots before shutdown.
 
 `E2E_VM_SLOT_COUNT` defaults to `2`. Slots are shared between environment types, rather than
@@ -265,8 +265,8 @@ base image, subject to the ordinary refresh and cache-retention policy.
 Refresh a type explicitly through the normal operator action flow:
 
 ```sh
-yard -Y test-yard test-vms refresh subyard-pair
-yard -Y test-yard test-vms refresh android-test
+yard -Y default test-vms refresh subyard-pair
+yard -Y default test-vms refresh android-test
 ```
 
 Refresh reserves private builder resources, asks for confirmation with a default of Yes, and
@@ -283,7 +283,7 @@ normal agent acquisition never deletes an unclassified legacy allocation. An act
 can renew and release, but release retains its old disks until explicit operator retirement:
 
 ```sh
-yard -Y test-yard test-vms retire-legacy --slot N
+yard -Y default test-vms retire-legacy --slot N
 ```
 
 This operation asks for destructive confirmation with a default of No. Review and preserve any
@@ -1341,7 +1341,7 @@ or capacity failure delays recovery; it does not turn quarantine into a permanen
 The manual command starts the same slot recovery workflow immediately:
 
 ```sh
-yard -Y test-yard test-vms recover --slot "$slot"
+yard -Y default test-vms recover --slot "$slot"
 ```
 
 ## Broker diagnostics

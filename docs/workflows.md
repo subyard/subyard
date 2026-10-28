@@ -133,12 +133,11 @@ One owner host can run several independent local yards, each with its own instan
 to select one:
 
 ```bash
-yard -Y openclaw init
-yard @openclaw status
-yard status
+yard -Y default init
 yard @default status
+yard status
 yard space
-yard @openclaw space --refresh
+yard @default space --refresh
 ```
 
 Without a selector, most commands use the default yard. Bare `yard status` and `yard list` are
@@ -190,7 +189,7 @@ To enable a profile and prepare its tools in one operation, run:
 
 ```sh
 yard provision android
-yard -Y demo provision subyard-dev
+yard -Y default provision subyard-dev
 ```
 
 An explicit profile is appended to the selected yard's local `ENVIRONMENT_PROFILES`, including

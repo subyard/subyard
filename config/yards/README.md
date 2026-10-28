@@ -11,8 +11,8 @@ the installed path. Start from [`example.env`](example.env). `SSH_PORT` must be 
 name derives the instance, Incus project, SSH alias, storage volume and host-data root.
 
 ```sh
-yard -Y openclaw init
-yard @openclaw status
+yard -Y default init
+yard @default status
 yard status
 yard -Y default status
 yard yards
@@ -30,7 +30,7 @@ loopback URL; it does not start a tunnel.
 
 Named yards use the same typed scopes, precedence and file-setting rules as the default yard. See
 [Subyard configuration](../../docs/configuration.md) for that canonical contract. Run
-`yard -Y <name> config show` to inspect effective settings and `yard config paths` to inspect their
+`yard -Y default config show` to inspect effective settings and `yard config paths` to inspect their
 storage roles.
 
 Public profiles remain in the immutable runtime. Set `YARD_TEMPLATE=<profile>` for a reusable yard
