@@ -387,7 +387,7 @@ terminals, saved agent/chat state and linked worktrees until their contents have
 Do not edit Orca's database or manufacture IDs in Subyard's sidecar.
 
 For an explicitly selected local repo-backed setup with no remaining sessions, the pinned
-[native project CLI](https://github.com/stablyai/orca/blob/2bb20586ebc39d605e16d95f57420e20a16e7485/src/cli/specs/project.ts)
+[native project CLI](https://github.com/stablyai/orca/blob/b8ec5c8d170bcb9988e65de547a3a4e98b2885a9/src/cli/specs/project.ts)
 supports this manual repair. Run it as the yard's development user against the managed server
 profile, replacing `PROJECT_ID` and `SETUP_ID` with the inspected native identities:
 
@@ -441,7 +441,14 @@ history and then follows new entries.
 `down` removes the owner proxy and stops Orca while preserving the installed package,
 projects, sessions, and paired-client state.
 
-Orca 1.4.224 starts a new background service for new terminals; already-open terminals
-keep their previous service. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
-state that terminals started in 1.4.224 cannot be reached from 1.4.223 after a downgrade
-until Orca is upgraded again. Account for this limitation before rolling back the package.
+The profile pins Orca 1.4.244. Its [upstream release notes](https://github.com/stablyai/orca/releases/tag/v1.4.244)
+say it shares 1.4.243's terminal host, preserving attached terminals when updating from
+that version. Some terminal fixes require restarting the terminal host. Remote file and
+paired-terminal fixes also require updating the host server; open a new remote shell
+for the manual Codex copy fix. These notes do not establish terminal compatibility
+across every older version.
+
+Account for terminal-host changes before rolling back the package. In particular,
+the [1.4.224 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.224)
+warn that terminals started in 1.4.224 cannot be reached from 1.4.223 after a downgrade
+until Orca is upgraded again.
