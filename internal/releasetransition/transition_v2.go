@@ -468,7 +468,7 @@ func (transition *V2Transition) preflightConverge(
 		}
 		current = &parsed
 	}
-	goal, found, blocker, warnings := transition.resolveConvergeGoal(ctx, execution, current)
+	goal, found, blocker, warnings, resolvedObservation := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
 		if linksErr != nil {
@@ -483,9 +483,14 @@ func (transition *V2Transition) preflightConverge(
 		outcome = withActivationWarnings(outcome, warnings)
 		return "", &outcome, nil
 	}
-	observation, err := transition.observe(ctx, goal)
-	if err != nil {
-		return "", nil, err
+	var observation v2Observation
+	if resolvedObservation != nil {
+		observation = *resolvedObservation
+	} else {
+		observation, err = transition.observe(ctx, goal)
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	if len(observation.blockers) != 0 {
 		blocker := observation.blockers[0]
@@ -573,24 +578,24 @@ func (transition *V2Transition) resolveConvergeGoal(
 	ctx context.Context,
 	execution Execution,
 	current *JournalRecord,
-) (Goal, bool, *Blocker, []string) {
+) (Goal, bool, *Blocker, []string, *v2Observation) {
 	goal, found := transition.cachedGoal(execution.Plan)
 	if current != nil && execution.Plan == current.ResumePlan &&
 		current.Goal.Target == transition.options.Releases.Target &&
 		current.Goal.Direction == transition.options.Direction {
-		return current.Goal, true, nil, nil
+		return current.Goal, true, nil, nil, nil
 	}
 	if current != nil && current.Checkpoint == JournalComplete &&
 		execution.Plan == current.AuthorizationPlan && transition.options.MigrationCheckpoint {
 		observation, err := transition.observe(ctx, current.Goal)
 		if err == nil && observation.checkpointConversion && observation.checkpointConsent &&
 			transition.fixedPoint(observation) {
-			return current.Goal, true, nil, nil
+			return current.Goal, true, nil, nil, &observation
 		}
 	}
 	if found || (current != nil && current.Checkpoint != JournalComplete &&
 		transition.options.Replacement == nil && transition.options.MigrationOwnerReplacement == nil) {
-		return goal, found, nil, nil
+		return goal, found, nil, nil, nil
 	}
 	candidate := Goal{
 		Target:    transition.options.Releases.Target,
@@ -600,7 +605,7 @@ func (transition *V2Transition) resolveConvergeGoal(
 	if err != nil {
 		message, retry := publicActivationDiagnostic(err,
 			"the release transition facts could not be reobserved safely", "run yard update --check")
-		return Goal{}, false, &Blocker{Code: CodePlanStale, Message: message, Retry: retry}, nil
+		return Goal{}, false, &Blocker{Code: CodePlanStale, Message: message, Retry: retry}, nil, nil
 	}
 	if len(observation.blockers) != 0 {
 		// A fresh process has no inspection cache. Preserve the validated
@@ -608,20 +613,22 @@ func (transition *V2Transition) resolveConvergeGoal(
 		// token result; an unresolved goal still cannot authorize any work.
 		blocker := observation.blockers[0]
 		if err := blocker.Validate(); err == nil {
-			return Goal{}, false, &blocker, observation.activationWarnings
+			return Goal{}, false, &blocker, observation.activationWarnings, nil
 		}
-		return Goal{}, false, nil, observation.activationWarnings
+		return Goal{}, false, nil, observation.activationWarnings, nil
 	}
 	plan, err := BindPlan(transition.planFacts(observation))
 	if err != nil {
 		return Goal{}, false, &Blocker{Code: CodePlanStale,
-			Message: "the reobserved release transition plan is invalid", Retry: "run yard update --check"}, observation.activationWarnings
+			Message: "the reobserved release transition plan is invalid", Retry: "run yard update --check"}, observation.activationWarnings, nil
 	}
 	if plan != execution.Plan {
 		return Goal{}, false, &Blocker{Code: CodePlanStale,
-			Message: "the inspected release transition changed before convergence", Retry: "run yard update --check"}, observation.activationWarnings
+			Message: "the inspected release transition changed before convergence", Retry: "run yard update --check"}, observation.activationWarnings, nil
 	}
-	return candidate, true, nil, nil
+	// This observation already binds the goal and plan. Its caller may use it
+	// within this phase; Converge resolves again after taking the store lock.
+	return candidate, true, nil, nil, &observation
 }
 
 // A caller may have inspected recovery just before another caller completed it.
@@ -703,7 +710,7 @@ func (transition *V2Transition) Converge(
 			recoverableJournal = current
 		}
 	}
-	goal, found, blocker, warnings := transition.resolveConvergeGoal(ctx, execution, current)
+	goal, found, blocker, warnings, resolvedObservation := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
 		if linksErr != nil {
@@ -718,9 +725,14 @@ func (transition *V2Transition) Converge(
 		outcome = withActivationWarnings(outcome, warnings)
 		return outcome, nil
 	}
-	observation, err := transition.observe(ctx, goal)
-	if err != nil {
-		return Outcome{}, err
+	var observation v2Observation
+	if resolvedObservation != nil {
+		observation = *resolvedObservation
+	} else {
+		observation, err = transition.observe(ctx, goal)
+		if err != nil {
+			return Outcome{}, err
+		}
 	}
 	if len(observation.blockers) != 0 {
 		blocker := observation.blockers[0]

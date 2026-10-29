@@ -3827,6 +3827,69 @@ func TestFreshV2TransitionRejectsChangedObservationScope(t *testing.T) {
 	}
 }
 
+func TestFreshV2ConvergeObservesOncePerPhaseAndRechecksUnderLock(t *testing.T) {
+	for _, driftAfterLock := range []bool{false, true} {
+		t.Run(fmt.Sprintf("driftAfterLock=%t", driftAfterLock), func(t *testing.T) {
+			ctx := context.Background()
+			transition, configHome, _ := v2TransitionFixture(t, nil)
+			reconciler := &v2TestReconciler{converged: true}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			initial, err := transition.Inspect(ctx, goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome, err := transition.Converge(ctx, Execution{Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan)}); err != nil || outcome.Status != StatusReady {
+				t.Fatalf("initial convergence: %+v %v", outcome, err)
+			}
+			ready, err := transition.Inspect(ctx, goal)
+			if err != nil || ready.Outcome.Status != StatusReady || ready.Assessment.Changed || ready.Resume != nil {
+				t.Fatalf("ready inspection: %+v %v", ready, err)
+			}
+			options := transition.options
+			observedUnderLock := false
+			if driftAfterLock {
+				observeLinks := options.ObserveLinks
+				options.ObserveLinks = func(ctx context.Context) (ReleaseLinks, error) {
+					fd, err := unix.Open(filepath.Join(configHome, "migrations", "update.lock"), unix.O_RDWR|unix.O_CLOEXEC, 0)
+					if err != nil {
+						return ReleaseLinks{}, err
+					}
+					defer unix.Close(fd)
+					if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+						if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+							return ReleaseLinks{}, err
+						}
+					} else if errors.Is(err, unix.EWOULDBLOCK) {
+						observedUnderLock = true
+						reconciler.converged = false
+					} else {
+						return ReleaseLinks{}, err
+					}
+					return observeLinks(ctx)
+				}
+			}
+			fresh, err := NewV2Transition(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotStoreV2Tree(t, configHome)
+			reconciler.observes, reconciler.reconciles = 0, 0
+			outcome, err := fresh.Converge(ctx, Execution{Plan: ready.Plan})
+			wantStatus, wantCode, wantObserves := StatusReady, CodeReady, 3
+			if driftAfterLock {
+				wantStatus, wantCode, wantObserves = StatusOperatorActionRequired, CodePlanStale, 2
+			}
+			if err != nil || outcome.Status != wantStatus || outcome.Code != wantCode || reconciler.observes != wantObserves || reconciler.reconciles != 0 || observedUnderLock != driftAfterLock {
+				t.Fatalf("fresh convergence: outcome=%+v err=%v observes=%d reconciles=%d observedUnderLock=%t", outcome, err, reconciler.observes, reconciler.reconciles, observedUnderLock)
+			}
+			if !bytes.Equal(before, snapshotStoreV2Tree(t, configHome)) {
+				t.Fatal("ready repeat or stale refusal changed protected state")
+			}
+		})
+	}
+}
+
 func TestV2TransitionRejectsObservationScopeChangedAfterInspection(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
