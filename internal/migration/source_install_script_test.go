@@ -197,7 +197,8 @@ func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) 
 				}
 			}
 			// Publishing and transition application stop at local recorder boundaries.
-			// The bootstrap itself runs unchanged, with its offline cache preseeded.
+			// Run unchanged bootstrap bytes in a fixture source tree so its current
+			// publisher and the preseeded offline helper share the same recorder.
 			writeTestFile(t, filepath.Join(source, "bin/yard"), 0o700, "#!/bin/sh\nexit 99\n")
 			ingressLog, installerLog := filepath.Join(home, "ingress"), filepath.Join(home, "installer")
 			writeTestFile(t, filepath.Join(candidate, "bin/yard"), 0o700, `#!/bin/sh
@@ -210,6 +211,9 @@ exit 23
 			installerPayload := "#!/bin/sh\nset -eu\n[ \"$3\" = --publish-only ] || exit 99\nprintf 'publish-only\\n' > \"$TEST_INSTALLER_LOG\"\nprintf 'releases/fixture-test-candidate\\n'\n"
 			writeTestFile(t, installer, 0o700, installerPayload)
 			writeTestFile(t, installer+".sha256", 0o600, fmt.Sprintf("%x\n", sha256.Sum256([]byte(installerPayload))))
+			bootstrap := filepath.Join(home, "bootstrap-source/dev/bootstrap-runtime.sh")
+			writeTestFile(t, bootstrap, 0o700, string(readTestFile(t, filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"))))
+			writeTestFile(t, filepath.Join(home, "bootstrap-source/scripts/install-runtime-release.sh"), 0o700, installerPayload)
 			for _, arch := range []string{"amd64", "arm64"} {
 				for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
 					writeTestFile(t, filepath.Join(cache, "subyard-fixture-test-linux-"+arch+".tar.gz"+suffix), 0o600, "fixture\n")
@@ -245,7 +249,7 @@ exit 23
 				writeTestFile(t, manifestPath, 0o600, string(payload))
 			}
 			writeTestFile(t, filepath.Join(recovery, "transaction"), 0o600, state)
-			command := exec.Command("bash", filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"),
+			command := exec.Command("bash", bootstrap,
 				"--version", "fixture-test", "--offline", "--yes")
 			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "SHELL=/bin/bash", "TMPDIR=/tmp",
 				"SUBYARD_HOME=" + data, "SUBYARD_CONFIG_HOME=" + config, "YARD_BIN_DIR=" + bin,
