@@ -17,8 +17,11 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestPowerYardContextsAreDiscoveredWithoutChangingSelection(t *testing.T) {
@@ -1498,14 +1501,69 @@ func TestNativeInitModesStayInOneConfirmedWorkflow(t *testing.T) {
 type initRecheckPlatformFixture struct {
 	*initPlatformFixture
 	lateExpansion bool
-	projectChecks int
+	lockPath      string
+	observedLock  bool
+}
+
+func TestInitExecutionLockScopeBelongsToOneLiveExecution(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	program, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := &initExecution{loaded: loaded}
+	ctx, unlock, err := execution.lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+	first.assessed = true
+	other := &initExecution{loaded: loaded}
+	other.loaded.Context.YardName = "other"
+	otherCtx, otherUnlock, err := other.lock(ctx)
+	if err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	if otherCtx.Value(initExecutionLockKey{}) == first {
+		t.Fatal("another execution reused the lock or assessment")
+	}
+	otherUnlock()
+	unlock()
+	if first.active || first.assessed {
+		t.Fatal("released lock retained its assessment")
+	}
+	ctx, unlock, err = execution.lock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if ctx.Value(initExecutionLockKey{}) == first {
+		t.Fatal("expired context reused its lock scope")
+	}
 }
 
 func (fixture *initRecheckPlatformFixture) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
 	if fixture.lateExpansion && stage == ports.ReconcileStageProject {
-		fixture.projectChecks++
-		if fixture.projectChecks == 1 {
-			return true, nil
+		fd, err := unix.Open(fixture.lockPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			return fixture.initPlatformFixture.CheckStage(ctx, stage)
+		}
+		if err != nil {
+			return false, err
+		}
+		defer unix.Close(fd)
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); errors.Is(err, unix.EWOULDBLOCK) {
+			fixture.observedLock = true
+			fixture.converged[stage] = false
+		} else if err != nil {
+			return false, err
+		} else if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+			return false, err
 		}
 	}
 	return fixture.initPlatformFixture.CheckStage(ctx, stage)
@@ -1516,7 +1574,7 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 		name          string
 		shrink        bool
 		lateExpansion bool
-	}{{name: "shrink", shrink: true}, {name: "expansion"}, {name: "late expansion", lateExpansion: true}} {
+	}{{name: "shrink", shrink: true}, {name: "expansion"}, {name: "late expansion", lateExpansion: true}, {name: "shrink late drift", shrink: true, lateExpansion: true}} {
 		t.Run(scenario.name, func(t *testing.T) {
 			root, environment, stateDirectory := preparationParityFixture(t)
 			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
@@ -1544,10 +1602,11 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			platform.converged[ports.ReconcileStageProject] = scenario.shrink
+			platform.converged[ports.ReconcileStageProject] = scenario.shrink || scenario.lateExpansion
 			platform.lateExpansion = scenario.lateExpansion
+			platform.lockPath = filepath.Join(loaded.Context.Paths.ConfigHome, "generated", "integration-locks", "default.lock")
 			_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
-			if scenario.shrink {
+			if scenario.shrink && !scenario.lateExpansion {
 				if err != nil || platform.projectHooks != 1 || len(platform.applied) != 0 {
 					t.Fatalf("safe shrink did not run only hooks: error=%v hooks=%d applied=%v", err, platform.projectHooks, platform.applied)
 				}
@@ -1556,11 +1615,107 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 			}
 			if scenario.lateExpansion {
 				message := err.Error()
-				if !strings.Contains(message, "approved={action=yard.init.project-hooks") ||
-					!strings.Contains(message, "current={action=yard.init.reconcile") ||
-					!strings.Contains(message, "first_pending=project") || strings.Contains(message, canary) {
+				if !platform.observedLock || !strings.Contains(message, `init stage "project" now requires work`) || strings.Contains(message, canary) {
 					t.Fatalf("refusal omitted safe planning facts or leaked private input: %s", message)
 				}
+			}
+		})
+	}
+}
+
+func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
+	for _, scenario := range []string{"ready", "stage drift", "new owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, environment, stateDirectory := preparationParityFixture(t)
+			environment, incus, data, fixture := preparationConvergedInit(t, root, environment, stateDirectory)
+			platform := &initRecheckPlatformFixture{initPlatformFixture: fixture.(*initPlatformFixture)}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root, Incus: incus, ProjectData: data, InitPlatform: platform})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.manifest.Lookup("init")
+			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			// Supply the native captured hook/metadata inputs alongside the injected
+			// stage fixture. No extra execution guard is installed by this test.
+			digest := strings.Repeat("b", 64)
+			native := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}, ExecSteps: []testkit.IncusExecStep{
+				{Result: ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + digest + `","wiring":"` + digest + `","hooks":[],"roots":[]}`)}},
+			}}
+			runtime := reconcileruntime.Runtime{RepositoryRoot: "../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: native, Executor: native, Yard: domain.Context{YardName: "default"}}
+			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution := prepared.initExecution
+			execution.hookPlan = runtime.HookPlan
+			store, err := openProjectStoreReadOnly(loaded.Context.Paths.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution.hookProjects, err = store.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(execution.hookProjects) != 0 {
+				t.Fatal("fixture unexpectedly registered projects")
+			}
+			runtime.HookPlan.CaptureOwnerProjects(execution.hookProjects)
+			if err := runtime.PrepareProjectMetadata(context.Background()); err != nil || len(native.ExecCalls) != 1 {
+				t.Fatalf("empty owner set acquired metadata probes: calls=%d err=%v", len(native.ExecCalls), err)
+			}
+			execution.hooksApplicable, err = execution.projectHooksApplicable(context.Background(), program, true)
+			if err != nil || execution.hooksApplicable {
+				t.Fatalf("empty native plan requires dispatch: %v", err)
+			}
+			// The effectful closure also owns the post-effect release gate. An
+			// unchanged action must reach neither it nor the hook adapter.
+			dispatched := false
+			prepared.execute = func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+				dispatched = true
+				return domain.AdapterResult{}, errors.New("unexpected init effects or final readiness gate")
+			}
+			if err := prepared.preparePlan(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if slices.ContainsFunc(prepared.Plan.Steps, func(step domain.OperationStep) bool { return step.ID == "init.project-metadata" }) {
+				t.Fatal("empty owner inventory acquired an artificial metadata step")
+			}
+			orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, prepared.Loaded, nil, &prepared.Definition)
+			if _, err := prepared.Confirm(context.Background(), orchestrator, true); err != nil {
+				t.Fatal(err)
+			}
+			platform.lateExpansion = scenario == "stage drift"
+			platform.lockPath = filepath.Join(loaded.Context.Paths.ConfigHome, "generated", "integration-locks", "default.lock")
+			if scenario == "new owner" {
+				writer, err := state.NewFileStore(loaded.Context.Paths.StateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Put(context.Background(), projectRemovalRecord(domain.ProjectSync)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = prepared.Execute(context.Background(), orchestrator, io.Discard)
+			if scenario != "ready" && !errors.Is(err, domain.ErrPlanStale) || scenario == "ready" && err != nil || dispatched || platform.projectHooks != 0 || len(platform.applied) != 0 || scenario == "stage drift" && !platform.observedLock {
+				t.Fatalf("empty init boundary: err=%v dispatched=%t hooks=%d applied=%v locked=%t", err, dispatched, platform.projectHooks, platform.applied, platform.observedLock)
+			}
+			// Direct callers, repair completion, and injected platforms without
+			// native plans retain their existing applicability behavior.
+			platform.hooksApplicable = true
+			if applicable, err := execution.projectHooksApplicable(context.Background(), program, false); err != nil || !applicable {
+				t.Fatalf("unlocked fallback omitted hooks: applicable=%t err=%v", applicable, err)
+			}
+			program.profileInitRepair = &configApplyRepairPermit{}
+			if applicable, err := execution.projectHooksApplicable(context.Background(), program, true); err != nil || !applicable {
+				t.Fatalf("repair completion omitted hooks: applicable=%t err=%v", applicable, err)
 			}
 		})
 	}

@@ -59,6 +59,30 @@ func (transition *V2Transition) observedReadyProof(observation v2Observation) (r
 	outcome := withActivationWarnings(readyOutcome(Outcome{Active: observation.links.Active, Previous: cloneReleaseID(observation.links.Previous), Target: observation.goal.Target}), observation.activationWarnings)
 	return runtimeReadyProof{owner: transition, registryDigest: transition.registryDigest, artifactDigest: transition.options.ArtifactDigest, registry: owner, completion: completion, outcome: cloneReadyOutcome(outcome)}, nil
 }
+
+// Completed history needs the same readiness proof plus its exact journal
+// binding. The caller observes under the transition lock before cleanup.
+func (transition *V2Transition) observedJournalReadyProof(observation v2Observation) (runtimeReadyProof, error) {
+	if observation.checkpointConversion || !transition.completedJournalMatches(observation) {
+		return runtimeReadyProof{}, invalid("readiness observation does not match completed journal history")
+	}
+	proof, err := transition.observedReadyProof(observation)
+	if err != nil {
+		return runtimeReadyProof{}, err
+	}
+	payload, err := MarshalJournal(*observation.journal)
+	if err != nil {
+		return runtimeReadyProof{}, err
+	}
+	proof.transaction = observation.journal.Transaction
+	proof.journalFingerprint = fingerprintPayload(payload)
+	proof.outcome = cloneReadyOutcome(transition.inspectionOutcome(observation))
+	if err := proof.validateJournal(transition, *observation.journal); err != nil {
+		return runtimeReadyProof{}, err
+	}
+	return proof, nil
+}
+
 func (transition *V2Transition) readyResult(proof runtimeReadyProof) (Outcome, error) {
 	if err := proof.validateRuntimeReadyProof(transition, proof.transaction); err != nil {
 		return Outcome{}, err

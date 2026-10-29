@@ -268,6 +268,14 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	}
 	prepared.Action = "migrate.apply"
 	prepared.RefreshConfigs = false
+	// A ready repeat has no historical activation scope to finish or widen.
+	// Keep fresh final inspection for repairs, recovery and source ingress.
+	reuseReady := protected != nil && !protected.rustOwner &&
+		protected.journal.Checkpoint == releasetransition.JournalComplete &&
+		inspection.Outcome.Status == releasetransition.StatusReady &&
+		!inspection.Assessment.Changed && inspection.Resume == nil &&
+		request.SourceIngress == nil && request.Replacement == nil &&
+		request.MigrationOwnerReplacement == nil && recoveryRequest == nil && delegate == nil
 	execute := prepared.run
 	prepared.run = func(ctx context.Context) error {
 		actual, err := runtime.readCurrentSnapshot(parsed.root, configHome)
@@ -277,9 +285,24 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 		if err := execute(ctx); err != nil {
 			return err
 		}
-		outcome, err := runtime.verifyCurrentConvergence(ctx, parsed.root, configHome, current, owner, request)
-		if err != nil {
-			return err
+		var outcome releasetransition.Outcome
+		if reuseReady && prepared.convergedOutcome != nil && prepared.convergedOutcome.Status == releasetransition.StatusReady {
+			actual, err := runtime.readCurrentSnapshot(parsed.root, configHome)
+			if err != nil || !sameCurrentSnapshot(before, actual) {
+				return fmt.Errorf("%w: current release or protected metadata changed during ready convergence; run yard migrate --check again", domain.ErrPlanStale)
+			}
+			outcome = *prepared.convergedOutcome
+			links := releaseLinksFromRuntimeSnapshot(actual.links)
+			if outcome.Active != links.Active || (outcome.Previous == nil) != (links.Previous == nil) ||
+				(outcome.Previous != nil && *outcome.Previous != *links.Previous) {
+				return errors.New("current release convergence does not match actual runtime links")
+			}
+		} else {
+			var err error
+			outcome, err = runtime.verifyCurrentConvergence(ctx, parsed.root, configHome, current, owner, request)
+			if err != nil {
+				return err
+			}
 		}
 		for _, warning := range outcome.Warnings {
 			fmt.Fprintf(runtime.config.Stdout, "Warning: %s\n", warning)

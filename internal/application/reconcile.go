@@ -63,6 +63,10 @@ type Reconciler struct {
 }
 
 func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
+	return reconciler.plan(ctx, nil)
+}
+
+func (reconciler Reconciler) plan(ctx context.Context, observations map[ports.ReconcileStageID]ports.ReconcileStageObservation) (ReconcilePlan, error) {
 	if err := validateStages(reconciler.Stages); err != nil {
 		return ReconcilePlan{}, err
 	}
@@ -71,9 +75,13 @@ func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
 	}
 	plan := ReconcilePlan{Steps: make([]ReconcileStep, 0, len(reconciler.Stages))}
 	for index, stage := range reconciler.Stages {
-		observation, err := reconciler.observe(ctx, stage.ID)
-		if err != nil {
-			return ReconcilePlan{}, fmt.Errorf("check init stage %q: %w", stage.ID, err)
+		observation, observed := observations[stage.ID]
+		if !observed {
+			var err error
+			observation, err = reconciler.observe(ctx, stage.ID)
+			if err != nil {
+				return ReconcilePlan{}, fmt.Errorf("check init stage %q: %w", stage.ID, err)
+			}
 		}
 		plan.Steps = append(plan.Steps, ReconcileStep{Stage: stage, Converged: observation.Converged})
 		if !observation.Converged {
@@ -88,6 +96,20 @@ func (reconciler Reconciler) Plan(ctx context.Context) (ReconcilePlan, error) {
 
 // CheckApproved rejects observed skip expansion without applying any stage.
 func (reconciler Reconciler) CheckApproved(ctx context.Context, approved ReconcilePlan) error {
+	return reconciler.checkApproved(ctx, approved, nil)
+}
+
+// RefreshApproved shares observations within one read-only assessment. Callers
+// must establish a fresh assessment at each subsequent mutation boundary.
+func (reconciler Reconciler) RefreshApproved(ctx context.Context, approved ReconcilePlan) (ReconcilePlan, error) {
+	observations := make(map[ports.ReconcileStageID]ports.ReconcileStageObservation)
+	if err := reconciler.checkApproved(ctx, approved, observations); err != nil {
+		return ReconcilePlan{}, err
+	}
+	return reconciler.plan(ctx, observations)
+}
+
+func (reconciler Reconciler) checkApproved(ctx context.Context, approved ReconcilePlan, observations map[ports.ReconcileStageID]ports.ReconcileStageObservation) error {
 	if err := validateStages(reconciler.Stages); err != nil {
 		return err
 	}
@@ -110,6 +132,9 @@ func (reconciler Reconciler) CheckApproved(ctx context.Context, approved Reconci
 			}
 			if !observation.Converged {
 				return staleStage(stage.ID, observation)
+			}
+			if observations != nil {
+				observations[stage.ID] = observation
 			}
 		}
 	}

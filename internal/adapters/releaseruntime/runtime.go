@@ -62,6 +62,8 @@ type Prepared struct {
 	check         func(context.Context) (releasetransition.Inspection, error)
 	nativePlan    releasetransition.PlanToken
 	currentReport *currentReport
+	// Set only after the verified owner returns a validated ready convergence.
+	convergedOutcome *releasetransition.Outcome
 }
 
 type verifiedPreparationError struct {
@@ -1560,22 +1562,25 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	if inspection.Resume != nil {
 		changed = false
 	}
+	convergedOutcome := new(releasetransition.Outcome)
 	return Prepared{
 		Action: map[bool]domain.ActionID{
 			true: "update.rollback", false: "update.activate",
 		}[request.Direction == releasetransition.DirectionActivatePrevious],
 		Changed: changed, Consequences: consequences,
-		RefreshConfigs: !activationReconciliationOwned,
-		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
-		SourceRelease:  string(inspection.Outcome.Active),
-		SourceVersion:  "",
-		TargetRelease:  string(target.candidate.release),
-		TargetVersion:  target.version,
+		RefreshConfigs:   !activationReconciliationOwned,
+		ActiveLauncher:   filepath.Join(parsed.root, "current", "bin", "yard"),
+		SourceRelease:    string(inspection.Outcome.Active),
+		SourceVersion:    "",
+		TargetRelease:    string(target.candidate.release),
+		TargetVersion:    target.version,
+		convergedOutcome: convergedOutcome,
 		check: func(ctx context.Context) (releasetransition.Inspection, error) {
 			checked, _, err := runtime.inspectCompletedTransition(ctx, request.RuntimeRoot, request.ConfigHome, request.Target, owner, request)
 			return checked, err
 		},
 		run: func(ctx context.Context) error {
+			*convergedOutcome = releasetransition.Outcome{}
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
 			}
@@ -1687,6 +1692,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 					return transitionOutcomeError(outcome)
 				}
 				return transitionOutcomeError(*converged.Outcome)
+			}
+			if converged.ActivationReconciliationOwned {
+				*convergedOutcome = *converged.Outcome
+				convergedOutcome.Warnings = slices.Clone(converged.Outcome.Warnings)
 			}
 			return nil
 		},

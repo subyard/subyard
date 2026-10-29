@@ -265,6 +265,24 @@ func (plan *ProjectHookPlan) Binding() string {
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }
 
+// NoProjectHookWork describes captured inputs only; callers must refresh the
+// plan at their execution boundary before treating the operation as unchanged.
+func (plan *ProjectHookPlan) NoProjectHookWork() bool {
+	if plan == nil || plan.conditional || plan.unavailable || plan.stopped ||
+		plan.current.Projects == "" || plan.current.Wiring == "" || len(plan.current.Hooks) != 0 ||
+		plan.current.Projects != plan.approved.Projects {
+		return false
+	}
+	if plan.metadata == nil {
+		return plan.ownerProjects != nil && len(plan.ownerProjects) == 0
+	}
+	if len(plan.metadata.Expected) == 0 || plan.metadata.Projects != plan.current.Projects {
+		return false
+	}
+	step := plan.MetadataOperationStep("")
+	return step != nil && step.Decision == domain.StepSkip
+}
+
 func (plan *ProjectHookPlan) OperationStep(target string) domain.OperationStep {
 	decision := domain.StepApply
 	observed := "captured guest project and installed dispatcher inputs"
@@ -274,6 +292,9 @@ func (plan *ProjectHookPlan) OperationStep(target string) domain.OperationStep {
 	} else if plan.approved.Projects == "" {
 		decision = domain.StepSkip
 		observed = "intentionally stopped"
+	} else if plan.NoProjectHookWork() {
+		decision = domain.StepSkip
+		observed = "captured metadata present and no installed project hooks"
 	}
 	ids := []string{}
 	for _, record := range plan.ownerProjects {

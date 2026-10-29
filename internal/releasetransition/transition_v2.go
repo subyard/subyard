@@ -104,6 +104,13 @@ type V2ActivationReconciler interface {
 	Reconcile(context.Context, ReleaseLinks) error
 }
 
+// V2ConcurrentActivationObserver opts independent, read-only Observe calls into
+// bounded overlap with adjacent opted-in observers. Prospective observations and
+// reconciliation remain serial; every overlapping call finishes before reduction.
+type V2ConcurrentActivationObserver interface {
+	ConcurrentActivationObservation() bool
+}
+
 type V2ActivationObservation struct {
 	// Binding pins native assessment inputs without making created inode IDs
 	// part of the desired recovery scope.
@@ -471,6 +478,28 @@ func (transition *V2Transition) preflightConverge(
 		}
 		current = &parsed
 	}
+	if execution.Authorization == "" && current != nil && current.Checkpoint == JournalComplete &&
+		current.Goal.Target == transition.options.Releases.Target &&
+		current.Goal.Direction == DirectionActivateTarget && transition.options.Direction == DirectionActivateTarget &&
+		current.ArtifactDigest == transition.options.ArtifactDigest &&
+		current.RegistryDigest == transition.registryDigest && current.CatalogDigest == transition.catalog.Digest() &&
+		current.SourceIngress == nil && transition.options.SourceIngress == nil &&
+		transition.options.Replacement == nil && transition.options.MigrationOwnerReplacement == nil {
+		state, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
+		if err != nil {
+			return "", nil, err
+		}
+		pending, err := transition.registry.PendingPath(state.Ledger)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(pending) == 0 && (!transition.options.MigrationCheckpoint || !state.RequiresCheckpointPublication()) {
+			// Completed history grants no new work. Resolve the caller's plan and
+			// observe readiness freshly under the update lock before cleanup.
+			// A stale caller may acquire the lock, but cannot authorize repair.
+			return "", nil, nil
+		}
+	}
 	goal, found, blocker, warnings, resolvedObservation := transition.resolveConvergeGoal(ctx, execution, current)
 	if !found {
 		links, linksErr := transition.options.ObserveLinks(ctx)
@@ -745,10 +774,10 @@ func (transition *V2Transition) Converge(
 				observation.journal.Goal == observation.goal) {
 			transaction = transactionIDPointer(observation.journal.Transaction)
 		}
-		return v2OperatorOutcome(
+		return withActivationWarnings(v2OperatorOutcome(
 			observation.links, goal.Target, transaction,
 			blocker.Code, blocker.Message, blocker.Retry,
-		), nil
+		), observation.activationWarnings), nil
 	}
 	if err := transition.validateObservationWork(observation); err != nil {
 		return v2OperatorOutcome(observation.links, goal.Target, nil, CodeRecoveryAmbiguous, "the migration work recipes cannot be reconstructed exactly", "run yard update --check"), nil
@@ -763,9 +792,9 @@ func (transition *V2Transition) Converge(
 	if outcome := transition.completedResumeOutcome(observation, execution.Plan); outcome != nil &&
 		!observation.checkpointConversion {
 		if outcome.Status == StatusReady {
-			return transition.evaluateTerminal(ctx, *observation.journal)
+			return transition.finishObservedTerminal(ctx, observation)
 		}
-		return *outcome, nil
+		return withActivationWarnings(*outcome, observation.activationWarnings), nil
 	}
 	completedHistory := transition.completedJournalMatches(observation)
 	if observation.journal != nil && observation.journal.Checkpoint == JournalComplete &&
@@ -781,7 +810,7 @@ func (transition *V2Transition) Converge(
 		return outcome, nil
 	}
 	if completedHistory && transition.fixedPoint(observation) && !observation.checkpointConversion {
-		return transition.evaluateTerminal(ctx, *observation.journal)
+		return transition.finishObservedTerminal(ctx, observation)
 	}
 
 	if observation.migrationOwnerReceipt != nil {
@@ -1039,6 +1068,18 @@ func (transition *V2Transition) evaluateTerminal(
 	if err != nil || outcome.Status != StatusReady {
 		return outcome, err
 	}
+	return transition.finishTerminal(ctx, journal, proof)
+}
+
+func (transition *V2Transition) finishObservedTerminal(ctx context.Context, observation v2Observation) (Outcome, error) {
+	proof, err := transition.observedJournalReadyProof(observation)
+	if err != nil {
+		return Outcome{}, err
+	}
+	return transition.finishTerminal(ctx, *observation.journal, proof)
+}
+
+func (transition *V2Transition) finishTerminal(ctx context.Context, journal JournalRecord, proof runtimeReadyProof) (Outcome, error) {
 	if _, err := transition.publishCheckpointAfterReady(ctx, journal, proof); err != nil {
 		return Outcome{}, err
 	}
@@ -2984,7 +3025,8 @@ func (transition *V2Transition) observeActivation(
 ) error {
 	observation.activationFixed = true
 	seen := make(map[string]struct{}, len(transition.options.Reconcilers))
-	for _, reconciler := range transition.options.Reconcilers {
+	ids := make([]string, len(transition.options.Reconcilers))
+	for index, reconciler := range transition.options.Reconcilers {
 		if reconciler == nil {
 			return errors.New("nil activation reconciler")
 		}
@@ -2996,13 +3038,45 @@ func (transition *V2Transition) observeActivation(
 			return invalid("duplicate activation reconciler %q", id)
 		}
 		seen[id] = struct{}{}
-		var actual V2ActivationObservation
-		var err error
-		if prospective, ok := reconciler.(V2ProspectiveActivationObserver); ok && observation.prospectiveSettings != nil {
-			actual, err = prospective.ObserveProspective(ctx, transition.options.Releases, observation.links, observation.prospectiveSettings)
-		} else {
-			actual, err = reconciler.Observe(ctx, transition.options.Releases, observation.links)
+		ids[index] = id
+	}
+	type result struct {
+		actual V2ActivationObservation
+		err    error
+	}
+	results := make([]result, len(ids))
+	concurrent := func(reconciler V2ActivationReconciler) bool {
+		observer, ok := reconciler.(V2ConcurrentActivationObserver)
+		return ok && observer.ConcurrentActivationObservation()
+	}
+	observed := 0
+	for index, reconciler := range transition.options.Reconcilers {
+		id := ids[index]
+		if index == observed {
+			observed = index + 1
+			if observation.prospectiveSettings == nil && concurrent(reconciler) {
+				for observed < len(results) && concurrent(transition.options.Reconcilers[observed]) {
+					observed++
+				}
+			}
+			if observed-index > 1 {
+				slots := make(chan struct{}, 3)
+				var workers sync.WaitGroup
+				for current := index; current < observed; current++ {
+					slots <- struct{}{}
+					workers.Go(func() {
+						defer func() { <-slots }()
+						results[current].actual, results[current].err = transition.options.Reconcilers[current].Observe(ctx, transition.options.Releases, observation.links)
+					})
+				}
+				workers.Wait()
+			} else if prospective, ok := reconciler.(V2ProspectiveActivationObserver); ok && observation.prospectiveSettings != nil {
+				results[index].actual, results[index].err = prospective.ObserveProspective(ctx, transition.options.Releases, observation.links, observation.prospectiveSettings)
+			} else {
+				results[index].actual, results[index].err = reconciler.Observe(ctx, transition.options.Releases, observation.links)
+			}
 		}
+		actual, err := results[index].actual, results[index].err
 		if err != nil {
 			if observation.activationObservationFailure == nil {
 				observation.activationObservationFailure = err

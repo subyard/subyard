@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -279,6 +280,112 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	if links.current.target != "releases/"+string(fixture.candidate.release) || links.previous.present {
 		t.Fatalf("current migration switched links: %#v", links)
 	}
+}
+
+func TestCurrentReadyRepeatReusesConvergenceAndChecksProtectedState(t *testing.T) {
+	for _, change := range []string{"", "links", "ledger"} {
+		t.Run("change="+change, func(t *testing.T) {
+			fixture := newCurrentProcessFixture(t)
+			calls := filepath.Join(filepath.Dir(fixture.runtimeRoot), "ready-owner-calls")
+			testkit.WriteFile(t, calls, nil, 0o600)
+			enginePath := filepath.Join(fixture.candidate.root, "bin", "yard-engine")
+			engine := strings.Replace(string(mustReadFile(t, enginePath)), "TestV0111TransitionProcessHelper", "TestCurrentReadyProcessHelper", 1)
+			engine = strings.Replace(engine, v0111ProcessFixtureEnvironment+"=1", fmt.Sprintf("SUBYARD_TEST_CURRENT_READY_LOG=%q SUBYARD_TEST_CURRENT_READY_CHANGE=%q %s=1", calls, change, v0111ProcessFixtureEnvironment), 1)
+			testkit.WriteFile(t, enginePath, []byte(engine), 0o700)
+			manifest := fmt.Sprintf("%s  ./bin/yard-engine\n%s  ./config/release-transition.json\n", v0111FixtureFingerprintBytes([]byte(engine)), v0111FixtureFingerprintBytes(fixture.registry))
+			testkit.WriteFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"), []byte(manifest), 0o600)
+			environment := fixture.environment()
+			environment["YARD_RUNTIME_ROOT"] = fixture.runtimeRoot
+			var stdout bytes.Buffer
+			runtime := New(Config{Inputs: fixtureCommandInputs(environment), Stdout: &stdout})
+			defer runtime.Close()
+			initial, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := initial.Execute(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, calls, nil, 0o600)
+			stdout.Reset()
+			ready, err := runtime.PrepareCurrentTransition(context.Background(), nil, fixture.configHome, "recovery-yard")
+			if err != nil || ready.Changed {
+				t.Fatalf("ready preparation: %+v %v", ready, err)
+			}
+			err = ready.Execute(context.Background())
+			if change == "" {
+				if err != nil || strings.Count(stdout.String(), "Warning: recovery cleanup is pending") != 1 || !strings.Contains(stdout.String(), ": ready") {
+					t.Fatalf("ready result: %v %q", err, stdout.String())
+				}
+			} else if !errors.Is(err, domain.ErrPlanStale) || strings.Contains(stdout.String(), ": ready") {
+				t.Fatalf("changed protected state accepted: %v %q", err, stdout.String())
+			}
+			if got := string(mustReadFile(t, calls)); got != "inspect\nconverge\n" {
+				t.Fatalf("ready owner calls = %q", got)
+			}
+		})
+	}
+}
+
+func TestCurrentReadyProcessHelper(t *testing.T) {
+	logPath := os.Getenv("SUBYARD_TEST_CURRENT_READY_LOG")
+	if logPath == "" {
+		return
+	}
+	payload, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request releasetransition.ProcessRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(log, request.Mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runV0111TransitionProcessHelper(bytes.NewReader(payload), &output); err != nil {
+		t.Fatal(err)
+	}
+	var response releasetransition.ProcessResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if request.Mode == releasetransition.ProcessConverge && request.Execution.Authorization == "" {
+		response.Outcome.Warnings = []string{"recovery cleanup is pending"}
+		switch os.Getenv("SUBYARD_TEST_CURRENT_READY_CHANGE") {
+		case "links":
+			if err := os.Remove(filepath.Join(request.RuntimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("releases/0.11.1-source", filepath.Join(request.RuntimeRoot, "current")); err != nil {
+				t.Fatal(err)
+			}
+		case "ledger":
+			path := filepath.Join(request.ConfigHome, "release-transition", "v2", "ledger.json")
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString("\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
 }
 
 func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testing.T) {

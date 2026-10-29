@@ -272,14 +272,18 @@ func TestPreparedProjectMetadataRepair(t *testing.T) {
 type metadataHookExecutor struct {
 	metadataFileExecutor
 	calls           int
+	metadataCalls   int
+	observations    int
 	expectedBinding string
 }
 
 func (fixture *metadataHookExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if request.Command[0] == "python3" {
+		fixture.metadataCalls++
 		return fixture.metadataFileExecutor.Exec(ctx, project, instance, request)
 	}
 	if request.Command[0] == "bash" {
+		fixture.observations++
 		script := strings.NewReplacer("/srv/workspaces", fixture.root, "/usr/local/libexec/subyard", fixture.root+"/absent-libexec", "/etc/subyard", fixture.root+"/absent-etc").Replace(string(request.Stdin))
 		command := exec.CommandContext(ctx, "bash", "-s", "--", "--observe")
 		command.Stdin = strings.NewReader(script)
@@ -306,6 +310,63 @@ func (fixture *metadataHookExecutor) Exec(ctx context.Context, project, instance
 	}
 	return ports.InstanceExecResult{}, nil
 }
+
+func TestReadyProjectMetadataSkipsPublicationChecksAndRetainsHookGuard(t *testing.T) {
+	ctx := context.Background()
+	root := testkit.TempDir(t)
+	workspace := filepath.Join(root, "workspaces")
+	if err := os.MkdirAll(filepath.Join(workspace, "sample", "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, nativeCalls := filepath.Join(root, "state"), filepath.Join(root, "native-calls")
+	runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf 'observe\\n' >> \"$NATIVE_CALLS\"\ncat \"$STATE\"\n")
+	runtime.Environment = []string{"STATE=" + state, "NATIVE_CALLS=" + nativeCalls}
+	testkit.WriteFile(t, state, []byte(`{"state":"current","actual":"`+testRuntimeNewDigest+`","desired":"`+testRuntimeNewDigest+`"}`), 0o600)
+	source, err := os.ReadFile("../../../config/projects-changed.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config", "projects-changed.sh"), source, 0o600)
+	runtime.Integrations = []profile.IntegrationDefinition{}
+	runtime.Yard.YardName, runtime.Yard.DevUID = "selected", os.Getuid()
+	runtime.Incus.(*testkit.Incus).Reconcile = ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}
+	executor := &metadataHookExecutor{metadataFileExecutor: metadataFileExecutor{workspace}}
+	runtime.Executor = executor
+	record := domain.ProjectRecord{Schema: 1, ProjectID: "sample", Name: "Sample", YardPath: "/srv/workspaces/sample/src", Mode: domain.ProjectSync, SSHHost: "yard"}
+	payload, err := application.ProjectMetadata(record, "selected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(workspace, "sample", ".subyard-meta.json")
+	testkit.WriteFile(t, metadata, payload, 0o600)
+	runtime.RuntimePlan, err = runtime.PrepareProfileRuntimes(ctx, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.HookPlan, err = runtime.PrepareProjectHooks(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{record})
+	if err := runtime.PrepareProjectMetadata(ctx); err != nil || runtime.HookPlan.HasMetadataRepair() {
+		t.Fatalf("matching metadata acquired publication work: %v", err)
+	}
+	metadataCalls, observations := executor.metadataCalls, executor.observations
+	// Publication would require a fresh native check, but this invocation only
+	// runs the separately guarded hooks over already-present project metadata.
+	testkit.WriteFile(t, state, []byte("unavailable"), 0o600)
+	if err := runtime.RunProjectHooks(ctx); err != nil || executor.calls != 1 {
+		t.Fatalf("ready metadata hook invocation: calls=%d err=%v", executor.calls, err)
+	}
+	if data, err := os.ReadFile(nativeCalls); err != nil || string(data) != "observe\n" || executor.metadataCalls != metadataCalls || executor.observations != observations+2 || runtime.HookPlan.metadataCompleted {
+		t.Fatalf("no-work metadata repeated publication checks: native=%q metadata=%d->%d observations=%d->%d completed=%t err=%v", data, metadataCalls, executor.metadataCalls, observations, executor.observations, runtime.HookPlan.metadataCompleted, err)
+	}
+	testkit.WriteFile(t, metadata, bytes.ReplaceAll(payload, []byte("Sample"), []byte("Changed")), 0o600)
+	if err := runtime.RunProjectHooks(ctx); !errors.Is(err, domain.ErrPlanStale) || executor.calls != 1 || executor.metadataCalls != metadataCalls {
+		t.Fatalf("metadata drift bypassed hook guard: calls=%d metadata=%d err=%v", executor.calls, executor.metadataCalls, err)
+	}
+}
+
 func TestInitRepairsOwnerMetadataBeforeHooksAndPreservesUnregisteredDirectories(t *testing.T) {
 	root := testkit.TempDir(t)
 	for _, name := range []string{"sample", "unregistered"} {

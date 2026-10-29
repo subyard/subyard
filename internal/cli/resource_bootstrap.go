@@ -367,7 +367,7 @@ func (bootstrap *profileBootstrap) refresh(ctx context.Context, cli *CLI) error 
 			}
 		}
 		before := bootstrap.init.consequences()
-		if err := bootstrap.init.refreshAssessment(ctx); err != nil {
+		if err := bootstrap.init.refreshAssessment(ctx, cli); err != nil {
 			return err
 		}
 		for _, consequence := range bootstrap.init.consequences() {

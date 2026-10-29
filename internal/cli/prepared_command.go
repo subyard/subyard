@@ -581,6 +581,14 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	defer release()
 	// Abort before releasing the host barrier, including failures after reservation.
 	defer prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
+	if prepared.initExecution != nil && prepared.initExecution.hooksOnly() && prepared.CLI.profileInitRepair == nil {
+		var unlock func()
+		ctx, unlock, err = prepared.initExecution.lock(ctx)
+		if err != nil {
+			return domain.AdapterResult{}, err
+		}
+		defer unlock()
+	}
 	if prepared.Plan.Assessment != nil && prepared.refresh != nil {
 		action, delta, err := prepared.refresh(ctx)
 		if err != nil {
@@ -605,6 +613,14 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		}
 		if !delta.Changed {
 			return prepared.commitResult(ctx, noOp)
+		}
+		if prepared.initExecution != nil {
+			boundary, _ := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+			// Repair/provision paths can wait for privilege or another repair
+			// lock before dispatch; retain their independent native guards.
+			if boundary != nil {
+				boundary.assessed = prepared.initExecution.hooksOnly()
+			}
 		}
 	}
 	if !prepared.executeNoOp && operationPlanNoOp(prepared.Plan) {
@@ -636,7 +652,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		return nil
 	}
 	cli := prepared.CLI
-	execution, err := cli.prepareInitExecution(ctx, prepared.Loaded, prepared.Arguments, bootstrap)
+	execution, err := cli.prepareInitExecutionPlan(ctx, prepared.Loaded, prepared.Arguments, bootstrap, true)
 	if err != nil {
 		return err
 	}
@@ -695,7 +711,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 				return "", domain.ActionDelta{}, err
 			}
 		}
-		if err := execution.refreshAssessment(ctx); err != nil {
+		if err := execution.refreshAssessment(ctx, cli); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
 		if err := cli.observeInitProfileProvision(ctx, execution); err != nil {

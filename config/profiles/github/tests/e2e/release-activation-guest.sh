@@ -124,6 +124,7 @@ UNITS_AUTHORIZED=0
 # readiness requirement. Native leaves run through fresh() with the same UID.
 CREATION_GID="$(id -g)"
 CREATED_YARDS=()
+# shellcheck disable=SC2034 # Consumed by the shared fixture's terminal duration.
 STARTED="$(date +%s)"
 release_activation_initialize_readiness
 YARD_BIN=''

@@ -402,6 +402,15 @@ func TestIntegrationScopeBindsDesiredArtifactsWithoutRuntimeProbes(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sources, _, err := runtime.integrationSourceBindingsWithSourceReader("inspect", runtime.SourceReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := slices.Clone(entries)
+	reused, reusedPaths, err := runtime.integrationScopeFromInputs(entries, sources)
+	if err != nil || reused != first || !slices.Equal(reusedPaths, paths) || !slices.Equal(entries, original) {
+		t.Fatalf("reused scope changed identity or mutated artifacts: scope=%s paths=%v err=%v", reused, reusedPaths, err)
+	}
 	for index := range entries {
 		entries[index].Content = ""
 	}

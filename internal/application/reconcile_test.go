@@ -250,3 +250,38 @@ func TestReconcilerRejectsLaterSkipExpansionBeforeEarlierApply(t *testing.T) {
 		t.Fatalf("applied before stale guard: %v", fixture.applied)
 	}
 }
+
+func TestReconcilerRefreshApprovedSharesOnlyItsOwnObservations(t *testing.T) {
+	stages := []ReconcileStage{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}, {ID: "c", Label: "C"}}
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{"a": true},
+		checkErr: map[ports.ReconcileStageID]error{"c": errors.New("prerequisite is pending")}}
+	approved := ReconcilePlan{Steps: []ReconcileStep{{Stage: stages[0], Converged: true}, {Stage: stages[1]}, {Stage: stages[2], Conditional: true}}}
+	reconciler := Reconciler{Stages: stages, Runner: fixture}
+	plan, err := reconciler.RefreshApproved(context.Background(), approved)
+	if err != nil || !reflect.DeepEqual(plan, approved) || !reflect.DeepEqual(fixture.checked, []ports.ReconcileStageID{"a", "b"}) {
+		t.Fatalf("plan=%#v checked=%v err=%v", plan, fixture.checked, err)
+	}
+	fixture.converged["a"] = false
+	if _, err := reconciler.RefreshApproved(context.Background(), approved); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("repeat refresh accepted drift: %v", err)
+	}
+	if err := reconciler.Apply(context.Background(), plan); !errors.Is(err, domain.ErrPlanStale) || len(fixture.applied) != 0 {
+		t.Fatalf("apply reused refresh facts: applied=%v err=%v", fixture.applied, err)
+	}
+}
+
+func TestReconcilerRefreshApprovedRejectsLaterSkipBeforePlanning(t *testing.T) {
+	stages := []ReconcileStage{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}
+	fixture := &reconcileFixture{converged: map[ports.ReconcileStageID]bool{"b": true}}
+	approved := ReconcilePlan{Steps: []ReconcileStep{{Stage: stages[0]}, {Stage: stages[1], Converged: true}}}
+	reconciler := Reconciler{Stages: stages, Runner: fixture}
+	plan, err := reconciler.RefreshApproved(context.Background(), approved)
+	if err != nil || !plan.Steps[1].Conditional || !reflect.DeepEqual(fixture.checked, []ports.ReconcileStageID{"b", "a"}) {
+		t.Fatalf("plan=%#v checked=%v err=%v", plan, fixture.checked, err)
+	}
+	fixture.checked = nil
+	fixture.converged["b"] = false
+	if _, err := reconciler.RefreshApproved(context.Background(), approved); !errors.Is(err, domain.ErrPlanStale) || !reflect.DeepEqual(fixture.checked, []ports.ReconcileStageID{"b"}) {
+		t.Fatalf("later skip guard bypassed: checked=%v err=%v", fixture.checked, err)
+	}
+}

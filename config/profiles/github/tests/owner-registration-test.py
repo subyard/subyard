@@ -57,8 +57,10 @@ def save(): control.write_text(json.dumps(state))
 if name=='loginctl': print('yes'); sys.exit(0)
 if name=='incus':
     sys.stdin.buffer.read()
-    if 'sha256sum' in args: print(os.environ['ENGINE_DIGEST']+'  client')
-    if 'status' in args: print(json.dumps(dict(protocol=1,broker_sha256=os.environ['ENGINE_DIGEST'],client_sha256=os.environ['ENGINE_DIGEST'])))
+    if 'sha256sum' in args: print(state.get('guest_digest',os.environ['ENGINE_DIGEST'])+'  client')
+    if 'status' in args:
+        print(state.get('status_output',json.dumps(dict(protocol=1,broker_sha256=os.environ['ENGINE_DIGEST'],client_sha256=os.environ['ENGINE_DIGEST']))))
+        sys.exit(state.get('status_exit',0))
     sys.exit(0)
 assert args.pop(0)=='--user'
 action=args.pop(0)
@@ -140,6 +142,36 @@ elif action!='show-environment': raise AssertionError([action,*args])
                 self.environment['SUBYARD_PROFILE_STOPPED'] = '1'
                 self.run_owner('--check', success=False)
                 self.environment.pop('SUBYARD_PROFILE_STOPPED')
+
+    def test_complete_selected_check_probes_installed_and_loaded_guest_once(self):
+        self.run_owner('--check')
+        guest = [call for call in self.calls() if call[0] == 'incus']
+        self.assertEqual(len(guest), 3)
+        self.assertEqual(sum('sha256sum' in call for call in guest), 1)
+        self.assertEqual(sum('--check' in call for call in guest), 1)
+        self.assertEqual(sum('status' in call for call in guest), 1)
+        self.assertFalse(any(call[0] == 'systemctl' and call[2] in
+            ('start', 'restart', 'enable', 'daemon-reload') for call in self.calls()))
+
+    def test_selected_check_rejects_failed_or_malformed_loaded_identity(self):
+        for output, status in (('{broken', 0), ('[]', 0),
+                               (json.dumps(dict(protocol=1,broker_sha256='c'*64,client_sha256=self.digest)), 0),
+                               (json.dumps(dict(protocol=1,broker_sha256=self.digest,client_sha256=self.digest)), 1)):
+            with self.subTest(output=output, status=status):
+                self.drift(status_output=output, status_exit=status)
+                result = self.run_owner('--check', success=False)
+                self.assertEqual(result.stderr, 'subyard-profile-readiness-v1 transport-unavailable\n')
+
+    def test_selected_check_rejects_installed_guest_engine_drift(self):
+        self.drift(guest_digest='c'*64)
+        self.run_owner('--check', success=False)
+        self.assertFalse(any('status' in call for call in self.calls()))
+
+    def test_selected_check_rejects_inactive_service(self):
+        self.drift(active=False)
+        result = self.run_owner('--check', success=False)
+        self.assertEqual(result.stderr, 'subyard-profile-readiness-v1 unit-inactive\n')
+        self.assertFalse(any(call[0] == 'incus' for call in self.calls()))
 
     def test_registration_only_repair_preserves_payloads_and_healthy_process(self):
         protected = [self.unit, self.root/'data/github-broker/fixture.json',

@@ -240,6 +240,12 @@ func (runtime Runtime) CheckProfileRuntimePlan(ctx context.Context) error {
 	return plan.checkObservations(observations)
 }
 
+// CheckedProfileRuntimesConverged consumes the observations just validated by
+// CheckProfileRuntimePlan within the same assessment, before any native effect.
+func (runtime Runtime) CheckedProfileRuntimesConverged(plan *ProfileRuntimePlan) bool {
+	return runtime.profileRuntimesConverged(plan.current)
+}
+
 // checkObservations applies stale-plan policy to captured native facts only.
 func (plan *ProfileRuntimePlan) checkObservations(observations map[string]ports.RuntimeObservation) error {
 

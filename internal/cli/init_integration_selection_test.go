@@ -219,7 +219,7 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 		t.Fatal("platform reconstruction discarded approved adoption")
 	}
 	executor.fingerprint = strings.Repeat("b", 64)
-	if err := execution.refreshAssessment(ctx); !errors.Is(err, domain.ErrPlanStale) {
+	if err := execution.refreshAssessment(ctx, program); !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("composed init refresh accepted changed adoption: %v", err)
 	}
 	if err := execution.run(ctx, program, io.Discard); !errors.Is(err, domain.ErrPlanStale) {

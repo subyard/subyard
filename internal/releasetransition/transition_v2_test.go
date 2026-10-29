@@ -2077,7 +2077,7 @@ func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 				links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
 				return links, nil
 			}
-			reconciler := &v2TestReconciler{}
+			reconciler := &v2TestReconciler{warnings: []string{"runtime warning"}}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
 			initial, err := transition.Inspect(ctx, goal)
@@ -2121,6 +2121,9 @@ func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 			}
 			if outcome.Code != want || reconciler.reconciles != 1 {
 				t.Fatalf("outcome = %#v, reconciles=%d", outcome, reconciler.reconciles)
+			}
+			if !slices.Equal(outcome.Warnings, []string{"runtime warning"}) {
+				t.Fatalf("completed resume lost current warnings: %v", outcome.Warnings)
 			}
 			after, err := fresh.store.ReadCurrentJournal()
 			if err != nil || !sameProtectedSnapshot(before, after) {
@@ -3832,12 +3835,16 @@ func TestFreshV2TransitionRejectsChangedObservationScope(t *testing.T) {
 	}
 }
 
-func TestFreshV2ConvergeObservesOncePerPhaseAndRechecksUnderLock(t *testing.T) {
-	for _, driftAfterLock := range []bool{false, true} {
-		t.Run(fmt.Sprintf("driftAfterLock=%t", driftAfterLock), func(t *testing.T) {
+func TestFreshV2CompletedConvergeObservesOnlyUnderLock(t *testing.T) {
+	for _, test := range []struct {
+		name                                                    string
+		driftAfterLock, cleanupFails, checkpointed, invalidPlan bool
+	}{{name: "ready"}, {name: "checkpointed", checkpointed: true}, {name: "invalid-plan", invalidPlan: true}, {name: "drift", driftAfterLock: true}, {name: "cleanup-warning", cleanupFails: true}} {
+		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			transition, configHome, _ := v2TransitionFixture(t, nil)
-			reconciler := &v2TestReconciler{converged: true}
+			transition.options.MigrationCheckpoint = test.checkpointed
+			reconciler := &v2TestReconciler{converged: true, warnings: []string{"runtime probe warning"}}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 			initial, err := transition.Inspect(ctx, goal)
@@ -3852,27 +3859,35 @@ func TestFreshV2ConvergeObservesOncePerPhaseAndRechecksUnderLock(t *testing.T) {
 				t.Fatalf("ready inspection: %+v %v", ready, err)
 			}
 			options := transition.options
-			observedUnderLock := false
-			if driftAfterLock {
-				observeLinks := options.ObserveLinks
-				options.ObserveLinks = func(ctx context.Context) (ReleaseLinks, error) {
-					fd, err := unix.Open(filepath.Join(configHome, "migrations", "update.lock"), unix.O_RDWR|unix.O_CLOEXEC, 0)
-					if err != nil {
-						return ReleaseLinks{}, err
+			if test.cleanupFails {
+				options.fault = func(point string) error {
+					if point == "before-recovery-gc" {
+						return errors.New("cleanup interrupted")
 					}
-					defer unix.Close(fd)
-					if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
-						if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
-							return ReleaseLinks{}, err
-						}
-					} else if errors.Is(err, unix.EWOULDBLOCK) {
-						observedUnderLock = true
-						reconciler.converged = false
-					} else {
-						return ReleaseLinks{}, err
-					}
-					return observeLinks(ctx)
+					return nil
 				}
+			}
+			observedUnderLock := false
+			observeLinks := options.ObserveLinks
+			options.ObserveLinks = func(ctx context.Context) (ReleaseLinks, error) {
+				fd, err := unix.Open(filepath.Join(configHome, "migrations", "update.lock"), unix.O_RDWR|unix.O_CLOEXEC, 0)
+				if err != nil {
+					return ReleaseLinks{}, err
+				}
+				defer unix.Close(fd)
+				if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+					if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+						return ReleaseLinks{}, err
+					}
+				} else if errors.Is(err, unix.EWOULDBLOCK) {
+					observedUnderLock = true
+					if test.driftAfterLock {
+						reconciler.converged = false
+					}
+				} else {
+					return ReleaseLinks{}, err
+				}
+				return observeLinks(ctx)
 			}
 			fresh, err := NewV2Transition(options)
 			if err != nil {
@@ -3880,13 +3895,24 @@ func TestFreshV2ConvergeObservesOncePerPhaseAndRechecksUnderLock(t *testing.T) {
 			}
 			before := snapshotStoreV2Tree(t, configHome)
 			reconciler.observes, reconciler.reconciles = 0, 0
-			outcome, err := fresh.Converge(ctx, Execution{Plan: ready.Plan})
-			wantStatus, wantCode, wantObserves := StatusReady, CodeReady, 3
-			if driftAfterLock {
-				wantStatus, wantCode, wantObserves = StatusOperatorActionRequired, CodePlanStale, 2
+			plan := ready.Plan
+			if test.invalidPlan {
+				plan = "plan-v1-" + PlanToken(strings.Repeat("f", 64))
 			}
-			if err != nil || outcome.Status != wantStatus || outcome.Code != wantCode || reconciler.observes != wantObserves || reconciler.reconciles != 0 || observedUnderLock != driftAfterLock {
+			outcome, err := fresh.Converge(ctx, Execution{Plan: plan})
+			wantStatus, wantCode := StatusReady, CodeReady
+			if test.driftAfterLock || test.invalidPlan {
+				wantStatus, wantCode = StatusOperatorActionRequired, CodePlanStale
+			}
+			if err != nil || outcome.Status != wantStatus || outcome.Code != wantCode || reconciler.observes != 1 || reconciler.reconciles != 0 || !observedUnderLock {
 				t.Fatalf("fresh convergence: outcome=%+v err=%v observes=%d reconciles=%d observedUnderLock=%t", outcome, err, reconciler.observes, reconciler.reconciles, observedUnderLock)
+			}
+			warnings := []string{"runtime probe warning"}
+			if test.cleanupFails {
+				warnings = append([]string{"recovery cleanup is pending"}, warnings...)
+			}
+			if !slices.Equal(outcome.Warnings, warnings) {
+				t.Fatalf("ready warnings = %v, want %v", outcome.Warnings, warnings)
 			}
 			if !bytes.Equal(before, snapshotStoreV2Tree(t, configHome)) {
 				t.Fatal("ready repeat or stale refusal changed protected state")

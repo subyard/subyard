@@ -3,18 +3,191 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+type profileBatchEvent struct {
+	Event, Name string
+	PID, Child  int
+}
+
+func TestObserveProfileRuntimeBatchBoundsOrdersAndDrainsNativeProcesses(t *testing.T) {
+	for _, scenario := range []string{"ready", "pinned", "ordered errors", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			eventsPath := filepath.Join(root, "events")
+			testkit.WriteFile(t, eventsPath, nil, 0o600)
+			runtime := Runtime{RepositoryRoot: root, Environment: []string{"BATCH_ROOT=" + root},
+				Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}}},
+				Yard:  domain.Context{IncusProject: "subyard", YardInstanceName: "yard"}}
+			for _, name := range []string{"a", "b", "c", "d"} {
+				profileRoot := filepath.Join(root, "config", "profiles", name)
+				if err := os.MkdirAll(profileRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(profileRoot, "runtime.py"), []byte(`#!/usr/bin/python3
+import json,os,subprocess,time
+from pathlib import Path
+root=Path(os.environ['BATCH_ROOT'])
+name=Path.cwd().name
+child=subprocess.Popen(['/bin/sleep','30'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+def emit(event):
+    with (root/'events').open('ab',buffering=0) as stream:
+        stream.write((json.dumps(dict(Event=event,Name=name,PID=os.getpid(),Child=child.pid))+'\n').encode())
+emit('start')
+while not (root/('release-'+name)).exists(): time.sleep(.005)
+child.terminate()
+child.wait()
+emit('end')
+output=(root/('output-'+name)).read_text()
+if output=='exit': raise SystemExit(9)
+print(output)
+`), 0o700)
+				runtime.Profiles = append(runtime.Profiles, profile.Definition{Name: name, Root: profileRoot,
+					Runtime: &profile.RuntimeHook{ActivationID: name + "-runtime", Handler: "runtime.py"}})
+				output := fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, strings.Repeat(name, 64), strings.Repeat(name, 64))
+				if scenario == "ordered errors" && name == "a" {
+					output = "invalid"
+				} else if scenario == "ordered errors" && name == "b" {
+					output = "exit"
+				}
+				testkit.WriteFile(t, filepath.Join(root, "output-"+name), []byte(output), 0o600)
+			}
+			if scenario == "pinned" {
+				pin, err := os.Open(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pin.Close()
+				runtime.RepositoryRoot = fmt.Sprintf("/proc/self/fd/%d", pin.Fd())
+				// Parallel command.Environ calls must not mutate shared spare capacity.
+				runtime.Environment = append(make([]string, 0, 8), runtime.Environment...)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			done := make(chan struct{})
+			var observations map[string]ports.RuntimeObservation
+			var observeErr error
+			go func() {
+				observations, observeErr = runtime.ObserveProfileRuntimes(ctx)
+				close(done)
+			}()
+			defer func() { cancel(); <-done }()
+			readEvents := func() []profileBatchEvent {
+				t.Helper()
+				data, err := os.ReadFile(eventsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var events []profileBatchEvent
+				for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+					if len(line) == 0 {
+						continue
+					}
+					var event profileBatchEvent
+					if err := json.Unmarshal(line, &event); err != nil {
+						t.Fatal(err)
+					}
+					events = append(events, event)
+				}
+				return events
+			}
+			waitEvents := func(kind string, count int) {
+				t.Helper()
+				ticker := time.NewTicker(5 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					found := 0
+					for _, event := range readEvents() {
+						if event.Event == kind {
+							found++
+						}
+					}
+					if found >= count {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						t.Fatalf("native batch did not reach %d %s events: %v", count, kind, ctx.Err())
+					case <-ticker.C:
+					}
+				}
+			}
+			release := func(name string) { testkit.WriteFile(t, filepath.Join(root, "release-"+name), nil, 0o600) }
+			waitEvents("start", 3)
+			if scenario == "cancel" {
+				cancel()
+			} else {
+				release("b")
+				waitEvents("start", 4)
+				release("c")
+				release("d")
+				waitEvents("end", 3)
+				select {
+				case <-done:
+					t.Fatal("batch returned while its first native observation was still running")
+				default:
+				}
+				release("a")
+			}
+			<-done
+			active, peak := 0, 0
+			for _, event := range readEvents() {
+				if event.Event == "start" {
+					active++
+					peak = max(peak, active)
+					for _, pid := range []int{event.PID, event.Child} {
+						if err := syscall.Kill(pid, 0); err == nil {
+							// A killed descendant can await reaping by init; it must
+							// no longer execute after the native batch has joined.
+							stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+							if err == nil && !strings.HasPrefix(string(stat)[strings.LastIndex(string(stat), ")")+1:], " Z ") {
+								t.Fatalf("batch returned with native process %d still running", pid)
+							}
+						}
+					}
+				} else {
+					active--
+				}
+			}
+			if peak != 3 {
+				t.Fatalf("native batch peak=%d, want three", peak)
+			}
+			switch scenario {
+			case "ready", "pinned":
+				if observeErr != nil || len(observations) != 4 || active != 0 {
+					t.Fatalf("batch result=%v error=%v active=%d", observations, observeErr, active)
+				}
+				for _, name := range []string{"a", "b", "c", "d"} {
+					if observations[name+"-runtime"].Actual != strings.Repeat(name, 64) {
+						t.Fatalf("out-of-order result lost owner %s", name)
+					}
+				}
+			case "ordered errors":
+				if observeErr == nil || !strings.Contains(observeErr.Error(), "decode profile runtime a-runtime observation") || active != 0 {
+					t.Fatalf("batch lost original-order failure or drain: %v active=%d", observeErr, active)
+				}
+			case "cancel":
+				if !errors.Is(observeErr, context.Canceled) {
+					t.Fatalf("batch lost cancellation: %v", observeErr)
+				}
+			}
+		})
+	}
+}
 
 func TestProfileRuntimeColdInstallationPreservesDependencyLoss(t *testing.T) {
 	for _, scenario := range []string{"cold", "retained", "installed", "custom socket"} {

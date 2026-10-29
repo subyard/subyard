@@ -173,6 +173,27 @@ func TestRuntimeReadyProofGuardsPublicationAndSuccess(t *testing.T) {
 	}
 }
 
+func TestObservedJournalReadyProofBindsCompletedHistory(t *testing.T) {
+	transition, _ := completedSourceMetadataFixture(t)
+	observation, err := transition.observe(context.Background(), Goal{Target: transition.options.Releases.Target, Direction: transition.options.Direction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := transition.observedJournalReadyProof(observation)
+	if err != nil || proof.validateJournal(transition, *observation.journal) != nil || proof.outcome.Transaction == nil {
+		t.Fatalf("observed journal proof: %+v %v", proof, err)
+	}
+	changed := *observation.journal
+	changed.ArtifactDigest = digestB
+	if proof.validateJournal(transition, changed) == nil {
+		t.Fatal("observed proof accepted changed journal facts")
+	}
+	observation.journal = &changed
+	if _, err := transition.observedJournalReadyProof(observation); err == nil {
+		t.Fatal("foreign completed history produced a journal readiness proof")
+	}
+}
+
 func TestV2RejectsTypedNilAdapters(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	options := transition.options

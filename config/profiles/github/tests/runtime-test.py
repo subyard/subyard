@@ -47,7 +47,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(observation['state'], 'current')
         self.assertEqual(observation['actual'], observation['desired'])
         self.assertTrue(observation['ownership_absent'])
-        self.assertEqual(len(observed), 3)
+        self.assertEqual(len(observed), 2)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir='/tmp')
@@ -69,6 +69,7 @@ class RuntimeTest(unittest.TestCase):
         self.manager = b'ActiveState=active\nMainPID=22\nLoadState=loaded\n'
         self.probe_code = 0
         self.applies = 0
+        self.commands = []
         self.remove_on_apply = False
         self.environment = {'SUBYARD_YARD': 'test', 'SUBYARD_HOME': str(self.root/'data'),
             'SUBYARD_OPERATOR_HOME': str(self.root/'home'), 'SUBYARD_CONFIG_HOME': str(self.root/'config'),
@@ -83,6 +84,7 @@ class RuntimeTest(unittest.TestCase):
         self.fake_run([str(self.source/'owner.sh'), '--yes'], env=environment)
 
     def fake_run(self, argv, **kwargs):
+        self.commands.append(argv)
         if argv[0] == str(self.source/'owner.sh'):
             if argv[1] == '--yes':
                 self.applies += 1
@@ -99,6 +101,37 @@ class RuntimeTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, self.probe_code, self.guest.encode())
         return subprocess.CompletedProcess(argv, 0, self.manager)
 
+    def test_selected_ready_uses_only_the_complete_owner_check(self):
+        self.ready = True
+        observed, _ = runtime.observe()
+        self.assertEqual(observed, {'state': 'current', 'actual': observed['desired'],
+                                    'desired': observed['desired']})
+        self.assertEqual(self.commands, [[str(self.source/'owner.sh'), '--check']])
+        # A later observation must still run the authoritative live check.
+        self.ready = False
+        self.check_reason = 'transport-unavailable'
+        self.assertEqual(runtime.observe()[0]['state'], 'stale')
+        self.assertEqual(sum(command[0] == str(self.source/'owner.sh') for command in self.commands), 2)
+
+    def test_stopped_selected_owner_does_not_bypass_guest_transport_check(self):
+        self.ready = True
+        os.environ['SUBYARD_PROFILE_STOPPED'] = '1'
+        self.probe_code = 1
+        observed, _ = runtime.observe()
+        self.assertEqual(observed['state'], 'stale')
+        self.assertTrue(any(command[0] == 'incus' for command in self.commands))
+
+    def test_failed_or_malformed_native_diagnostics_cannot_make_stale_owner_ready(self):
+        for status, output in ((1, b''), (0, b'{broken'), (0, b'[]'),
+                               (0, b'{"protocol":1,"broker_sha256":"wrong"}')):
+            with self.subTest(status=status, output=output):
+                def native(argv, **kwargs):
+                    if argv[0] == 'incus' and 'status' in argv:
+                        return subprocess.CompletedProcess(argv, status, output)
+                    return self.fake_run(argv, **kwargs)
+                with patch.object(subprocess, 'run', native):
+                    self.assertEqual(runtime.observe()[0]['state'], 'stale')
+
     def test_unselected_absence_requires_all_guest_and_loaded_owner_artifacts_absent(self):
         os.environ['ENVIRONMENT_PROFILES'] = ''
         self.ready = True  # ordinary removal check: no owned skills/links/socket
@@ -108,6 +141,8 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(absent['state'], 'current')
         self.assertEqual(absent['actual'], absent['desired'])
         self.assertTrue(absent['ownership_absent'])
+        self.assertEqual(len(self.commands), 3)
+        self.assertFalse(any('status' in command for command in self.commands))
         self.guest = 'remaining-copied-guest-engine'
         self.assertFalse(runtime.observe()[0].get('ownership_absent', False))
         self.guest = ''
@@ -161,6 +196,10 @@ class RuntimeTest(unittest.TestCase):
         self.loaded['broker_sha256'] = 'c'*64
         changed, _ = runtime.observe()
         self.assertNotEqual(old['actual'], changed['actual'])
+        with patch.object(sys, 'argv', ['runtime.py', 'apply', 'op', old['actual'], old['desired']]):
+            with self.assertRaises(ValueError):
+                runtime.main()
+        self.assertEqual(self.applies, 0)
 
     def test_boot_registration_reason_binds_assessment_without_extending_wire(self):
         self.check_reason = 'boot-link-missing'

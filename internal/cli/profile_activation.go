@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -25,6 +26,14 @@ func (cli *CLI) profileActivationReconciler(request releasetransition.ProcessReq
 }
 
 func (reconciler *profileRuntimeActivationReconciler) ID() string { return reconciler.id }
+
+func (reconciler *profileRuntimeActivationReconciler) ConcurrentActivationObservation() bool {
+	// Native profile handlers have isolated processes and captured output. Shared
+	// injected platforms/transports have no independence or concurrency contract.
+	return !coreInstalledRuntimeID(reconciler.id) && reconciler.cli.options.InitPlatform == nil &&
+		reconciler.cli.options.Incus == nil && reconciler.cli.options.Executor == nil &&
+		slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id)
+}
 
 func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string, cause error) error {
 	owner := "profile " + reconciler.id + " runtime"

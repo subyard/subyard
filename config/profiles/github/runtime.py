@@ -106,7 +106,7 @@ def observe():
     unit = Path(os.environ['SUBYARD_OPERATOR_HOME'])/'.config/systemd/user'/f'subyard-github-{yard}.service'
     boot_link = unit.parent/'default.target.wants'/unit.name
     paths = [state, state/f'{yard}.json', state/f'{yard}-engine', unit.parent, unit, boot_link]
-    facts = {'paths': {str(path): metadata(path) for path in paths}, 'selected': selected}
+    facts = {'selected': selected}
     environment = dict(os.environ, SUBYARD_PROFILE_SELECTED='1' if selected else '0')
     try:
         result = subprocess.run([str(SOURCE/'owner.sh'), '--check'], env=environment,
@@ -121,6 +121,12 @@ def observe():
     except subprocess.TimeoutExpired:
         facts['check_timeout'] = True
         ready = False
+    # The selected owner's full check already verifies installed payloads,
+    # boot registration and the loaded broker/client handshake. Stopped-profile
+    # checks deliberately omit the guest and transport, so retain their probes.
+    if selected and ready and environment.get('SUBYARD_PROFILE_STOPPED') != '1':
+        return {'state': 'current', 'actual': desired, 'desired': desired}, environment
+    facts['paths'] = {str(path): metadata(path) for path in paths}
     facts['ready'] = ready
     guest = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--']
     probe = "getent passwd \"$1\" >/dev/null || exit 2; for path in /usr/local/libexec/subyard/github-client /usr/local/bin/subyard-github /usr/local/bin/git-remote-subyard-github; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null && sha256sum \"$path\" 2>/dev/null || exit 2; fi; done; home=$(getent passwd \"$1\" | cut -d: -f6); if [ ! -L \"$home/.config/subyard/github-git.conf\" ] && [ \"$(head -n 1 \"$home/.config/subyard/github-git.conf\" 2>/dev/null)\" = '# subyard-managed-github-git-v1' ]; then for path in \"$home/.config/git/config\" \"$home/.config/subyard/github-git.conf\"; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then stat -c '%F|%a|%u|%g|%i|%s|%Y|%Z' \"$path\" 2>/dev/null || exit 2; fi; done; fi"
@@ -130,17 +136,6 @@ def observe():
     facts['guest_available'] = installed.returncode == 0
     if installed.returncode == 0 and len(installed.stdout) < 4096:
         facts['guest'] = installed.stdout.decode().splitlines()
-    loaded = subprocess.run(guest + ['timeout', '--kill-after=1', '2', 'runuser', '-u',
-                            os.environ.get('DEV_USER', 'dev'), '--', '/usr/local/bin/subyard-github',
-                            'status', '--runtime'], capture_output=True, timeout=4)
-    if loaded.returncode == 0 and len(loaded.stdout) < 4096:
-        try:
-            identity = json.loads(loaded.stdout)
-            if identity.get('protocol') == 1 and all(re.fullmatch('[a-f0-9]{64}', identity.get(key, ''))
-                                                    for key in ('broker_sha256', 'client_sha256')):
-                facts['loaded'] = {key: identity[key] for key in ('protocol', 'broker_sha256', 'client_sha256')}
-        except (ValueError, TypeError, AttributeError):
-            pass
     manager_environment = dict(environment, XDG_RUNTIME_DIR=f'/run/user/{os.getuid()}',
                                DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{os.getuid()}/bus')
     manager = subprocess.run(['systemctl', '--user', 'show', unit.name,
@@ -158,6 +153,19 @@ def observe():
             and manager_fields.get('ActiveState') == 'inactive' and manager_fields.get('MainPID') == '0'):
         return {'state': 'current', 'actual': desired, 'desired': desired,
                 'ownership_absent': True}, environment
+    # Loaded identity binds stale/partial state before apply. A proven absent
+    # installation has no loaded client whose diagnostic would be retained.
+    loaded = subprocess.run(guest + ['timeout', '--kill-after=1', '2', 'runuser', '-u',
+                            os.environ.get('DEV_USER', 'dev'), '--', '/usr/local/bin/subyard-github',
+                            'status', '--runtime'], capture_output=True, timeout=4)
+    if loaded.returncode == 0 and len(loaded.stdout) < 4096:
+        try:
+            identity = json.loads(loaded.stdout)
+            if identity.get('protocol') == 1 and all(re.fullmatch('[a-f0-9]{64}', identity.get(key, ''))
+                                                    for key in ('broker_sha256', 'client_sha256')):
+                facts['loaded'] = {key: identity[key] for key in ('protocol', 'broker_sha256', 'client_sha256')}
+        except (ValueError, TypeError, AttributeError):
+            pass
     return {'state': 'current' if ready else 'stale',
             'actual': desired if ready else digest(facts), 'desired': desired}, environment
 

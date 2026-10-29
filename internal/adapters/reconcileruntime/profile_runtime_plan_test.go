@@ -42,6 +42,29 @@ esac
 	}
 }
 
+func TestCheckedProfileRuntimeConvergenceReusesOnlyValidatedObservation(t *testing.T) {
+	root := testkit.TempDir(t)
+	state, calls := filepath.Join(root, "state"), filepath.Join(root, "calls")
+	runtime := profileRuntimeFixtureAt(t, root, "#!/bin/sh\nprintf 'observe\\n' >> \"$CALLS\"\ncat \"$STATE\"\n")
+	runtime.Environment = []string{"STATE=" + state, "CALLS=" + calls}
+	testkit.WriteFile(t, state, []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, testRuntimeNewDigest, testRuntimeNewDigest)), 0o600)
+	plan, err := runtime.PrepareProfileRuntimes(context.Background(), false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.RuntimePlan = plan
+	if err := runtime.CheckProfileRuntimePlan(context.Background()); err != nil || !runtime.CheckedProfileRuntimesConverged(plan) {
+		t.Fatalf("checked runtime did not converge: %v", err)
+	}
+	if data, err := os.ReadFile(calls); err != nil || string(data) != "observe\nobserve\n" {
+		t.Fatalf("convergence repeated native observation: %q %v", data, err)
+	}
+	testkit.WriteFile(t, state, []byte(fmt.Sprintf(`{"state":"stale","actual":%q,"desired":%q}`, testRuntimeOldDigest, testRuntimeNewDigest)), 0o600)
+	if err := runtime.CheckProfileRuntimePlan(context.Background()); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("later native drift was accepted: %v", err)
+	}
+}
+
 func TestPreparedProfileRuntimeAllowsConvergenceAndRejectsDesiredDrift(t *testing.T) {
 	approved := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: testRuntimeOldDigest, Desired: testRuntimeNewDigest}
 	for _, test := range []struct {
