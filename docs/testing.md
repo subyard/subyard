@@ -825,6 +825,11 @@ handling, latest-release installation and preservation of a working binary after
 Mocks do not establish compatibility with a real CLI release. Check its native `execpolicy check`
 against the shipped rules for that evidence; real client approve/deny needs separate acceptance.
 
+`bash tests/claude-agent-policy.sh` runs the Claude package's hermetic CLI-install and policy checks.
+For a native Claude download, installation and repeat-provision smoke test, use
+`dev/agent-e2e.sh --slot N --vm-count 1 --vm 1 --purpose claude-install -- bash config/agents/claude/tests/e2e/acceptance.sh --install-only`.
+This mode needs no account or model API and does not run the separate SDK permission scenarios.
+
 ## Run Veranda host-free checks
 
 Install Python 3 and the current stable Rust toolchain selected by
