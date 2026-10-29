@@ -1624,6 +1624,15 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+  Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
+  write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
+  `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,
+  `boot-dependency-unloaded`, `unit-inactive`, or `transport-unavailable`. The dispatcher
+  captures at most 128 bytes and discards malformed, duplicate, oversized or arbitrary
+  output. Adapters opt in with `SUBYARD_PROFILE_DIAGNOSTICS=1` to receive a validated
+  `reason=CODE` after the existing owner/native-exit check record; callers without the
+  opt-in retain that original record. Scoped human status displays `diagnostic: CODE`
+  from the same observation. Runtime observation and status JSON stay unchanged.
   Scoped disable invokes only that profile's `--remove`, carrying metadata bindings for its declared
   managed paths so replacement artifacts fail stale guards before deletion.
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional

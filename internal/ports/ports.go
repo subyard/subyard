@@ -212,6 +212,7 @@ type ReconcileStageObservation struct {
 	Converged  bool
 	Owner      string
 	NativeExit int
+	Reason     string
 }
 
 type InitPlatform interface {

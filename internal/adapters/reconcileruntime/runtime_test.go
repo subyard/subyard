@@ -59,11 +59,11 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := filepath.Join(root, "events")
-	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1' >&2\nexit 1\n"), 0o700)
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\n[ \"$SUBYARD_PROFILE_DIAGNOSTICS\" = 1 ] || exit 2\necho 'profile service check owner=sample native-exit=1 reason=boot-dependency-unloaded' >&2\nexit 1\n"), 0o700)
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped"}}}}}
 	observed, failure := runtime.ObserveStage(context.Background(), ports.ReconcileStageProfileServices)
 	data, readErr := os.ReadFile(events)
-	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || readErr != nil || string(data) != "--check:1" {
+	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || observed.Reason != "boot-dependency-unloaded" || readErr != nil || string(data) != "--check:1" {
 		t.Fatalf("original single stopped check changed: %#v %v %q %v", observed, failure, data, readErr)
 	}
 	for _, code := range []int{1, 17} {
@@ -73,16 +73,52 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		if observation.Converged || observation.Owner != "sample" || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
 			t.Fatalf("native disposition lost: %#v %v", observation, observedErr)
 		}
+		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable"} {
+			withReason := strings.TrimSuffix(output, "\n") + " reason=" + reason + "\n"
+			observation, observedErr := profileServiceObservation(withReason, false, err)
+			if observation.Reason != reason || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
+				t.Fatalf("readiness reason lost: %#v %v", observation, observedErr)
+			}
+		}
 		for _, invalid := range []string{"private-canary", output + "private-canary\n", "profile service check owner=../private-canary native-exit=1"} {
 			_, failure := profileServiceObservation(invalid, false, err)
 			if failure == nil || strings.Contains(failure.Error(), "private-canary") {
 				t.Fatalf("dispatcher failure classified as drift or leaked: %v", failure)
 			}
 		}
+		for _, suffix := range []string{" reason=private-canary", " reason=unit-inactive reason=unit-inactive", " unit-inactive", " reason="} {
+			_, failure := profileServiceObservation(strings.TrimSuffix(output, "\n")+suffix, false, err)
+			if failure == nil || strings.Contains(failure.Error(), "private-canary") {
+				t.Fatalf("invalid readiness record admitted or leaked: %v", failure)
+			}
+		}
+		if _, failure := profileServiceObservation(output, true, err); failure == nil {
+			t.Fatal("oversized readiness record admitted")
+		}
 	}
 	observation, err := profileServiceObservation("", false, nil)
 	if err != nil || !observation.Converged {
 		t.Fatalf("successful check changed: %#v %v", observation, err)
+	}
+}
+
+func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
+	root := testkit.TempDir(t)
+	script := filepath.Join(root, "scripts/profile-services.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(root, "events")
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s:%s\\n' \"$1\" \"$2\" \"$SUBYARD_PROFILE_DIAGNOSTICS\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1 reason=unit-inactive' >&2\nexit 1\n"), 0o700)
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}}
+	observation, err := runtime.ProfileServiceObservation(context.Background(), "sample")
+	data, readErr := os.ReadFile(events)
+	if err != nil || observation.Converged || observation.Reason != "unit-inactive" || readErr != nil || string(data) != "--check:sample:1\n" {
+		t.Fatalf("scoped observation=%#v err=%v events=%q read=%v", observation, err, data, readErr)
+	}
+	converged, err := runtime.ProfileServiceConverged(context.Background(), "sample")
+	if err != nil || converged {
+		t.Fatalf("scoped convergence lost drift: %t %v", converged, err)
 	}
 }
 

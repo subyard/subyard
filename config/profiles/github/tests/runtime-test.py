@@ -62,6 +62,8 @@ class RuntimeTest(unittest.TestCase):
         shared.mkdir()
         (shared/'deliver.py').write_text('shared skill delivery fixture')
         self.ready = False
+        self.check_status = 1
+        self.check_reason = ''
         self.guest = 'installed-old'
         self.loaded = {'protocol': 1, 'broker_sha256': 'a'*64, 'client_sha256': 'b'*64}
         self.manager = b'ActiveState=active\nMainPID=22\nLoadState=loaded\n'
@@ -89,7 +91,8 @@ class RuntimeTest(unittest.TestCase):
                     self.guest = ''
                     self.manager = b'ActiveState=inactive\nMainPID=0\nLoadState=not-found\n'
                     (self.root/'data/github-broker/test-engine').unlink()
-            return subprocess.CompletedProcess(argv, 0 if self.ready or argv[1] == '--yes' else 1)
+            return subprocess.CompletedProcess(argv, 0 if self.ready or argv[1] == '--yes' else self.check_status,
+                stderr=(f'subyard-profile-readiness-v1 {self.check_reason}\n'.encode() if self.check_reason else b''))
         if argv[0] == 'incus':
             if 'status' in argv:
                 return subprocess.CompletedProcess(argv, 0, json.dumps(self.loaded).encode())
@@ -158,6 +161,24 @@ class RuntimeTest(unittest.TestCase):
         self.loaded['broker_sha256'] = 'c'*64
         changed, _ = runtime.observe()
         self.assertNotEqual(old['actual'], changed['actual'])
+
+    def test_boot_registration_reason_binds_assessment_without_extending_wire(self):
+        self.check_reason = 'boot-link-missing'
+        old, _ = runtime.observe()
+        self.check_reason = 'boot-dependency-unloaded'
+        changed, _ = runtime.observe()
+        self.assertNotEqual(old['actual'], changed['actual'])
+        self.assertEqual(set(changed), {'state', 'actual', 'desired'})
+        with patch.object(sys, 'argv', ['runtime.py', 'apply', 'op', old['actual'], old['desired']]):
+            with self.assertRaises(ValueError):
+                runtime.main()
+        self.assertEqual(self.applies, 0)
+
+    def test_unknown_check_diagnostics_do_not_enter_runtime_facts(self):
+        old, _ = runtime.observe()
+        self.check_reason = 'private-sentinel-do-not-copy'
+        changed, _ = runtime.observe()
+        self.assertEqual(old, changed)
 
     def test_retry_then_noop_preserves_credentials(self):
         protected = self.root/'private-connection'

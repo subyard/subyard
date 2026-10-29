@@ -16,17 +16,55 @@ import (
 // ReadinessTimeout bounds read-only profile readiness observation.
 const ReadinessTimeout = 30 * time.Second
 
-// ServiceCheckError contains only a validated public owner and native status.
+// ServiceCheckError contains only a validated public owner, native status and
+// optional closed readiness reason.
 type ServiceCheckError struct {
 	Owner      string
 	NativeExit int
+	Reason     string
 	cause      error
 }
 
 func (failure *ServiceCheckError) Error() string {
-	return fmt.Sprintf("profile service check owner=%s native-exit=%d", failure.Owner, failure.NativeExit)
+	message := fmt.Sprintf("profile service check owner=%s native-exit=%d", failure.Owner, failure.NativeExit)
+	if ValidServiceReadinessReason(failure.Reason) {
+		message += " reason=" + failure.Reason
+	}
+	return message
 }
 func (failure *ServiceCheckError) Unwrap() error { return failure.cause }
+
+// ValidServiceReadinessReason admits only public, secret-free readiness facts.
+func ValidServiceReadinessReason(reason string) bool {
+	switch reason {
+	case "boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable":
+		return true
+	}
+	return false
+}
+
+type serviceReadinessBuffer []byte
+
+const serviceReadinessLimit = 128
+
+func (buffer *serviceReadinessBuffer) Write(data []byte) (int, error) {
+	*buffer = append(*buffer, data[:min(len(data), serviceReadinessLimit-len(*buffer))]...)
+	return len(data), nil
+}
+
+func (buffer *serviceReadinessBuffer) reason() string {
+	const prefix = "subyard-profile-readiness-v1 "
+	data := string(*buffer)
+	// Every valid closed record is shorter than a full (possibly truncated) buffer.
+	if len(*buffer) == serviceReadinessLimit || !strings.HasPrefix(data, prefix) || !strings.HasSuffix(data, "\n") {
+		return ""
+	}
+	reason := strings.TrimSuffix(strings.TrimPrefix(data, prefix), "\n")
+	if !ValidServiceReadinessReason(reason) {
+		return ""
+	}
+	return reason
+}
 
 // ServiceCheckExit preserves ordinary drift and native failures separately from
 // dispatcher failures. Other service verbs retain their existing exit policy.
@@ -90,14 +128,18 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 		command.Env = env
 		command.Stdout = output
 		command.Stderr = stderr
+		var diagnostic serviceReadinessBuffer
 		if action == "--check" {
 			command.Stdout, command.Stderr = io.Discard, io.Discard
+			if environment["SUBYARD_PROFILE_DIAGNOSTICS"] == "1" {
+				command.Stderr = &diagnostic
+			}
 		}
 		if err := command.Run(); err != nil {
 			if action == "--check" {
 				var exit *exec.ExitError
 				if errors.As(err, &exit) && exit.ExitCode() > 0 {
-					return &ServiceCheckError{Owner: definition.Name, NativeExit: exit.ExitCode(), cause: err}
+					return &ServiceCheckError{Owner: definition.Name, NativeExit: exit.ExitCode(), Reason: diagnostic.reason(), cause: err}
 				}
 				return errors.New("profile service check unavailable")
 			}

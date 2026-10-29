@@ -29,6 +29,10 @@ type profileServiceBinder interface {
 	ProfileServiceBinding(context.Context, string) (string, error)
 }
 
+type profileServiceObserver interface {
+	ProfileServiceObservation(context.Context, string) (ports.ReconcileStageObservation, error)
+}
+
 type profileRequest struct {
 	verb, id string
 	json     bool
@@ -221,8 +225,21 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	connection, connectionErr := cli.profileConnection(loaded, definition)
 	if request.verb == "status" {
 		status := profileStatus{Yard: loaded.Context.YardName, ID: request.id, Enabled: definition.Selected(loaded.Context.YardName, loaded.Environment), Configured: connectionErr == nil, Runtime: "unavailable"}
+		diagnostic := ""
 		if cli.requireRunningProfileYard(ctx, loaded) == nil {
-			converged, err := cli.profileRuntime(loaded).ProfileServiceConverged(ctx, request.id)
+			runtime := cli.profileRuntime(loaded)
+			var converged bool
+			var err error
+			if observer, ok := runtime.(profileServiceObserver); ok {
+				var observation ports.ReconcileStageObservation
+				observation, err = observer.ProfileServiceObservation(ctx, request.id)
+				converged = observation.Converged
+				if !converged && profile.ValidServiceReadinessReason(observation.Reason) {
+					diagnostic = observation.Reason
+				}
+			} else {
+				converged, err = runtime.ProfileServiceConverged(ctx, request.id)
+			}
 			if err != nil {
 				return err
 			}
@@ -241,6 +258,9 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 				return
 			}
 			fmt.Fprintf(cli.options.Stdout, "yard: %s\nprofile: %s\nenabled: %t\nconfigured: %t\nruntime: %s\nready: %t\n", status.Yard, status.ID, status.Enabled, status.Configured, status.Runtime, status.Ready)
+			if diagnostic != "" {
+				fmt.Fprintf(cli.options.Stdout, "diagnostic: %s\n", diagnostic)
+			}
 		}
 		return nil
 	}

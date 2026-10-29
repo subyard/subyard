@@ -44,6 +44,7 @@ class GitHubSkill(unittest.TestCase):
                         unit_dir=str(root/'units'),broker_engine=str(root/'host-state/engine'),
                         runtime_file=str(root/'host-state/runtime.json'),unit_file=str(root/'units/broker.service'),
                         unit='fixture.service',mode='apply',YARD_INSTANCE_NAME='fixture',INCUS_PROJECT='fixture',
+                        operator=pwd.getpwuid(os.getuid()).pw_name,operator_uid=str(os.getuid()),
                         guest_engine='/usr/local/libexec/subyard/github-client',DEV_USER=pwd.getpwuid(os.getuid()).pw_name)
                     setup = r'''
 skill_delivery() { python3 "$DELIVERY_SOURCE" "$@" --root "$FIXTURE_ROOT" --provider profile-github --source "$PROFILE_SOURCE/skills.json" --home "$DEV_HOME" --uid "$(id -u)" --gid "$(id -g)" --extra; }
@@ -55,6 +56,8 @@ user_systemctl() {
   case "$1:$SCENARIO" in enable:manager-failure) return 8 ;; restart:start-failure) return 9 ;; esac
 }
 guest_runtime_current() { [ "$SCENARIO" != handshake-failure ]; }
+host_payload_current() { return 1; }
+boot_registration_current() { :; }
 sleep() { :; }
 die() { exit 2; }
 '''

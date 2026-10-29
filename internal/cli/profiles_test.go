@@ -38,6 +38,62 @@ func (runtime profileRuntimeSelection) ApplyProfileService(_ context.Context, na
 	return nil
 }
 
+type profileDiagnosticRuntime struct {
+	profileRuntimeSelection
+	observation  ports.ReconcileStageObservation
+	checks       int
+	observations int
+}
+
+func (runtime *profileDiagnosticRuntime) ProfileServiceObservation(context.Context, string) (ports.ReconcileStageObservation, error) {
+	runtime.observations++
+	return runtime.observation, nil
+}
+
+func (runtime *profileDiagnosticRuntime) ProfileServiceConverged(ctx context.Context, name string) (bool, error) {
+	runtime.checks++
+	return runtime.profileRuntimeSelection.ProfileServiceConverged(ctx, name)
+}
+
+func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
+	for _, reason := range []string{"boot-dependency-unloaded", "private-canary"} {
+		t.Run(reason, func(t *testing.T) {
+			cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+			runtime := &profileDiagnosticRuntime{profileRuntimeSelection: profileRuntimeSelection{fixture, true}, observation: ports.ReconcileStageObservation{Owner: "fixture", NativeExit: 1, Reason: reason}}
+			cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime { return runtime }
+			for _, asJSON := range []bool{false, true} {
+				output.Reset()
+				arguments := []string{"status", "fixture"}
+				if asJSON {
+					arguments = append(arguments, "--json")
+				}
+				prepared, err := prepareScopedProfile(t, cli, arguments...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				code := cli.runPreparedCommand(context.Background(), prepared, true)
+				prepared.Close()
+				if code != 0 {
+					t.Fatalf("status exit=%d: %s", code, output)
+				}
+				if asJSON {
+					if output.String() != "{\"yard\":\"default\",\"id\":\"fixture\",\"enabled\":true,\"configured\":true,\"runtime\":\"pending\",\"ready\":false}\n" {
+						t.Fatalf("status JSON changed: %s", output)
+					}
+				} else if reason == "boot-dependency-unloaded" && !strings.HasSuffix(output.String(), "diagnostic: boot-dependency-unloaded\n") {
+					t.Fatalf("human diagnostic absent: %s", output)
+				}
+				if strings.Contains(output.String(), "private-canary") {
+					t.Fatal("unvalidated diagnostic rendered")
+				}
+			}
+			if runtime.observations != 2 || runtime.checks != 0 {
+				t.Fatalf("status repeated its check: observations=%d fallback=%d", runtime.observations, runtime.checks)
+			}
+		})
+	}
+}
+
 func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)

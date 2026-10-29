@@ -16,6 +16,8 @@ SOURCE = Path(__file__).resolve().parent
 OWNER_BARRIER = SOURCE.parents[2]/'scripts/lib/native-owner-barrier.py'
 OWNER_TIMEOUT = 90
 OWNER_CANCEL_SECONDS = 2
+CHECK_REASONS = {'boot-link-missing', 'boot-link-target-mismatch', 'unit-fragment-mismatch',
+                 'boot-dependency-unloaded', 'unit-inactive', 'transport-unavailable'}
 
 
 def apply_owner(environment):
@@ -102,13 +104,20 @@ def observe():
     desired = digest({'schema': 1, 'selected': selected, 'inputs': inputs, 'settings': settings})
     state = Path(os.environ['SUBYARD_HOME'])/'github-broker'
     unit = Path(os.environ['SUBYARD_OPERATOR_HOME'])/'.config/systemd/user'/f'subyard-github-{yard}.service'
-    paths = [state, state/f'{yard}.json', state/f'{yard}-engine', unit.parent, unit]
+    boot_link = unit.parent/'default.target.wants'/unit.name
+    paths = [state, state/f'{yard}.json', state/f'{yard}-engine', unit.parent, unit, boot_link]
     facts = {'paths': {str(path): metadata(path) for path in paths}, 'selected': selected}
     environment = dict(os.environ, SUBYARD_PROFILE_SELECTED='1' if selected else '0')
     try:
         result = subprocess.run([str(SOURCE/'owner.sh'), '--check'], env=environment,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
         ready = result.returncode == 0
+        facts['check_status'] = result.returncode
+        if not ready:
+            for reason in CHECK_REASONS:
+                if result.stderr == f'subyard-profile-readiness-v1 {reason}\n'.encode():
+                    facts['check_reason'] = reason
+                    break
     except subprocess.TimeoutExpired:
         facts['check_timeout'] = True
         ready = False

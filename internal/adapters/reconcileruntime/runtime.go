@@ -2315,7 +2315,7 @@ func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, erro
 }
 
 func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.ReconcileStageObservation, error) {
-	environment := map[string]string{}
+	environment := map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return ports.ReconcileStageObservation{}, err
@@ -2335,7 +2335,14 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 	observation := ports.ReconcileStageObservation{}
 	var exit *exec.ExitError
 	fields := strings.Fields(output)
-	if !exceeded && errors.As(err, &exit) && len(fields) == 5 && strings.Join(fields[:3], " ") == "profile service check" {
+	if !exceeded && errors.As(err, &exit) && (len(fields) == 5 || len(fields) == 6) && strings.Join(fields[:3], " ") == "profile service check" {
+		if len(fields) == 6 {
+			reason := strings.TrimPrefix(fields[5], "reason=")
+			if fields[5] != "reason="+reason || !profile.ValidServiceReadinessReason(reason) {
+				return observation, errors.New("profile service check unavailable")
+			}
+			observation.Reason = reason
+		}
 		owner := strings.TrimPrefix(fields[3], "owner=")
 		code, parseErr := strconv.Atoi(strings.TrimPrefix(fields[4], "native-exit="))
 		if fields[3] == "owner="+owner && fields[4] == "native-exit="+strconv.Itoa(code) && domain.SafeName(owner) && parseErr == nil && code == exit.ExitCode() && code > 0 && code <= 255 {
@@ -2351,7 +2358,15 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 
 // Scoped profile operations never enter the general init reconciler.
 func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string) (bool, error) {
-	return probeConverged(runtime.runScript(ctx, nil, "profile-services.sh", "--check", name))
+	observation, err := runtime.ProfileServiceObservation(ctx, name)
+	return observation.Converged, err
+}
+
+// ProfileServiceObservation retains the same bounded check used for convergence.
+func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
+	output := &profileRuntimeBoundedBuffer{limit: 256}
+	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
+	return profileServiceObservation(output.String(), output.exceeded, err)
 }
 
 func (runtime Runtime) ApplyProfileService(ctx context.Context, name string, artifacts []ports.TeardownArtifact) error {

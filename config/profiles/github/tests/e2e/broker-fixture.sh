@@ -1,5 +1,61 @@
 # shellcheck shell=bash
 # Source-only broker lifecycle operations; state and traps belong to the caller.
+assert_default_boot_registration() {
+  local link="$SUBYARD_OPERATOR_HOME/.config/systemd/user/default.target.wants/$UNIT" wants
+  [ -L "$link" ] && [ "$(readlink -- "$link")" = "$UNIT_FILE" ] \
+    || die 'broker boot link does not select its owned unit'
+  [ "$(systemctl_user show "$UNIT" --property=FragmentPath --value)" = "$UNIT_FILE" ] \
+    || die 'broker loaded a different unit fragment'
+  wants="$(systemctl_user show default.target --property=Wants --value)"
+  case " $wants " in *" $UNIT "*) ;; *) die 'broker boot dependency is not loaded' ;; esac
+}
+
+verify_boot_registration_recovery() {
+  local link="$SUBYARD_OPERATOR_HOME/.config/systemd/user/default.target.wants/$UNIT"
+  local phase before_pid before_payloads before_connection wants
+  before_connection="$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json")"
+  before_payloads="$(stat -c '%i:%Y:%s' "$UNIT_FILE" "$SUBYARD_HOME/github-broker/default.json" \
+    "$SUBYARD_HOME/github-broker/default-engine")"
+  [ "$#" -gt 0 ] || set -- active inactive
+  for phase in "$@"; do
+    assert_default_boot_registration
+    [ "$phase" != inactive ] || systemctl_user stop "$UNIT"
+    before_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
+    # Reproduce a persistent link arriving after the target graph was loaded.
+    # The link and its unit are exact marker-owned fixture resources.
+    rm -- "$link"
+    systemctl_user daemon-reload
+    ln -s "$UNIT_FILE" "$link"
+    systemctl_user is-enabled --quiet "$UNIT" || die 'drift fixture is not persistently enabled'
+    wants="$(systemctl_user show default.target --property=Wants --value)"
+    case " $wants " in *" $UNIT "*) die 'drift fixture unexpectedly loaded the boot dependency' ;; esac
+    yard profile status github --json | jq -e '.enabled and .configured and (.ready == false) and .runtime == "pending"' >/dev/null \
+      || die 'read-only profile status missed broker registration drift'
+    yard profile status github | grep -Fxq 'diagnostic: boot-dependency-unloaded' \
+      || die 'profile status did not explain unloaded boot registration'
+    # Release admission detects the same drift; repair through its approved
+    # activation boundary rather than bypassing that guard with scoped enable.
+    yard migrate --yes
+    wait_active
+    wait_status '{"configured":true}'
+    assert_default_boot_registration
+    [ "$(stat -c '%i:%Y:%s' "$UNIT_FILE" "$SUBYARD_HOME/github-broker/default.json" \
+      "$SUBYARD_HOME/github-broker/default-engine")" = "$before_payloads" ] \
+      || die 'registration repair reinstalled healthy broker payloads'
+    if [ "$phase" = active ]; then
+      [ "$(systemctl_user show "$UNIT" -p MainPID --value)" = "$before_pid" ] \
+        || die 'registration repair restarted a healthy broker'
+    fi
+    before_pid="$(systemctl_user show "$UNIT" -p MainPID --value)"
+    yard migrate --yes
+    [ "$(systemctl_user show "$UNIT" -p MainPID --value)" = "$before_pid" ] \
+      || die 'repeated registration repair restarted the broker'
+  done
+  [ "$(sha256sum "$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json")" = "$before_connection" ] \
+    || die 'registration repair changed the App connection'
+  ok 'enabled broker registration recovered active and inactive states without reinstalling payloads'
+}
+
 disable_default_broker() {
   local connection="$SUBYARD_KEYS_CONSUMER_ROOT/github/connection.json" connection_hash=''
   if [ -f "$connection" ]; then connection_hash="$(sha256sum "$connection" | awk '{print $1}')"; fi

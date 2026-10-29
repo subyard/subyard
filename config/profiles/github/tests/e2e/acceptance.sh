@@ -521,6 +521,7 @@ if [ "$MODE" = --verify-reboot ]; then
   DEV_GID="$(guest id -g dev)"
   [[ "$DEV_UID" =~ ^[0-9]+$ && "$DEV_GID" =~ ^[0-9]+$ ]] || die 'invalid guest dev identity'
   wait_active
+  assert_default_boot_registration
   wait_status '{"configured":true}'
   ok 'rebooted owner restored configured broker status'
 elif [ "$MODE" = --cleanup ]; then
@@ -602,6 +603,7 @@ else
   wait_status '{"configured":true}'
   guest test ! -e "$MATERIALIZED_KEY" || die 'owner App key entered the yard'
   ok 'broker loaded and rotated the yard keys consumer without a GitHub request'
+  verify_boot_registration_recovery
   if [ "$MODE" = --prepare-reboot ]; then
     save_checkpoint
     trap - EXIT INT TERM
@@ -693,6 +695,10 @@ ok 'named Hermes init/provision selects GitHub, preserves opaque state and keeps
 
 info 'scoped enable/disable preserves the second yard and unrelated init drift'
 verify_scoped_broker_lifecycle "$connection_before_lifecycle" "$opaque" "$opaque_before"
+neighbor_pid="$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)"
+verify_boot_registration_recovery active
+[ "$(systemctl_user show "$HERMES_UNIT" -p MainPID --value)" = "$neighbor_pid" ] \
+  || die 'registration repair restarted the neighboring yard broker'
 ok 'scoped lifecycle preserved credentials, neighboring profiles/yard and explicit power control'
 credential="$(yard keys list | awk -F '\t' '$8=="github-broker-e2e" {print $1}')"
 [ -n "$credential" ] || die 'GitHub key record is missing after reboot'
