@@ -391,6 +391,78 @@ canonical_broker_release_migration_contract() {
   printf 'ok: active broker auto-upgraded and inactive broker stayed inactive\n'
 }
 
+owner_named_yard_contract() (
+  local yard="$1" name="empty-$TOKEN" tools registration project instance original cleanup
+  local peer_before default_before port uuid instance_before registration_before
+  local -a result
+  project="subyard-$name" instance="yard-$name" registration="$OWNER_YARD_DIR/$name/config.env"
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] \
+    && ! incus project show "$project" >/dev/null 2>&1 || die 'named init fixture already exists'
+  tools="$(mktemp -d "$OWNER_ROOT/named-init.XXXXXX")"
+  trap '
+    original=$?; trap - EXIT; cleanup=0
+    if [ -f "$registration" ]; then
+      [ ! -L "$registration" ] && [ -O "$registration" ] \
+        && [ "$(stat -c %a "$registration")" = 600 ] \
+        && timeout --kill-after=5 120 "$yard" -Y "$name" teardown --yes || cleanup=3
+      if [ "$cleanup" = 0 ]; then
+        ! incus project show "$project" >/dev/null 2>&1 \
+          && find "$registration" -maxdepth 0 -type f -delete || cleanup=3
+      fi
+    fi
+    find "$tools" -depth -delete || cleanup=3
+    printf "named-init: original_exit=%s cleanup_exit=%s\n" "$original" "$cleanup"
+    [ "$original" = 0 ] || exit "$original"
+    exit "$cleanup"
+  ' EXIT
+  peer_before="$(incus config show yard-test-yard --project subyard-test-yard | sha256sum)"
+  default_before="$("$yard" -Y default _info)"
+  p0_retry_init_after_plan_stale "$yard" -Y "$name" init --yes
+  [ -f "$registration" ] && [ ! -L "$registration" ] && [ -O "$registration" ] \
+    && [ "$(stat -c %a "$registration")" = 600 ] || die 'named registration is not protected'
+  for selection in YARD_TEMPLATE ENVIRONMENT_PROFILES CODING_TOOL_INTEGRATIONS; do
+    grep -Fxq "$selection=''" "$registration" \
+      && "$yard" -Y "$name" config show "$selection" | grep -Fxq 'effective: <unset>' \
+      || die 'named init did not preserve explicit empty selections'
+  done
+  port="$("$yard" -Y "$name" _info | jq -er .sshPort)"
+  [ "$port" != 2224 ] && [ "$port" != "$(jq -r .sshPort <<<"$default_before")" ] \
+    || die 'named init reused a configured owner SSH port'
+  "$yard" -Y "$name" start --yes
+  incus exec "$instance" --project "$project" -- sh -c \
+    'printf "%s\n" "$1" > /srv/named-init-retained; chmod 0644 /srv/named-init-retained' _ "$MARKER"
+  uuid="$(incus config get "$instance" volatile.uuid --project "$project")"
+  instance_before="$(incus config show "$instance" --project "$project" | sha256sum)"
+  registration_before="$(sha256sum "$registration")"
+  [ "$(incus project get "$project" user.subyard.operator_uid)" = "$(id -u)" ] \
+    && [ "$(incus project get "$project" user.subyard.config_home)" = "$OWNER_CONFIG_HOME" ] \
+    && [ "$(incus config get "$instance" user.subyard.name --project "$project")" = "$name" ] \
+    && [ "$(incus config device get "$instance" ssh listen --project "$project")" = "tcp:127.0.0.1:$port" ] \
+    || die 'refusing to disturb an unproven SSH proxy'
+  incus config device remove "$instance" ssh --project "$project"
+  cat > "$tools/ssh" <<'SH'
+#!/bin/sh
+printf '%s\n' 'named-init deliberate SSH failure' >&2
+exit 73
+SH
+  chmod 0755 "$tools/ssh"
+  set +e
+  PATH="$tools:$PATH" p0_retry_init_after_plan_stale "$yard" -Y "$name" init --yes 2>&1 | tee "$tools/failure.log"
+  result=("${PIPESTATUS[@]}")
+  set -e
+  [ "${result[0]}" != 0 ] && [ "${result[1]}" = 0 ] \
+    && grep -Fq 'named-init deliberate SSH failure' "$tools/failure.log" || die 'controlled init failure was not observed'
+  p0_retry_init_after_plan_stale "$yard" -Y "$name" init --yes
+  SSH_AUTH_SOCK='' ssh -o BatchMode=yes -o ConnectTimeout=10 "yard-$name" -- \
+    grep -Fxq "$MARKER" /srv/named-init-retained
+  [ "$(incus config get "$instance" volatile.uuid --project "$project")" = "$uuid" ] \
+    && [ "$(incus config show "$instance" --project "$project" | sha256sum)" = "$instance_before" ] \
+    && [ "$(sha256sum "$registration")" = "$registration_before" ] \
+    && [ "$(incus config show yard-test-yard --project subyard-test-yard | sha256sum)" = "$peer_before" ] \
+    && [ "$("$yard" -Y default _info)" = "$default_before" ] || die 'named init retry changed retained state or its peer'
+  printf 'ok: installed empty named init, unique SSH, controlled failure/retry and retained data\n'
+)
+
 owner_release_contract() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime" yard yard_info project_marker
   install_current_base_runtime
@@ -428,6 +500,7 @@ owner_release_contract() {
   incus project set subyard-test-yard user.subyard.p0-image-cache="$MARKER"
   [ "$(incus project get subyard-test-yard user.subyard.p0-image-cache)" = "$MARKER" ] \
     || die 'fresh owner project lost its P0 marker'
+  owner_named_yard_contract "$yard"
   printf 'ok: supported broker update and rollback retained history and prepared a fresh current owner\n'
 }
 

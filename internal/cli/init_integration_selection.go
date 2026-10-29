@@ -112,7 +112,7 @@ func (selection *initIntegrationSelection) check(ctx context.Context, cli *CLI, 
 	if err := config.CheckLocalSettingsWritable(execution.loaded.Context.Paths.ConfigHome); err != nil {
 		return err
 	}
-	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv}
+	options := config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: execution.loaded.Context.Paths.OperatorHome, YardName: execution.loaded.Context.YardName, Environment: cli.baseEnv, ProspectiveFiles: execution.loaded.ProspectiveFiles}
 	if execution.bootstrap != nil {
 		options.YardSettingsFile = execution.bootstrap.sourcePath
 	}

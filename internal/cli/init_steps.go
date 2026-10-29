@@ -72,8 +72,8 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			"read exact canonical integration settings", "record the selected yard's requested integration set", false, false)
 	}
 	if execution.bootstrap != nil {
-		appendStep("init.registration", execution.bootstrap.targetPath, "create protected yard definition from profile "+execution.bootstrap.profile,
-			"read exact published registration bytes and validate protected mode", "create named yard definition from profile "+execution.bootstrap.profile, false, false)
+		appendStep("init.registration", execution.bootstrap.targetPath, execution.bootstrap.description()+fmt.Sprintf("; owner-local SSH port %d", yard.SSHPort),
+			"read exact published registration bytes and validate protected mode", execution.bootstrap.description(), false, false)
 	}
 	appendStep("init.host-id", yard.Paths.ConfigHome+"/host-id", "owner HostID "+execution.hostID,
 		"read protected HostID and compare to the approved identity", "record owner HostID "+execution.hostID, !execution.hostIDPending, false)

@@ -443,8 +443,9 @@ func persistentFileIdentity(stat *syscall.Stat_t) PersistentFileIdentity {
 }
 
 // CreatePersistentFile atomically stores a new persistent file and refuses to
-// replace an existing target.
-func CreatePersistentFile(configHome, path string, content []byte) error {
+// replace an existing target. Optional guards run under the configuration root
+// lock before publication, as with guarded assignment and file updates.
+func CreatePersistentFile(configHome, path string, content []byte, guards ...func() error) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
 	}
@@ -455,6 +456,11 @@ func CreatePersistentFile(configHome, path string, content []byte) error {
 	defer unlock()
 	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
 		return err
+	}
+	for _, guard := range guards {
+		if err := guard(); err != nil {
+			return err
+		}
 	}
 	return persistFile(configHome, path, content, false)
 }

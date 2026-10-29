@@ -16,15 +16,19 @@ import (
 // consent. A separate lock avoids holding the configuration reader/CAS lock
 // during potentially slow guest installation.
 func lockIntegrationYard(ctx context.Context, loaded config.Loaded) (func(), error) {
-	path := filepath.Join(loaded.Context.Paths.ConfigHome, "generated", "integration-locks", loaded.Context.YardName+".lock")
-	snapshot, err := config.ReadPersistentFileSnapshot(loaded.Context.Paths.ConfigHome, path)
+	return lockOwnerOperation(ctx, loaded.Context.Paths.ConfigHome, filepath.Join("integration-locks", loaded.Context.YardName+".lock"))
+}
+
+func lockOwnerOperation(ctx context.Context, configHome, name string) (func(), error) {
+	path := filepath.Join(configHome, "generated", name)
+	snapshot, err := config.ReadPersistentFileSnapshot(configHome, path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	if !snapshot.Exists {
-		if createErr := config.CreatePersistentFile(loaded.Context.Paths.ConfigHome, path, nil); createErr != nil {
+		if createErr := config.CreatePersistentFile(configHome, path, nil); createErr != nil {
 			// A competing operation may have created the stable lock first.
-			snapshot, err = config.ReadPersistentFileSnapshot(loaded.Context.Paths.ConfigHome, path)
+			snapshot, err = config.ReadPersistentFileSnapshot(configHome, path)
 			if err != nil || !snapshot.Exists {
 				return nil, createErr
 			}

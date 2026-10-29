@@ -28,7 +28,7 @@ type preparedOwnerChildInputView struct {
 	current      ownerChildCheck
 }
 
-func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, baseline *ownerInputBaseline) error {
+func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, baseline *ownerInputBaseline, locked bool) error {
 	checked, err := testyardmigration.CheckOwnerChildSource(view.options, view.source.Before, view.source, view.root)
 	if err != nil {
 		observer, ok := ports.NativeOperationObserverFrom(ctx).(ports.NativeOwnerRestorationObserver)
@@ -75,7 +75,7 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 		}
 		return value, matched, err
 	}}
-	fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: baseline.initial.Context.Paths.OperatorHome, YardName: baseline.initial.Context.YardName, YardSettingsFile: baseline.preset, Environment: cli.baseEnv, ProspectiveFiles: files})
+	fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: baseline.initial.Context.Paths.OperatorHome, YardName: baseline.initial.Context.YardName, YardSettingsFile: baseline.preset, Environment: cli.baseEnv, ProspectiveFiles: files, ConfigLocked: locked})
 	if err != nil {
 		return err
 	}
@@ -104,7 +104,7 @@ func (view *preparedOwnerChildInputView) check(ctx context.Context, cli *CLI, ba
 	if !reflect.DeepEqual(actual, baseline.files) {
 		return domain.ErrPlanStale
 	}
-	peers, err := cli.powerYardContexts(fresh)
+	peers, err := cli.powerYardContextsLocked(fresh, locked)
 	if err != nil {
 		return err
 	}

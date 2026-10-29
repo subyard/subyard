@@ -135,15 +135,19 @@ func (baseline *ownerInputBaseline) binding() string {
 }
 
 func (baseline *ownerInputBaseline) check(ctx context.Context, cli *CLI) error {
+	return baseline.checkLocked(ctx, cli, false)
+}
+
+func (baseline *ownerInputBaseline) checkLocked(ctx context.Context, cli *CLI, locked bool) error {
 	if baseline == nil {
 		return nil
 	}
 	if baseline.ownerSource != nil {
-		return baseline.ownerSource.check(ctx, cli, baseline)
+		return baseline.ownerSource.check(ctx, cli, baseline, locked)
 	}
 	fresh, err := config.Load(config.LoadOptions{Catalog: &cli.catalog, RepositoryRoot: cli.options.RepositoryRoot,
 		OperatorHome: baseline.initial.Context.Paths.OperatorHome, YardName: baseline.initial.Context.YardName,
-		YardSettingsFile: baseline.preset, Environment: cli.baseEnv})
+		YardSettingsFile: baseline.preset, Environment: cli.baseEnv, ProspectiveFiles: baseline.initial.ProspectiveFiles, ConfigLocked: locked})
 	if err != nil {
 		return err
 	}
@@ -166,7 +170,7 @@ func (baseline *ownerInputBaseline) check(ctx context.Context, cli *CLI) error {
 		return fmt.Errorf("%w: owner configuration source identity changed", domain.ErrPlanStale)
 	}
 	if baseline.peers != nil {
-		peers, err := cli.powerYardContexts(fresh)
+		peers, err := cli.powerYardContextsLocked(fresh, locked)
 		if err != nil {
 			return err
 		}

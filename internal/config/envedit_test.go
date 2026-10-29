@@ -108,6 +108,32 @@ func TestCreatePersistentFileCreatesMissingConfigurationRoot(t *testing.T) {
 	}
 }
 
+func TestCreatePersistentFileGuardHoldsExclusiveRootWithoutPublishing(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, "yards", "new", "config.env")
+	rejected := errors.New("approved inputs changed")
+	called := false
+	err := CreatePersistentFile(root, path, []byte("SSH_PORT=2444\n"), func() error {
+		called = true
+		probe, err := os.Open(root)
+		if err != nil {
+			return err
+		}
+		defer probe.Close()
+		if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = syscall.Flock(int(probe.Fd()), syscall.LOCK_UN)
+			return fmt.Errorf("create guard lacks exclusive configuration root: %v", err)
+		}
+		return rejected
+	})
+	if !called || !errors.Is(err, rejected) {
+		t.Fatalf("guard called=%v err=%v", called, err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected create guard published a target: %v", err)
+	}
+}
+
 func TestReadPersistentFileSnapshotIsStrictlyReadOnlyAndProtected(t *testing.T) {
 	configHome := t.TempDir()
 	if err := os.Chmod(configHome, 0o700); err != nil {

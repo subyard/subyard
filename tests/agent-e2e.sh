@@ -1939,6 +1939,7 @@ YARD
     write_owner_registration() { [ "$*" = "test-yard test-vms 2224 1" ]; printf "registration\n" >> "$CASE_ROOT/calls"; }
     install_owner_runtime() { [ "$(tail -n 1 "$CASE_ROOT/calls")" = registration ]; printf "%s\n" "$P0_OWNER_VERSION" > "$CASE_ROOT/version"; printf "public-owner-install\n" >> "$CASE_ROOT/calls"; }
     p0_retry_init_after_plan_stale() { "$@"; }
+    owner_named_yard_contract() { [ "$1" = "$SUBYARD_HOME/runtime/current/bin/yard" ]; printf "named\n" >> "$CASE_ROOT/calls"; }
     p0_capacity_assert_root_marker() { :; }
     die() { exit 2; }
     incus() {
@@ -1962,7 +1963,7 @@ YARD
   [ "$(cat "$CASE_ROOT/version")" = "$P0_OWNER_VERSION" ] || exit 1
   if [ "$scenario" = ready ]; then
     [ -f "$CASE_ROOT/running" ] && [ "$(cat "$CASE_ROOT/marker")" = "$MARKER" ] || exit 1
-    [ "$(cat "$CASE_ROOT/calls")" = $'base\ncanonical\ncache\nregistration\npublic-owner-install\ninit\ncheck\nstart\nstatus\ninfo\nmarker' ] || exit 1
+    [ "$(cat "$CASE_ROOT/calls")" = $'base\ncanonical\ncache\nregistration\npublic-owner-install\ninit\ncheck\nstart\nstatus\ninfo\nmarker\nnamed' ] || exit 1
   else
     [ ! -s "$CASE_ROOT/marker" ] || exit 1
   fi

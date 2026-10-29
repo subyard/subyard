@@ -738,6 +738,10 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `peer-cleanup`, `cleanup` | current disposable allocation | exact marked fixtures and run worktrees | standalone idempotent cleanup/verifier |
 | `--lane full` | all prerequisites above | union of the marked scopes | periodic manual and risk-selected exhaustive matrix; includes release smoke |
 
+The installed-owner release contract also creates a new named yard without a profile. It
+checks protected empty selections, a distinct SSH port, retained `/srv` data through a
+controlled init failure and ordinary retry, real SSH access, and unchanged neighboring yards.
+
 The owner chain recovers two authentic v0.11.1 histories through the checksum-pinned official
 v0.11.2 bridge. This preserves the closed recovery policy and its historical metadata writers.
 Each completed or interrupted/resumed bridge then

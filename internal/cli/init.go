@@ -204,6 +204,9 @@ func (cli *CLI) loadInitContext(
 	}
 	if request.profile == "" {
 		loaded, err := cli.loadContext(yard)
+		if errors.Is(err, config.ErrUnknownYard) && explicit && yard != "" && yard != "default" && request.mode == initReconcile && !request.continueLegacy {
+			return cli.loadEmptyNamedYard(yard)
+		}
 		if err == nil && request.continueLegacy && loaded.Context.AccessKind != domain.AccessLocal {
 			return config.Loaded{}, nil, errors.New("--continue-legacy must run locally through the installed owner launcher")
 		}
@@ -401,6 +404,10 @@ func (cli *CLI) initPlatformWithDispatcher(
 }
 
 func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, error) {
+	return cli.powerYardContextsLocked(current, false)
+}
+
+func (cli *CLI) powerYardContextsLocked(current config.Loaded, locked bool) ([]domain.Context, error) {
 	names, err := config.YardNames(
 		current.Context.Paths.ConfigDir, current.Context.Paths.ConfigHome,
 	)
@@ -423,6 +430,7 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 			OperatorHome:   operatorHome,
 			YardName:       name,
 			Environment:    environment,
+			ConfigLocked:   locked,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("load power context %q: %w", name, err)
@@ -645,8 +653,7 @@ func (execution *initExecution) consequences() []string {
 		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
 	}
 	if execution.bootstrap != nil {
-		hostIDConsequences = append(hostIDConsequences,
-			"create named yard definition from profile "+execution.bootstrap.profile)
+		hostIDConsequences = append(hostIDConsequences, execution.bootstrap.description())
 	}
 	if execution.hostIDPending {
 		hostIDConsequences = append(hostIDConsequences, "record owner HostID "+execution.hostID)
@@ -779,6 +786,9 @@ func (execution *initExecution) projectHooksApplicable(ctx context.Context, cli 
 func (execution *initExecution) refreshAssessment(ctx context.Context, cli *CLI) error {
 	if execution == nil {
 		return errors.New("init execution is required")
+	}
+	if err := execution.checkRegistration(ctx, cli, false); err != nil {
+		return err
 	}
 	if err := execution.checkHookProjects(ctx); err != nil {
 		return err
@@ -954,11 +964,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		return err
 	}
 	if execution.bootstrap != nil {
-		if err := config.CreatePersistentFile(
-			execution.loaded.Context.Paths.ConfigHome,
-			execution.bootstrap.targetPath,
-			execution.bootstrap.content,
-		); err != nil {
+		if err := execution.publishRegistration(ctx, cli); err != nil {
 			return fmt.Errorf("create named-yard definition: %w", err)
 		}
 	}
@@ -1048,6 +1054,9 @@ func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *
 }
 
 func (execution *initExecution) checkBeforeInitWritesWithAssessment(ctx context.Context, cli *CLI, assessed bool) error {
+	if err := execution.checkRegistration(ctx, cli, false); err != nil {
+		return err
+	}
 	if execution.bootstrap != nil && execution.bootstrap.source != nil {
 		if _, err := execution.bootstrap.source.Read(); err != nil {
 			return fmt.Errorf("%w: profile preset changed", domain.ErrPlanStale)

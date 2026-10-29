@@ -217,7 +217,14 @@ disabling Codex while Paseo still requests it is rejected. Status reports the re
 set, effective set, dependency reasons, configuration source and observed yard readiness.
 An ID filters membership and dependency details; readiness describes the whole yard.
 
-`yard init` uses the selection resolved from profiles and persistent configuration;
+For an absent named yard, `yard -Y example init` creates a protected local definition and
+chooses an available owner-local `SSH_PORT` in its confirmed plan. It explicitly saves empty
+`YARD_TEMPLATE`, `ENVIRONMENT_PROFILES` and `CODING_TOOL_INTEGRATIONS`, so the new base yard
+selects neither a preset, environment profiles nor coding tools. These are independent settings.
+An existing yard's plain init preserves its saved selections and endpoint; an interrupted init
+resumes through the same command. `--profile <name>` retains its named-yard preset behavior.
+
+For registered yards, `yard init` uses the selection resolved from profiles and persistent configuration;
 no tool-selection argument or explicit per-yard assignment is required. Default and
 named yards inherit `claude codex opencode pi` unless their profiles or
 settings select another set. Init preserves inheritance, so later profile changes

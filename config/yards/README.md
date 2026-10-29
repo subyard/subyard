@@ -1,13 +1,25 @@
 # Named yards
 
-Create an installed yard at:
+Create a named yard through the ordinary initialization plan:
+
+```sh
+yard -Y example init
+```
+
+For a new name, init chooses an available owner-local SSH port and creates a protected local
+definition with explicitly empty `YARD_TEMPLATE`, `ENVIRONMENT_PROFILES` and
+`CODING_TOOL_INTEGRATIONS`. No profile or manual configuration file is required. Later plain
+init reconciles the saved settings and preserves existing selections, including after an
+interrupted initialization. Other commands require an existing definition.
+
+The installed definition lives at:
 
 ```text
 ~/.config/subyard/yards/<name>/config.env
 ```
 
 Source checkouts may still use `private/yards/<name>.env`; release installation migrates it to
-the installed path. Start from [`example.env`](example.env). `SSH_PORT` must be unique; the yard
+the installed path. For manual definitions, start from [`example.env`](example.env). `SSH_PORT` must be unique; the yard
 name derives the instance, Incus project, SSH alias, storage volume and host-data root.
 
 ```sh
