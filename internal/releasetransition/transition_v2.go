@@ -105,6 +105,9 @@ type V2ActivationReconciler interface {
 }
 
 type V2ActivationObservation struct {
+	// Binding pins native assessment inputs without making created inode IDs
+	// part of the desired recovery scope.
+	Binding      Fingerprint `json:"binding,omitempty"`
 	Actual       Fingerprint `json:"actual"`
 	Desired      Fingerprint `json:"desired"`
 	Converged    bool        `json:"converged"`
@@ -3029,7 +3032,8 @@ func (transition *V2Transition) observeActivation(
 			ID      string      `json:"id"`
 			Actual  Fingerprint `json:"actual"`
 			Desired Fingerprint `json:"desired"`
-		}{ID: id, Actual: actual.Actual, Desired: actual.Desired})
+			Binding Fingerprint `json:"binding,omitempty"`
+		}{ID: id, Actual: actual.Actual, Desired: actual.Desired, Binding: actual.Binding})
 		if err != nil {
 			return err
 		}
@@ -3415,6 +3419,11 @@ func boundedFailureText(message string, maximum int) string {
 }
 
 func validateActivationObservation(id string, observation V2ActivationObservation) error {
+	if observation.Binding != "" {
+		if err := validateFingerprint(observation.Binding, "activation native binding"); err != nil {
+			return err
+		}
+	}
 	if err := validateSafeID(id, "activation reconciler ID"); err != nil {
 		return err
 	}

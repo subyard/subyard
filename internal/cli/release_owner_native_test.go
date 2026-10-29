@@ -919,6 +919,38 @@ func TestRustOwnerActivationFactsCorpus(t *testing.T) {
 			cases = append(cases, sample{"materialized-config", "release-b", a, "release-a", []releaseowner.Target{{Owner: "materialized-config", Yard: "default", Class: "materialized-files", State: state, ScopeState: "drift", ReportedActual: a, ReportedDesired: b, Scope: b}, {Owner: "materialized-config", Yard: "default", Class: "materialized-integrations", State: integrationState, ReportedActual: a}}, releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(expected.Actual), Desired: releasetransition.Fingerprint(expected.Desired), Converged: expected.Converged}, false})
 		}
 	}
+	root, environment, _ := nativeFixture(t)
+	runtimeRoot := filepath.Join(root, "installation-runtime")
+	if err := os.Mkdir(runtimeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &installationActivationReconciler{cli: program, request: releasetransition.ProcessRequest{RuntimeRoot: runtimeRoot, ConfigHome: environmentValue(environment, "SUBYARD_CONFIG_HOME")}}
+	defer func() {
+		if r.before != nil {
+			r.before.Close()
+		}
+	}()
+	for _, converged := range []bool{false, true} {
+		if converged {
+			if err := r.Reconcile(context.Background(), links); err != nil {
+				t.Fatal(err)
+			}
+		}
+		expected, err := r.Observe(context.Background(), pair, links)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := "stale"
+		if converged {
+			state = "current"
+		}
+		facts := []releaseowner.Target{{Owner: r.ID(), Class: "installation", State: state, ReportedActual: string(expected.Actual), ReportedDesired: string(expected.Desired), Source: string(expected.Binding)}}
+		cases = append(cases, sample{r.ID(), "release-b", a, "release-a", facts, expected, false})
+	}
 	for _, owner := range []string{"sample-runtime", "core-guest-runtime", "key-tools-runtime"} {
 		for _, state := range []ports.RuntimeState{ports.RuntimeStateStale, ports.RuntimeStateCurrent, ports.RuntimeStateDeferred, ports.RuntimeStateAbsent} {
 			fixture := newConfigApplyRepairFixture(t, true)

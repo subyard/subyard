@@ -167,7 +167,15 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		if desiredErr != nil {
 			return false, desiredErr
 		}
-		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
+		state, observeErr := runtime.reconcileState(ctx)
+		if observeErr != nil {
+			return false, observeErr
+		}
+		if !state.InstanceFound {
+			return false, nil
+		}
+		_, _, policyErr := runtime.extrasNativePolicy(state, desired, true, nil)
+		return policyErr == nil, nil
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
 	case ports.ReconcileStageProfileRuntimes:
@@ -1329,6 +1337,7 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 
 func (runtime Runtime) extrasContext() (map[string]string, error) {
 	mounts := map[string]bool{}
+	mountNames := map[string]string{}
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
 	hostMemory := "0"
@@ -1367,6 +1376,10 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 				!safeDirectoryMode(parts[3]) {
 				return nil, fmt.Errorf("invalid YARD_MOUNTS entry %q in %s", mount, path)
 			}
+			if previous := mountNames[parts[0]]; previous != "" && previous != mount {
+				return nil, fmt.Errorf("conflicting YARD_MOUNTS declaration for %q", parts[0])
+			}
+			mountNames[parts[0]] = mount
 			mounts[mount] = true
 		}
 		for _, capability := range strings.Fields(values["YARD_CAPS"]) {

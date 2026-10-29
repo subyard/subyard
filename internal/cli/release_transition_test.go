@@ -40,6 +40,9 @@ func TestComponentRegistryIncludesProfileActivationOwner(t *testing.T) {
 	if !slices.Contains(owners, "sample-runtime") {
 		t.Fatal("owning profile activation registration missing", owners)
 	}
+	if !slices.Contains(owners, "installation-runtime-v1") {
+		t.Fatal("candidate does not own runtime installation enrollment", owners)
+	}
 }
 
 func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {

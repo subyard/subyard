@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type sampleRepairPlatformFixture struct {
@@ -763,6 +764,15 @@ func completeConfigApplyGateFixture(
 	journalPath string,
 ) (string, releasetransition.Outcome) {
 	t.Helper()
+	identity, err := uninstall.InstallationIdentity(uint32(os.Getuid()), environmentValue(environment, "SUBYARD_HOME"), environmentValue(environment, "SUBYARD_CONFIG_HOME"), runtimeRoot, filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "releases"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := uninstall.MarshalInstallation(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProfileTestFile(t, filepath.Join(runtimeRoot, uninstall.ManifestName), inventory, 0600)
 	const target = "1.2.3-aaaaaaaaaaaa"
 	readyMarker := filepath.Join(root, "config-apply-ready")
 	engine := filepath.Join(runtimeRoot, "releases", target, "bin", "yard-engine")

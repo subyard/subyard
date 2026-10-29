@@ -529,6 +529,30 @@ consent includes this boundary. An interrupted first installation retains protec
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
 publishing entrypoints. Publication-only staging leaves migration state untouched.
 
+Schema-1 installation identity and protected metadata publication are shared by bootstrap,
+runtime publication, candidate activation and ownership consumers. The candidate advertises
+`installation-runtime-v1` and assesses missing runtime inventory as an activation step,
+including same-release reuse and updates delivered by supported historical callers. Inspection
+never repairs metadata. Publication binds the native directory, exact file snapshot and owner
+epoch under the existing owner barrier; matching metadata stays unchanged. Runtime inventory
+does not claim bootstrap entrypoints or native project ownership. Full bootstrap retains its
+separate inventory and preserves previous shell and cache claims. A transient download cache
+does not change an established installation cache root; private release drafts have their own
+runtime scope and never donate identity to the live installation.
+The manifest-bound `config/installation-capabilities.json` admits the common installer
+leaf; retained older payloads without that contract keep their historical installer semantics.
+The current full bootstrap requires this capability and a successful candidate API inspection
+before activation or entrypoint changes. Its embedded current publisher verifies older selected
+helpers' archives without replacing their cached helper; publication-only staging retains the
+selected installer's own behavior.
+
+Limited legacy continuation assesses selected native declarations against observed device,
+mount and privilege facts, using the ordinary extras policy and owning host-memory validator.
+It grants only bounded normal reconciliation after explicit consent. An already selected named
+provision hook uses its own verified native prerequisites and the ordinary provision planner;
+unrelated selected hooks and native repairs do not expand that operation. Missing prerequisites
+retain the assessed init and ownership boundary.
+
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
 failures as errors. The operation boundary renders current `Outcome.Warnings`

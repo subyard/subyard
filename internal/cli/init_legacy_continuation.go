@@ -108,10 +108,20 @@ func (cli *CLI) legacyContinuationSource(ctx context.Context, loaded config.Load
 	}
 	installation, err := uninstall.ReadInstallationFile(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), loaded.Context.Paths.DataHome, uint32(os.Getuid()))
 	if err != nil {
+		if uninstall.InstallationAbsent(err) {
+			return "", "", config.OwnerMetadataError(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", "source is missing (observed metadata unavailable); run yard migrate to assess runtime installation enrollment", "", err)
+		}
 		return "", "", err
 	}
-	if err := installation.CheckRoots(loaded.Context.Paths.ConfigHome, options.RuntimeRoot, ""); err != nil {
+	identity, err := cli.installationIdentity(options.RuntimeRoot, loaded.Context.Paths.ConfigHome, true)
+	if err != nil {
+		return "", "", err
+	}
+	if err := installation.CheckRoots(identity.ConfigHome, identity.RuntimeRoot, identity.CacheRoot); err != nil {
 		return "", "", config.OwnerMetadataContext(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), "installation inventory", err)
+	}
+	if err := installation.CheckRuntimeScope(); err != nil {
+		return "", "", config.OwnerMetadataContext(filepath.Join(options.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", err)
 	}
 	inspector := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
 	defer inspector.Close()

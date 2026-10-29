@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,6 +35,144 @@ func writeUnmigratedSettingsManifest(t *testing.T, configHome string) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, path, `{"schemaVersion":1,"files":[{"path":"config.env"}]}`, 0o600)
+}
+
+func TestSelectedNamedProvisionAssessesOnlyItsNativePrerequisites(t *testing.T) {
+	for _, scenario := range []string{"ready", "missing", "unmarked", "foreign"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			writeProvisionProfile(t, root, "sample")
+			writeProvisionProfile(t, root, "other")
+			path := filepath.Join(root, "state", "config.env")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, path, "ENVIRONMENT_PROFILES='sample other'\n", 0600)
+			runtime, incus := legacyContinuationFixture(t)
+			runtime.RepositoryRoot = root
+			runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=sample other")
+			// An unrelated selected profile needs native work. The named guest hook
+			// must not acquire its prerequisites or execute its provision hook.
+			writeCLIFile(t, filepath.Join(root, "config/profiles/other/profile.conf"), "YARD_DEVICES=kvm\n", 0600)
+			runtime.HostDeviceRoot = testkit.TempDir(t)
+			if err := os.Symlink("/dev/null", filepath.Join(runtime.HostDeviceRoot, "kvm")); err != nil {
+				t.Fatal(err)
+			}
+			incus.Reconcile.Instance.LocalDevices["kvm"] = map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm"}
+			if scenario == "missing" {
+				writeCLIFile(t, filepath.Join(root, "config/profiles/sample/profile.conf"), "YARD_DEVICES=kvm\n", 0600)
+			} else if scenario != "unmarked" {
+				incus.Reconcile.ProjectConfig["user.subyard.installation"] = "1"
+				incus.Reconcile.ProjectConfig["user.subyard.operator_uid"] = strconv.Itoa(os.Getuid())
+				incus.Reconcile.ProjectConfig["user.subyard.data_home"] = runtime.Yard.Paths.DataHome
+				incus.Reconcile.ProjectConfig["user.subyard.config_home"] = runtime.Yard.Paths.ConfigHome
+				if scenario == "foreign" {
+					incus.Reconcile.ProjectConfig["user.subyard.data_home"] = "/foreign"
+				}
+			}
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, InitPlatform: runtime})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bootstrap, err := program.prepareProfileBootstrap(context.Background(), loaded, "sample", "provision", nil)
+			if scenario == "missing" || scenario == "unmarked" {
+				if err == nil || !strings.Contains(err.Error(), "continuation consent") {
+					t.Fatalf("missing native prerequisite skipped ownership assessment: %v", err)
+				}
+				return
+			}
+			if scenario == "foreign" {
+				if err == nil && bootstrap.ready != nil {
+					t.Fatal("foreign project admitted to guest-only provision")
+				}
+				return
+			}
+			if err != nil || bootstrap.init != nil {
+				t.Fatalf("guest-only hook requested unrelated init: %v", err)
+			}
+			named, err := program.prepareProvisionExecution(loaded, []string{"sample"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(named.profiles, []string{"sample"}) {
+				t.Fatal("named selection expanded", named.profiles)
+			}
+			unnamed, err := program.prepareProvisionExecution(loaded, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(unnamed.profiles, []string{"sample", "other"}) {
+				t.Fatal("unnamed selection changed", unnamed.profiles)
+			}
+			if err := bootstrap.refresh(context.Background(), program); err != nil {
+				t.Fatalf("unchanged native prerequisites rejected: %v", err)
+			}
+			incus.Reconcile.ProjectConfig["user.subyard.data_home"] = "/foreign"
+			if err := bootstrap.apply(context.Background(), program); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("changed project authority admitted before hook: %v", err)
+			}
+			incus.Reconcile.ProjectConfig["user.subyard.data_home"] = runtime.Yard.Paths.DataHome
+			writeCLIFile(t, filepath.Join(root, "config/profiles/sample/profile.conf"), "YARD_DEVICES=kvm\n", 0600)
+			device := map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm", "mode": "0666"}
+			incus.Reconcile.Instance.LocalDevices["yx-dev-kvm"] = device
+			incus.Reconcile.Instance.Devices["yx-dev-kvm"] = device
+			withDevice, err := program.prepareProfileBootstrap(context.Background(), loaded, "sample", "provision", nil)
+			if err != nil || withDevice.ready == nil {
+				t.Fatalf("matching device refused: %v", err)
+			}
+			if err := os.Remove(filepath.Join(runtime.HostDeviceRoot, "kvm")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/dev/zero", filepath.Join(runtime.HostDeviceRoot, "kvm")); err != nil {
+				t.Fatal(err)
+			}
+			if err := withDevice.apply(context.Background(), program); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("replaced device source admitted before hook: %v", err)
+			}
+			incus.Reconcile.Instance.Config["volatile.uuid"] = "replacement"
+			if err := bootstrap.refresh(context.Background(), program); !errors.Is(err, domain.ErrPlanStale) {
+				t.Fatalf("changed native identity admitted: %v", err)
+			}
+		})
+	}
+}
+
+func TestSelectedProvisionReusesLimitedContinuation(t *testing.T) {
+	program, execution, incus, path := legacyContinuationInstalledFixture(t)
+	writeConfigCommandFile(t, path, "SSH_PORT=2240\nENVIRONMENT_PROFILES=fixture-selected\n")
+	delete(program.baseEnv, "ENVIRONMENT_PROFILES")
+	delete(program.env, "ENVIRONMENT_PROFILES")
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	runtime.Environment = environmentList(loaded.Environment, nil)
+	runtime.HostDeviceRoot = testkit.TempDir(t)
+	canonicalLegacyInstanceFixture(runtime, incus)
+	execution.loaded, execution.platform = loaded, runtime
+	if err := program.prepareLegacyContinuation(context.Background(), execution, initArguments{mode: initReconcile, continueLegacy: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.legacyContinuation.publish(execution); err != nil {
+		t.Fatal(err)
+	}
+	program.options.InitPlatform = runtime
+	bootstrap, err := program.prepareProfileBootstrap(context.Background(), loaded, "fixture-selected", "provision", nil)
+	if err != nil || bootstrap.ready == nil || bootstrap.init != nil {
+		t.Fatalf("limited grant did not authorize the selected hook: %v", err)
+	}
+	if err := bootstrap.refresh(context.Background(), program); err != nil {
+		t.Fatal(err)
+	}
+	incus.Reconcile.Instance.Config["volatile.uuid"] = "replacement"
+	if err := bootstrap.apply(context.Background(), program); !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("replacement passed grant revalidation: %v", err)
+	}
 }
 
 func TestProvisionBootstrapPreservesGroupReexecContinuation(t *testing.T) {

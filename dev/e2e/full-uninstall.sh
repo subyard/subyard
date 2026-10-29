@@ -239,7 +239,6 @@ case "$mode" in
     incus profile device get default root pool --project default > "$state/baseline-pool"
     incus profile device get default eth0 network --project default > "$state/baseline-network"
     sudo -n chmod 0644 "$state/.marker"
-    sudo -n install -o "$operator" -g "$operator" -m 0755 "$ROOT/dev/bootstrap-runtime.sh" "$state/bootstrap.sh"
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$operator" | sudo -n tee "/etc/sudoers.d/$marker" >/dev/null
     sudo -n chmod 0440 "/etc/sudoers.d/$marker"
     sudo -n loginctl enable-linger "$operator"
@@ -251,6 +250,7 @@ case "$mode" in
     else
       bash "$ROOT/dev/package-engine.sh" --output-dir "$state/release" --version "$version" --arch amd64 >/dev/null
     fi
+    sudo -n install -o "$operator" -g "$operator" -m 0755 "$state/release/subyard-install.sh" "$state/bootstrap.sh"
     sudo -n chown -R "$operator:$operator" "$state/release"
     bundle="$state/release/subyard-$version-linux-amd64.tar.gz"
     sudo -n install -o "$operator" -g "$operator" -m 0755 "$ROOT/scripts/install-runtime-release.sh" "$state/installer.sh"

@@ -1804,6 +1804,10 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	if _, err := runtime.extrasContext(); err == nil {
 		t.Fatal("unsafe profile extras were accepted")
 	}
+	writeProfile("bad", "YARD_MOUNTS='cache:/srv/cache:rw:0755 cache:/srv/other:ro:0700'\n")
+	if _, err := runtime.extrasContext(); err == nil {
+		t.Fatal("ambiguous profile mount declarations were accepted")
+	}
 }
 
 func TestExtrasAcceptsResourceOnlyProfileAndRejectsUnknownProfile(t *testing.T) {

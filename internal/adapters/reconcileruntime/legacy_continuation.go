@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
@@ -224,8 +225,12 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	if err != nil {
 		return err
 	}
-	if extras["SUBYARD_EXTRAS_MOUNTS"] != "" || extras["SUBYARD_EXTRAS_CAPABILITIES"] != "" || extras["SUBYARD_EXTRAS_DEVICES"] != "" || extras["SUBYARD_EXTRAS_HOST_MEMORY"] != "0" {
-		return errors.New("legacy continuation refuses unsupported additional native profile capabilities")
+	extraDevices, extraConfig, err := runtime.extrasNativePolicy(state, extras, true, nil)
+	if err != nil {
+		return fmt.Errorf("legacy continuation native capability assessment: %w", err)
+	}
+	if err := testvmsruntime.HostMemoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"); err != nil {
+		return err
 	}
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
 		if want := runtime.environmentValue(setting); want != "" && instance.Config[key] != want {
@@ -244,6 +249,12 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	}
 	for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
 		for key, value := range values {
+			if expected, ok := extraConfig[key]; ok && expected != "" && value == expected {
+				continue
+			}
+			if key == "user.subyard.host_memory" && extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1" {
+				continue
+			}
 			switch key {
 			case "security.nesting":
 				if value == "true" {
@@ -306,6 +317,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		"subyard-e2e-routes": {"type": "disk", "source": filepath.Join(runtime.Yard.Paths.DataHome, "e2e", "routes"), "path": "/var/lib/subyard/e2e-routes", "readonly": "true"},
 		"ssh":                {"type": "proxy", "bind": "host", "listen": "tcp:127.0.0.1:" + strconv.Itoa(runtime.Yard.SSHPort), "connect": "tcp:127.0.0.1:22"},
 	}
+	for name, device := range extraDevices {
+		desired[name] = device
+	}
 	for _, entry := range strings.Fields(runtime.environmentValue("HOST_MOUNTS")) {
 		parts := strings.Split(entry, ":")
 		if len(parts) != 4 || parts[0] == "" || (parts[2] != "ro" && parts[2] != "rw") {
@@ -322,6 +336,9 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	}
 	for name, device := range instance.LocalDevices {
 		switch name {
+		case "subyard-host-memory":
+			// The owning host-memory validator checked marker, shape and effective identity.
+			continue
 		case "subyard-docker-apparmor":
 			if !maps.Equal(device, legacyAppArmorDevice()) {
 				return errors.New("legacy continuation refuses noncanonical AppArmor compatibility device")

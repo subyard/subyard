@@ -2216,6 +2216,9 @@ func (runtime *Runtime) installWithOutput(
 ) error {
 	command := exec.CommandContext(ctx, runtime.config.Installer, arguments...)
 	command.Env = commandEnvironment(runtime.config.Inputs.environment(runtime.config.Context))
+	// This leaf is used only for the verified private draft prepared above.
+	// Its runtime scope must not claim the canonical bootstrap inventory.
+	command.Env = append(command.Env, "SUBYARD_INSTALL_RUNTIME_SCOPE=private-draft")
 	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
 	if home == "" {
 		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")

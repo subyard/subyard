@@ -226,7 +226,11 @@ func TestConfigGitAuthoringRejectsSourceSymlinksBeforeWriting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code := program.Run(context.Background()); code != 1 || !strings.Contains(f.stderr.String(), "validate configuration before source change") {
+			diagnostic := "source file must be a regular non-symlink file"
+			if kind == "scalar ancestor" {
+				diagnostic = "source directory must be a real source directory"
+			}
+			if code := program.Run(context.Background()); code != 1 || !strings.Contains(f.stderr.String(), diagnostic) || !strings.Contains(f.stderr.String(), "observed type=symlink") {
 				t.Fatalf("source boundary: code=%d stderr=%s", code, f.stderr.String())
 			}
 			if len(prompt.Requests) != 0 {

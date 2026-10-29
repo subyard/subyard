@@ -54,13 +54,16 @@ func (bootstrap *profileBootstrap) stateBinding() string {
 	if bootstrap.init != nil {
 		init = bootstrap.init.stateBinding()
 	}
+	if bootstrap.ready != nil {
+		init = bootstrap.ready.legacyContinuation.binding()
+	}
 	return operationStateDigest(struct {
-		Profile, Command, Path, Profiles, Init string
-		Before                                 config.PersistentFileSnapshot
-		Endpoint                               *resourceendpoint.Plan
-		Request                                resourceendpoint.Request
-		Context                                domain.Context
-		Settings                               map[string]config.SettingTrace
+		Profile, Command, Path, Profiles, Init, Native string
+		Before                                         config.PersistentFileSnapshot
+		Endpoint                                       *resourceendpoint.Plan
+		Request                                        resourceendpoint.Request
+		Context                                        domain.Context
+		Settings                                       map[string]config.SettingTrace
 	}{
-		bootstrap.profile, bootstrap.command, bootstrap.selectionPath, bootstrap.profiles, init, bootstrap.selection, bootstrap.endpoint, bootstrap.request, bootstrap.initial.Context, bootstrap.initial.Settings})
+		bootstrap.profile, bootstrap.command, bootstrap.selectionPath, bootstrap.profiles, init, bootstrap.nativeBinding, bootstrap.selection, bootstrap.endpoint, bootstrap.request, bootstrap.initial.Context, bootstrap.initial.Settings})
 }

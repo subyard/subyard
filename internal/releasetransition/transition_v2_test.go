@@ -3050,12 +3050,15 @@ func TestV2TransitionCannotReplaceUnsafeCompletedJournalForSameGoal(t *testing.T
 }
 
 func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing.T) {
-	for _, change := range []string{"none", "consequence", "snapshot"} {
+	for _, change := range []string{"none", "consequence", "snapshot", "native binding"} {
 		t.Run(change, func(t *testing.T) {
 			transition, _, configPath := v2TransitionFixture(t, nil)
 			reconciler := &v2TestReconciler{consequences: []string{
 				"Adopt existing Codex rules under integration management: /home/dev/.codex/rules/repo.rules",
 			}}
+			if change == "native binding" {
+				reconciler.binding = digestA
+			}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 			inspection, err := transition.InspectProcessV1(context.Background(), goal)
@@ -3083,6 +3086,8 @@ func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing
 				reconciler.consequences[0] = "Adopt a different existing artifact"
 			case "snapshot":
 				reconciler.drift = digestC
+			case "native binding":
+				reconciler.binding = digestC
 			}
 			outcome, err := transition.Converge(context.Background(), Execution{
 				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
@@ -3951,6 +3956,7 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
+	binding       Fingerprint
 	id            string
 	converged     bool
 	desired       Fingerprint
@@ -4282,6 +4288,7 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 		warnings = append(warnings, reconciler.driftWarnings...)
 	}
 	return V2ActivationObservation{
+		Binding: reconciler.binding,
 		Actual:  map[bool]Fingerprint{true: desired, false: drift}[reconciler.converged],
 		Desired: desired, Converged: reconciler.converged,
 		Consequences: slices.Clone(reconciler.consequences), Warnings: warnings,

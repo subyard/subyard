@@ -209,9 +209,36 @@ candidate_version="$(SUBYARD_REPOSITORY_ROOT="$candidate" "$candidate/bin/yard-e
   || { printf 'install-runtime-release: candidate self-check failed\n' >&2; exit 1; }
 [ "$candidate_version" = "$version" ] \
   || { printf 'install-runtime-release: candidate version does not match manifest\n' >&2; exit 1; }
+# Consume the already verified candidate; this bounded metadata preflight does
+# not rescan runtime assets or publish inventory on the read-only path.
+inventory_capable=0
+if [ -e "$candidate/config/installation-capabilities.json" ]; then
+  jq -e '. == {schemaVersion:1,contract:"installation-inventory-v1"}' \
+    "$candidate/config/installation-capabilities.json" >/dev/null \
+    || { printf 'install-runtime-release: unsupported installation capability\n' >&2; exit 1; }
+  inventory_capable=1
+  entrypoints="${SUBYARD_INSTALL_ENTRYPOINTS:-}"
+  [ -n "$entrypoints" ] || entrypoints='{}'
+  printf '%s\n' "$entrypoints" \
+    | SUBYARD_REPOSITORY_ROOT="$candidate" "$candidate/bin/yard-engine" _installation inspect
+elif [ -n "${SUBYARD_INSTALL_ENTRYPOINTS:-}" ]; then
+  printf 'install-runtime-release: full bootstrap requires installation-inventory-v1 capability\n' >&2
+  exit 1
+fi
+
 if [ "$CHECK_ONLY" = 1 ]; then
   printf 'verified runtime yard %s\n' "$version"
   exit 0
+fi
+
+helper="${SUBYARD_INSTALL_VERIFIED_HELPER:-$0}"
+if [ "$helper" != "$0" ]; then
+  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -f "$helper.sha256" ] && [ ! -L "$helper.sha256" ] \
+    || { printf 'install-runtime-release: verified installer inputs are unavailable\n' >&2; exit 1; }
+  read -r helper_expected _ < "$helper.sha256" || true
+  helper_actual="$(sha256sum "$helper" | cut -d' ' -f1)"
+  [ "${helper_actual,,}" = "${helper_expected,,}" ] && [ "${#helper_actual}" = 64 ] \
+    || { printf 'install-runtime-release: verified installer checksum changed\n' >&2; exit 1; }
 fi
 
 if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
@@ -235,66 +262,18 @@ if [ "$published" = 0 ]; then
   published=1
 fi
 
-# Keep an installation boundary even before bootstrap creates any yard or
-# external launcher. Only the verified runtime store is mutated here.
-installation_inventory="$RUNTIME_ROOT/installation.json"
-if [ -e "$installation_inventory" ] || [ -L "$installation_inventory" ]; then
-  [ -f "$installation_inventory" ] && [ ! -L "$installation_inventory" ] \
-    && [ "$(stat -c '%u' "$installation_inventory")" = "$(id -u)" ] \
-    && [ "$(stat -c '%a' "$installation_inventory")" = 600 ] \
-    || { printf 'install-runtime-release: unsafe installation ownership inventory\n' >&2; exit 1; }
-  jq -e --arg data "${SUBYARD_HOME:-$HOME/.subyard}" \
-    --arg config "${SUBYARD_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/subyard}" \
-    --arg runtime "$RUNTIME_ROOT" --argjson uid "$(id -u)" \
-    '.schema == 1 and .operatorUid == $uid and .dataHome == $data and .configHome == $config and .runtimeRoot == $runtime' \
-    "$installation_inventory" >/dev/null \
-    || { printf 'install-runtime-release: runtime ownership conflicts with this installation\n' >&2; exit 1; }
-
-else
-  installation_candidate="$(mktemp "$RUNTIME_ROOT/.installation.XXXXXX")"
-  jq -n --arg data "${SUBYARD_HOME:-$HOME/.subyard}" \
-    --arg config "${SUBYARD_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/subyard}" \
-    --arg runtime "$RUNTIME_ROOT" --arg cache "${YARD_RELEASE_CACHE:-${SUBYARD_HOME:-$HOME/.subyard}/releases}" \
-    --argjson uid "$(id -u)" \
-    '{schema:1,operatorUid:$uid,dataHome:$data,configHome:$config,runtimeRoot:$runtime,cacheRoot:$cache,binDir:"",shellFiles:[]}' \
-    > "$installation_candidate"
-  chmod 0600 "$installation_candidate"
-  mv -fT -- "$installation_candidate" "$installation_inventory"
-  sync -d -- "$installation_inventory"
-fi
-
-if [ "$CHECK_ONLY" = 0 ]; then
-  # These verified inputs belong to this cache only when the owning installer
-  # actually publishes from it. Record native file identity, never infer ownership
-  # later from a release-like filename or approve the surrounding directory.
-  python3 - "$installation_inventory" "$BUNDLE" "$CHECKSUM" "$MANIFEST" "$PROVENANCE" "$0" "${0}.sha256" <<'PY_CACHE'
-import hashlib,json,os,pathlib,stat,sys,tempfile
-metadata=pathlib.Path(sys.argv[1]);value=json.loads(metadata.read_bytes())
-root=pathlib.Path(value["cacheRoot"])
-records={entry["Path"]:entry for entry in value.get("cacheFiles",[])}
-arguments=sys.argv[2:6]
-helper=pathlib.Path(sys.argv[6]).absolute();checksum=pathlib.Path(sys.argv[7]).absolute()
-if helper.is_relative_to(root) and checksum.is_relative_to(root):
- for path in (helper,checksum):
-  info=path.lstat()
-  if not stat.S_ISREG(info.st_mode) or info.st_uid!=value["operatorUid"]:raise SystemExit("install-runtime-release: unsafe cached installer helper")
- if hashlib.sha256(helper.read_bytes()).hexdigest()!=checksum.read_text().split()[0].lower():raise SystemExit("install-runtime-release: cached installer helper checksum changed")
- arguments += [str(helper),str(checksum)]
-for argument in arguments:
- path=pathlib.Path(argument).absolute()
- try:relative=path.relative_to(root).as_posix()
- except ValueError:continue
- info=path.lstat()
- if not stat.S_ISREG(info.st_mode) or info.st_uid!=value["operatorUid"]:raise SystemExit("install-runtime-release: unsafe cache artifact ownership")
- records[relative]={"Path":relative,"Device":info.st_dev,"Inode":info.st_ino,"Mode":info.st_mode,"UID":info.st_uid,"GID":info.st_gid,"Size":info.st_size,"Modified":info.st_mtime_ns,"Changed":info.st_ctime_ns,"Link":""}
-if len(records)>4096:raise SystemExit("install-runtime-release: cache ownership inventory is oversized")
-value["cacheFiles"]=[records[path] for path in sorted(records)]
-fd,pending=tempfile.mkstemp(prefix=".cache-ownership.",dir=metadata.parent)
-with os.fdopen(fd,"w") as output:
- os.fchmod(output.fileno(),0o600);json.dump(value,output);output.write("\n");output.flush();os.fsync(output.fileno())
-os.replace(pending,metadata)
-directory=os.open(metadata.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
-PY_CACHE
+# The verified candidate owns schema-1 identity and scoped publication. Reuse
+# the installer barrier; metadata inspection is bounded and matching is no-op.
+if [ "$inventory_capable" = 1 ]; then
+cache_inputs=("$BUNDLE" "$CHECKSUM" "$MANIFEST" "$PROVENANCE")
+case "$helper" in
+  "${YARD_RELEASE_CACHE:-${SUBYARD_HOME:-$HOME/.subyard}/releases}"/*)
+    cache_inputs+=("$helper" "${helper}.sha256") ;;
+esac
+jq -n --args '{CacheInputs:$ARGS.positional}' "${cache_inputs[@]}" \
+  | env SUBYARD_OWNER_LOCK_FD="${SUBYARD_INSTALL_OWNER_FD:-}" \
+    SUBYARD_REPOSITORY_ROOT="$destination" \
+    "$destination/bin/yard-engine" _installation runtime
 fi
 
 if [ "$PUBLISH_ONLY" = 1 ]; then

@@ -13,6 +13,22 @@ const (
 	hostMemoryOwnerVersion = "v1"
 )
 
+// HostMemoryPolicy validates the owning device contract on an already observed
+// native snapshot. It never adopts an unmarked mount or changes host policy.
+func HostMemoryPolicy(config map[string]string, local, expanded map[string]map[string]string, enabled bool) error {
+	instance := hostMemoryInstance{Config: config, Devices: local, ExpandedDevices: expanded}
+	if err := validateHostMemoryInstance(instance); err != nil {
+		return err
+	}
+	if enabled && (config[hostMemoryOwnerKey] != hostMemoryOwnerVersion || local[hostMemoryDevice] == nil) {
+		return doctorCheck("physical memory device is not converged", nil)
+	}
+	if !enabled && (config[hostMemoryOwnerKey] != "" || local[hostMemoryDevice] != nil) {
+		return doctorCheck("unselected physical memory device remains", nil)
+	}
+	return nil
+}
+
 type hostMemoryInstance struct {
 	Config          map[string]string            `json:"config"`
 	Devices         map[string]map[string]string `json:"devices"`
@@ -35,32 +51,36 @@ func (backend *Backend) hostMemoryInstance(ctx context.Context) (hostMemoryInsta
 	if instance.Config == nil || instance.Devices == nil || instance.ExpandedDevices == nil {
 		return instance, doctorCheck("physical memory device evidence incomplete", nil)
 	}
+	return instance, validateHostMemoryInstance(instance)
+}
+
+func validateHostMemoryInstance(instance hostMemoryInstance) error {
 	marker := instance.Config[hostMemoryOwnerKey]
 	if marker != "" && marker != hostMemoryOwnerVersion && marker != "pending:"+hostMemoryOwnerVersion {
-		return instance, doctorCheck("physical memory device ownership conflict", nil)
+		return doctorCheck("physical memory device ownership conflict", nil)
 	}
 	device := instance.Devices[hostMemoryDevice]
 	if device != nil && (marker == "" || !reflect.DeepEqual(device, hostMemoryDeviceSpec())) {
-		return instance, doctorCheck("physical memory device ownership conflict", nil)
+		return doctorCheck("physical memory device ownership conflict", nil)
 	}
 	if device != nil && !reflect.DeepEqual(instance.ExpandedDevices[hostMemoryDevice], device) {
-		return instance, doctorCheck("physical memory device effective evidence inconsistent", nil)
+		return doctorCheck("physical memory device effective evidence inconsistent", nil)
 	}
 	for name, expanded := range instance.ExpandedDevices {
 		if name == hostMemoryDevice {
 			if device == nil || !reflect.DeepEqual(expanded, device) {
-				return instance, doctorCheck("physical memory device is inherited or divergent", nil)
+				return doctorCheck("physical memory device is inherited or divergent", nil)
 			}
 		} else if expanded["path"] == hostMemoryPath {
-			return instance, doctorCheck("physical memory path is occupied", nil)
+			return doctorCheck("physical memory path is occupied", nil)
 		}
 	}
 	for name, local := range instance.Devices {
 		if name != hostMemoryDevice && local["path"] == hostMemoryPath {
-			return instance, doctorCheck("physical memory path is occupied", nil)
+			return doctorCheck("physical memory path is occupied", nil)
 		}
 	}
-	return instance, nil
+	return nil
 }
 
 func (backend *Backend) hostMemoryConverged(ctx context.Context, enabled bool) (bool, error) {

@@ -155,6 +155,7 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		result = append(result, cli.profileActivationReconciler(request, id))
 	}
 	return append(result, []releasetransition.V2ActivationReconciler{
+		&installationActivationReconciler{cli: cli, request: request},
 		cli.profileActivationReconciler(request, "core-guest-runtime"),
 		cli.profileActivationReconciler(request, "key-tools-runtime"),
 		cli.brokerActivationReconciler(request),

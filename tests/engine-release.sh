@@ -280,6 +280,35 @@ for excluded in update-engine.sh power-state.sh bootstrap-runtime.sh build-engin
   ! grep -Fq "/$excluded" "$bundle_list" \
     || fail "runtime bundle contains non-runtime script $excluded"
 done
+
+# The inventory leaf is opt-in for retained older engines. A declared but
+# malformed/unknown capability must never enter that compatibility path.
+capability_bundle="$TMP/installation-capability.tar.gz"
+for capability_mutant in unknown malformed directory; do
+  case "$capability_mutant" in
+    unknown) printf '%s\n' '{"schemaVersion":1,"contract":"unknown"}' > "$bundle_extract/config/installation-capabilities.json" ;;
+    malformed) printf '{' > "$bundle_extract/config/installation-capabilities.json" ;;
+    directory) rm -f -- "$bundle_extract/config/installation-capabilities.json"; mkdir "$bundle_extract/config/installation-capabilities.json" ;;
+  esac
+  (cd "$bundle_extract" && find . -type f ! -path './runtime-files.sha256' -print0 | sort -z | xargs -0 sha256sum > runtime-files.sha256)
+  tar -czf "$capability_bundle" -C "$bundle_extract" .
+  sha256sum "$capability_bundle" > "$capability_bundle.sha256"
+  cp "$bundle_one.manifest.json" "$capability_bundle.manifest.json"
+  capability_digest="$(sha256sum "$capability_bundle" | cut -d' ' -f1)"
+  jq --arg artifact "$(basename "$capability_bundle")" --arg digest "$capability_digest" \
+    '.artifact=$artifact | .sha256=$digest' "$bundle_one.provenance.json" > "$capability_bundle.provenance.json"
+  capability_root="$TMP/capability-$capability_mutant"
+  if "$ROOT/scripts/install-runtime-release.sh" --runtime-root "$capability_root" \
+    --bundle "$capability_bundle" --checksum "$capability_bundle.sha256" \
+    --manifest "$capability_bundle.manifest.json" --provenance "$capability_bundle.provenance.json" \
+    > "$TMP/capability-$capability_mutant.log" 2>&1; then
+    fail 'invalid installation capability was accepted'
+  fi
+  grep -Fq 'unsupported installation capability' "$TMP/capability-$capability_mutant.log" \
+    && [ ! -e "$capability_root/current" ] && [ ! -L "$capability_root/current" ] \
+    && [ ! -e "$capability_root/installation.json" ] \
+    || fail 'invalid installation capability changed activation or inventory'
+done
 jq -e '.schemaVersion == 1 and .version == "1.0.0-test" and .rpc.min == 1 and .rpc.max == 1 and
   .projectStateSchema == 1 and .credentialSchema == 1' "$artifact_one.manifest.json" >/dev/null
 jq -e '.schemaVersion == 1 and .version == "1.0.0-test" and
@@ -428,6 +457,163 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
 [ "$(directory_identity "$standalone_home")" = "$standalone_home_before" ] \
   && [ "$(directory_identity "$standalone_bin")" = "$standalone_bin_before" ] \
   || fail 'bootstrap retry changed existing default shell parent or binary directory identity'
+# An authentic retained publisher cannot bypass the current full-bootstrap API
+# boundary. The same verified archive remains stageable by a current publisher.
+boundary_assets="$TMP/boundary-assets"
+mkdir -m 0700 "$boundary_assets"
+boundary_bundle="$boundary_assets/$(basename "$bundle_one")"
+cp "$legacy_031_installer" "$boundary_assets/subyard-install-runtime-release.sh"
+(cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
+rmdir "$bundle_extract/config/installation-capabilities.json"
+for boundary_case in absent malformed api; do
+  case "$boundary_case" in
+    absent) ;;
+    malformed) printf '{' > "$bundle_extract/config/installation-capabilities.json" ;;
+    api)
+      cp "$ROOT/config/installation-capabilities.json" "$bundle_extract/config/installation-capabilities.json"
+      cat > "$bundle_extract/bin/yard-engine" <<'NO_INSTALLATION_API'
+#!/bin/sh
+[ "${1:-}" = --version ] && { echo 'yard-engine 1.0.0-test'; exit 0; }
+exit 2
+NO_INSTALLATION_API
+      chmod 0755 "$bundle_extract/bin/yard-engine" ;;
+  esac
+  (cd "$bundle_extract" && find . -type f ! -path './runtime-files.sha256' -print0 | sort -z | xargs -0 sha256sum > runtime-files.sha256)
+  tar -czf "$boundary_bundle" -C "$bundle_extract" .
+  (cd "$boundary_assets" && sha256sum "$(basename "$boundary_bundle")" > "$(basename "$boundary_bundle").sha256")
+  cp "$bundle_one.manifest.json" "$boundary_bundle.manifest.json"
+  jq --arg digest "$(sha256sum "$boundary_bundle" | cut -d' ' -f1)" \
+    '.sha256=$digest' "$bundle_one.provenance.json" > "$boundary_bundle.provenance.json"
+  for boundary_kind in initial-absent initial-existing existing; do
+    boundary_home="$TMP/boundary-$boundary_case-$boundary_kind"
+    boundary_bin="$boundary_home/bin"
+    if [ "$boundary_kind" = existing ]; then
+      boundary_home="$standalone_home"
+      boundary_bin="$standalone_bin"
+      boundary_before="$(readlink "$standalone_home/.subyard/runtime/current"):$(readlink "$standalone_home/.subyard/runtime/previous" || true):$(readlink "$standalone_bin/yard"):$(sha256sum "$standalone_home/.subyard/installation.json" "$standalone_home/.subyard/runtime/installation.json" "$standalone_home/.bashrc" "$standalone_home/.profile" "$standalone_ledger")"
+    else
+      mkdir -m 0700 "$boundary_home"
+      if [ "$boundary_kind" = initial-existing ]; then
+        mkdir -p "$boundary_home/.config/subyard"
+        chmod 0755 "$boundary_home/.config/subyard"
+        directory_sentinel "$boundary_home/.config/subyard"
+        boundary_config_before="$(directory_identity "$boundary_home/.config/subyard")"
+      fi
+    fi
+    if HOME="$boundary_home" SUBYARD_HOME="$boundary_home/.subyard" \
+      SUBYARD_CONFIG_HOME="$boundary_home/.config/subyard" YARD_BIN_DIR="$boundary_bin" \
+      SHELL=/bin/bash ZDOTDIR="$boundary_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
+      YARD_RELEASE_BASE_URL="file://$boundary_assets" YARD_RELEASE_VERSION=1.0.0-test \
+      "$release/subyard-install.sh" --yes > "$TMP/boundary-$boundary_case-$boundary_kind.log" 2>&1; then
+      fail "full bootstrap accepted $boundary_case inventory API"
+    fi
+    case "$boundary_case" in
+      absent) grep -Fq 'full bootstrap requires installation-inventory-v1 capability' "$TMP/boundary-$boundary_case-$boundary_kind.log" ;;
+      malformed) grep -Fq 'unsupported installation capability' "$TMP/boundary-$boundary_case-$boundary_kind.log" ;;
+    esac
+    if [ "$boundary_kind" = existing ]; then
+      [ "$boundary_before" = "$(readlink "$standalone_home/.subyard/runtime/current"):$(readlink "$standalone_home/.subyard/runtime/previous" || true):$(readlink "$standalone_bin/yard"):$(sha256sum "$standalone_home/.subyard/installation.json" "$standalone_home/.subyard/runtime/installation.json" "$standalone_home/.bashrc" "$standalone_home/.profile" "$standalone_ledger")" ] \
+        || fail 'refused bootstrap changed current release, inventory or shell files'
+    else
+      [ ! -e "$boundary_home/.subyard/runtime/current" ] && [ ! -L "$boundary_home/.subyard/runtime/current" ] \
+        && [ ! -e "$boundary_home/.subyard/runtime/previous" ] && [ ! -L "$boundary_home/.subyard/runtime/previous" ] \
+        && [ ! -e "$boundary_home/.subyard/runtime/installation.json" ] \
+        && [ ! -e "$boundary_home/.subyard/installation.json" ] && [ ! -e "$boundary_home/bin/yard" ] && [ ! -L "$boundary_home/bin/yard" ] \
+        && [ ! -e "$boundary_home/bin/sy" ] && [ ! -L "$boundary_home/bin/sy" ] \
+        && [ ! -e "$boundary_home/.bashrc" ] && [ ! -e "$boundary_home/.profile" ] \
+        || fail 'refused initial bootstrap published inventory or entrypoints'
+      if [ "$boundary_kind" = initial-existing ]; then
+        [ "$boundary_config_before" = "$(directory_identity "$boundary_home/.config/subyard")" ] \
+          || fail 'refused initial bootstrap changed existing config directory'
+      else
+        [ ! -e "$boundary_home/.config/subyard" ] && [ ! -L "$boundary_home/.config/subyard" ] \
+          || fail 'refused initial bootstrap created config directory'
+      fi
+    fi
+  done
+  if [ "$boundary_case" = absent ]; then
+    cp "$ROOT/scripts/install-runtime-release.sh" "$boundary_assets/subyard-install-runtime-release.sh"
+    (cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
+    HOME="$TMP/boundary-stage" SUBYARD_HOME="$TMP/boundary-stage/data" \
+      SUBYARD_CONFIG_HOME="$TMP/boundary-stage/config" YARD_RUNTIME_ROOT="$TMP/boundary-stage/runtime" \
+      YARD_RELEASE_BASE_URL="file://$boundary_assets" \
+      "$release/subyard-install.sh" --version 1.0.0-test --publish-only --yes > "$TMP/boundary-stage.log" \
+      || fail 'publication-only rejected a verified legacy archive'
+    [ ! -e "$TMP/boundary-stage/runtime/current" ] && [ ! -L "$TMP/boundary-stage/runtime/current" ] \
+      || fail 'publication-only activated a legacy archive'
+    cp "$legacy_031_installer" "$boundary_assets/subyard-install-runtime-release.sh"
+    (cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
+  fi
+done
+# A capable archive delivered alongside an old helper uses the embedded current
+# publisher and records the exact downloaded helper, not the temporary publisher.
+cp "$bundle_one" "$boundary_bundle"
+cp "$bundle_one.sha256" "$boundary_bundle.sha256"
+cp "$bundle_one.manifest.json" "$boundary_bundle.manifest.json"
+cp "$bundle_one.provenance.json" "$boundary_bundle.provenance.json"
+boundary_home="$TMP/boundary-capable"
+mkdir -m 0700 "$boundary_home"
+HOME="$boundary_home" SUBYARD_HOME="$boundary_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$boundary_home/.config/subyard" YARD_BIN_DIR="$boundary_home/bin" \
+  SHELL=/bin/bash ZDOTDIR="$boundary_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
+  YARD_RELEASE_BASE_URL="file://$boundary_assets" YARD_RELEASE_VERSION=1.0.0-test \
+  "$release/subyard-install.sh" --yes > "$TMP/boundary-capable.log" 2>&1 \
+  || fail 'capable full bootstrap with historical helper failed'
+jq -e '[.cacheFiles[].Path] | index("1.0.0-test/subyard-install-runtime-release.sh") != null and index("1.0.0-test/subyard-install-runtime-release.sh.sha256") != null' \
+  "$boundary_home/.subyard/runtime/installation.json" >/dev/null \
+  || fail 'historical downloaded helper was not recorded as a verified cache input'
+# Full-scope metadata is assessed by the verified candidate before activation.
+full_inventory="$standalone_home/.subyard/installation.json"
+established_cache="$(jq -er '.cacheRoot' "$full_inventory")"
+rm -f -- "$standalone_home/.subyard/runtime/installation.json"
+HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
+  SUBYARD_CONFIG_HOME="$standalone_home/.config/subyard" YARD_RELEASE_CACHE="$TMP/staging-download-cache" \
+  YARD_RELEASE_BASE_URL="file://$release" \
+  "$release/subyard-install.sh" --publish-only --runtime-root "$standalone_home/.subyard/runtime" --version 1.0.0-test --yes >/dev/null
+jq -e --arg cache "$established_cache" '.cacheRoot==$cache and .binDir=="" and (.shellFiles|length)==0' \
+  "$standalone_home/.subyard/runtime/installation.json" >/dev/null \
+  || fail 'canonical staging lost the established full-scope cache identity'
+cp "$full_inventory" "$TMP/full-inventory.before"
+bootstrap_link_before="$(readlink "$standalone_home/.subyard/runtime/current")"
+bootstrap_entrypoints_before="$(sha256sum "$standalone_home/.bashrc" "$standalone_home/.profile")"
+for invalid_inventory in malformed unknown-field conflicting-root; do
+  case "$invalid_inventory" in
+    malformed) printf '{' > "$full_inventory" ;;
+    unknown-field) jq '.unexpected = true' "$TMP/full-inventory.before" > "$full_inventory" ;;
+    conflicting-root) jq --arg path "$TMP/foreign-config" '.configHome=$path' "$TMP/full-inventory.before" > "$full_inventory" ;;
+  esac
+  invalid_inventory_before="$(sha256sum "$full_inventory")"
+  if HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
+    SUBYARD_CONFIG_HOME="$standalone_home/.config/subyard" YARD_BIN_DIR="$standalone_bin" \
+    SHELL=/bin/bash ZDOTDIR="$standalone_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
+    YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test \
+    "$release/subyard-install.sh" --yes > "$TMP/bootstrap-$invalid_inventory.log" 2>&1; then
+    fail "bootstrap accepted $invalid_inventory installation metadata"
+  fi
+  [ "$(sha256sum "$full_inventory")" = "$invalid_inventory_before" ] \
+    && [ "$(readlink "$standalone_home/.subyard/runtime/current")" = "$bootstrap_link_before" ] \
+    && [ "$(sha256sum "$standalone_home/.bashrc" "$standalone_home/.profile")" = "$bootstrap_entrypoints_before" ] \
+    || fail 'invalid full inventory changed activation, entrypoints or ownership'
+done
+cp "$TMP/full-inventory.before" "$full_inventory"
+# A first publisher can finish before config directory creation is interrupted.
+# Its next bootstrap must complete the reader transition and publish entrypoints.
+(
+  export HOME="$TMP/bootstrap-no-config-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-no-config-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test
+  mkdir -m 0700 "$HOME"
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$bundle_one" --checksum "$bundle_one.sha256" --manifest "$bundle_one.manifest.json" \
+    --provenance "$bundle_one.provenance.json" > "$TMP/bootstrap-no-config-stage.log"
+  [ -L "$YARD_RUNTIME_ROOT/current" ] && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
+    || fail 'missing-config retry precondition was not established'
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-no-config-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-no-config-retry.log" >&2; fail 'bootstrap could not resume without config directory'; }
+  [ -f "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" ] && [ -x "$YARD_BIN_DIR/yard" ] \
+    || fail 'missing-config retry omitted protected transition or entrypoints'
+)
 # A rejected first transition keeps its installed owner, withholds entrypoints,
 # and remains recoverable through the existing-runtime supported transition.
 (
@@ -755,11 +941,21 @@ jq -e '.schemaVersion == 2 and .domains.settings.epoch == 3 and
 [ ! -e "$SUBYARD_CONFIG_HOME/migrations/state.json" ] \
   || fail 'production release transition wrote the superseded global layout'
 
+# The canonical candidate already exists. Enrollment belongs to its activation,
+# independently of whether this caller has a contemporary publisher helper.
+rm -f -- "$runtime_root/installation.json"
 same_output="$(YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_CACHE="$TMP/cache" \
   installed_update --runtime-root "$runtime_root" --version 1.1.0-test)"
 [ "$(readlink "$runtime_root/current")" = "$candidate_target" ] \
   && [ "$(readlink "$runtime_root/previous")" = "$initial_target" ] \
   || fail 'same-version transition changed the retained release pair'
+[ -f "$runtime_root/installation.json" ] \
+  && jq -e --arg root "$runtime_root" '.schema == 1 and .runtimeRoot == $root and .binDir == "" and (.shellFiles|length)==0' "$runtime_root/installation.json" >/dev/null \
+  || fail 'same-version activation omitted scoped live runtime enrollment'
+installation_identity="$(stat -c '%d:%i:%Y:%Z' "$runtime_root/installation.json")"
+installed_update --runtime-root "$runtime_root" --version 1.1.0-test >/dev/null
+[ "$(stat -c '%d:%i:%Y:%Z' "$runtime_root/installation.json")" = "$installation_identity" ] \
+  || fail 'matching activation rewrote installation inventory'
 ! grep -Fq '{"schemaVersion"' <<<"$same_output" \
   || fail 'candidate process protocol leaked into public update output'
 
@@ -981,13 +1177,13 @@ cp -a "$source_version_config" "$source_version_baseline/config"
 # Inspect the already-published candidate directly before the standalone
 # bootstrap mutates links or transition state. This is the exact Plan the
 # terminal replacement journal and immutable archive must retain.
+# Stage through bootstrap so exact ownership includes the verified cache inputs
+# before preview. Offline continuation below preserves those native identities.
 recovery_candidate_path="$(HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
   SUBYARD_CONFIG_HOME="$recovery_config" YARD_RELEASE_CACHE="$recovery_cache" \
-  "$ROOT/scripts/install-runtime-release.sh" \
-  --runtime-root "$recovery_runtime" --publish-only \
-  --bundle "$recovery_candidate_bundle" --checksum "$recovery_candidate_bundle.sha256" \
-  --manifest "$recovery_candidate_bundle.manifest.json" \
-  --provenance "$recovery_candidate_bundle.provenance.json")"
+  YARD_RELEASE_BASE_URL="file://$recovery_release" \
+  "$recovery_release/subyard-install.sh" --runtime-root "$recovery_runtime" \
+  --version 0.11.2 --publish-only --yes | sed -n 's/^staged release=\([^ ]*\) candidate=.*/\1/p')"
 case "$recovery_candidate_path" in
   releases/0.11.2-*) ;;
   *) fail "publish-only returned an invalid recovery candidate: $recovery_candidate_path" ;;
@@ -1026,7 +1222,7 @@ HOME="$recovery_home" SUBYARD_HOME="$recovery_home/data" \
   SUBYARD_POWER_RECONCILER_PATH="$TMP/missing-power-reconciler" \
   SUBYARD_POWER_UNIT_PATH="$TMP/missing-power-unit" \
   BASH_ENV="$trace_environment" BASH_XTRACEFD=9 \
-  "$recovery_release/subyard-install.sh" --yes >/dev/null 9>"$trace_output"
+  "$recovery_release/subyard-install.sh" --offline --yes >/dev/null 9>"$trace_output"
 recovery_candidate_target="$(readlink "$recovery_runtime/current")"
 recovery_candidate="${recovery_candidate_target#releases/}"
 grep -F -- "--runtime-root $recovery_runtime --publish-only" "$trace_output" >/dev/null \

@@ -48,6 +48,52 @@ func legacyContinuationFixture(t *testing.T) (reconcileruntime.Runtime, *testkit
 	return runtime, incus
 }
 
+func TestLegacyContinuationAssessesSelectedNativeCapabilities(t *testing.T) {
+	runtime, incus := legacyContinuationFixture(t)
+	runtime.RepositoryRoot = runtime.Yard.Paths.OperatorHome
+	if err := os.MkdirAll(filepath.Join(runtime.RepositoryRoot, "config/profiles/native-tools"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/native-tools/profile.conf"), []byte("YARD_DEVICES=kvm\nYARD_CAPS=host-memory\n"), 0600)
+	runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=native-tools")
+	runtime.HostDeviceRoot = testkit.TempDir(t)
+	if err := os.Symlink("/dev/null", filepath.Join(runtime.HostDeviceRoot, "kvm")); err != nil {
+		t.Fatal(err)
+	}
+	instance := incus.Reconcile.Instance
+	instance.Config["user.subyard.host_memory"] = "v1"
+	instance.LocalConfig = maps.Clone(instance.Config)
+	device := map[string]string{"type": "disk", "source": "/proc/meminfo", "path": "/var/lib/subyard/host-meminfo", "readonly": "true"}
+	instance.LocalDevices["subyard-host-memory"] = device
+	instance.Devices["subyard-host-memory"] = maps.Clone(device)
+	character := map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm", "mode": "0666"}
+	instance.LocalDevices["yx-dev-kvm"], instance.Devices["yx-dev-kvm"] = character, maps.Clone(character)
+	incus.Reconcile.Instance = instance
+	if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err != nil {
+		t.Fatal("supported selected capabilities refused before native assessment:", err)
+	}
+	for _, mutant := range []struct{ name, device, key, value string }{
+		{"source", "yx-dev-kvm", "source", "/dev/mem"},
+		{"path", "yx-dev-kvm", "path", "/dev/mem"},
+		{"gid", "yx-dev-kvm", "gid", "0"},
+		{"mode", "yx-dev-kvm", "mode", "0777"},
+		{"readonly", "subyard-host-memory", "readonly", "false"},
+		{"memory source", "subyard-host-memory", "source", "/tmp/meminfo"},
+	} {
+		t.Run(mutant.name, func(t *testing.T) {
+			before := instance.LocalDevices[mutant.device]
+			changed := maps.Clone(before)
+			changed[mutant.key] = mutant.value
+			instance.LocalDevices[mutant.device], instance.Devices[mutant.device] = changed, changed
+			incus.Reconcile.Instance = instance
+			if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err == nil {
+				t.Fatal("unsafe native capability admitted")
+			}
+			instance.LocalDevices[mutant.device], instance.Devices[mutant.device] = before, maps.Clone(before)
+		})
+	}
+}
+
 // The fixture models the devices authored by the historical default container
 // scripts; it does not approve the observed test device inventory.
 func canonicalLegacyInstanceFixture(runtime reconcileruntime.Runtime, incus *testkit.Incus) {
@@ -470,7 +516,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 		t.Fatal(err)
 	}
 	runtimeRoot := program.env["YARD_RUNTIME_ROOT"]
-	installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: configHome, RuntimeRoot: runtimeRoot, CacheRoot: filepath.Join(loaded.Context.Paths.DataHome, "releases"), BinDir: filepath.Join(loaded.Context.Paths.OperatorHome, ".local/bin")}
+	installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: configHome, RuntimeRoot: runtimeRoot, CacheRoot: filepath.Join(loaded.Context.Paths.DataHome, "releases")}
 	payload, _ := json.Marshal(installation)
 	writeProfileTestFile(t, filepath.Join(runtimeRoot, "installation.json"), payload, 0600)
 	hostID, err := configsync.EnsureHostID(configHome, loaded.Environment)

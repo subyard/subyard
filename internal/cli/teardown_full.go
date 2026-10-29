@@ -87,6 +87,9 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 		if err := runtimeInventory.CheckRoots(installation.ConfigHome, installation.RuntimeRoot, installation.CacheRoot); err != nil {
 			return config.OwnerMetadataContext(filepath.Join(installation.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", err)
 		}
+		if err := runtimeInventory.CheckRuntimeScope(); err != nil {
+			return config.OwnerMetadataContext(filepath.Join(installation.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", err)
+		}
 		byPath := map[string]uninstall.Entry{}
 		for _, entry := range installation.CacheFiles {
 			byPath[entry.Path] = entry

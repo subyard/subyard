@@ -446,6 +446,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return code
 	}
 	name := remaining[0]
+	if name == "_installation" {
+		return cli.runInstallation(ctx, remaining[1:])
+	}
 	if name == "_uninstall-resume" {
 		return cli.runFullTeardownRecovery(ctx, remaining[1:])
 	}
