@@ -98,15 +98,11 @@ func readSourceRecord(configHome string) (SourceRecord, bool, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
 		info.Mode().Perm() != 0o600 {
-		return SourceRecord{}, false, errors.New(
-			"configuration source record must be a regular 0600 file",
-		)
+		return SourceRecord{}, false, metadataSafetyError(path, "configuration source record must be a regular 0600 file", "type=regular, mode=0600", info)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return SourceRecord{}, false, errors.New(
-			"configuration source record has unsafe ownership or hard links",
-		)
+		return SourceRecord{}, false, metadataSafetyError(path, "configuration source record has unsafe ownership or hard links", fmt.Sprintf("uid=%d, links=1", os.Getuid()), info)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

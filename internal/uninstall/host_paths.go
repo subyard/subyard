@@ -3,8 +3,11 @@ package uninstall
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/Subyard/Subyard/internal/config"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -43,7 +46,7 @@ func ReadHostPaths(installation Installation) ([]HostPathRecord, error) {
 			return nil, err
 		}
 		if len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].Mode&0777 != 0600 || tree.Entries[0].UID != installation.OperatorUID {
-			return nil, errors.New("host ownership ledger must be an operator-owned regular mode 0600 file")
+			return nil, protectedEntryError(path, "host ownership ledger", tree.Entries, installation.OperatorUID)
 		}
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -54,10 +57,26 @@ func ReadHostPaths(installation Installation) ([]HostPathRecord, error) {
 		}
 		var record HostPathRecord
 		if err = json.Unmarshal(body, &record); err != nil {
-			return nil, errors.New("invalid host ownership ledger")
+			return nil, config.OwnerMetadataError(path, "host ownership ledger", "invalid host ownership ledger (JSON format)", "", err)
 		}
-		if record.Schema != 1 || record.UID != installation.OperatorUID || record.DataHome != installation.DataHome || installation.ConfigHome != "" && record.ConfigHome != installation.ConfigHome || len(record.Paths) > 256 {
-			return nil, errors.New("foreign host ownership ledger")
+		var differences []string
+		if record.Schema != 1 {
+			differences = append(differences, fmt.Sprintf("schema: stored=%d, required=1", record.Schema))
+		}
+		if record.UID != installation.OperatorUID {
+			differences = append(differences, fmt.Sprintf("uid: stored=%d, current=%d", record.UID, installation.OperatorUID))
+		}
+		if record.DataHome != installation.DataHome {
+			differences = append(differences, pathDifference("dataHome", record.DataHome, installation.DataHome))
+		}
+		if installation.ConfigHome != "" && record.ConfigHome != installation.ConfigHome {
+			differences = append(differences, pathDifference("configHome", record.ConfigHome, installation.ConfigHome))
+		}
+		if len(record.Paths) > 256 {
+			differences = append(differences, fmt.Sprintf("paths: observed count=%d, required maximum=256", len(record.Paths)))
+		}
+		if len(differences) != 0 {
+			return nil, config.OwnerMetadataError(path, "host ownership ledger", "foreign host ownership ledger", strings.Join(differences, "; "), nil)
 		}
 		if err = safePath(record.Root); err != nil {
 			return nil, err
@@ -87,7 +106,7 @@ func ReadHostPaths(installation Installation) ([]HostPathRecord, error) {
 					native.Modified, old.Modified = 0, 0
 					native.Changed, old.Changed = 0, 0
 					if native != old {
-						return nil, errors.New("host namespace identity differs from its installation owner")
+						return nil, config.OwnerMetadataError(filepath.Join(record.Root, item.Name), "host namespace", "identity differs from its installation owner", entryIdentityFacts(old, native), nil)
 					}
 				}
 			}
@@ -98,4 +117,19 @@ func ReadHostPaths(installation Installation) ([]HostPathRecord, error) {
 		result = append(result, record)
 	}
 	return result, nil
+}
+
+// protectedEntryError formats the already-captured inventory; it does not
+// perform another filesystem check or change the exact-mode policy.
+func protectedEntryError(path, role string, entries []Entry, uid uint32) error {
+	observed := fmt.Sprintf("observed entries=%d", len(entries))
+	if len(entries) > 0 {
+		entry := entries[0]
+		observed += fmt.Sprintf(", type=%#o, mode=%04o, uid=%d", entry.Mode&syscall.S_IFMT, entry.Mode&0777, entry.UID)
+	}
+	return config.OwnerMetadataError(path, role, fmt.Sprintf("must be an operator-owned regular mode 0600 file; %s; required entries=1, type=%#o, mode=0600, uid=%d", observed, syscall.S_IFREG, uid), "", nil)
+}
+
+func entryIdentityFacts(stored, current Entry) string {
+	return fmt.Sprintf("stored mode=%#o, uid=%d, gid=%d, device=%d, inode=%d; current mode=%#o, uid=%d, gid=%d, device=%d, inode=%d", stored.Mode, stored.UID, stored.GID, stored.Device, stored.Inode, current.Mode, current.UID, current.GID, current.Device, current.Inode)
 }

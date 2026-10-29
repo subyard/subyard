@@ -33,7 +33,7 @@ func (prepared *preparedCommand) bindFullInstallation() error {
 			if readErr == nil {
 				for name, value := range map[string]string{"SUBYARD_HOME": self.DataHome, "SUBYARD_CONFIG_HOME": self.ConfigHome} {
 					if explicit := prepared.CLI.baseEnv[name]; explicit != "" && explicit != value {
-						return fmt.Errorf("%s selects another installation; run full removal from its own launcher", name)
+						return config.OwnerMetadataError(filepath.Join(actualRuntime, uninstall.ManifestName), "full uninstall installation "+name, "selects another installation; run full removal from its own launcher", name+": stored="+config.QuoteMetadataPath(value)+", current="+config.QuoteMetadataPath(explicit), nil)
 					}
 					prepared.CLI.env[name] = value
 				}
@@ -43,7 +43,7 @@ func (prepared *preparedCommand) bindFullInstallation() error {
 					return loadErr
 				}
 				prepared.Loaded = loaded
-			} else if !errors.Is(readErr, os.ErrNotExist) {
+			} else if !uninstall.InstallationAbsent(readErr) {
 				return readErr
 			}
 		}
@@ -72,11 +72,11 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 
 	installation, err := uninstall.ReadInstallation(current.Context.Paths.DataHome, uint32(os.Getuid()))
-	if errors.Is(err, os.ErrNotExist) {
+	if uninstall.InstallationAbsent(err) {
 		runtimeRoot := runtimeRootForRepository(cli.options.RepositoryRoot, firstNonempty(current.Environment["YARD_RUNTIME_ROOT"], filepath.Join(current.Context.Paths.DataHome, "runtime")))
 		installation, err = uninstall.ReadInstallationFile(filepath.Join(runtimeRoot, uninstall.ManifestName), current.Context.Paths.DataHome, uint32(os.Getuid()))
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if uninstall.InstallationAbsent(err) {
 		installation, err = cli.discoverLegacyInstallation(current)
 	}
 	if err != nil {
@@ -84,8 +84,8 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 	// Runtime publication may add verified cache artifacts after bootstrap.
 	if runtimeInventory, readErr := uninstall.ReadInstallationFile(filepath.Join(installation.RuntimeRoot, uninstall.ManifestName), installation.DataHome, installation.OperatorUID); readErr == nil {
-		if runtimeInventory.ConfigHome != installation.ConfigHome || runtimeInventory.RuntimeRoot != installation.RuntimeRoot || runtimeInventory.CacheRoot != installation.CacheRoot {
-			return errors.New("runtime and bootstrap cache ownership roots differ; restore matching installation metadata before full removal")
+		if err := runtimeInventory.CheckRoots(installation.ConfigHome, installation.RuntimeRoot, installation.CacheRoot); err != nil {
+			return config.OwnerMetadataContext(filepath.Join(installation.RuntimeRoot, uninstall.ManifestName), "runtime installation inventory", err)
 		}
 		byPath := map[string]uninstall.Entry{}
 		for _, entry := range installation.CacheFiles {
@@ -99,14 +99,14 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			installation.CacheFiles = append(installation.CacheFiles, entry)
 		}
 		sort.Slice(installation.CacheFiles, func(i, j int) bool { return installation.CacheFiles[i].Path < installation.CacheFiles[j].Path })
-	} else if !errors.Is(readErr, os.ErrNotExist) {
+	} else if !uninstall.InstallationAbsent(readErr) {
 		return readErr
 	}
 	if installation.ConfigHome != current.Context.Paths.ConfigHome {
-		return errors.New("full uninstall config root differs from the recorded installation")
+		return config.OwnerMetadataError("", "full uninstall installation", "config root differs from the recorded installation", "configHome: stored="+config.QuoteMetadataPath(installation.ConfigHome)+", current="+config.QuoteMetadataPath(current.Context.Paths.ConfigHome), nil)
 	}
 	if runtimeRootForRepository(cli.options.RepositoryRoot, installation.RuntimeRoot) != installation.RuntimeRoot {
-		return errors.New("the executing runtime belongs to a different recorded installation")
+		return config.OwnerMetadataError("", "full uninstall installation", "the executing runtime belongs to a different recorded installation", "runtimeRoot: stored="+config.QuoteMetadataPath(installation.RuntimeRoot)+", current="+config.QuoteMetadataPath(runtimeRootForRepository(cli.options.RepositoryRoot, installation.RuntimeRoot)), nil)
 	}
 	if execution.Assessed {
 		if operationStateDigest(execution.Installation) != operationStateDigest(installation) {

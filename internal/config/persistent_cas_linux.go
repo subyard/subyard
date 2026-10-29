@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -219,14 +220,15 @@ func validatePersistentDirectoryFD(fd int) error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
 	}
+	metadata := fmt.Sprintf("observed type=%#o, mode=%04o, uid=%d, links=%d", stat.Mode&unix.S_IFMT, stat.Mode&0777, stat.Uid, stat.Nlink)
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return sourceError("", 0, "", "persistent settings directory", "directory has unsafe type", nil)
+		return sourceError("", 0, "", "persistent settings directory", fmt.Sprintf("directory has unsafe type; %s; required type=%#o", metadata, unix.S_IFDIR), nil)
 	}
 	if stat.Mode&0o022 != 0 {
-		return sourceError("", 0, "", "persistent settings directory", "directory is group/world writable", nil)
+		return sourceError("", 0, "", "persistent settings directory", "directory is group/world writable; "+metadata+"; required writable mask=0000 (mask=0022)", nil)
 	}
 	if stat.Uid != uint32(os.Getuid()) {
-		return sourceError("", 0, "", "persistent settings directory", "directory is not operator-owned", nil)
+		return sourceError("", 0, "", "persistent settings directory", fmt.Sprintf("directory is not operator-owned; %s; required uid=%d", metadata, os.Getuid()), nil)
 	}
 	return nil
 }
@@ -245,35 +247,35 @@ func readPersistentSnapshotAt(parent int, name string) (PersistentFileSnapshot, 
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)
 	}
+	identity := PersistentFileIdentity{
+		Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode,
+		UID: stat.Uid, GID: stat.Gid, Links: uint64(stat.Nlink),
+	}
+	metadata := fmt.Sprintf("observed type=%#o, mode=%04o, uid=%d, links=%d", identity.Mode&unix.S_IFMT, identity.Mode&0777, identity.UID, identity.Links)
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target must be a regular non-symlink file", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", fmt.Sprintf("target must be a regular non-symlink file; %s; required type=%#o", metadata, unix.S_IFREG), nil)
 	}
 	if stat.Mode&0o022 != 0 {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target is group/world writable", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target is group/world writable; "+metadata+"; required writable mask=0000 (mask=0022)", nil)
 	}
 	if stat.Uid != uint32(os.Getuid()) {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target is not operator-owned", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", fmt.Sprintf("target is not operator-owned; %s; required uid=%d", metadata, os.Getuid()), nil)
 	}
 	if stat.Nlink != 1 {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target has hard links", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target has hard links; "+metadata+"; required links=1", nil)
 	}
 	if stat.Size > 8<<20 {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target exceeds its size bound", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", fmt.Sprintf("target exceeds its size bound; observed bytes=%d, required maximum=%d", stat.Size, 8<<20), nil)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, (8<<20)+1))
 	if err != nil {
 		return PersistentFileSnapshot{}, sourceAccessError("", "persistent settings", err)
 	}
 	if len(content) > 8<<20 {
-		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", "target exceeds its size bound", nil)
+		return PersistentFileSnapshot{}, sourceError("", 0, "", "persistent settings", fmt.Sprintf("target exceeds its size bound; observed bytes=%d, required maximum=%d", len(content), 8<<20), nil)
 	}
 	return PersistentFileSnapshot{
-		Exists:  true,
-		Content: content,
-		Identity: PersistentFileIdentity{
-			Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode,
-			UID: stat.Uid, GID: stat.Gid, Links: uint64(stat.Nlink),
-		},
+		Exists: true, Content: content, Identity: identity,
 	}, nil
 }
 

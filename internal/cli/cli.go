@@ -134,11 +134,13 @@ type CLI struct {
 	ownerMutationLockExpected    *uninstall.Tree
 	ownerAdmission               *ownerWriteAdmission
 	ownerAdmissionMutex          *sync.Mutex
+	localMetadataDiagnostics     bool
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation := *cli
 	operation.updateProgress = nil
+	operation.localMetadataDiagnostics = false
 	operation.configResources, operation.configResourcesRoot = nil, ""
 	// The session owns framed stdin; native children must see EOF, not RPC frames.
 	operation.options.Stdin = strings.NewReader("")
@@ -426,6 +428,7 @@ func New(options Options) (*CLI, error) {
 }
 
 func (cli *CLI) Run(ctx context.Context) int {
+	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
 	cli.resourceShutdownRepair = nil
 	cli.updateProgress = cli.options.Stdout
@@ -570,6 +573,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	}
 	if core && definition.Handler == "@rpc" {
+		cli.localMetadataDiagnostics = false
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")
 		}
@@ -3924,6 +3928,15 @@ func (cli *CLI) ensureOperationID() string {
 }
 
 func (cli *CLI) errorf(format string, arguments ...any) {
+	// Only this local stderr boundary may expose trusted owner path metadata.
+	// The error itself remains safe for RPC and activation consumers.
+	for index, argument := range arguments {
+		if cause, ok := argument.(error); ok && cli.localMetadataDiagnostics {
+			if diagnostic, local := config.OwnerSourceDiagnostic(cause); local {
+				arguments[index] = diagnostic
+			}
+		}
+	}
 	fmt.Fprintf(cli.options.Stderr, "%s: ", cli.options.Program)
 	fmt.Fprintf(cli.options.Stderr, format, arguments...)
 	fmt.Fprintln(cli.options.Stderr)

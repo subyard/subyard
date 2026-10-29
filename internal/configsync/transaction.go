@@ -368,7 +368,7 @@ func readTransaction(configHome string) (transaction, bool, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
 		info.Mode().Perm() != 0o600 {
-		return transaction{}, false, errors.New("config sync transaction must be a regular 0600 file")
+		return transaction{}, false, metadataSafetyError(path, "config sync transaction must be a regular 0600 file", "type=regular, mode=0600", info)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -378,7 +378,7 @@ func readTransaction(configHome string) (transaction, bool, error) {
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&tx); err != nil {
-		return transaction{}, false, err
+		return transaction{}, false, config.OwnerMetadataError(path, "protected configuration metadata", "invalid JSON metadata", "", err)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
 		return transaction{}, false, err
@@ -483,11 +483,11 @@ func validateExistingConfigurationRoot(root string) error {
 func validateConfigurationRootInfo(root string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
 		info.Mode().Perm()&0o022 != 0 {
-		return errors.New("configuration root must be a private real directory")
+		return metadataSafetyError(root, "configuration root must be a private real directory", "type=directory, writable mask=0000 (mask=0022)", info)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return errors.New("configuration root is not operator-owned")
+		return metadataSafetyError(root, "configuration root is not operator-owned", fmt.Sprintf("uid=%d", os.Getuid()), info)
 	}
 	return nil
 }
@@ -516,11 +516,11 @@ func validateConfigurationAncestors(configHome, path string) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
 			info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("unsafe configuration directory %s", current)
+			return metadataSafetyError(current, "unsafe configuration directory", "type=directory, writable mask=0000 (mask=0022)", info)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != uint32(os.Getuid()) {
-			return fmt.Errorf("configuration directory is not operator-owned: %s", current)
+			return metadataSafetyError(current, "configuration directory is not operator-owned", fmt.Sprintf("uid=%d", os.Getuid()), info)
 		}
 	}
 	return nil
@@ -541,11 +541,11 @@ func ensureDirectory(configHome, path string, mode os.FileMode) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
 			info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("unsafe configuration directory %s", current)
+			return metadataSafetyError(current, "unsafe configuration directory", "type=directory, writable mask=0000 (mask=0022)", info)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != uint32(os.Getuid()) {
-			return fmt.Errorf("configuration directory is not operator-owned: %s", current)
+			return metadataSafetyError(current, "configuration directory is not operator-owned", fmt.Sprintf("uid=%d", os.Getuid()), info)
 		}
 		if current == filepath.Clean(configHome) {
 			break

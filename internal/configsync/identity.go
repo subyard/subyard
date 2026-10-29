@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
@@ -30,10 +32,10 @@ func ResolveHostID(configHome string, environment map[string]string) (string, bo
 			return "", false, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", false, errors.New("owner host ID must be a regular non-symlink file")
+			return "", false, config.OwnerMetadataError(path, "owner host ID", "must be a regular non-symlink file; "+config.FileMetadata(info), "", nil)
 		}
 		if info.Mode().Perm() != 0o600 {
-			return "", false, errors.New("owner host ID file mode must be 0600")
+			return "", false, config.OwnerMetadataError(path, "owner host ID", fmt.Sprintf("file mode must be 0600; observed mode=%04o, required mode=0600", info.Mode().Perm()), "", nil)
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -41,7 +43,7 @@ func ResolveHostID(configHome string, environment map[string]string) (string, bo
 		}
 		hostID := strings.TrimSpace(string(content))
 		if !safeHostID(hostID) {
-			return "", false, fmt.Errorf("invalid owner host ID %q", hostID)
+			return "", false, config.OwnerMetadataError(path, "owner host ID", "invalid owner host ID (expected a safe native identifier)", "", nil)
 		}
 		return hostID, false, nil
 	}
@@ -57,10 +59,7 @@ func ResolveHostID(configHome string, environment map[string]string) (string, bo
 		hostID = strings.TrimSuffix(strings.TrimSpace(hostID), ".")
 	}
 	if !safeHostID(hostID) {
-		return "", false, fmt.Errorf(
-			"initial owner host ID %q is unsafe; set SUBYARD_HOST_ID to a safe value for the first sync",
-			hostID,
-		)
+		return "", false, errors.New("initial owner host ID is unsafe; set SUBYARD_HOST_ID to a safe value for the first sync")
 	}
 	return hostID, true, nil
 }
@@ -134,4 +133,14 @@ func ReadStatus(configHome string, environment map[string]string) (Status, error
 
 func safeHostID(value string) bool {
 	return domain.SafeID(value) && !strings.ContainsAny(value, `/\`)
+}
+
+// metadataSafetyError formats facts from the owning check without another read
+// or validation pass; each caller retains its own mode/type policy.
+func metadataSafetyError(path, role, required string, info os.FileInfo) error {
+	links := "unavailable"
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		links = fmt.Sprintf("%d", stat.Nlink)
+	}
+	return config.OwnerMetadataError(path, role, config.FileMetadata(info)+", links="+links+"; required "+required, "", nil)
 }

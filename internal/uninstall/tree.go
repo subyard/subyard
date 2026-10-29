@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
@@ -164,7 +165,7 @@ func nativeArtifact(mode string, input, result any) error {
 
 func safePath(path string) error {
 	if slices.Contains([]string{"/usr/local", "/usr/local/bin", "/usr/bin", "/usr/sbin", "/var/lib", "/var/log", "/etc/systemd", "/etc/systemd/system"}, path) || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.ContainsAny(path, "\x00\r\n") || filepath.Dir(path) == "/" {
-		return errors.New("uninstall requires a clean, non-root absolute artifact path")
+		return config.OwnerMetadataError(path, "uninstall artifact path", "uninstall requires a clean, non-root absolute artifact path", "", nil)
 	}
 	current := "/"
 	for _, part := range strings.Split(strings.TrimPrefix(filepath.Dir(path), "/"), "/") {
@@ -174,10 +175,10 @@ func safePath(path string) error {
 			return nil
 		}
 		if err != nil {
-			return err
+			return config.OwnerMetadataError(current, "uninstall artifact ancestor", config.MetadataAccessReason(err), "", err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("uninstall artifact has a non-directory or symbolic-link ancestor: %s", current)
+			return config.OwnerMetadataError(current, "uninstall artifact ancestor", "has a non-directory or symbolic-link ancestor; "+config.FileMetadata(info)+"; required type=directory", "", nil)
 		}
 	}
 	return nil
@@ -229,10 +230,15 @@ func openParent(path string) (*os.Root, error) {
 			return nil, err
 		}
 		pinned, err := child.Stat(".")
-		if err != nil || !os.SameFile(before, pinned) {
+		if err != nil {
 			root.Close()
 			child.Close()
-			return nil, domain.ErrPlanStale
+			return nil, config.OwnerMetadataError(path, "uninstall artifact ancestor", config.MetadataAccessReason(err), "", errors.Join(domain.ErrPlanStale, err))
+		}
+		if !os.SameFile(before, pinned) {
+			root.Close()
+			child.Close()
+			return nil, config.OwnerMetadataError(path, "uninstall artifact ancestor", "inode identity changed while opening", "", domain.ErrPlanStale)
 		}
 		root.Close()
 		root = child
@@ -264,10 +270,10 @@ func CheckGeneration(approved []Tree) error {
 			return err
 		}
 		if len(current.Entries) != len(tree.Entries) {
-			return fmt.Errorf("%w: installation generation changed while waiting for owner mutation lock", domain.ErrPlanStale)
+			return config.OwnerMetadataError(tree.Path, "installation generation", "changed while waiting for owner mutation lock", fmt.Sprintf("stored entries=%d, current entries=%d", len(tree.Entries), len(current.Entries)), domain.ErrPlanStale)
 		}
 		if len(tree.Entries) > 0 && !sameEntry(tree.Entries[0], current.Entries[0]) {
-			return fmt.Errorf("%w: installation root identity changed while waiting for owner mutation lock", domain.ErrPlanStale)
+			return config.OwnerMetadataError(tree.Path, "installation root identity", "changed while waiting for owner mutation lock", entryIdentityFacts(tree.Entries[0], current.Entries[0]), domain.ErrPlanStale)
 		}
 	}
 	return nil

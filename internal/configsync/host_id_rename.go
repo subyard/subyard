@@ -342,7 +342,7 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 		return hostIDRenameJournal{}, false, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return hostIDRenameJournal{}, false, errors.New("unsafe owner rename journal")
+		return hostIDRenameJournal{}, false, metadataSafetyError(path, "unsafe owner rename journal", "type=regular, mode=0600", info)
 	}
 	if err := validateOwnedMode(path, info, false); err != nil {
 		return hostIDRenameJournal{}, false, err
@@ -361,7 +361,7 @@ func readHostIDRenameJournal(configHome string) (hostIDRenameJournal, bool, erro
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&journal); err != nil {
-		return hostIDRenameJournal{}, false, err
+		return hostIDRenameJournal{}, false, config.OwnerMetadataError(path, "protected configuration metadata", "invalid JSON metadata", "", err)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
 		return hostIDRenameJournal{}, false, err

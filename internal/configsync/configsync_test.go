@@ -683,6 +683,8 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 			(!strings.Contains(err.Error(), "regular non-symlink") &&
 				!strings.Contains(err.Error(), "real regular file")) {
 			t.Fatalf("source symlink was accepted: %v", err)
+		} else if diagnostic, ok := config.OwnerSourceDiagnostic(err); !ok || !strings.Contains(diagnostic, "observed type=L") || !strings.Contains(diagnostic, "config.env") || strings.Contains(err.Error(), fixture.source) {
+			t.Fatal("source safety facts lost or public path exposed", diagnostic, err)
 		}
 	})
 
@@ -701,6 +703,8 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
 			!strings.Contains(err.Error(), "hard-linked") {
 			t.Fatalf("source hard link was accepted: %v", err)
+		} else if diagnostic, ok := config.OwnerSourceDiagnostic(err); !ok || !strings.Contains(diagnostic, "links=2") || !strings.Contains(diagnostic, "config.env") || strings.Contains(err.Error(), fixture.source) {
+			t.Fatal("source safety facts lost or public path exposed", diagnostic, err)
 		}
 	})
 
@@ -715,6 +719,8 @@ func TestVersionedConfigSyncSourceFilesystemBoundary(t *testing.T) {
 		if _, err := BuildPlan(fixture.options(false)); err == nil ||
 			!strings.Contains(err.Error(), "must not be executable") {
 			t.Fatalf("executable source setting was accepted: %v", err)
+		} else if diagnostic, ok := config.OwnerSourceDiagnostic(err); !ok || !strings.Contains(diagnostic, "mode=0700") || !strings.Contains(diagnostic, "config.env") || strings.Contains(err.Error(), fixture.source) {
+			t.Fatal("source safety facts lost or public path exposed", diagnostic, err)
 		}
 	})
 
@@ -1222,5 +1228,47 @@ func TestVersionedConfigSyncDefaultYardAssets(t *testing.T) {
 	assertSyncTestFile(t, filepath.Join(fixture.configHome, config.GitSettingsRelativePath, relative), "default rules\n", 0o644)
 	if _, err := os.Stat(filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards/default/config.env")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("asset-only default created scalar settings: %v", err)
+	}
+}
+
+func TestHostIDDiagnosticsDoNotRenderInvalidIdentity(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := HostIDPath(root)
+	testkit.WriteFile(t, path, []byte("SECRET_HOST_ID\n\x1b[31m"), 0600)
+	_, _, err := ResolveHostID(root, nil)
+	diagnostic, ok := config.OwnerSourceDiagnostic(err)
+	if !ok || !strings.Contains(diagnostic, "invalid owner host ID") || strings.Contains(diagnostic, "SECRET_HOST_ID") || strings.Contains(err.Error(), "SECRET_HOST_ID") {
+		t.Fatal(diagnostic, err)
+	}
+	testkit.WriteFile(t, path, []byte("owner\n"), 0644)
+	_, _, err = ResolveHostID(root, nil)
+	diagnostic, ok = config.OwnerSourceDiagnostic(err)
+	if !ok || !strings.Contains(diagnostic, "observed mode=0644, required mode=0600") {
+		t.Fatal(diagnostic, err)
+	}
+}
+
+func TestSourceExecutableDiagnosticEscapesPathAndOmitsContents(t *testing.T) {
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, "tool\n\x1b.sh")
+	testkit.WriteFile(t, path, []byte("SECRET_CONTENT"), 0600)
+	content, err := readSourceFile(root, path, 1024, true)
+	diagnostic, ok := config.OwnerSourceDiagnostic(err)
+	if len(content) != 0 || !ok || !strings.Contains(diagnostic, "mode=0600") || !strings.Contains(diagnostic, "mask=0111") || strings.ContainsAny(diagnostic, "\n\x1b") || strings.Contains(diagnostic, "SECRET_CONTENT") || strings.Contains(err.Error(), root) {
+		t.Fatal(diagnostic, err)
+	}
+	_, err = readSourceFile(root, filepath.Join(root, "missing"), 1024, false)
+	var pathError *os.PathError
+	if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathError) {
+		t.Fatal("source read cause lost", err)
+	}
+	ancestor := filepath.Join(root, "link")
+	if err := os.Symlink(root, ancestor); err != nil {
+		t.Fatal(err)
+	}
+	_, err = readSourceFile(root, filepath.Join(ancestor, "asset"), 1024, false)
+	diagnostic, ok = config.OwnerSourceDiagnostic(err)
+	if !ok || !strings.Contains(diagnostic, "non-directory or symlink ancestor") || !strings.Contains(diagnostic, "required type=directory") || !strings.Contains(diagnostic, "asset") || strings.Contains(err.Error(), root) {
+		t.Fatal("source ancestor facts or provenance lost", diagnostic, err)
 	}
 }

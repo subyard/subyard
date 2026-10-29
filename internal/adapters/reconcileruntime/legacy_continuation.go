@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerpublication"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -58,14 +59,33 @@ func (runtime Runtime) InspectLegacyContinuation(ctx context.Context) (ports.Rec
 	}
 
 	instance := state.Instance
-	if instance.Project != runtime.Yard.IncusProject || instance.Name != runtime.Yard.YardInstanceName || instance.Type != runtime.Yard.YardKind ||
-		instance.Config["volatile.uuid"] == "" || instance.Config["user.subyard.managed"] != "true" ||
-		(runtime.LegacyContinuation == nil && instance.Config["user.subyard.initialized"] != "true") || instance.Config["user.subyard.name"] != runtime.Yard.YardName ||
-		instance.Config["user.subyard.bridge"] != runtime.Yard.IncusBridge ||
-		(instance.Config["user.subyard.desired_power"] != "running" && instance.Config["user.subyard.desired_power"] != "stopped") ||
-		instance.Config["boot.autostart"] != "false" {
-		return state, nil, errors.New("legacy continuation requires a complete matching managed native identity and UUID")
+	var identityDifferences []string
+	for _, field := range []struct{ name, observed, required string }{
+		{"project", instance.Project, runtime.Yard.IncusProject},
+		{"instance", instance.Name, runtime.Yard.YardInstanceName},
+		{"type", string(instance.Type), string(runtime.Yard.YardKind)},
+		{"user.subyard.managed", instance.Config["user.subyard.managed"], "true"},
+		{"user.subyard.name", instance.Config["user.subyard.name"], runtime.Yard.YardName},
+		{"user.subyard.bridge", instance.Config["user.subyard.bridge"], runtime.Yard.IncusBridge},
+		{"boot.autostart", instance.Config["boot.autostart"], "false"},
+	} {
+		if field.observed != field.required {
+			identityDifferences = append(identityDifferences, field.name+": observed="+legacyIdentityValue(field.observed)+", required="+legacyIdentityValue(field.required))
+		}
 	}
+	if instance.Config["volatile.uuid"] == "" {
+		identityDifferences = append(identityDifferences, "volatile.uuid: observed empty, required nonempty")
+	}
+	if runtime.LegacyContinuation == nil && instance.Config["user.subyard.initialized"] != "true" {
+		identityDifferences = append(identityDifferences, "user.subyard.initialized: observed="+legacyIdentityValue(instance.Config["user.subyard.initialized"])+", required=true")
+	}
+	if power := instance.Config["user.subyard.desired_power"]; power != "running" && power != "stopped" {
+		identityDifferences = append(identityDifferences, "user.subyard.desired_power: observed="+legacyIdentityValue(power)+", required running or stopped")
+	}
+	if len(identityDifferences) != 0 {
+		return state, nil, config.OwnerMetadataError("", "legacy continuation native identity", "requires a complete matching managed native identity and UUID", strings.Join(identityDifferences, "; "), nil)
+	}
+
 	if err := runtime.legacyInstancePolicy(ctx, state); err != nil {
 		return state, nil, err
 	}
@@ -136,15 +156,30 @@ func (runtime Runtime) checkLegacyContinuation(ctx context.Context) error {
 	}
 	state, resources, err := runtime.InspectLegacyContinuation(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: legacy continuation native identity is no longer eligible: %v", domain.ErrPlanStale, err)
+		return fmt.Errorf("%w: legacy continuation native identity is no longer eligible: %w", domain.ErrPlanStale, err)
 	}
 	binding, err := runtime.LegacyContinuationSecurityBinding(state)
 	if err != nil {
-		return fmt.Errorf("%w: native publication policy changed: %v", domain.ErrPlanStale, err)
+		return fmt.Errorf("%w: native publication policy changed: %w", domain.ErrPlanStale, err)
 	}
-	if grant.Scope != "normal-reconcile" || grant.Context != domain.ContinuationContext(runtime.Yard) ||
-		grant.InstanceUUID != state.Instance.Config["volatile.uuid"] || grant.SecurityPolicyBinding != binding || !reflect.DeepEqual(grant.Resources, LegacyContinuationResources(resources)) {
-		return fmt.Errorf("%w: legacy continuation identity changed", domain.ErrPlanStale)
+	var differences []string
+	if grant.Scope != "normal-reconcile" {
+		differences = append(differences, "scope: stored="+legacyIdentityValue(grant.Scope)+", required=normal-reconcile")
+	}
+	if current := domain.ContinuationContext(runtime.Yard); grant.Context != current {
+		differences = append(differences, "context changed; configHome: stored="+config.QuoteMetadataPath(grant.Context.Paths.ConfigHome)+", current="+config.QuoteMetadataPath(current.Paths.ConfigHome)+"; dataHome: stored="+config.QuoteMetadataPath(grant.Context.Paths.DataHome)+", current="+config.QuoteMetadataPath(current.Paths.DataHome))
+	}
+	if current := state.Instance.Config["volatile.uuid"]; grant.InstanceUUID != current {
+		differences = append(differences, "instanceUuid: stored="+legacyIdentityValue(grant.InstanceUUID)+", current="+legacyIdentityValue(current))
+	}
+	if grant.SecurityPolicyBinding != binding {
+		differences = append(differences, "securityPolicyBinding: stored and current protected policy differ")
+	}
+	if current := LegacyContinuationResources(resources); !reflect.DeepEqual(grant.Resources, current) {
+		differences = append(differences, fmt.Sprintf("resources: stored and current inventory differ (stored count=%d, current count=%d)", len(grant.Resources), len(current)))
+	}
+	if len(differences) != 0 {
+		return config.OwnerMetadataError("", "legacy continuation", "legacy continuation identity changed", strings.Join(differences, "; "), domain.ErrPlanStale)
 	}
 	return nil
 }
@@ -454,4 +489,11 @@ func (runtime Runtime) legacyPublicationPolicy(instance ports.InstanceInfo) (map
 		}
 	}
 	return result, nil
+}
+
+func legacyIdentityValue(value string) string {
+	if !domain.SafeID(value) {
+		return "unavailable (empty or invalid native identifier)"
+	}
+	return config.QuoteMetadataPath(value)
 }

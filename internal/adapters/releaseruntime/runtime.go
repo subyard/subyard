@@ -1908,9 +1908,11 @@ func releaseLinksFromRuntimeSnapshot(snapshot runtimeLinkSnapshot) releasetransi
 func validateRuntimeEngine(root string, state runtimeLinkState) error {
 	engine := filepath.Join(root, state.target, "bin", "yard-engine")
 	info, err := os.Lstat(engine)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("runtime %q has no executable yard-engine", state.target)
+	if err != nil {
+		return config.OwnerMetadataError(engine, "runtime yard-engine", config.MetadataAccessReason(err), "", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		return config.OwnerMetadataError(engine, "runtime yard-engine", "has no executable yard-engine; "+config.FileMetadata(info)+"; required type=regular, executable mask nonzero (mask=0111)", "", nil)
 	}
 	return nil
 }
