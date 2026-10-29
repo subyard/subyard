@@ -109,3 +109,15 @@ func TestTreeRefusesSymbolicLinkAncestors(t *testing.T) {
 		t.Fatal("filesystem root accepted")
 	}
 }
+
+func TestInstallationAbsentRetainsChangedReadRefusal(t *testing.T) {
+	missing := &os.PathError{Op: "lstat", Path: "installation.json", Err: os.ErrNotExist}
+	if !InstallationAbsent(missing) {
+		t.Fatal("initial absence no longer selects optional inventory handling")
+	}
+	changed := errors.Join(ErrInstallationChanged, missing)
+	var pathError *os.PathError
+	if !errors.Is(changed, os.ErrNotExist) || !errors.As(changed, &pathError) || InstallationAbsent(changed) {
+		t.Fatal("changed inventory selected absence fallback or lost read cause")
+	}
+}

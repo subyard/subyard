@@ -529,6 +529,30 @@ consent includes this boundary. An interrupted first installation retains protec
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
 publishing entrypoints. Publication-only staging leaves migration state untouched.
 
+Schema-1 installation identity and protected metadata publication are shared by bootstrap,
+runtime publication, candidate activation and ownership consumers. The candidate advertises
+`installation-runtime-v1` and assesses missing runtime inventory as an activation step,
+including same-release reuse and updates delivered by supported historical callers. Inspection
+never repairs metadata. Publication binds the native directory, exact file snapshot and owner
+epoch under the existing owner barrier; matching metadata stays unchanged. Runtime inventory
+does not claim bootstrap entrypoints or native project ownership. Full bootstrap retains its
+separate inventory and preserves previous shell and cache claims. A transient download cache
+does not change an established installation cache root; private release drafts have their own
+runtime scope and never donate identity to the live installation.
+The manifest-bound `config/installation-capabilities.json` admits the common installer
+leaf; retained older payloads without that contract keep their historical installer semantics.
+The current full bootstrap requires this capability and a successful candidate API inspection
+before activation or entrypoint changes. Its embedded current publisher verifies older selected
+helpers' archives without replacing their cached helper; publication-only staging retains the
+selected installer's own behavior.
+
+Limited legacy continuation assesses selected native declarations against observed device,
+mount and privilege facts, using the ordinary extras policy and owning host-memory validator.
+It grants only bounded normal reconciliation after explicit consent. An already selected named
+provision hook uses its own verified native prerequisites and the ordinary provision planner;
+unrelated selected hooks and native repairs do not expand that operation. Missing prerequisites
+retain the assessed init and ownership boundary.
+
 Activation observers do not print diagnostics. Return expected drift as
 `Converged: false`, persistent notices as `V2ActivationObservation.Warnings`, and
 failures as errors. The operation boundary renders current `Outcome.Warnings`
@@ -1624,6 +1648,15 @@ Unknown fields, unsupported versions, unsafe relative paths and duplicate consum
   `--resume` restores that service. Core retains the paused profile IDs and restores earlier
   services if a later pause fails. Hooks own their service-specific identity and recovery guards.
   `SUBYARD_PROFILE_STOPPED=1` asks readiness checks to honor the yard's stopped intent.
+  Readiness drift returns exit 1; other native failures retain their exit codes. Hooks may
+  write exactly one `subyard-profile-readiness-v1 CODE` line to stderr, where `CODE` is
+  `boot-link-missing`, `boot-link-target-mismatch`, `unit-fragment-mismatch`,
+  `boot-dependency-unloaded`, `unit-inactive`, or `transport-unavailable`. The dispatcher
+  captures at most 128 bytes and discards malformed, duplicate, oversized or arbitrary
+  output. Adapters opt in with `SUBYARD_PROFILE_DIAGNOSTICS=1` to receive a validated
+  `reason=CODE` after the existing owner/native-exit check record; callers without the
+  opt-in retain that original record. Scoped human status displays `diagnostic: CODE`
+  from the same observation. Runtime observation and status JSON stay unchanged.
   Scoped disable invokes only that profile's `--remove`, carrying metadata bindings for its declared
   managed paths so replacement artifacts fail stale guards before deletion.
 - `managed_paths` declares owned `data`/`operator` paths for teardown assessment, with optional

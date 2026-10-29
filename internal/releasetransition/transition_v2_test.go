@@ -2077,7 +2077,7 @@ func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 				links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
 				return links, nil
 			}
-			reconciler := &v2TestReconciler{}
+			reconciler := &v2TestReconciler{warnings: []string{"runtime warning"}}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-b", Direction: DirectionActivateTarget}
 			initial, err := transition.Inspect(ctx, goal)
@@ -2121,6 +2121,9 @@ func TestV2TransitionResumeAfterAnotherCallerCompletes(t *testing.T) {
 			}
 			if outcome.Code != want || reconciler.reconciles != 1 {
 				t.Fatalf("outcome = %#v, reconciles=%d", outcome, reconciler.reconciles)
+			}
+			if !slices.Equal(outcome.Warnings, []string{"runtime warning"}) {
+				t.Fatalf("completed resume lost current warnings: %v", outcome.Warnings)
 			}
 			after, err := fresh.store.ReadCurrentJournal()
 			if err != nil || !sameProtectedSnapshot(before, after) {
@@ -3050,12 +3053,15 @@ func TestV2TransitionCannotReplaceUnsafeCompletedJournalForSameGoal(t *testing.T
 }
 
 func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing.T) {
-	for _, change := range []string{"none", "consequence", "snapshot"} {
+	for _, change := range []string{"none", "consequence", "snapshot", "native binding"} {
 		t.Run(change, func(t *testing.T) {
 			transition, _, configPath := v2TransitionFixture(t, nil)
 			reconciler := &v2TestReconciler{consequences: []string{
 				"Adopt existing Codex rules under integration management: /home/dev/.codex/rules/repo.rules",
 			}}
+			if change == "native binding" {
+				reconciler.binding = digestA
+			}
 			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
 			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
 			inspection, err := transition.InspectProcessV1(context.Background(), goal)
@@ -3083,6 +3089,8 @@ func TestV2ActivationConsequencesReachProcessInspectionAndBindConsent(t *testing
 				reconciler.consequences[0] = "Adopt a different existing artifact"
 			case "snapshot":
 				reconciler.drift = digestC
+			case "native binding":
+				reconciler.binding = digestC
 			}
 			outcome, err := transition.Converge(context.Background(), Execution{
 				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
@@ -3827,6 +3835,92 @@ func TestFreshV2TransitionRejectsChangedObservationScope(t *testing.T) {
 	}
 }
 
+func TestFreshV2CompletedConvergeObservesOnlyUnderLock(t *testing.T) {
+	for _, test := range []struct {
+		name                                                    string
+		driftAfterLock, cleanupFails, checkpointed, invalidPlan bool
+	}{{name: "ready"}, {name: "checkpointed", checkpointed: true}, {name: "invalid-plan", invalidPlan: true}, {name: "drift", driftAfterLock: true}, {name: "cleanup-warning", cleanupFails: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			transition, configHome, _ := v2TransitionFixture(t, nil)
+			transition.options.MigrationCheckpoint = test.checkpointed
+			reconciler := &v2TestReconciler{converged: true, warnings: []string{"runtime probe warning"}}
+			transition.options.Reconcilers = []V2ActivationReconciler{reconciler}
+			goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
+			initial, err := transition.Inspect(ctx, goal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome, err := transition.Converge(ctx, Execution{Plan: initial.Plan, Authorization: v2TestAuthorization(initial.Plan)}); err != nil || outcome.Status != StatusReady {
+				t.Fatalf("initial convergence: %+v %v", outcome, err)
+			}
+			ready, err := transition.Inspect(ctx, goal)
+			if err != nil || ready.Outcome.Status != StatusReady || ready.Assessment.Changed || ready.Resume != nil {
+				t.Fatalf("ready inspection: %+v %v", ready, err)
+			}
+			options := transition.options
+			if test.cleanupFails {
+				options.fault = func(point string) error {
+					if point == "before-recovery-gc" {
+						return errors.New("cleanup interrupted")
+					}
+					return nil
+				}
+			}
+			observedUnderLock := false
+			observeLinks := options.ObserveLinks
+			options.ObserveLinks = func(ctx context.Context) (ReleaseLinks, error) {
+				fd, err := unix.Open(filepath.Join(configHome, "migrations", "update.lock"), unix.O_RDWR|unix.O_CLOEXEC, 0)
+				if err != nil {
+					return ReleaseLinks{}, err
+				}
+				defer unix.Close(fd)
+				if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+					if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+						return ReleaseLinks{}, err
+					}
+				} else if errors.Is(err, unix.EWOULDBLOCK) {
+					observedUnderLock = true
+					if test.driftAfterLock {
+						reconciler.converged = false
+					}
+				} else {
+					return ReleaseLinks{}, err
+				}
+				return observeLinks(ctx)
+			}
+			fresh, err := NewV2Transition(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotStoreV2Tree(t, configHome)
+			reconciler.observes, reconciler.reconciles = 0, 0
+			plan := ready.Plan
+			if test.invalidPlan {
+				plan = "plan-v1-" + PlanToken(strings.Repeat("f", 64))
+			}
+			outcome, err := fresh.Converge(ctx, Execution{Plan: plan})
+			wantStatus, wantCode := StatusReady, CodeReady
+			if test.driftAfterLock || test.invalidPlan {
+				wantStatus, wantCode = StatusOperatorActionRequired, CodePlanStale
+			}
+			if err != nil || outcome.Status != wantStatus || outcome.Code != wantCode || reconciler.observes != 1 || reconciler.reconciles != 0 || !observedUnderLock {
+				t.Fatalf("fresh convergence: outcome=%+v err=%v observes=%d reconciles=%d observedUnderLock=%t", outcome, err, reconciler.observes, reconciler.reconciles, observedUnderLock)
+			}
+			warnings := []string{"runtime probe warning"}
+			if test.cleanupFails {
+				warnings = append([]string{"recovery cleanup is pending"}, warnings...)
+			}
+			if !slices.Equal(outcome.Warnings, warnings) {
+				t.Fatalf("ready warnings = %v, want %v", outcome.Warnings, warnings)
+			}
+			if !bytes.Equal(before, snapshotStoreV2Tree(t, configHome)) {
+				t.Fatal("ready repeat or stale refusal changed protected state")
+			}
+		})
+	}
+}
+
 func TestV2TransitionRejectsObservationScopeChangedAfterInspection(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	goal := Goal{Target: "release-a", Direction: DirectionActivateTarget}
@@ -3888,6 +3982,7 @@ func TestV2TransitionDoesNotFabricateLinksWhenPostMutationObservationFails(t *te
 }
 
 type v2TestReconciler struct {
+	binding       Fingerprint
 	id            string
 	converged     bool
 	desired       Fingerprint
@@ -4219,6 +4314,7 @@ func (reconciler *v2TestReconciler) Observe(context.Context, ReleasePair, Releas
 		warnings = append(warnings, reconciler.driftWarnings...)
 	}
 	return V2ActivationObservation{
+		Binding: reconciler.binding,
 		Actual:  map[bool]Fingerprint{true: desired, false: drift}[reconciler.converged],
 		Desired: desired, Converged: reconciler.converged,
 		Consequences: slices.Clone(reconciler.consequences), Warnings: warnings,

@@ -128,6 +128,15 @@ func (runtime Runtime) integrationScopeWithSourceReader(phase string, reader fun
 	if err != nil {
 		return "", nil, err
 	}
+	sourceBinding, _, err := runtime.integrationSourceBindingsWithSourceReader(phase, reader)
+	if err != nil {
+		return "", nil, err
+	}
+	return runtime.integrationScopeFromInputs(entries, sourceBinding)
+}
+
+func (runtime Runtime) integrationScopeFromInputs(entries []integrationArtifact, sourceBinding string) (string, []string, error) {
+	entries = slices.Clone(entries)
 	paths := []string{}
 	for index := range entries {
 		entries[index].Content = ""
@@ -137,10 +146,6 @@ func (runtime Runtime) integrationScopeWithSourceReader(phase string, reader fun
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
-	sourceBinding, _, err := runtime.integrationSourceBindingsWithSourceReader(phase, reader)
-	if err != nil {
-		return "", nil, err
-	}
 	uid := runtime.Yard.DevUID
 	if uid <= 0 {
 		uid = 1000
@@ -414,7 +419,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		return plan, observed, err
 	}
 	plan.facts = slices.Clone(observed.Facts)
-	scope, _, err := runtime.integrationScopeWithSourceReader(phase, reader)
+	scope, _, err := runtime.integrationScopeFromInputs(entries, plan.sources)
 	if err != nil {
 		return plan, observed, err
 	}

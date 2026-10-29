@@ -132,6 +132,89 @@ func (executor *hookPlanExecutor) Exec(_ context.Context, _ string, _ string, re
 	return ports.InstanceExecResult{}, nil
 }
 
+func TestNoProjectHookWorkRequiresBoundReadyMetadataAndEmptyInstalledHooks(t *testing.T) {
+	for _, scenario := range []string{"ready", "empty owners", "uncaptured owners", "agent hook", "resource hook", "conditional", "unavailable", "stopped", "missing metadata", "missing observation", "pending metadata", "other projects"} {
+		t.Run(scenario, func(t *testing.T) {
+			observation := hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}
+			plan := &ProjectHookPlan{approved: observation, current: observation, allowedHooks: []string{"declared-but-uninstalled"},
+				metadata: &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample"}}, projectMetadataObservation: projectMetadataObservation{Projects: observation.Projects, Expected: json.RawMessage(`[{"metadata":[[],"fingerprint"]}]`)}}}
+			switch scenario {
+			case "empty owners":
+				plan.metadata = nil
+				plan.CaptureOwnerProjects([]domain.ProjectRecord{})
+			case "uncaptured owners":
+				plan.metadata = nil
+			case "agent hook":
+				plan.current.Hooks = []string{"agent-projects-changed"}
+			case "resource hook":
+				plan.current.Hooks = []string{"/usr/local/libexec/subyard/projects-changed.d/resource"}
+			case "conditional":
+				plan.conditional = true
+			case "unavailable":
+				plan.unavailable = true
+			case "stopped":
+				plan.stopped = true
+			case "missing metadata":
+				plan.metadata = nil
+				plan.CaptureOwnerProjects([]domain.ProjectRecord{{ProjectID: "sample"}})
+			case "missing observation":
+				plan.metadata.Expected = nil
+			case "pending metadata":
+				plan.metadata.Expected = json.RawMessage(`[{"metadata":null}]`)
+			case "other projects":
+				plan.metadata.Projects = testRuntimeNewDigest
+			}
+			if got := plan.NoProjectHookWork(); got != (scenario == "ready" || scenario == "empty owners") {
+				t.Fatalf("no project hook work = %t", got)
+			}
+			if (scenario == "ready" || scenario == "empty owners") && plan.OperationStep("yard").Decision != domain.StepSkip {
+				t.Fatal("empty hook step still reports work")
+			}
+		})
+	}
+}
+
+func TestEmptyProjectHookPlanRetainsFreshDriftRefusal(t *testing.T) {
+	for _, scenario := range []string{"ready", "zero projects", "project drift", "agent hook", "resource hook"} {
+		t.Run(scenario, func(t *testing.T) {
+			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest}}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
+			runtime := Runtime{RepositoryRoot: "../../..", Incus: incus, Executor: executor, Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}}
+			var err error
+			runtime.HookPlan, err = runtime.PrepareProjectHooks(context.Background(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.HookPlan.metadata = &projectMetadataPlan{Targets: []projectMetadataTarget{{Root: "/srv/workspaces/sample"}}, projectMetadataObservation: projectMetadataObservation{Projects: testRuntimeOldDigest, Expected: json.RawMessage(`[{"metadata":[[],"fingerprint"]}]`)}}
+			if scenario == "zero projects" {
+				runtime.HookPlan.metadata = nil
+				// Empty registered ownership does not authorize publication into
+				// any unregistered directories from the guest project digest.
+				runtime.HookPlan.CaptureOwnerProjects([]domain.ProjectRecord{})
+				if err := runtime.PrepareProjectMetadata(context.Background()); err != nil || runtime.HookPlan.HasMetadataRepair() || runtime.HookPlan.metadata != nil || runtime.HookPlan.MetadataOperationStep("yard") != nil {
+					t.Fatalf("empty captured ownership needs metadata work: %v", err)
+				}
+			}
+			if !runtime.HookPlan.NoProjectHookWork() {
+				t.Fatal("captured ready empty plan requires work")
+			}
+			switch scenario {
+			case "project drift":
+				executor.observation.Projects = testRuntimeNewDigest
+			case "agent hook":
+				executor.observation.Hooks = []string{"agent-projects-changed"}
+			case "resource hook":
+				executor.observation.Hooks = []string{"/usr/local/libexec/subyard/projects-changed.d/resource"}
+			}
+			err = runtime.CheckProjectHookPlan(context.Background(), true)
+			ready := scenario == "ready" || scenario == "zero projects"
+			if ready && err != nil || !ready && !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
+				t.Fatalf("empty plan guard: err=%v effects=%d", err, executor.calls)
+			}
+		})
+	}
+}
+
 func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) {
 	for _, scenario := range []string{"projects", "hook", "wiring", "source after prerequisite", "failed hook", "success"} {
 		t.Run(scenario, func(t *testing.T) {

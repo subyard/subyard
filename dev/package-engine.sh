@@ -38,6 +38,8 @@ if [[ "${GOFLAGS:-}" == *-tags* ]]; then
   exit 2
 fi
 case "$TARGET_ARCH" in amd64 | arm64) ;; *) printf 'package-engine: unsupported architecture: %s\n' "$TARGET_ARCH" >&2; exit 2 ;; esac
+jq -e '. == {schemaVersion:1,contract:"installation-inventory-v1"}' "$REPO/config/installation-capabilities.json" >/dev/null \
+  || { printf 'package-engine: unsupported installation capability\n' >&2; exit 2; }
 for package_input in "$MIGRATION_REGISTRY" "$RELEASE_TRANSITION_REGISTRY" "$RUNTIME_INSTALLER"; do
   [ -f "$package_input" ] && [ ! -L "$package_input" ] \
     || { printf 'package-engine: package override must be a regular non-symlink file: %s\n' "$package_input" >&2; exit 2; }
@@ -76,7 +78,13 @@ if [ -n "$RUNTIME_DIR" ]; then
 else
   [ -z "$PREBUILT_ENGINE" ] || { printf 'package-engine: --engine requires --runtime-dir\n' >&2; exit 2; }
 install -d "$OUTPUT_DIR"
-install -m 0755 "$REPO/dev/bootstrap-runtime.sh" "$OUTPUT_DIR/subyard-install.sh"
+publisher_sha="$(sha256sum "$REPO/scripts/install-runtime-release.sh" | cut -d' ' -f1)"
+awk -v publisher="$REPO/scripts/install-runtime-release.sh" -v digest="$publisher_sha" '
+  /^publisher_sha=\047@SUBYARD_PUBLISHER_SHA256@\047$/ { print "publisher_sha=\047" digest "\047"; next }
+  /^# SUBYARD_EMBEDDED_PUBLISHER_CONTENT$/ { while ((getline line < publisher) > 0) print line; close(publisher); next }
+  { print }
+' "$REPO/dev/bootstrap-runtime.sh" > "$OUTPUT_DIR/subyard-install.sh"
+chmod 0755 "$OUTPUT_DIR/subyard-install.sh"
 install -m 0755 "$RUNTIME_INSTALLER" \
   "$OUTPUT_DIR/subyard-install-runtime-release.sh"
 ( cd "$OUTPUT_DIR" && sha256sum subyard-install-runtime-release.sh \
@@ -179,7 +187,7 @@ GOOS="$goos" GOARCH="$goarch" "$SCRIPT_DIR/build-profiles.sh" \
 install -m 0755 "$RUNTIME_INSTALLER" "$bundle_stage/scripts/install-runtime-release.sh"
 install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
-for required in \
+for required in config/installation-capabilities.json \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
   scripts/e2e-lab/base.sh \

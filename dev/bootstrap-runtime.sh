@@ -14,6 +14,15 @@ OFFLINE=0
 PUBLISH_ONLY=0
 ASSUME_YES="${ASSUME_YES:-0}"
 
+# Package generation embeds the exact current publisher for older selected
+# helpers. A source checkout uses that same script directly.
+publisher_sha='@SUBYARD_PUBLISHER_SHA256@'
+publisher_payload() {
+  cat <<'SUBYARD_EMBEDDED_PUBLISHER'
+# SUBYARD_EMBEDDED_PUBLISHER_CONTENT
+SUBYARD_EMBEDDED_PUBLISHER
+}
+
 # Startup parents and the binary directory may be existing operator directories.
 # Unlike install -d, mkdir never resets their permissions or ownership. Create
 # only missing components, with private parents and an explicit final mode.
@@ -55,23 +64,10 @@ while [ $# -gt 0 ]; do
 done
 
 # Validate existing installation ownership without changing the target.
-installation_inventory="$DATA_HOME/installation.json"
 if [ -e "$DATA_HOME" ] || [ -L "$DATA_HOME" ]; then
   validate_data_directory \
     || { printf 'bootstrap-runtime: unsafe installation data directory\n' >&2; exit 1; }
 fi
-if [ -e "$installation_inventory" ] || [ -L "$installation_inventory" ]; then
-  [ -f "$installation_inventory" ] && [ ! -L "$installation_inventory" ] \
-    && [ "$(stat -c '%u' "$installation_inventory")" = "$(id -u)" ] \
-    && [ "$(stat -c '%a' "$installation_inventory")" = 600 ] \
-    || { printf 'bootstrap-runtime: unsafe installation ownership inventory\n' >&2; exit 1; }
-  jq -e --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" --arg runtime "$RUNTIME_ROOT" \
-    --arg bin "$BIN_DIR" --argjson uid "$(id -u)" \
-    '.schema == 1 and .operatorUid == $uid and .dataHome == $data and .configHome == $config and .runtimeRoot == $runtime and .binDir == $bin' \
-    "$installation_inventory" >/dev/null \
-    || { printf 'bootstrap-runtime: installation paths conflict with the recorded installation; retain its inventory and repair the path selection\n' >&2; exit 1; }
-fi
-
 [ "$PUBLISH_ONLY" = 0 ] || [ -n "$VERSION" ] \
   || { printf 'bootstrap-runtime: --publish-only requires an explicitly chosen --version\n' >&2; exit 2; }
 
@@ -318,7 +314,39 @@ read -r installer_expected _ < "$installer_checksum" || true
 installer_actual="$(sha256sum "$installer" | cut -d' ' -f1)"
 [ "${installer_actual,,}" = "${installer_expected,,}" ] && [ "${#installer_actual}" = 64 ] \
   || { printf 'bootstrap-runtime: installer checksum mismatch\n' >&2; exit 1; }
-chmod 0700 "$installer"
+[ "$(stat -c '%a' "$installer")" = 700 ] || chmod 0700 "$installer"
+
+# The verified candidate validates both installation scopes before activation.
+# The publisher passes this bounded request to that exact engine after verification.
+unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
+if [ "$PUBLISH_ONLY" = 0 ]; then
+  inventory_shell_files="$(printf '%s\n' "${login_rcs[@]}" "${shell_rcs[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')"
+  SUBYARD_INSTALL_ENTRYPOINTS="$(jq -n --arg bin "$BIN_DIR" --argjson shellFiles "$inventory_shell_files" '{BinDir:$bin,ShellFiles:$shellFiles}')"
+  export SUBYARD_INSTALL_ENTRYPOINTS
+  publisher="$installer"
+  publisher_source=''
+  if [[ "$publisher_sha" = @* ]]; then
+    publisher_source="$(dirname "${BASH_SOURCE[0]}")/../scripts/install-runtime-release.sh"
+    [ -f "$publisher_source" ] && [ ! -L "$publisher_source" ] \
+      || { printf 'bootstrap-runtime: current publisher is unavailable\n' >&2; exit 1; }
+    publisher_sha="$(sha256sum "$publisher_source" | cut -d' ' -f1)"
+  fi
+  if [ "${installer_actual,,}" != "$publisher_sha" ]; then
+    publisher_dir="$(mktemp -d /tmp/subyard-bootstrap-publisher.XXXXXX)"
+    publisher="$publisher_dir/installer"
+    trap 'rm -f -- "$publisher"; rmdir -- "$publisher_dir"' EXIT
+    if [ -n "${publisher_source:-}" ]; then
+      cp -- "$publisher_source" "$publisher"
+    else
+      publisher_payload > "$publisher"
+    fi
+    [ "$(sha256sum "$publisher" | cut -d' ' -f1)" = "$publisher_sha" ] \
+      || { printf 'bootstrap-runtime: current publisher integrity check failed\n' >&2; exit 1; }
+    chmod 0700 "$publisher"
+  fi
+  SUBYARD_INSTALL_VERIFIED_HELPER="$installer"
+  export SUBYARD_INSTALL_VERIFIED_HELPER
+fi
 
 printf 'channel=%s available=%s platform=%s/%s\n' "$CHANNEL" "$VERSION" "$os" "$arch"
 if [ "$PUBLISH_ONLY" = 1 ]; then
@@ -336,13 +364,12 @@ if [ "$PUBLISH_ONLY" = 1 ]; then
 fi
 run_transition=0
 if [ "$existing_runtime" = 0 ]; then
-  install -d -m 0700 "$CONFIG_HOME"
-  "$installer" --runtime-root "$RUNTIME_ROOT" \
+  "$publisher" --runtime-root "$RUNTIME_ROOT" \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance"
   candidate="$(readlink -f -- "$RUNTIME_ROOT/current")"
   [ -z "$SOURCE_INGRESS_ROOT" ] || run_transition=1
 else
-  published_release="$("$installer" --runtime-root "$RUNTIME_ROOT" --publish-only \
+  published_release="$("$publisher" --runtime-root "$RUNTIME_ROOT" --publish-only \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance")"
   case "$published_release" in
     releases/"$VERSION"-*) ;;
@@ -354,6 +381,12 @@ else
   run_transition=1
 fi
 
+# A crash after initial publication can leave current without configuration.
+# Retry creates only a missing root; existing-runtime directories keep their mode.
+if [ "$existing_runtime" = 0 ] || [ ! -d "$CONFIG_HOME" ]; then
+  install -d -m 0700 "$CONFIG_HOME"
+fi
+unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
 if [ "$run_transition" = 1 ]; then
   transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
   transition_environment=(
@@ -382,41 +415,18 @@ else
     "$candidate/bin/yard" migrate --yes
 fi
 
-inventory_shell_files="$(printf '%s\n' "${login_rcs[@]}" "${shell_rcs[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')"
 ensure_directory "$DATA_HOME"
 validate_data_directory \
   || { printf 'bootstrap-runtime: unsafe installation data directory\n' >&2; exit 1; }
-inventory_candidate="$(mktemp "$DATA_HOME/.installation.XXXXXX")"
-jq -n --arg data "$DATA_HOME" --arg config "$CONFIG_HOME" --arg runtime "$RUNTIME_ROOT" \
-  --arg cache "$CACHE_ROOT" --arg bin "$BIN_DIR" --argjson uid "$(id -u)" \
-  --argjson shellFiles "$inventory_shell_files" \
-  '{schema:1,operatorUid:$uid,dataHome:$data,configHome:$config,runtimeRoot:$runtime,cacheRoot:$cache,binDir:$bin,shellFiles:$shellFiles}' \
-  > "$inventory_candidate"
-chmod 0600 "$inventory_candidate"
-# Preserve exact previous cache ownership and the runtime installer's newly
-# verified bundle records; add only the two helper files this bootstrap published.
-python3 - "$inventory_candidate" "$installation_inventory" "$RUNTIME_ROOT/installation.json" "$installer" "$installer_checksum" <<'PY_CACHE'
-import json,os,pathlib,stat,sys
-target=pathlib.Path(sys.argv[1]);value=json.loads(target.read_bytes());root=pathlib.Path(value["cacheRoot"])
-records={}
-for argument in sys.argv[2:4]:
- path=pathlib.Path(argument)
- if not path.exists():continue
- info=path.lstat()
- if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=value["operatorUid"]:raise SystemExit("bootstrap-runtime: unsafe cache ownership inventory")
- previous=json.loads(path.read_bytes())
- if previous.get("cacheRoot")!=str(root):raise SystemExit("bootstrap-runtime: cache root changed; retain its original ownership inventory")
- for entry in previous.get("cacheFiles",[]):records[entry["Path"]]=entry
-for argument in sys.argv[4:]:
- path=pathlib.Path(argument);relative=path.relative_to(root).as_posix();info=path.lstat()
- if not stat.S_ISREG(info.st_mode) or info.st_uid!=value["operatorUid"]:raise SystemExit("bootstrap-runtime: unsafe published cache helper")
- records[relative]={"Path":relative,"Device":info.st_dev,"Inode":info.st_ino,"Mode":info.st_mode,"UID":info.st_uid,"GID":info.st_gid,"Size":info.st_size,"Modified":info.st_mtime_ns,"Changed":info.st_ctime_ns,"Link":""}
-if len(records)>4096:raise SystemExit("bootstrap-runtime: cache ownership inventory is oversized")
-value["cacheFiles"]=[records[path] for path in sorted(records)]
-with target.open("w") as output:json.dump(value,output);output.write("\n");output.flush();os.fsync(output.fileno())
-PY_CACHE
-mv -fT -- "$inventory_candidate" "$installation_inventory"
-sync -d -- "$installation_inventory"
+[ -f "$candidate/config/installation-capabilities.json" ] && [ ! -L "$candidate/config/installation-capabilities.json" ] \
+  && jq -e '. == {schemaVersion:1,contract:"installation-inventory-v1"}' "$candidate/config/installation-capabilities.json" >/dev/null \
+  || { printf 'bootstrap-runtime: unsupported installation capability\n' >&2; exit 1; }
+jq -n --arg bin "$BIN_DIR" --argjson shellFiles "$inventory_shell_files" \
+  --arg installer "$installer" --arg checksum "$installer_checksum" \
+  '{BinDir:$bin,ShellFiles:$shellFiles,CacheInputs:[$installer,$checksum]}' \
+  | env YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
+    SUBYARD_REPOSITORY_ROOT="$candidate" \
+    "$candidate/bin/yard-engine" _installation full
 
 if [ -z "$SOURCE_INGRESS_ROOT" ]; then
   ensure_directory "$BIN_DIR" 0755

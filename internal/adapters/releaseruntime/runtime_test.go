@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -3273,4 +3274,23 @@ func countString(values []string, target string) int {
 
 func releaseIDPointer(value releasetransition.ReleaseID) *releasetransition.ReleaseID {
 	return &value
+}
+
+func TestRuntimeEngineDiagnosticsDistinguishReadAndMode(t *testing.T) {
+	root := testkit.TempDir(t)
+	state := runtimeLinkState{target: "releases/test"}
+	err := validateRuntimeEngine(root, state)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("missing engine cause lost", err)
+	}
+	path := filepath.Join(root, state.target, "bin", "yard-engine")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("PRIVATE_ENGINE_BYTES"), 0600)
+	err = validateRuntimeEngine(root, state)
+	diagnostic, ok := config.OwnerSourceDiagnostic(err)
+	if !ok || !strings.Contains(diagnostic, "mode=0600") || !strings.Contains(diagnostic, "mask=0111") || strings.Contains(diagnostic, "PRIVATE_ENGINE_BYTES") {
+		t.Fatal(diagnostic, err)
+	}
 }

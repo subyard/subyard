@@ -12,7 +12,9 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/resourceendpoint"
 )
@@ -26,6 +28,8 @@ type profileBootstrap struct {
 	initial       config.Loaded
 	definition    resource.Definition
 	init          *initExecution
+	ready         *initExecution
+	nativeBinding string
 	selectionPath string
 	selection     config.PersistentFileSnapshot
 	profiles      string
@@ -117,6 +121,48 @@ func (cli *CLI) prepareProfileBootstrap(ctx context.Context, loaded config.Loade
 		bootstrap.endpoint = &endpoint
 		bootstrap.loaded.Environment[definition.Proxy.AdvertiseHostSetting] = endpoint.Host
 		bootstrap.loaded.Environment[definition.Proxy.HostPortSetting] = strconv.Itoa(endpoint.Port)
+	}
+	if resourceDefinition == nil && bootstrap.selectionPath == "" {
+		platform := cli.options.InitPlatform
+		if platform == nil {
+			powerYards, err := cli.powerYardContexts(bootstrap.loaded)
+			if err != nil {
+				return nil, err
+			}
+			platform = cli.initPlatform(bootstrap.loaded, powerYards)
+		}
+		if runtime, ok := platform.(reconcileruntime.Runtime); ok {
+			ready, state, err := runtime.ProfileProvisionReady(ctx, profile)
+			if err != nil {
+				return nil, err
+			}
+			if ready {
+				execution := &initExecution{loaded: bootstrap.loaded, mode: initReconcile, platform: runtime}
+				execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(loaded.Context.Paths.ConfigHome, loaded.Environment)
+				if err != nil {
+					return nil, err
+				}
+				if err := cli.prepareLegacyContinuation(ctx, execution, initArguments{mode: initReconcile}); err != nil {
+					return nil, err
+				}
+				runtime = execution.platform.(reconcileruntime.Runtime)
+				owned, err := runtime.CheckStage(ctx, ports.ReconcileStageProject)
+				if err != nil {
+					return nil, err
+				}
+				if owned {
+					owned, err = runtime.CheckStage(ctx, ports.ReconcileStageInstance)
+					if err != nil {
+						return nil, err
+					}
+				}
+				if owned {
+					bootstrap.ready = execution
+					bootstrap.nativeBinding = operationStateDigest(state)
+					return bootstrap, nil
+				}
+			}
+		}
 	}
 	execution, err := cli.prepareInitExecution(ctx, bootstrap.loaded, nil, nil)
 	if err != nil {
@@ -256,6 +302,33 @@ func (bootstrap *profileBootstrap) refresh(ctx context.Context, cli *CLI) error 
 	if err := bootstrap.checkSelectionSource(); err != nil {
 		return err
 	}
+	if bootstrap.ready != nil {
+		if err := bootstrap.ready.legacyContinuation.check(ctx, cli, bootstrap.ready); err != nil {
+			return err
+		}
+		runtime := bootstrap.ready.platform.(reconcileruntime.Runtime)
+		owned, err := runtime.CheckStage(ctx, ports.ReconcileStageProject)
+		if err != nil {
+			return fmt.Errorf("%w: inspect native project authority: %v", domain.ErrPlanStale, err)
+		}
+		if !owned {
+			return fmt.Errorf("%w: native project authority changed", domain.ErrPlanStale)
+		}
+		owned, err = runtime.CheckStage(ctx, ports.ReconcileStageInstance)
+		if err != nil {
+			return fmt.Errorf("%w: inspect native instance prerequisites: %v", domain.ErrPlanStale, err)
+		}
+		if !owned {
+			return fmt.Errorf("%w: native instance prerequisites changed", domain.ErrPlanStale)
+		}
+		ready, state, err := runtime.ProfileProvisionReady(ctx, bootstrap.profile)
+		if err != nil {
+			return fmt.Errorf("%w: inspect native provision prerequisites: %v", domain.ErrPlanStale, err)
+		}
+		if !ready || operationStateDigest(state) != bootstrap.nativeBinding {
+			return fmt.Errorf("%w: native provision prerequisites changed", domain.ErrPlanStale)
+		}
+	}
 	if bootstrap.selectionPath != "" {
 		current, err := readConfigAuthoringTarget(bootstrap.selectionPath)
 		if err != nil {
@@ -294,7 +367,7 @@ func (bootstrap *profileBootstrap) refresh(ctx context.Context, cli *CLI) error 
 			}
 		}
 		before := bootstrap.init.consequences()
-		if err := bootstrap.init.refreshAssessment(ctx); err != nil {
+		if err := bootstrap.init.refreshAssessment(ctx, cli); err != nil {
 			return err
 		}
 		for _, consequence := range bootstrap.init.consequences() {

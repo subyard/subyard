@@ -62,6 +62,8 @@ type Prepared struct {
 	check         func(context.Context) (releasetransition.Inspection, error)
 	nativePlan    releasetransition.PlanToken
 	currentReport *currentReport
+	// Set only after the verified owner returns a validated ready convergence.
+	convergedOutcome *releasetransition.Outcome
 }
 
 type verifiedPreparationError struct {
@@ -1560,22 +1562,25 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 	if inspection.Resume != nil {
 		changed = false
 	}
+	convergedOutcome := new(releasetransition.Outcome)
 	return Prepared{
 		Action: map[bool]domain.ActionID{
 			true: "update.rollback", false: "update.activate",
 		}[request.Direction == releasetransition.DirectionActivatePrevious],
 		Changed: changed, Consequences: consequences,
-		RefreshConfigs: !activationReconciliationOwned,
-		ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
-		SourceRelease:  string(inspection.Outcome.Active),
-		SourceVersion:  "",
-		TargetRelease:  string(target.candidate.release),
-		TargetVersion:  target.version,
+		RefreshConfigs:   !activationReconciliationOwned,
+		ActiveLauncher:   filepath.Join(parsed.root, "current", "bin", "yard"),
+		SourceRelease:    string(inspection.Outcome.Active),
+		SourceVersion:    "",
+		TargetRelease:    string(target.candidate.release),
+		TargetVersion:    target.version,
+		convergedOutcome: convergedOutcome,
 		check: func(ctx context.Context) (releasetransition.Inspection, error) {
 			checked, _, err := runtime.inspectCompletedTransition(ctx, request.RuntimeRoot, request.ConfigHome, request.Target, owner, request)
 			return checked, err
 		},
 		run: func(ctx context.Context) error {
+			*convergedOutcome = releasetransition.Outcome{}
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
 			}
@@ -1687,6 +1692,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 					return transitionOutcomeError(outcome)
 				}
 				return transitionOutcomeError(*converged.Outcome)
+			}
+			if converged.ActivationReconciliationOwned {
+				*convergedOutcome = *converged.Outcome
+				convergedOutcome.Warnings = slices.Clone(converged.Outcome.Warnings)
 			}
 			return nil
 		},
@@ -1908,9 +1917,11 @@ func releaseLinksFromRuntimeSnapshot(snapshot runtimeLinkSnapshot) releasetransi
 func validateRuntimeEngine(root string, state runtimeLinkState) error {
 	engine := filepath.Join(root, state.target, "bin", "yard-engine")
 	info, err := os.Lstat(engine)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("runtime %q has no executable yard-engine", state.target)
+	if err != nil {
+		return config.OwnerMetadataError(engine, "runtime yard-engine", config.MetadataAccessReason(err), "", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		return config.OwnerMetadataError(engine, "runtime yard-engine", "has no executable yard-engine; "+config.FileMetadata(info)+"; required type=regular, executable mask nonzero (mask=0111)", "", nil)
 	}
 	return nil
 }
@@ -2214,6 +2225,9 @@ func (runtime *Runtime) installWithOutput(
 ) error {
 	command := exec.CommandContext(ctx, runtime.config.Installer, arguments...)
 	command.Env = commandEnvironment(runtime.config.Inputs.environment(runtime.config.Context))
+	// This leaf is used only for the verified private draft prepared above.
+	// Its runtime scope must not claim the canonical bootstrap inventory.
+	command.Env = append(command.Env, "SUBYARD_INSTALL_RUNTIME_SCOPE=private-draft")
 	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
 	if home == "" {
 		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")

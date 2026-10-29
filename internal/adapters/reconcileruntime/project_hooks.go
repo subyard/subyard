@@ -74,7 +74,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 	if err != nil || !applicable {
 		return err
 	}
-	if runtime.HookPlan != nil && runtime.HookPlan.metadata != nil && !runtime.HookPlan.metadataCompleted {
+	if runtime.HookPlan != nil && runtime.HookPlan.HasMetadataRepair() && !runtime.HookPlan.metadataCompleted {
 		if err := runtime.repairProjectMetadata(ctx); err != nil {
 			return err
 		}

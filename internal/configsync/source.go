@@ -333,10 +333,10 @@ func (snapshot *sourceSnapshot) readOverrides(
 func validateSourceDirectory(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
-		return err
+		return config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("versioned configuration source must be a real directory")
+		return metadataSafetyError(root, "versioned configuration source must be a real directory", "type=directory", info)
 	}
 	return validateOwnedMode(root, info, true)
 }
@@ -410,29 +410,29 @@ func validateTopLevelRoles(root string) error {
 func validateChildren(root string, allowed map[string]bool) error {
 	info, err := os.Lstat(root)
 	if err != nil {
-		return err
+		return config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("%s must be a real source directory", root)
+		return metadataSafetyError(root, "source root must be a real source directory", "type=directory", info)
 	}
 	if err := validateOwnedMode(root, info, true); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return err
+		return config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
 	}
 	for _, entry := range entries {
 		directory, ok := allowed[entry.Name()]
 		if !ok {
-			return fmt.Errorf("unexpected source path %q", filepath.Join(root, entry.Name()))
+			return config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry", "unexpected source path", "required a registered source role", nil)
 		}
 		if directory != entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			kind := "regular file"
 			if directory {
 				kind = "directory"
 			}
-			return fmt.Errorf("%s must be a real %s", filepath.Join(root, entry.Name()), kind)
+			return config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry type check", fmt.Sprintf("must be a real %s (non-symlink); observed type=%s, required type=%s", kind, entry.Type(), kind), "", nil)
 		}
 	}
 	return nil
@@ -447,15 +447,19 @@ func readOptionalDirectory(sourceRoot, path string) ([]os.DirEntry, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataError(path, "source directory", config.MetadataAccessReason(err), "", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !pathWithin(path, sourceRoot) {
-		return nil, fmt.Errorf("%s must be a real source directory", path)
+		return nil, metadataSafetyError(path, "source directory must be a real source directory", "type=directory within source root", info)
 	}
 	if err := validateOwnedMode(path, info, true); err != nil {
 		return nil, err
 	}
-	return os.ReadDir(path)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, config.OwnerMetadataError(path, "source directory", config.MetadataAccessReason(err), "", err)
+	}
+	return entries, nil
 }
 
 func readOptionalSourceFile(root, path string, maximum int64, executable bool) ([]byte, error) {
@@ -464,7 +468,7 @@ func readOptionalSourceFile(root, path string, maximum int64, executable bool) (
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataError(path, "source file", config.MetadataAccessReason(err), "", err)
 	}
 	return readSourceFile(root, path, maximum, executable)
 }
@@ -474,44 +478,44 @@ func readSourceFile(root, path string, maximum int64, executable bool) ([]byte, 
 		return nil, errors.New("source path escaped its worktree")
 	}
 	if err := validateSourceAncestors(root, path); err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataContext(path, "source file", err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataError(path, "source file", config.MetadataAccessReason(err), "", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s must be a regular non-symlink file", path)
+		return nil, metadataSafetyError(path, "source file must be a regular non-symlink file", "type=regular", info)
 	}
 	if executable != (info.Mode().Perm()&0o111 != 0) {
 		if executable {
-			return nil, fmt.Errorf("%s must be executable", path)
+			return nil, metadataSafetyError(path, "source file must be executable", "executable mask nonzero (mask=0111)", info)
 		}
 		if info.Mode().Perm()&0o111 != 0 {
-			return nil, fmt.Errorf("%s must not be executable", path)
+			return nil, metadataSafetyError(path, "source file must not be executable", "executable mask=0000 (mask=0111)", info)
 		}
 	}
 	if info.Size() > maximum {
-		return nil, fmt.Errorf("%s exceeds the %d byte limit", path, maximum)
+		return nil, config.OwnerMetadataError(path, "source file", fmt.Sprintf("exceeds its size limit; observed bytes=%d, required maximum=%d", info.Size(), maximum), "", nil)
 	}
 	if err := validateOwnedMode(path, info, false); err != nil {
 		return nil, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Nlink != 1 {
-		return nil, fmt.Errorf("%s must not be hard-linked", path)
+		return nil, metadataSafetyError(path, "source file must not be hard-linked", "links=1", info)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataError(path, "source file", config.MetadataAccessReason(err), "", err)
 	}
 	defer file.Close()
 	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
-		return nil, err
+		return nil, config.OwnerMetadataError(path, "source file", config.MetadataAccessReason(err), "", err)
 	}
 	if int64(len(content)) > maximum {
-		return nil, fmt.Errorf("%s exceeds the %d byte limit", path, maximum)
+		return nil, config.OwnerMetadataError(path, "source file", fmt.Sprintf("exceeds its size limit; observed bytes=%d, required maximum=%d", len(content), maximum), "", nil)
 	}
 	return content, nil
 }
@@ -531,10 +535,10 @@ func validateSourceAncestors(root, path string) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if err != nil {
-			return err
+			return config.OwnerMetadataError(current, "source directory", config.MetadataAccessReason(err), "", err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("source path has a non-directory or symlink ancestor: %s", current)
+			return metadataSafetyError(current, "source path has a non-directory or symlink ancestor", "type=directory", info)
 		}
 		if err := validateOwnedMode(current, info, true); err != nil {
 			return err
@@ -546,14 +550,14 @@ func validateSourceAncestors(root, path string) error {
 func validateOwnedMode(path string, info os.FileInfo, directory bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return fmt.Errorf("source path is not operator-owned: %s", path)
+		return metadataSafetyError(path, "source path is not operator-owned", fmt.Sprintf("uid=%d", os.Getuid()), info)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		kind := "file"
 		if directory {
 			kind = "directory"
 		}
-		return fmt.Errorf("source %s is group/world writable: %s", kind, path)
+		return metadataSafetyError(path, "source "+kind+" is group/world writable", "writable mask=0000 (mask=0022)", info)
 	}
 	return nil
 }

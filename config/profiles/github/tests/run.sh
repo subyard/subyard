@@ -55,6 +55,7 @@ PY
 bash "$ROOT/tests/profile-native-loss.sh"
 python3 -B "$ROOT/config/profiles/github/tests/native-loss-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/skills-test.py"
+python3 -B "$ROOT/config/profiles/github/tests/owner-registration-test.py"
 python3 "$ROOT/config/profiles/github/tests/release-activation-test.py"
 python3 -B "$ROOT/config/profiles/github/tests/e2e/runtime-hook-trace-test.py"
 go -C "$ROOT" test ./config/profiles/github/tests/e2e -run '^TestRuntimeHookTraceNativeLauncher$' -count=1

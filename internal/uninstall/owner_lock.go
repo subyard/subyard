@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"io"
 	"os"
@@ -59,7 +60,7 @@ func RegisterBorrowedOwnerLock(dataHome string, held *os.File) (func(), error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
 		stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || !os.SameFile(current, info) {
-		return nil, errors.New("native owner barrier differs from its protected installation")
+		return nil, config.OwnerMetadataError(path, "native owner barrier", "differs from its protected installation; "+ownerLockFacts(info)+"; required type=regular, mode=0600, links=1, matching inode", fmt.Sprintf("required uid=%d; current %s", os.Getuid(), config.FileMetadata(current)), nil)
 	}
 	fd, err := syscall.Dup(int(held.Fd()))
 	if err != nil {
@@ -151,9 +152,13 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 		file = os.NewFile(uintptr(duplicate), path)
 		current, statErr := parent.Lstat(name)
 		inheritedInfo, infoErr := file.Stat()
-		if statErr != nil || infoErr != nil || !os.SameFile(current, inheritedInfo) {
+		if cause := errors.Join(statErr, infoErr); cause != nil {
 			file.Close()
-			return Tree{}, nil, errors.New("inherited owner barrier belongs to another installation")
+			return Tree{}, nil, config.OwnerMetadataError(path, "inherited owner barrier", config.MetadataAccessReason(cause), "", cause)
+		}
+		if !os.SameFile(current, inheritedInfo) {
+			file.Close()
+			return Tree{}, nil, config.OwnerMetadataError(path, "inherited owner barrier", "belongs to another installation (inode identity differs)", "", nil)
 		}
 	} else {
 		file, err = parent.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
@@ -177,7 +182,7 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uid || stat.Nlink != 1 {
 		file.Close()
-		return Tree{}, nil, errors.New("owner mutation lock must be an operator-owned real mode 0600 file")
+		return Tree{}, nil, config.OwnerMetadataError(path, "owner mutation lock", "must be an operator-owned real mode 0600 file; "+ownerLockFacts(info), fmt.Sprintf("required type=regular, mode=0600, uid=%d, links=1", uid), nil)
 	}
 	for {
 		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -198,8 +203,10 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 	binding, err := Capture(path)
 	if err == nil {
 		current, statErr := parent.Lstat(name)
-		if statErr != nil || !os.SameFile(info, current) {
-			err = errors.New("owner coordination lock changed while acquiring its barrier")
+		if statErr != nil {
+			err = config.OwnerMetadataError(path, "owner coordination lock", "changed while acquiring its barrier: "+config.MetadataAccessReason(statErr), "", statErr)
+		} else if !os.SameFile(info, current) {
+			err = config.OwnerMetadataError(path, "owner coordination lock", "changed while acquiring its barrier (inode identity differs)", "", nil)
 		}
 	}
 	if err == nil && expected != nil {
@@ -249,7 +256,7 @@ func ReadOwnerEpoch(dataHome string) (uint64, error) {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Getuid()) {
-		return 0, errors.New("unsafe owner coordination epoch")
+		return 0, config.OwnerMetadataError(path, "owner coordination epoch", fmt.Sprintf("unsafe owner coordination epoch; %s; required type=regular, mode=0600, uid=%d", config.FileMetadata(info), os.Getuid()), "", nil)
 	}
 	parent, err := openParent(filepath.Dir(path))
 	if err != nil {
@@ -267,7 +274,7 @@ func ReadOwnerEpoch(dataHome string) (uint64, error) {
 	}
 	epoch, err := strconv.ParseUint(strings.TrimSuffix(string(body), "\n"), 10, 64)
 	if err != nil || string(body) != strconv.FormatUint(epoch, 10)+"\n" {
-		return 0, errors.New("invalid owner coordination epoch")
+		return 0, config.OwnerMetadataError(path, "owner coordination epoch", "invalid owner coordination epoch (expected canonical unsigned integer and newline)", "", err)
 	}
 	return epoch, nil
 }
@@ -302,7 +309,7 @@ func AdvanceOwnerEpoch(dataHome string, before, after uint64) error {
 		return nil
 	}
 	if current != before {
-		return errors.New("owner installation epoch changed outside the approved cleanup")
+		return fmt.Errorf("owner installation epoch changed outside the approved cleanup; observed epoch=%d, required epoch=%d", current, before)
 	}
 	return nativeArtifact("advance-epoch", struct {
 		Path          string
@@ -317,14 +324,14 @@ func CheckOwnerLockIdentity(expected Tree) error {
 		return err
 	}
 	if len(current.Entries) != 1 || len(expected.Entries) != 1 {
-		return errors.New("owner coordination lock identity is missing")
+		return config.OwnerMetadataError(expected.Path, "owner coordination lock", "identity is missing", fmt.Sprintf("stored entries=%d, current entries=%d; required entries=1", len(expected.Entries), len(current.Entries)), nil)
 	}
 	old, fresh := expected.Entries[0], current.Entries[0]
 	old.Size, fresh.Size = 0, 0
 	old.Modified, fresh.Modified = 0, 0
 	old.Changed, fresh.Changed = 0, 0
 	if old != fresh {
-		return errors.New("owner coordination lock inode or permissions changed")
+		return config.OwnerMetadataError(expected.Path, "owner coordination lock", "inode or permissions changed", entryIdentityFacts(old, fresh), nil)
 	}
 	return nil
 }
@@ -338,7 +345,7 @@ func Admit(home string, generation []Tree, epoch uint64, recovery, established b
 		return err
 	}
 	if current != epoch {
-		return fmt.Errorf("%w: owner installation epoch changed while waiting for mutation lock", domain.ErrPlanStale)
+		return fmt.Errorf("%w: owner installation epoch changed while waiting for mutation lock; observed epoch=%d, required epoch=%d", domain.ErrPlanStale, current, epoch)
 	}
 	if !recovery {
 		if _, err := os.Lstat(home + ".uninstall"); !errors.Is(err, os.ErrNotExist) {
@@ -351,4 +358,12 @@ func Admit(home string, generation []Tree, epoch uint64, recovery, established b
 		return errors.New("installation has been fully removed; no state was written")
 	}
 	return CheckGeneration(generation)
+}
+
+func ownerLockFacts(info os.FileInfo) string {
+	links := "unavailable"
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		links = fmt.Sprintf("%d", stat.Nlink)
+	}
+	return config.FileMetadata(info) + ", links=" + links
 }

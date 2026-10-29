@@ -3,6 +3,7 @@ use crate::{codec, digest, native::Target, record::require, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 pub(crate) struct Assessment {
+    pub binding: String,
     pub actual: String,
     pub desired: String,
     pub converged: bool,
@@ -17,6 +18,17 @@ pub(crate) fn assess(
 ) -> Result<Assessment> {
     let mut converged = targets.iter().all(|t| t.state != "stale");
     let (desired, actual) = match id {
+        "installation-runtime-v1" => {
+            require(targets.len() == 1 && targets[0].class == "installation")?;
+            require(
+                crate::record::fingerprint(&targets[0].reported_actual)
+                    && crate::record::fingerprint(&targets[0].reported_desired),
+            )?;
+            (
+                targets[0].reported_desired.clone(),
+                targets[0].reported_actual.clone(),
+            )
+        }
         "host-power" | "test-vm-broker" => {
             require(targets.len() == 1 && targets[0].class == "stage")?;
             let t = &targets[0];
@@ -219,6 +231,11 @@ pub(crate) fn assess(
         }
     };
     Ok(Assessment {
+        binding: if id == "installation-runtime-v1" {
+            targets[0].source.clone()
+        } else {
+            String::new()
+        },
         actual: if converged { desired.clone() } else { actual },
         desired,
         converged,
@@ -231,6 +248,8 @@ mod tests {
     use serde::Deserialize;
     #[derive(Deserialize)]
     struct Expected {
+        #[serde(default)]
+        binding: String,
         actual: String,
         desired: String,
         converged: bool,
@@ -252,7 +271,7 @@ mod tests {
             return;
         };
         let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(cases.len(), 33);
+        assert_eq!(cases.len(), 35);
         for (n, c) in cases.into_iter().enumerate() {
             let value = assess(
                 &c.owner,
@@ -265,6 +284,7 @@ mod tests {
             .unwrap();
             assert_eq!(value.actual, c.expected.actual, "case {n} actual");
             assert_eq!(value.desired, c.expected.desired, "case {n} desired");
+            assert_eq!(value.binding, c.expected.binding, "case {n} binding");
             assert_eq!(value.converged, c.expected.converged, "case {n} converged")
         }
     }

@@ -1598,7 +1598,12 @@ impl Owner {
                 consequences.push(format!("refresh {owner}"));
             }
             let actual = assessed.actual;
-            observations.push(activation_observation(&owner, &actual, &desired)?);
+            observations.push(activation_observation(
+                &owner,
+                &actual,
+                &desired,
+                &assessed.binding,
+            )?);
             activation_scope.push(ActivationScope { id: owner, desired });
             targets.extend(current);
         }
@@ -1812,12 +1817,19 @@ fn current_observation_scope(
         None => (if prefer { marked } else { base }, prefer),
     })
 }
-fn activation_observation(id: &str, actual: &str, desired: &str) -> Result<f::ResourceObservation> {
+fn activation_observation(
+    id: &str,
+    actual: &str,
+    desired: &str,
+    binding: &str,
+) -> Result<f::ResourceObservation> {
     #[derive(Serialize)]
     struct Value<'a> {
         id: &'a str,
         actual: &'a str,
         desired: &'a str,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        binding: &'a str,
     }
     Ok(f::ResourceObservation {
         resource: format!("activation.{id}"),
@@ -1827,6 +1839,7 @@ fn activation_observation(id: &str, actual: &str, desired: &str) -> Result<f::Re
                 id,
                 actual,
                 desired,
+                binding,
             },
             false,
         )?),

@@ -82,6 +82,30 @@ type initExecution struct {
 	hookProjects          []domain.ProjectRecord
 }
 
+type initExecutionLockKey struct{}
+type initExecutionBoundary struct {
+	execution *initExecution
+	active    bool
+	assessed  bool
+}
+
+// The marker belongs to this call and exact execution, never a retained plan.
+func (execution *initExecution) lock(ctx context.Context) (context.Context, func(), error) {
+	boundary, _ := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+	if boundary != nil && boundary.active && boundary.execution == execution {
+		return ctx, func() {}, nil
+	}
+	unlock, err := lockIntegrationYard(ctx, execution.loaded)
+	if err != nil {
+		return ctx, nil, err
+	}
+	boundary = &initExecutionBoundary{execution: execution, active: true}
+	return context.WithValue(ctx, initExecutionLockKey{}, boundary), func() {
+		boundary.active, boundary.assessed = false, false
+		unlock()
+	}, nil
+}
+
 func (execution *initExecution) refreshOrphanIngress(ctx context.Context, cli *CLI) error {
 	err := execution.orphanIngress.refresh(ctx, cli, execution.loaded)
 	if execution.orphanIngressDeferred && errors.Is(err, errOrphanIngressAccessDeferred) {
@@ -411,6 +435,10 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 }
 
 func (execution *initExecution) prepareStages(ctx context.Context, stages []application.ReconcileStage) error {
+	return execution.prepareStageObservations(ctx, stages, false)
+}
+
+func (execution *initExecution) prepareStageObservations(ctx context.Context, stages []application.ReconcileStage, batchReady bool) error {
 	_, nativeRuntime := execution.platform.(reconcileruntime.Runtime)
 	runtimeStage := slices.IndexFunc(stages, func(stage application.ReconcileStage) bool { return stage.ID == ports.ReconcileStageProfileRuntimes })
 	prepareRuntimeStage := nativeRuntime && execution.mode != initReset && runtimeStage > 0 && runtimeStage == len(stages)-1 && stages[runtimeStage].Label != ""
@@ -425,7 +453,11 @@ func (execution *initExecution) prepareStages(ctx context.Context, stages []appl
 		}
 	} else {
 		var err error
-		execution.plan, err = (application.Reconciler{Stages: planningStages, Runner: execution.platform}).Plan(ctx)
+		var runner ports.ReconcileStageRunner = execution.platform
+		if batchReady {
+			runner = initReadyStageObserver(ctx, execution.platform.(reconcileruntime.Runtime), planningStages)
+		}
+		execution.plan, err = (application.Reconciler{Stages: planningStages, Runner: runner}).Plan(ctx)
 		if err != nil {
 			return err
 		}
@@ -464,6 +496,10 @@ func (cli *CLI) prepareInitExecution(
 	arguments []string,
 	bootstrap *initBootstrap,
 ) (*initExecution, error) {
+	return cli.prepareInitExecutionPlan(ctx, loaded, arguments, bootstrap, false)
+}
+
+func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Loaded, arguments []string, bootstrap *initBootstrap, ordinary bool) (*initExecution, error) {
 	request, err := parseInitArguments(arguments)
 	if err != nil {
 		return nil, err
@@ -552,7 +588,7 @@ func (cli *CLI) prepareInitExecution(
 		execution.configsChanged = !converged
 		return execution, nil
 	}
-	if err := execution.prepareStages(ctx, application.InitStages(loaded.Context)); err != nil {
+	if err := execution.prepareStageObservations(ctx, application.InitStages(loaded.Context), ordinary && cli.initBatchEligible(ctx, execution)); err != nil {
 		return nil, err
 	}
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
@@ -581,15 +617,15 @@ func (cli *CLI) prepareInitExecution(
 		}
 		execution.platform = runtime
 	}
+	if execution.hooksOnly() {
+		execution.hooksApplicable, err = execution.projectHooksApplicable(ctx, cli, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if execution.plan.Pending() != 0 || bootstrap != nil {
 		if err := execution.platform.Preflight(ctx, mode == initReset); err != nil {
 			return nil, fmt.Errorf("host preflight failed: %w", err)
-		}
-	}
-	if execution.hooksOnly() {
-		execution.hooksApplicable, err = execution.platform.ProjectHooksApplicable(ctx)
-		if err != nil {
-			return nil, err
 		}
 	}
 	return execution, nil
@@ -733,7 +769,14 @@ func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *
 	return nil
 }
 
-func (execution *initExecution) refreshAssessment(ctx context.Context) error {
+func (execution *initExecution) projectHooksApplicable(ctx context.Context, cli *CLI, allowNoWork bool) (bool, error) {
+	if allowNoWork && cli.profileInitRepair == nil && execution.hookPlan.NoProjectHookWork() {
+		return false, nil
+	}
+	return execution.platform.ProjectHooksApplicable(ctx)
+}
+
+func (execution *initExecution) refreshAssessment(ctx context.Context, cli *CLI) error {
 	if execution == nil {
 		return errors.New("init execution is required")
 	}
@@ -768,18 +811,41 @@ func (execution *initExecution) refreshAssessment(ctx context.Context) error {
 		}
 		execution.configsChanged = !converged
 	case initReconcile:
-		if err := (application.Reconciler{Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform}).CheckApproved(ctx, execution.approvedPlan); err != nil {
-			return err
+		stages := application.InitStages(execution.loaded.Context)
+		approved := execution.approvedPlan
+		runtime, native := execution.platform.(reconcileruntime.Runtime)
+		reuseRuntime := native && execution.runtimePlan != nil && len(approved.Steps) == len(stages) &&
+			stages[len(stages)-1].ID == ports.ReconcileStageProfileRuntimes &&
+			approved.Steps[len(stages)-1].Stage == stages[len(stages)-1] &&
+			!(approved.Steps[len(stages)-1].Converged && approved.Steps[len(stages)-1].Conditional)
+		if reuseRuntime {
+			stages = stages[:len(stages)-1]
+			approved.Steps = approved.Steps[:len(approved.Steps)-1]
+		}
+		var runner ports.ReconcileStageRunner = execution.platform
+		boundary, _ := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+		if cli.initBatchEligible(ctx, execution) && boundary != nil && boundary.active && boundary.execution == execution && execution.hooksOnly() &&
+			slices.EqualFunc(approved.Steps, stages, func(step application.ReconcileStep, stage application.ReconcileStage) bool {
+				return step.Stage == stage && step.Converged && !step.Conditional
+			}) {
+			runner = initReadyStageObserver(ctx, runtime, stages)
 		}
 		plan, err := (application.Reconciler{
-			Stages: application.InitStages(execution.loaded.Context), Runner: execution.platform,
-		}).Plan(ctx)
+			Stages: stages, Runner: runner,
+		}).RefreshApproved(ctx, approved)
 		if err != nil {
 			return err
 		}
+		if reuseRuntime {
+			stage := application.InitStages(execution.loaded.Context)[len(stages)]
+			plan.Steps = append(plan.Steps, application.ReconcileStep{Stage: stage,
+				Converged: plan.Pending() == 0 && runtime.CheckedProfileRuntimesConverged(execution.runtimePlan), Conditional: plan.Pending() != 0})
+		}
 		execution.plan = plan
 		if execution.hooksOnly() {
-			execution.hooksApplicable, err = execution.platform.ProjectHooksApplicable(ctx)
+			boundary, _ := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+			locked := boundary != nil && boundary.active && boundary.execution == execution
+			execution.hooksApplicable, err = execution.projectHooksApplicable(ctx, cli, locked)
 			if err != nil {
 				return err
 			}
@@ -816,13 +882,30 @@ func (cli *CLI) printInitPlan(execution *initExecution) {
 }
 
 func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Writer) error {
-	unlock, err := lockIntegrationYard(ctx, execution.loaded)
+	ctx, unlock, err := execution.lock(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := execution.checkBeforeInitWrites(ctx, cli); err != nil {
+	boundary, _ := ctx.Value(initExecutionLockKey{}).(*initExecutionBoundary)
+	assessed := boundary != nil && boundary.active && boundary.execution == execution && boundary.assessed
+	if assessed {
+		boundary.assessed = false
+	}
+	if err := execution.checkBeforeInitWritesWithAssessment(ctx, cli, assessed); err != nil {
 		return err
+	}
+	if !assessed && execution.hooksOnly() && len(execution.approvedPlan.Steps) != 0 {
+		// A broader approval may have shrunk to hooks. Keep its newly
+		// converged stages fresh when no same-lock assessment preceded run.
+		approved := execution.plan
+		stages := make([]application.ReconcileStage, len(approved.Steps))
+		for index, step := range approved.Steps {
+			stages[index] = step.Stage
+		}
+		if err := (application.Reconciler{Stages: stages, Runner: execution.platform}).CheckApproved(ctx, approved); err != nil {
+			return err
+		}
 	}
 	if err := execution.legacyContinuation.publish(execution); err != nil {
 		return err
@@ -961,10 +1044,19 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) err
 }
 
 func (execution *initExecution) checkBeforeInitWrites(ctx context.Context, cli *CLI) error {
+	return execution.checkBeforeInitWritesWithAssessment(ctx, cli, false)
+}
+
+func (execution *initExecution) checkBeforeInitWritesWithAssessment(ctx context.Context, cli *CLI, assessed bool) error {
 	if execution.bootstrap != nil && execution.bootstrap.source != nil {
 		if _, err := execution.bootstrap.source.Read(); err != nil {
 			return fmt.Errorf("%w: profile preset changed", domain.ErrPlanStale)
 		}
+	}
+	if assessed {
+		// The hooks-only assessment ran under this same still-held yard lock.
+		// No provisioning, privilege prompt or repair-lock wait intervened.
+		return nil
 	}
 	if err := execution.legacyContinuation.check(ctx, cli, execution); err != nil {
 		return err

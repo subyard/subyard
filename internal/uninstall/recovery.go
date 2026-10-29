@@ -97,7 +97,7 @@ func (store RecoveryStore) validateDirectory() error {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != store.UID {
-		return errors.New("uninstall recovery root must be an operator-owned real mode 0700 directory")
+		return config.OwnerMetadataError(store.Directory, "uninstall recovery root", fmt.Sprintf("must be an operator-owned real mode 0700 directory; %s; required type=directory, mode=0700, uid=%d", config.FileMetadata(info), store.UID), "", nil)
 	}
 	return nil
 }
@@ -244,7 +244,7 @@ func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
 		return plan, binding, err
 	}
 	if len(binding.Entries) != 1 || binding.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || binding.Entries[0].Mode&0777 != 0600 || binding.Entries[0].UID != store.UID {
-		return plan, binding, errors.New("uninstall recovery plan must be an operator-owned regular mode 0600 file")
+		return plan, binding, protectedEntryError(path, "uninstall recovery plan", binding.Entries, store.UID)
 	}
 	body, err := store.ReadBody(binding)
 	if err != nil {
@@ -253,7 +253,7 @@ func (store RecoveryStore) Read() (RecoveryPlan, Tree, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&plan); err != nil {
-		return plan, binding, fmt.Errorf("incomplete original full uninstall plan at %s; retain this protected store and restore its original approved publication before continuing", path)
+		return plan, binding, config.OwnerMetadataError(path, "uninstall recovery plan", "incomplete original full uninstall plan; retain this protected store and restore its original approved publication before continuing", "", err)
 	}
 	var extra json.RawMessage
 	if decoder.Decode(&extra) != io.EOF {

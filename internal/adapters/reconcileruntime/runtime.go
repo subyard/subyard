@@ -123,7 +123,14 @@ type Runtime struct {
 	ACLToolsAvailable func() (bool, error)
 }
 
+type readOnlyProbeKey struct{}
+
+func readOnlyProbeContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, readOnlyProbeKey{}, struct{}{})
+}
+
 func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
+	ctx = readOnlyProbeContext(ctx)
 	var err error
 	switch stage {
 	case ports.ReconcileStageProject:
@@ -167,7 +174,15 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		if desiredErr != nil {
 			return false, desiredErr
 		}
-		err = runtime.runScriptEnvironment(ctx, nil, desired, "09-yard-extras.sh", "--check")
+		state, observeErr := runtime.reconcileState(ctx)
+		if observeErr != nil {
+			return false, observeErr
+		}
+		if !state.InstanceFound {
+			return false, nil
+		}
+		_, _, policyErr := runtime.extrasNativePolicy(state, desired, true, nil)
+		return policyErr == nil, nil
 	case ports.ReconcileStageSecurity:
 		return runtime.securityConverged(ctx)
 	case ports.ReconcileStageProfileRuntimes:
@@ -1329,6 +1344,7 @@ func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsrunti
 
 func (runtime Runtime) extrasContext() (map[string]string, error) {
 	mounts := map[string]bool{}
+	mountNames := map[string]string{}
 	capabilities := map[string]bool{}
 	devices := map[string]bool{}
 	hostMemory := "0"
@@ -1367,6 +1383,10 @@ func (runtime Runtime) extrasContext() (map[string]string, error) {
 				!safeDirectoryMode(parts[3]) {
 				return nil, fmt.Errorf("invalid YARD_MOUNTS entry %q in %s", mount, path)
 			}
+			if previous := mountNames[parts[0]]; previous != "" && previous != mount {
+				return nil, fmt.Errorf("conflicting YARD_MOUNTS declaration for %q", parts[0])
+			}
+			mountNames[parts[0]] = mount
 			mounts[mount] = true
 		}
 		for _, capability := range strings.Fields(values["YARD_CAPS"]) {
@@ -1837,18 +1857,22 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1"}); err != nil || !ok {
 		return false, err
 	}
-	definitions, err := runtime.integrationDefinitions()
-	if err != nil {
-		return false, err
-	}
-	for _, definition := range definitions {
-		if definition.Lifecycle != nil {
-			observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
-			if err != nil {
-				return false, err
-			}
-			if observation.State == ports.RuntimeStateStale {
-				return false, nil
+	_, resolvedIntegrations := runtimeEnvironment(runtime.Environment)["INTEGRATION_HOST_LINKS"]
+	if !resolvedIntegrations && runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
+		// Resolved contexts observe every lifecycle in the final IntegrationPlan.
+		definitions, err := runtime.integrationDefinitions()
+		if err != nil {
+			return false, err
+		}
+		for _, definition := range definitions {
+			if definition.Lifecycle != nil {
+				observation, err := runtime.observeIntegrationLifecycle(ctx, definition)
+				if err != nil {
+					return false, err
+				}
+				if observation.State == ports.RuntimeStateStale {
+					return false, nil
+				}
 			}
 		}
 	}
@@ -1856,17 +1880,13 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	commands = append([]string{"docker"}, commands...)
-	commandCheck := []string{"sh", "-c", `for command do command -v "$command" >/dev/null || exit 1; done`, "subyard"}
-	commandCheck = append(commandCheck, commands...)
-	if ok, err := runtime.guestCheck(ctx, commandCheck); err != nil || !ok {
-		return false, err
-	}
-	forwardingCheck := []string{"sh", "-c", `
+	commandCheck := []string{"sh", "-c", `
+for command do command -v "$command" >/dev/null || exit 1; done
 jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
   && ! iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'
-`}
-	if ok, err := runtime.guestCheck(ctx, forwardingCheck); err != nil || !ok {
+`, "subyard"}
+	commandCheck = append(commandCheck, commands...)
+	if ok, err := runtime.guestCheck(ctx, commandCheck); err != nil || !ok {
 		return false, err
 	}
 	checks, err := runtime.provisionAgentChecks()
@@ -1882,10 +1902,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if user == "" {
 		user = runtime.environmentDefault("DEV_USER", "dev")
 	}
-	if ok, err := runtime.guestCheck(ctx, []string{"id", user}); err != nil || !ok {
-		return false, err
-	}
-	passwd, ok, err := runtime.guestObserve(ctx, []string{"getent", "passwd", user})
+	passwd, ok, err := runtime.guestObserve(ctx, provisionPasswdProbe(user))
 	if err != nil || !ok {
 		return false, err
 	}
@@ -1896,17 +1913,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	home := fields[5]
 	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" {
 		ccusagePath := runtime.environmentDefault("CCUSAGE_INSTALL_PATH", "/usr/local/bin/ccusage")
-		status, ok, err := runtime.guestObserve(ctx,
-			[]string{"stat", "-c", "%F|%a|%u:%g", ccusagePath})
-		if err != nil || !ok || strings.TrimSpace(string(status.Stdout)) !=
-			"regular file|755|"+runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0") {
-			return false, err
-		}
-		magic, ok, err := runtime.guestObserve(ctx, []string{"od", "-An", "-tx1", "-N4", ccusagePath})
-		if err != nil || !ok || strings.Join(strings.Fields(string(magic.Stdout)), "") != "7f454c46" {
-			return false, err
-		}
-		reported, ok, err := runtime.guestObserve(ctx, []string{ccusagePath, "--version"})
+		reported, ok, err := runtime.guestObserve(ctx, provisionUsageProbe(ccusagePath, runtime.environmentDefault("CCUSAGE_EXPECTED_OWNER", "0:0")))
 		if err != nil || !ok || strings.TrimSpace(string(reported.Stdout)) != "ccusage "+version {
 			return false, err
 		}
@@ -1970,6 +1977,20 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, nil
 	}
 	return runtime.diskTmpReadiness(ctx, false)
+}
+
+func provisionPasswdProbe(user string) []string {
+	return []string{"sh", "-c", `id "$1" >/dev/null && getent passwd "$1"`, "subyard", user}
+}
+
+func provisionUsageProbe(path, owner string) []string {
+	return []string{"sh", "-c", `
+status=$(stat -c '%F|%a|%u:%g' "$1") || exit 1
+[ "$status" = "$2" ] || exit 1
+magic=$(od -An -tx1 -N4 "$1") || exit 1
+[ "$(printf '%s' "$magic" | tr -d '[:space:]')" = 7f454c46 ] || exit 1
+exec "$1" --version
+`, "subyard", path, "regular file|755|" + owner}
 }
 
 func (runtime Runtime) provisionAgentCommands() ([]string, error) {
@@ -2289,7 +2310,7 @@ func (runtime Runtime) runPathEnvironment(
 			command.Env = append(command.Env, "SUBYARD_NATIVE_OWNER_FD3=1")
 		}
 	}
-	if ports.NativeOperationObserverFrom(ctx) != nil {
+	if ports.NativeOperationObserverFrom(ctx) != nil || ctx.Value(readOnlyProbeKey{}) != nil {
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error {
 			if command.Process == nil {
@@ -2315,7 +2336,8 @@ func (runtime Runtime) profileServicesConverged(ctx context.Context) (bool, erro
 }
 
 func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.ReconcileStageObservation, error) {
-	environment := map[string]string{}
+	ctx = readOnlyProbeContext(ctx)
+	environment := map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}
 	state, err := runtime.reconcileState(ctx)
 	if err != nil {
 		return ports.ReconcileStageObservation{}, err
@@ -2335,7 +2357,14 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 	observation := ports.ReconcileStageObservation{}
 	var exit *exec.ExitError
 	fields := strings.Fields(output)
-	if !exceeded && errors.As(err, &exit) && len(fields) == 5 && strings.Join(fields[:3], " ") == "profile service check" {
+	if !exceeded && errors.As(err, &exit) && (len(fields) == 5 || len(fields) == 6) && strings.Join(fields[:3], " ") == "profile service check" {
+		if len(fields) == 6 {
+			reason := strings.TrimPrefix(fields[5], "reason=")
+			if fields[5] != "reason="+reason || !profile.ValidServiceReadinessReason(reason) {
+				return observation, errors.New("profile service check unavailable")
+			}
+			observation.Reason = reason
+		}
 		owner := strings.TrimPrefix(fields[3], "owner=")
 		code, parseErr := strconv.Atoi(strings.TrimPrefix(fields[4], "native-exit="))
 		if fields[3] == "owner="+owner && fields[4] == "native-exit="+strconv.Itoa(code) && domain.SafeName(owner) && parseErr == nil && code == exit.ExitCode() && code > 0 && code <= 255 {
@@ -2351,7 +2380,16 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 
 // Scoped profile operations never enter the general init reconciler.
 func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string) (bool, error) {
-	return probeConverged(runtime.runScript(ctx, nil, "profile-services.sh", "--check", name))
+	observation, err := runtime.ProfileServiceObservation(ctx, name)
+	return observation.Converged, err
+}
+
+// ProfileServiceObservation retains the same bounded check used for convergence.
+func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
+	ctx = readOnlyProbeContext(ctx)
+	output := &profileRuntimeBoundedBuffer{limit: 256}
+	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
+	return profileServiceObservation(output.String(), output.exceeded, err)
 }
 
 func (runtime Runtime) ApplyProfileService(ctx context.Context, name string, artifacts []ports.TeardownArtifact) error {

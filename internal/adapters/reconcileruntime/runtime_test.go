@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,11 +60,11 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := filepath.Join(root, "events")
-	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1' >&2\nexit 1\n"), 0o700)
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$SUBYARD_PROFILE_STOPPED\" >> \"$EVENTS\"\n[ \"$SUBYARD_PROFILE_DIAGNOSTICS\" = 1 ] || exit 2\necho 'profile service check owner=sample native-exit=1 reason=boot-dependency-unloaded' >&2\nexit 1\n"), 0o700)
 	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}, Incus: &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "stopped", Config: map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": "true", "user.subyard.desired_power": "stopped"}}}}}
 	observed, failure := runtime.ObserveStage(context.Background(), ports.ReconcileStageProfileServices)
 	data, readErr := os.ReadFile(events)
-	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || readErr != nil || string(data) != "--check:1" {
+	if failure != nil || observed.Owner != "sample" || observed.NativeExit != 1 || observed.Reason != "boot-dependency-unloaded" || readErr != nil || string(data) != "--check:1" {
 		t.Fatalf("original single stopped check changed: %#v %v %q %v", observed, failure, data, readErr)
 	}
 	for _, code := range []int{1, 17} {
@@ -73,16 +74,52 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 		if observation.Converged || observation.Owner != "sample" || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
 			t.Fatalf("native disposition lost: %#v %v", observation, observedErr)
 		}
+		for _, reason := range []string{"boot-link-missing", "boot-link-target-mismatch", "unit-fragment-mismatch", "boot-dependency-unloaded", "unit-inactive", "transport-unavailable"} {
+			withReason := strings.TrimSuffix(output, "\n") + " reason=" + reason + "\n"
+			observation, observedErr := profileServiceObservation(withReason, false, err)
+			if observation.Reason != reason || observation.NativeExit != code || (observedErr == nil) != (code == 1) {
+				t.Fatalf("readiness reason lost: %#v %v", observation, observedErr)
+			}
+		}
 		for _, invalid := range []string{"private-canary", output + "private-canary\n", "profile service check owner=../private-canary native-exit=1"} {
 			_, failure := profileServiceObservation(invalid, false, err)
 			if failure == nil || strings.Contains(failure.Error(), "private-canary") {
 				t.Fatalf("dispatcher failure classified as drift or leaked: %v", failure)
 			}
 		}
+		for _, suffix := range []string{" reason=private-canary", " reason=unit-inactive reason=unit-inactive", " unit-inactive", " reason="} {
+			_, failure := profileServiceObservation(strings.TrimSuffix(output, "\n")+suffix, false, err)
+			if failure == nil || strings.Contains(failure.Error(), "private-canary") {
+				t.Fatalf("invalid readiness record admitted or leaked: %v", failure)
+			}
+		}
+		if _, failure := profileServiceObservation(output, true, err); failure == nil {
+			t.Fatal("oversized readiness record admitted")
+		}
 	}
 	observation, err := profileServiceObservation("", false, nil)
 	if err != nil || !observation.Converged {
 		t.Fatalf("successful check changed: %#v %v", observation, err)
+	}
+}
+
+func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {
+	root := testkit.TempDir(t)
+	script := filepath.Join(root, "scripts/profile-services.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(root, "events")
+	testkit.WriteFile(t, script, []byte("#!/bin/bash\nprintf '%s:%s:%s\\n' \"$1\" \"$2\" \"$SUBYARD_PROFILE_DIAGNOSTICS\" >> \"$EVENTS\"\necho 'profile service check owner=sample native-exit=1 reason=unit-inactive' >&2\nexit 1\n"), 0o700)
+	runtime := Runtime{RepositoryRoot: root, Environment: []string{"PATH=" + os.Getenv("PATH"), "EVENTS=" + events}}
+	observation, err := runtime.ProfileServiceObservation(context.Background(), "sample")
+	data, readErr := os.ReadFile(events)
+	if err != nil || observation.Converged || observation.Reason != "unit-inactive" || readErr != nil || string(data) != "--check:sample:1\n" {
+		t.Fatalf("scoped observation=%#v err=%v events=%q read=%v", observation, err, data, readErr)
+	}
+	converged, err := runtime.ProfileServiceConverged(context.Background(), "sample")
+	if err != nil || converged {
+		t.Fatalf("scoped convergence lost drift: %t %v", converged, err)
 	}
 }
 
@@ -1028,14 +1065,67 @@ esac
 	}
 }
 
+type provisionLifecycleExecutor struct{ *retryableIntegrationExecutor }
+
+func (fixture provisionLifecycleExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if slices.Equal(command, provisionPasswdProbe("dev")) {
+		return ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}, nil
+	}
+	if slices.Equal(command, provisionUsageProbe("/usr/local/bin/ccusage", "0:0")) {
+		return ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}, nil
+	}
+	if len(command) != 0 {
+		switch command[0] {
+		case "readlink":
+			return ports.InstanceExecResult{ExitCode: 1}, errors.New("not a link")
+		}
+	}
+	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestProvisionProbeObservesLifecycleOnceOnLegacyAndResolvedPaths(t *testing.T) {
+	previewLoopbackFixture(t)
+	for _, selection := range []string{"legacy", "resolved", "disabled"} {
+		t.Run(selection, func(t *testing.T) {
+			runtime, definition, _, desired := lifecycleFixture(t)
+			calls := filepath.Join(definition.Root, "calls")
+			testkit.WriteFile(t, filepath.Join(definition.Root, "hook.sh"), []byte("#!/bin/sh\nprintf 'observe\\n' >> \"$CALLS\"\ncat \"$STATE\"\n"), 0o755)
+			testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte(fmt.Sprintf(`{"state":"current","actual":%q,"desired":%q}`, desired, desired)), 0o600)
+			runtime.RepositoryRoot = "../../.."
+			runtime.Environment = append(runtime.Environment, "CALLS="+calls, "CCUSAGE_VERSION=1.2.3")
+			if selection == "resolved" {
+				runtime.Environment = append(runtime.Environment, "INTEGRATION_HOST_LINKS=")
+			} else if selection == "disabled" {
+				runtime.Environment = append(runtime.Environment, "ALLOWS_CODING_TOOLS=false")
+			}
+			runtime.Yard = domain.Context{IncusProject: "fixture", YardInstanceName: "fixture", DevUser: "dev", DevUID: 1000}
+			incus := &testkit.Incus{ServerInfo: ports.ServerInfo{Environment: "incus"},
+				Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{"user.subyard.ccusage_version": "1.2.3"}}}}
+			runtime.Incus, runtime.Executor = incus, provisionLifecycleExecutor{&retryableIntegrationExecutor{}}
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); err != nil || !ready {
+				t.Fatalf("provision readiness: %t %v", ready, err)
+			}
+			if data, err := os.ReadFile(calls); err != nil || string(data) != "observe\n" {
+				t.Fatalf("lifecycle observation count: %q %v", data, err)
+			}
+			testkit.WriteFile(t, filepath.Join(definition.Root, "state"), []byte("invalid"), 0o600)
+			if ready, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision); ready || err == nil {
+				t.Fatalf("invalid lifecycle report was accepted: %t %v", ready, err)
+			}
+		})
+	}
+}
+
 func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	previewLoopbackFixture(t)
 	steps := func(stat, configHash string) []testkit.IncusExecStep {
+		usage := testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}}
+		if stat != "regular file|755|0:0" {
+			usage = testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("ccusage metadata drift")}
+		}
 		return []testkit.IncusExecStep{
-			{}, {}, {}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}},
-			{Result: ports.InstanceExecResult{Stdout: []byte(stat + "\n")}},
-			{Result: ports.InstanceExecResult{Stdout: []byte(" 7f 45 4c 46\n")}},
-			{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}},
+			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {},
 		}
@@ -1067,9 +1157,28 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	bindArtifactTestPackages(t, &runtime, filepath.Dir(instructions))
 	assertStage(t, runtime, "provision", true, "matching running provision state")
-	if command := incus.ExecCalls[8].Request.Command; len(command) != 3 ||
+	if len(incus.ExecCalls) != 10 {
+		t.Fatalf("running provision observations = %d, want ten", len(incus.ExecCalls))
+	}
+	if command := incus.ExecCalls[4].Request.Command; len(command) != 3 ||
 		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {
 		t.Fatalf("OpenCode instructions were not checked natively: %#v", command)
+	}
+	transport := errors.New("native transport unavailable")
+	for _, index := range []int{1, 2, 3} {
+		for _, wantErr := range []error{nil, transport} {
+			incus.ExecSteps = steps("regular file|755|0:0", digest)
+			failure := testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("native drift")}
+			if wantErr != nil {
+				failure = testkit.IncusExecStep{Err: wantErr}
+			}
+			incus.ExecSteps[index] = failure
+			incus.ExecCalls = nil
+			converged, err := runtime.CheckStage(context.Background(), ports.ReconcileStageProvision)
+			if converged || !errors.Is(err, wantErr) || len(incus.ExecCalls) != index+1 {
+				t.Fatalf("combined probe %d changed drift/transport refusal: converged=%t err=%v calls=%d", index, converged, err, len(incus.ExecCalls))
+			}
+		}
 	}
 	testkit.WriteFile(t, instructions, []byte("updated\n"), 0o600)
 	incus.ExecSteps = steps("regular file|755|0:0", digest)
@@ -1094,13 +1203,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	missing := steps("regular file|755|0:0", digest)
-	missing[8] = testkit.IncusExecStep{
+	missing[4] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing config"),
 	}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
 	forwardDrop := steps("regular file|755|0:0", digest)
-	forwardDrop[2] = testkit.IncusExecStep{
+	forwardDrop[1] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("FORWARD DROP"),
 	}
 	incus.ExecSteps = forwardDrop
@@ -1767,6 +1876,10 @@ func TestExtrasDesiredStateIsParsedAndValidatedInGo(t *testing.T) {
 	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad"}
 	if _, err := runtime.extrasContext(); err == nil {
 		t.Fatal("unsafe profile extras were accepted")
+	}
+	writeProfile("bad", "YARD_MOUNTS='cache:/srv/cache:rw:0755 cache:/srv/other:ro:0700'\n")
+	if _, err := runtime.extrasContext(); err == nil {
+		t.Fatal("ambiguous profile mount declarations were accepted")
 	}
 }
 

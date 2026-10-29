@@ -35,7 +35,7 @@ def public_digest_input(value):
         if set(value['settings']) != settings:
             raise ValueError('unexpected desired settings schema')
         return 'desired', value
-    facts = {'paths', 'selected', 'check_timeout', 'ready', 'guest_available', 'guest', 'loaded', 'manager'}
+    facts = {'paths', 'selected', 'check_status', 'check_reason', 'check_timeout', 'ready', 'guest_available', 'guest', 'loaded', 'manager'}
     if {'paths', 'selected', 'ready'} <= set(value) <= facts:
         return 'actual-facts', value
     raise ValueError('unexpected observer digest schema')

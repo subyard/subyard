@@ -489,20 +489,20 @@ func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, er
 		return liveFile{}, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return liveFile{}, false, fmt.Errorf("live target is not a regular non-symlink file: %s", path)
+		return liveFile{}, false, metadataSafetyError(path, "live target is not a regular non-symlink file", "type=regular", info)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return liveFile{}, false, fmt.Errorf("live target is group/world writable: %s", path)
+		return liveFile{}, false, metadataSafetyError(path, "live target is group/world writable", "writable mask=0000 (mask=0022)", info)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return liveFile{}, false, fmt.Errorf("live target has unsafe ownership or hard links: %s", path)
+		return liveFile{}, false, metadataSafetyError(path, "live target has unsafe ownership or hard links", fmt.Sprintf("uid=%d, links=1", os.Getuid()), info)
 	}
 	maximum := int64(maxAssetBytes)
 	if filepath.Base(path) == "config.env" {
 		maximum = maxConfigBytes
 		if info.Mode().Perm() != 0o600 && !(len(local) != 0 && local[0]) {
-			return liveFile{}, false, fmt.Errorf("live config.env mode must be 0600: %s", path)
+			return liveFile{}, false, metadataSafetyError(path, "live config.env mode must be 0600", "mode=0600", info)
 		}
 	}
 	if info.Size() > int64(maximum) {
@@ -537,7 +537,7 @@ func readManifest(configHome string) (Manifest, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
 		info.Mode().Perm() != 0o600 {
-		return Manifest{}, errors.New("config sync manifest must be a regular 0600 file")
+		return Manifest{}, metadataSafetyError(path, "config sync manifest must be a regular 0600 file", "type=regular, mode=0600", info)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -547,7 +547,7 @@ func readManifest(configHome string) (Manifest, error) {
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
-		return Manifest{}, err
+		return Manifest{}, config.OwnerMetadataError(path, "protected configuration metadata", "invalid JSON metadata", "", err)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
 		return Manifest{}, err

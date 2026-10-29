@@ -48,6 +48,52 @@ func legacyContinuationFixture(t *testing.T) (reconcileruntime.Runtime, *testkit
 	return runtime, incus
 }
 
+func TestLegacyContinuationAssessesSelectedNativeCapabilities(t *testing.T) {
+	runtime, incus := legacyContinuationFixture(t)
+	runtime.RepositoryRoot = runtime.Yard.Paths.OperatorHome
+	if err := os.MkdirAll(filepath.Join(runtime.RepositoryRoot, "config/profiles/native-tools"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/native-tools/profile.conf"), []byte("YARD_DEVICES=kvm\nYARD_CAPS=host-memory\n"), 0600)
+	runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=native-tools")
+	runtime.HostDeviceRoot = testkit.TempDir(t)
+	if err := os.Symlink("/dev/null", filepath.Join(runtime.HostDeviceRoot, "kvm")); err != nil {
+		t.Fatal(err)
+	}
+	instance := incus.Reconcile.Instance
+	instance.Config["user.subyard.host_memory"] = "v1"
+	instance.LocalConfig = maps.Clone(instance.Config)
+	device := map[string]string{"type": "disk", "source": "/proc/meminfo", "path": "/var/lib/subyard/host-meminfo", "readonly": "true"}
+	instance.LocalDevices["subyard-host-memory"] = device
+	instance.Devices["subyard-host-memory"] = maps.Clone(device)
+	character := map[string]string{"type": "unix-char", "source": "/dev/kvm", "path": "/dev/kvm", "mode": "0666"}
+	instance.LocalDevices["yx-dev-kvm"], instance.Devices["yx-dev-kvm"] = character, maps.Clone(character)
+	incus.Reconcile.Instance = instance
+	if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err != nil {
+		t.Fatal("supported selected capabilities refused before native assessment:", err)
+	}
+	for _, mutant := range []struct{ name, device, key, value string }{
+		{"source", "yx-dev-kvm", "source", "/dev/mem"},
+		{"path", "yx-dev-kvm", "path", "/dev/mem"},
+		{"gid", "yx-dev-kvm", "gid", "0"},
+		{"mode", "yx-dev-kvm", "mode", "0777"},
+		{"readonly", "subyard-host-memory", "readonly", "false"},
+		{"memory source", "subyard-host-memory", "source", "/tmp/meminfo"},
+	} {
+		t.Run(mutant.name, func(t *testing.T) {
+			before := instance.LocalDevices[mutant.device]
+			changed := maps.Clone(before)
+			changed[mutant.key] = mutant.value
+			instance.LocalDevices[mutant.device], instance.Devices[mutant.device] = changed, changed
+			incus.Reconcile.Instance = instance
+			if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err == nil {
+				t.Fatal("unsafe native capability admitted")
+			}
+			instance.LocalDevices[mutant.device], instance.Devices[mutant.device] = before, maps.Clone(before)
+		})
+	}
+}
+
 // The fixture models the devices authored by the historical default container
 // scripts; it does not approve the observed test device inventory.
 func canonicalLegacyInstanceFixture(runtime reconcileruntime.Runtime, incus *testkit.Incus) {
@@ -250,8 +296,10 @@ func TestLegacyContinuationUnsafeRecordAndChangedOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decodeLegacyContinuation(snapshot); err == nil {
+	if _, err := assessLegacyContinuation(context.Background(), runtime, "host", "/runtime", "sealed", snapshot); err == nil {
 		t.Fatal("public-readable grant admitted")
+	} else if diagnostic, ok := config.OwnerSourceDiagnostic(err); !ok || !strings.Contains(diagnostic, "observed mode=0644, required mode=0600") || !strings.Contains(diagnostic, "default.json") {
+		t.Fatal("record mode source facts lost", diagnostic, err)
 	}
 	if err := os.Chmod(path, 0600); err != nil {
 		t.Fatal(err)
@@ -468,7 +516,7 @@ func legacyContinuationInstalledFixture(t *testing.T, implicitDefault ...bool) (
 		t.Fatal(err)
 	}
 	runtimeRoot := program.env["YARD_RUNTIME_ROOT"]
-	installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: configHome, RuntimeRoot: runtimeRoot, CacheRoot: filepath.Join(loaded.Context.Paths.DataHome, "releases"), BinDir: filepath.Join(loaded.Context.Paths.OperatorHome, ".local/bin")}
+	installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: configHome, RuntimeRoot: runtimeRoot, CacheRoot: filepath.Join(loaded.Context.Paths.DataHome, "releases")}
 	payload, _ := json.Marshal(installation)
 	writeProfileTestFile(t, filepath.Join(runtimeRoot, "installation.json"), payload, 0600)
 	hostID, err := configsync.EnsureHostID(configHome, loaded.Environment)
@@ -883,6 +931,19 @@ func TestLegacyContinuationImplicitDefaultRegistration(t *testing.T) {
 				if err == nil {
 					t.Fatal("unsafe or non-default source authorized continuation", scenario)
 				}
+				if scenario == "missing-host" || scenario == "named-missing" || scenario == "unsafe-host-mode" || scenario == "unsafe-yard-mode" {
+					diagnostic, ok := config.OwnerSourceDiagnostic(err)
+					if !ok || !strings.Contains(diagnostic, "config.env") {
+						t.Fatal("registration source facts lost", diagnostic, err)
+					}
+					if strings.HasPrefix(scenario, "unsafe-") {
+						if !strings.Contains(diagnostic, "observed mode=0644, required mode=0600") {
+							t.Fatal(diagnostic)
+						}
+					} else if !strings.Contains(diagnostic, "source is missing (observed metadata unavailable)") {
+						t.Fatal(diagnostic)
+					}
+				}
 			} else {
 				if err != nil {
 					t.Fatal("genuine implicit default producer refused", err)
@@ -1099,6 +1160,208 @@ func TestLegacyContinuationDeclaredPublication(t *testing.T) {
 			after, err := readLegacyContinuation(execution.loaded.Context)
 			if err != nil || !reflect.DeepEqual(before, after) || len(incus.ConfigUpdates) != 0 {
 				t.Fatal("publication check changed grant/native state", err)
+			}
+		})
+	}
+}
+
+func requireDiagnosticNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func diagnosticJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	requireDiagnosticNoError(t, err)
+	return body
+}
+
+func requireOwnerDiagnostic(t *testing.T, err error, want ...string) string {
+	t.Helper()
+	diagnostic, ok := config.OwnerSourceDiagnostic(err)
+	if !ok {
+		t.Fatalf("missing owner diagnostic: %v", err)
+	}
+	for _, text := range want {
+		if !strings.Contains(diagnostic, text) {
+			t.Fatalf("diagnostic missing %q: %s", text, diagnostic)
+		}
+	}
+	return diagnostic
+}
+
+func TestLegacyContinuationInstallationDiagnostics(t *testing.T) {
+	cases := []struct {
+		name string
+		want []string
+	}{
+		{"missing", []string{"source is missing"}},
+		{"unsafe-mode", []string{"observed type=regular, mode=0644", "required type=regular, mode=0600"}},
+		{"invalid-json", []string{"JSON format"}},
+		{"configHome", nil}, {"runtimeRoot", nil}, {"both", nil},
+		{"unsafe-config-ancestor", []string{"installation inventory configHome", "uninstall artifact ancestor", "observed type=symlink", "required type=directory"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			program, execution, _, _ := legacyContinuationInstalledFixture(t)
+			path := filepath.Join(program.env["YARD_RUNTIME_ROOT"], uninstall.ManifestName)
+			installation, err := uninstall.ReadInstallationFile(path, execution.loaded.Context.Paths.DataHome, uint32(os.Getuid()))
+			requireDiagnosticNoError(t, err)
+			switch test.name {
+			case "missing":
+				err = os.Remove(path)
+			case "unsafe-mode":
+				err = os.Chmod(path, 0644)
+			case "invalid-json":
+				testkit.WriteFile(t, path, []byte(`{"SECRET_JSON":`), 0600)
+			default:
+				if test.name == "unsafe-config-ancestor" {
+					ancestor := filepath.Join(testkit.TempDir(t), "link")
+					requireDiagnosticNoError(t, os.Symlink(filepath.Dir(ancestor), ancestor))
+					installation.ConfigHome = filepath.Join(ancestor, "config")
+				}
+				if test.name == "configHome" || test.name == "both" {
+					installation.ConfigHome += "-stored"
+				}
+				if test.name == "runtimeRoot" || test.name == "both" {
+					installation.RuntimeRoot += "-stored"
+				}
+				testkit.WriteFile(t, path, diagnosticJSON(t, installation), 0600)
+			}
+			requireDiagnosticNoError(t, err)
+			_, _, err = program.legacyContinuationSource(context.Background(), execution.loaded)
+			diagnostic := requireOwnerDiagnostic(t, err, append(test.want, "installation.json")...)
+			if strings.Contains(diagnostic, "SECRET_JSON") {
+				t.Fatal("private JSON exposed", diagnostic)
+			}
+			if test.name == "missing" {
+				var pathErr *os.PathError
+				if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || strings.Contains(diagnostic, "roots conflict") {
+					t.Fatal(diagnostic, err)
+				}
+			}
+			if test.name == "configHome" || test.name == "runtimeRoot" || test.name == "both" {
+				for _, field := range []string{"configHome", "runtimeRoot"} {
+					if strings.Contains(diagnostic, field+": stored=") != (test.name == field || test.name == "both") {
+						t.Fatal(diagnostic)
+					}
+				}
+				if !strings.Contains(diagnostic, ", current=") || strings.Contains(err.Error(), "-stored") {
+					t.Fatal(diagnostic, err)
+				}
+			}
+			if _, err := os.Stat(legacyContinuationPath(execution.loaded.Context)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("refusal wrote continuation", err)
+			}
+		})
+	}
+}
+
+func TestOwnerMetadataCLIAndRPCBoundary(t *testing.T) {
+	var stderr bytes.Buffer
+	program := &CLI{options: Options{Program: "yard", Stderr: &stderr}, env: map[string]string{}, localMetadataDiagnostics: true}
+	cause := config.OwnerMetadataError("/owner/installation.json", "installation inventory", "roots differ", `configHome: stored="/stored", current="/current"`, domain.ErrPlanStale)
+	program.errorf("prepare init: %v", cause)
+	if !strings.Contains(stderr.String(), `prepare init: operation plan is stale:`) || !strings.Contains(stderr.String(), `installation inventory: roots differ`) || !strings.Contains(stderr.String(), `stored="/stored"`) {
+		t.Fatal(stderr.String())
+	}
+	stderr.Reset()
+	remote := program.rpcOperation("test")
+	remote.errorf("RPC initialization: %v", cause)
+	public := operationRPCError("plan_failed", cause)
+	if strings.Contains(stderr.String(), "/owner") || strings.Contains(stderr.String(), "/stored") || strings.Contains(public.Error(), "/stored") {
+		t.Fatal("remote boundary exposed owner paths", stderr.String(), public)
+	}
+	owner, _, _, _ := legacyContinuationInstalledFixture(t)
+	owner.options.Stderr = &stderr
+	owner.options.Arguments = []string{"rpc", "--invalid"}
+	stderr.Reset()
+	if code := owner.Run(context.Background()); code != 2 {
+		t.Fatalf("RPC startup exit=%d", code)
+	}
+	owner.errorf("RPC startup: %v", cause)
+	if owner.localMetadataDiagnostics || strings.Contains(stderr.String(), "/stored") || strings.Contains(stderr.String(), "/owner") {
+		t.Fatal("RPC startup enabled owner path rendering", stderr.String())
+	}
+	child := owner.rpcOperation("child")
+	child.releaseTransitionChild = true
+	child.options.Arguments = []string{"--help"}
+	child.Run(context.Background())
+	if child.localMetadataDiagnostics {
+		t.Fatal("internal release child enabled owner path rendering")
+	}
+}
+
+func TestLegacyContinuationRecordDiagnostics(t *testing.T) {
+	runtime, _ := legacyContinuationFixture(t)
+	original, err := assessLegacyContinuation(context.Background(), runtime, "host", "/runtime", "sealed", config.PersistentFileSnapshot{})
+	requireDiagnosticNoError(t, err)
+	valid := diagnosticJSON(t, original.grant)
+	large := []byte(strings.Repeat("S", 16385))
+	privateLarge := bytes.Clone(large)
+	copy(privateLarge, "SECRET_JSON")
+	unsupported := original.grant
+	unsupported.Schema, unsupported.Scope = 2, "SECRET_SCOPE"
+	unsupported.SecurityPolicyBinding, unsupported.Resources = "", nil
+	cases := []struct {
+		name    string
+		content []byte
+		mode    uint32
+		want    []string
+	}{
+		{"missing", valid, 0600, []string{"source is missing (observed metadata unavailable)"}},
+		{"size", large, 0600, []string{"observed bytes=16385, required maximum=16384"}},
+		{"size-mode", privateLarge, 0644, []string{"observed bytes=16385, required maximum=16384", "observed mode=0644, required mode=0600"}},
+		{"mode", []byte("SECRET_JSON"), 0644, []string{"observed mode=0644, required mode=0600"}},
+		{"json", []byte(`{"schema":]`), 0600, []string{"JSON format"}},
+		{"trailing", append(bytes.Clone(valid), []byte("\n{")...), 0600, []string{"trailing data"}},
+		{"fields", diagnosticJSON(t, unsupported), 0600, []string{"schema: observed=2, required=1", "scope: required normal-reconcile", "securityPolicyBinding: observed bytes=0", "resources: observed count=0"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := config.PersistentFileSnapshot{Exists: test.name != "missing", Content: test.content, Identity: config.PersistentFileIdentity{Mode: test.mode}}
+			_, err := decodeLegacyContinuation(snapshot)
+			diagnostic := requireOwnerDiagnostic(t, err, test.want...)
+			if strings.Contains(diagnostic, "SECRET") || test.name == "size-mode" && strings.Contains(diagnostic, "JSON format") {
+				t.Fatal("private or unsafe record decoded", diagnostic)
+			}
+			if test.name == "json" {
+				var syntax *json.SyntaxError
+				if !errors.As(err, &syntax) {
+					t.Fatal("JSON cause lost", err)
+				}
+			}
+			if test.name == "trailing" && !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatal("trailing JSON cause lost", err)
+			}
+		})
+	}
+}
+
+func TestFullInstallationExplicitRootDiagnostics(t *testing.T) {
+	for _, field := range []string{"SUBYARD_HOME", "SUBYARD_CONFIG_HOME"} {
+		t.Run(field, func(t *testing.T) {
+			program, execution, _, _ := legacyContinuationInstalledFixture(t)
+			stored := execution.loaded.Context.Paths.DataHome
+			if field == "SUBYARD_CONFIG_HOME" {
+				stored = execution.loaded.Context.Paths.ConfigHome
+			}
+			current := stored + "-other"
+			program.baseEnv[field] = current
+			path := filepath.Join(program.env["YARD_RUNTIME_ROOT"], uninstall.ManifestName)
+			before, err := os.ReadFile(path)
+			requireDiagnosticNoError(t, err)
+			err = (&preparedCommand{CLI: program, Loaded: execution.loaded}).bindFullInstallation()
+			diagnostic := requireOwnerDiagnostic(t, err, field+": stored="+config.QuoteMetadataPath(stored)+", current="+config.QuoteMetadataPath(current), "installation.json")
+			if strings.Contains(err.Error(), current) {
+				t.Fatal(diagnostic, err)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatal("root refusal changed inventory", readErr)
 			}
 		})
 	}

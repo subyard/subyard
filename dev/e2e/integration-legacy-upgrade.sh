@@ -29,6 +29,7 @@ CANDIDATE_LAUNCHER=''
 HOST_CONFIG_FINGERPRINT=''
 OPENCODE_CONFIG="$OPERATOR_HOME/opencode-fixture.jsonc"
 OPENCODE_INSTRUCTIONS="$OPERATOR_HOME/opencode-instructions.md"
+CODEX_RULES="$OPERATOR_HOME/codex-rules-fixture.rules"
 
 die() {
   printf 'integration-legacy-upgrade: %s\n' "$*" >&2
@@ -191,8 +192,29 @@ chmod 0600 "$2" "$3"' _ "$HOST_CONFIG" "$OPENCODE_CONFIG" "$OPENCODE_INSTRUCTION
   < "$ROOT/config/agents/opencode/opencode.jsonc"
 
 info "packaging candidate $CANDIDATE_VERSION"
+# Synthetic declarations and hooks exercise the shared native contract without
+# installing a shipped profile's external toolchain. The predecessor stays exact.
+for fixture_profile in lifecycle-native lifecycle-other; do
+  install -d -m 0755 "$ROOT/config/profiles/$fixture_profile"
+  printf 'PROFILE_NAME=%s\n' "$fixture_profile" > "$ROOT/config/profiles/$fixture_profile/profile.conf"
+  cat > "$ROOT/config/profiles/$fixture_profile/provision.sh" <<'PROFILE_HOOK'
+#!/bin/sh
+# subyard-provision-check-v1
+set -eu
+marker="/srv/subyard-PROFILE_FIXTURE-provisioned"
+for argument in "$@"; do
+  case "$argument" in --check) [ -f "$marker" ] && exit 0; exit 10 ;; --yes) ;; *) exit 2 ;; esac
+done
+printf 'synthetic provision hook\n' > "$marker"
+PROFILE_HOOK
+  sed -i "s/PROFILE_FIXTURE/$fixture_profile/" "$ROOT/config/profiles/$fixture_profile/provision.sh"
+  chmod 0755 "$ROOT/config/profiles/$fixture_profile/provision.sh"
+done
+printf 'YARD_DEVICES=kvm\nYARD_CAPS=host-memory\n' >> "$ROOT/config/profiles/lifecycle-native/profile.conf"
+sha256sum "$ROOT/config/profiles/"lifecycle-*/{profile.conf,provision.sh}
 "$ROOT/dev/package-engine.sh" --output-dir "$RELEASE_ROOT" \
   --version "$CANDIDATE_VERSION" >/dev/null
+sha256sum "$RELEASE_ROOT"/subyard-*.tar.gz
 chmod -R a+rX "$RELEASE_ROOT"
 
 info "installing checksum-pinned published baseline $OLD_VERSION"
@@ -234,6 +256,22 @@ operator_env test ! -e "$YARD_CONFIG" \
   || die 'published baseline unexpectedly has canonical default-yard settings'
 guest test ! -e "$INVENTORY" \
   || die 'published baseline unexpectedly has integration inventory'
+
+# Keep the authentic predecessor bytes as an explicit operator input. Newer
+# shipped Codex rules are a different desired artifact, so strict initial
+# adoption correctly refuses them rather than guessing ownership of old bytes.
+guest stat -c 'legacy-codex-rules mode=%a uid=%u gid=%g links=%h' "$PLAIN_PATH"
+guest sha256sum "$PLAIN_PATH"
+[ "$(guest stat -c '%a:%u:%g:%h' "$PLAIN_PATH")" = '644:2000:2000:1' ] \
+  || die 'authentic Codex rules have unexpected native ownership'
+guest cat "$PLAIN_PATH" | operator_env sh -eu -c '
+  cat > "$1"
+  chmod 0600 "$1"
+  printf "\nAGENT_codex_RULES=%s\n" "$1" >> "$2"
+' subyard "$CODEX_RULES" "$HOST_CONFIG"
+[ "$(guest sha256sum "$PLAIN_PATH" | awk '{print $1}')" = \
+  "$(operator_env sha256sum "$CODEX_RULES" | awk '{print $1}')" ] \
+  || die 'explicit Codex rules source differs from authentic predecessor bytes'
 
 guest sh -eu -c '
   printf "%s\n" legacy-auth > /home/dev/.claude/auth.json
@@ -519,10 +557,57 @@ operator_env jq -e '.schema_version == 2 and (.artifacts | length) == 2' \
   || die 'artifact activation changed raw JSONC bytes'
 guest sh -eu -c '
   grep -Fq "OpenCode operator instructions survive artifact cutover." /home/dev/.config/opencode/AGENTS.md
-  [ "$(grep -c "<!-- subyard-preview -->" /home/dev/.config/opencode/AGENTS.md)" = 1 ]
+  ! grep -Fq "<!-- subyard-preview -->" /home/dev/.config/opencode/AGENTS.md
   [ "$(stat -c "%a:%u" /home/dev/.config/opencode/AGENTS.md)" = "644:2000" ]
   [ "$(stat -c "%a:%u" /home/dev/.config/opencode/opencode.jsonc)" = "644:2000" ]
-' || die 'declared instructions lost preview, content or permissions'
+' || die 'declared instructions lost content or permissions, or retained legacy preview text'
+guest sh -eu -c '
+  skill=/usr/local/share/subyard/skills/subyard-preview
+  [ "$(stat -c "%a:%u:%g" "$skill/SKILL.md")" = "644:0:0" ]
+  [ "$(readlink /home/dev/.config/opencode/skills/subyard-preview)" = "$skill" ]
+  [ "$(stat -c "%u:%g" /home/dev/.config/opencode/skills/subyard-preview)" = "2000:2000" ]
+' || die 'preview skill delivery or OpenCode discovery is invalid'
+[ "$(guest sha256sum /usr/local/share/subyard/skills/subyard-preview/SKILL.md | awk '{print $1}')" = \
+  "$(operator_env sha256sum "$candidate_root/config/skills/core/subyard-preview/SKILL.md" | awk '{print $1}')" ] \
+  || die 'preview skill differs from the activated runtime'
+
+info 'preparing observed native capabilities through the owning host-memory backend'
+assert_project_owned
+[ -c /dev/kvm ] || die 'native capability fixture requires the allocated VM KVM device'
+operator_yard config set ENVIRONMENT_PROFILES 'lifecycle-native lifecycle-other' --scope host --local --yes
+# KVM is a synthetic pre-existing device; host-memory creation must use its
+# production owner, including the actual read-only proc mount verification.
+incus config device add "$INSTANCE" yx-dev-kvm unix-char --project "$PROJECT" \
+  source=/dev/kvm path=/dev/kvm mode=0666
+driver="$ROOT/.build/legacy-native-owner"
+install -d -m 0700 "$driver"
+cat > "$driver/main.go" <<'NATIVE_OWNER'
+package main
+import (
+ "context"
+ "os"
+ "path/filepath"
+ "github.com/Subyard/Subyard/internal/adapters/testvmsruntime"
+ "github.com/Subyard/Subyard/internal/config"
+)
+func main() {
+ if len(os.Args)!=4 {panic("native fixture requires runtime, operator home and marker")}
+ root,home,marker:=os.Args[1],os.Args[2],os.Args[3]
+ ctx:=context.Background()
+ runner:=testvmsruntime.ProcessRunner{}
+ actual,_,err:=runner.Run(ctx,"incus",[]string{"project","get","subyard","user.subyard.p0-power-systemd"},nil,nil)
+ if err!=nil || string(actual)!=marker+"\n" {panic("native fixture project marker differs")}
+ loaded,err:=config.Load(config.LoadOptions{RepositoryRoot:root,OperatorHome:home,YardName:"default",Environment:map[string]string{"HOME":home,"SUBYARD_HOME":filepath.Join(home,".subyard"),"SUBYARD_CONFIG_HOME":filepath.Join(home,".config/subyard")}})
+ if err!=nil {panic(err)}
+ backend:=testvmsruntime.Backend{RepositoryRoot:root,DataHome:loaded.Context.Paths.DataHome,Dispatcher:filepath.Join(root,"bin/yard-engine"),Project:loaded.Context.IncusProject,Instance:loaded.Context.YardInstanceName,YardName:"default",DesiredPower:"running",HostMemory:true,Environment:loaded.Environment,Output:os.Stderr}
+ if err:=backend.Apply(ctx);err!=nil {panic(err)}
+ if ready,err:=backend.Verify(ctx);err!=nil || !ready {panic("native host-memory backend verification failed")}
+}
+NATIVE_OWNER
+go build -o "$driver/owner" "$driver/main.go"
+sudo -n install -o "$OPERATOR" -g "$OPERATOR" -m 0755 "$driver/owner" "$OPERATOR_HOME/native-profile-owner"
+operator_env "$OPERATOR_HOME/native-profile-owner" "$candidate_root" "$OPERATOR_HOME" "$MARKER"
+sha256sum "$driver/main.go" "$driver/owner"
 
 continuation_grant="$OPERATOR_HOME/.config/subyard/ownership/legacy-continuations/default.json"
 operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
@@ -534,12 +619,11 @@ continuation_host_before="$(operator_env sha256sum "$HOST_CONFIG")"
 runtime_links_before="$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")"
 instructions_before="$(guest sha256sum /home/dev/.config/opencode/AGENTS.md)"
 artifact_modes_before="$(guest stat -c '%a:%u:%g' /home/dev/.config/opencode/AGENTS.md /home/dev/.config/opencode/opencode.jsonc)"
-info 'staging current installation ownership after authentic updater adoption'
-# The authentic v0.14 updater publishes with its own historical helper, which
-# predates installation.json. Use the current supported installer to establish
-# that boundary without reactivating the release or reconciling the legacy yard.
-operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-  "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only --yes
+info 'verifying candidate-owned installation enrollment after authentic updater adoption'
+operator_env test -f "$OPERATOR_HOME/.subyard/runtime/installation.json" \
+  || die 'successful historical update omitted runtime installation inventory'
+[ "$(operator_env stat -c '%a:%u' "$OPERATOR_HOME/.subyard/runtime/installation.json")" = "600:$(operator_env id -u)" ] \
+  || die 'candidate-owned runtime inventory has unsafe permissions'
 [ "$(operator_env readlink "$OPERATOR_HOME/.subyard/runtime/current" "$OPERATOR_HOME/.subyard/runtime/previous")" = "$runtime_links_before" ] \
   && [ "$(guest sha256sum /home/dev/.config/opencode/AGENTS.md)" = "$instructions_before" ] \
   && [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/opencode/AGENTS.md /home/dev/.config/opencode/opencode.jsonc)" = "$artifact_modes_before" ] \
@@ -547,11 +631,11 @@ operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
   && [ "$(yard_config_fingerprint)" = "$config_before" ] \
   && [ "$(legacy_fingerprint)" = "$state_before" ] \
   && [ "$(operator_env sha256sum "$HOST_CONFIG")" = "$continuation_host_before" ] \
-  || die 'publication-only ownership staging changed activation or adopted state'
+  || die 'candidate-owned enrollment changed activation or adopted state'
 operator_env test ! -e "$continuation_grant" && operator_env test ! -L "$continuation_grant" \
-  || die 'publication-only ownership staging granted legacy continuation'
+  || die 'candidate-owned enrollment granted legacy continuation'
 [ -z "$(incus project get "$PROJECT" user.subyard.installation)" ] \
-  || die 'publication-only ownership staging acquired destructive installation ownership'
+  || die 'candidate-owned enrollment acquired destructive installation ownership'
 
 info 'declining installed-owner continuation without changing the adopted state'
 run_declined "$STATE_ROOT/continuation-declined.log" "file://$RELEASE_ROOT" \
@@ -572,6 +656,20 @@ info 'establishing limited continuation through the active installed owner'
 # This shared helper also owns any required disk-/tmp restart and the exact
 # activation-only repair, while proving no full removal ownership is acquired.
 establish_legacy_continuation
+
+info 'provisioning only the requested selected hook after exact native continuation'
+run_declined "$STATE_ROOT/named-provision-declined.log" "file://$RELEASE_ROOT" \
+  "$OPERATOR_HOME/.local/bin/yard" provision lifecycle-native
+guest test ! -e /srv/subyard-lifecycle-native-provisioned
+guest test ! -e /srv/subyard-lifecycle-other-provisioned
+operator_yard provision lifecycle-native --yes
+guest test -f /srv/subyard-lifecycle-native-provisioned
+guest test ! -e /srv/subyard-lifecycle-other-provisioned
+hook_before="$(guest stat -c '%d:%i:%Y:%Z' /srv/subyard-lifecycle-native-provisioned)"
+operator_yard provision lifecycle-native --yes
+[ "$(guest stat -c '%d:%i:%Y:%Z' /srv/subyard-lifecycle-native-provisioned)" = "$hook_before" ] \
+  || die 'matching named provision replayed its hook'
+guest test ! -e /srv/subyard-lifecycle-other-provisioned
 
 info 'repeating init without materializing an inherited selection'
 config_before="$(yard_config_fingerprint)"

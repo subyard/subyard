@@ -78,27 +78,27 @@ func ReadPersistentFileSnapshot(
 		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is group/world writable", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is group/world writable; "+FileMetadata(info)+"; required writable mask=0000 (mask=0022)", nil)
 	}
 	if info.Size() > 8<<20 {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target exceeds its size bound", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", fmt.Sprintf("target exceeds its size bound; observed bytes=%d, required maximum=%d", info.Size(), 8<<20), nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is not operator-owned", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", fmt.Sprintf("target is not operator-owned; %s; required uid=%d", FileMetadata(info), os.Getuid()), nil)
 	}
 	if stat.Nlink != 1 {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target has hard links", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", fmt.Sprintf("target has hard links; observed links=%d, required links=1", stat.Nlink), nil)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, (8<<20)+1))
 	if err != nil {
 		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
 	}
 	if len(content) > 8<<20 {
-		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target exceeds its size bound", nil)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", fmt.Sprintf("target exceeds its size bound; observed bytes=%d, required maximum=%d", len(content), 8<<20), nil)
 	}
 	return PersistentFileSnapshot{
 		Exists: true, Content: content, Identity: persistentFileIdentity(stat),
@@ -169,14 +169,14 @@ func validateOpenedPersistentDirectory(file *os.File, path string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return sourceError(path, 0, "", "persistent settings directory", "directory has unsafe type", nil)
+		return sourceError(path, 0, "", "persistent settings directory", "directory has unsafe type; "+FileMetadata(info)+"; required type=directory", nil)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return sourceError(path, 0, "", "persistent settings directory", "directory is group/world writable", nil)
+		return sourceError(path, 0, "", "persistent settings directory", "directory is group/world writable; "+FileMetadata(info)+"; required writable mask=0000 (mask=0022)", nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return sourceError(path, 0, "", "persistent settings directory", "directory is not operator-owned", nil)
+		return sourceError(path, 0, "", "persistent settings directory", fmt.Sprintf("directory is not operator-owned; %s; required uid=%d", FileMetadata(info), os.Getuid()), nil)
 	}
 	return nil
 }
@@ -326,11 +326,11 @@ func writePersistentAssignment(
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("persistent setting target is not a regular file")
+			return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-			return errors.New("persistent setting target has unsafe ownership or hard links")
+			return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
 		}
 		if err := os.Remove(path); err != nil {
 			return err
@@ -403,19 +403,20 @@ func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
 		return PersistentFileSnapshot{}, nil
 	}
 	if err != nil {
-		return PersistentFileSnapshot{}, err
+		return PersistentFileSnapshot{}, sourceAccessError(path, "persistent settings", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm()&0o022 != 0 || info.Size() > 8<<20 {
-		return PersistentFileSnapshot{}, errors.New(
-			"persistent setting target must be a bounded regular non-symlink file",
-		)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", "target is group/world writable; "+FileMetadata(info)+"; required writable mask=0000 (mask=0022)", nil)
+	}
+	if info.Size() > 8<<20 {
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", fmt.Sprintf("target exceeds its size bound; observed bytes=%d, required maximum=%d", info.Size(), 8<<20), nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-		return PersistentFileSnapshot{}, errors.New(
-			"persistent setting target has unsafe ownership or hard links",
-		)
+		return PersistentFileSnapshot{}, sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -598,14 +599,14 @@ func persistFile(configHome, path string, content []byte, replace bool) error {
 			return errors.New("persistent setting target already exists")
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("persistent setting target is not a regular file")
+			return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-			return errors.New("persistent setting target has unsafe ownership or hard links")
+			return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return errors.New("persistent setting target is group/world writable")
+			return sourceError(path, 0, "", "persistent settings", "target is group/world writable; "+FileMetadata(info)+"; required writable mask=0000 (mask=0022)", nil)
 		}
 		mode = info.Mode().Perm()
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -695,11 +696,11 @@ func validatePersistentDirectory(path string) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
 		info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("persistent setting directory is unsafe: %s", path)
+		return sourceError(path, 0, "", "persistent settings directory", "directory is unsafe; "+FileMetadata(info)+"; required type=directory, writable mask=0000 (mask=0022)", nil)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Getuid()) {
-		return fmt.Errorf("persistent setting directory is not operator-owned: %s", path)
+		return sourceError(path, 0, "", "persistent settings directory", fmt.Sprintf("directory is not operator-owned; %s; required uid=%d", FileMetadata(info), os.Getuid()), nil)
 	}
 	return nil
 }
@@ -711,4 +712,12 @@ func syncPersistentDirectory(path string) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+func persistentOwnershipReason(info os.FileInfo, stat *syscall.Stat_t) string {
+	links := "unavailable"
+	if stat != nil {
+		links = fmt.Sprintf("%d", stat.Nlink)
+	}
+	return fmt.Sprintf("target has unsafe ownership or hard links; %s, links=%s; required uid=%d, links=1", FileMetadata(info), links, os.Getuid())
 }

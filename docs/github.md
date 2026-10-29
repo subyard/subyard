@@ -163,6 +163,13 @@ Concurrent ledger conflicts retain the last verified consumer until resolved, as
 `subyard-github-<YARD>.service`. The service uses a pinned yard identity over its protected reverse
 SSH transport, starts again after stop/start or reboot, and does not require an interactive owner
 SSH session. The profile also installs the short local skill for supported agents.
+Readiness checks both the persistent boot link and the user manager's loaded
+`default.target` dependency. Human profile status reports a fixed diagnostic code
+when boot registration, service activity or transport readiness is missing.
+Setup and activation repair restore registration and reconnect an inactive broker.
+When an installed release reports `migration-required`, `yard migrate` assesses
+and authorizes that repair. When the installed payloads and running broker
+are current, registration repair preserves the process and the App connection.
 
 ## Ordinary Git with original-authentication fallback
 

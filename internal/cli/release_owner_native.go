@@ -47,6 +47,7 @@ type releaseSettingsPrepared struct {
 	files    []config.PersistentPrecondition
 }
 type releaseActivationPrepared struct {
+	installation       *installationActivationReconciler
 	originalTarget     *releaseowner.Target
 	value              releaseowner.Target
 	platform           ports.InitPlatform
@@ -1045,6 +1046,21 @@ func (c *releaseOwnerComponents) bindGuestTarget(ctx context.Context, loaded con
 func (c *releaseOwnerComponents) captureCoreActivation(ctx context.Context, owner string) ([]releaseowner.Target, error) {
 	values := []releaseowner.Target{}
 	switch owner {
+	case "installation-runtime-v1":
+		reconciler := &installationActivationReconciler{cli: c.cli, request: c.request()}
+		observation, err := reconciler.Observe(ctx, releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+		if err != nil {
+			return nil, err
+		}
+		c.closers = append(c.closers, reconciler.before)
+		state := "stale"
+		if observation.Converged {
+			state = "current"
+		}
+		target := c.coreTarget(owner, "installation", "installation", state, "runtime", "", string(observation.Actual), string(observation.Desired), string(observation.Binding))
+		target.ReportedActual, target.ReportedDesired = string(observation.Actual), string(observation.Desired)
+		c.activation[activationKey(target)] = releaseActivationPrepared{value: target, installation: reconciler}
+		return []releaseowner.Target{target}, nil
 	case "test-yard-route-consumers":
 		options, err := c.cli.releaseTransitionTestYardOptions(c.request())
 		if err != nil {
@@ -1563,6 +1579,11 @@ func (c *releaseOwnerComponents) applyCoreActivation(ctx context.Context, target
 		return domain.ErrPlanStale
 	}
 	switch target.Class {
+	case "installation":
+		if prepared.installation == nil {
+			return domain.ErrPlanStale
+		}
+		return prepared.installation.Reconcile(ctx, releasetransition.ReleaseLinks{})
 	case "route-consumers":
 		route, ok := prepared.route.(*testYardRouteConsumerActivation)
 		if !ok || prepared.nativeInstalled == nil || target.PreparedRecipe == "" || prepared.nativeInstalled.Binding() != target.PreparedRecipe || !c.installedBound[target.PreparedRecipe] {

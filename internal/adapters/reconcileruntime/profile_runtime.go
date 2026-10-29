@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -87,12 +88,25 @@ func (runtime Runtime) observeProfileRuntimes(
 	if !strings.EqualFold(instance.Status, "running") {
 		return nil, fmt.Errorf("cannot inspect profile runtimes while yard state is %q", instance.Status)
 	}
-	for _, definition := range definitions {
-		stdout, _, err := runtime.runProfileRuntimeHandler(ctx, definition, "observe")
-		if err != nil {
-			return nil, fmt.Errorf("observe profile runtime %s: %w", definition.Runtime.ActivationID, err)
+	outputs := make([][]byte, len(definitions))
+	failures := make([]error, len(definitions))
+	slots := make(chan struct{}, 3)
+	var workers sync.WaitGroup
+	for index, definition := range definitions {
+		slots <- struct{}{}
+		workers.Go(func() {
+			defer func() { <-slots }()
+			outputs[index], _, failures[index] = runtime.runProfileRuntimeHandler(ctx, definition, "observe")
+		})
+	}
+	workers.Wait()
+	// Every read-only native process has finished before decoding in declaration
+	// order. Errors never leave sibling observations running into later effects.
+	for index, definition := range definitions {
+		if failures[index] != nil {
+			return nil, fmt.Errorf("observe profile runtime %s: %w", definition.Runtime.ActivationID, failures[index])
 		}
-		observation, err := decodeProfileRuntimeObservation(stdout)
+		observation, err := decodeProfileRuntimeObservation(outputs[index])
 		if err != nil {
 			return nil, fmt.Errorf("decode profile runtime %s observation: %w", definition.Runtime.ActivationID, err)
 		}

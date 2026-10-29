@@ -151,6 +151,45 @@ func TestPersistentSourceDiagnosticsDistinguishSafetyChecks(t *testing.T) {
 			if !ok || !strings.Contains(diagnostic, "config.env") || !strings.Contains(diagnostic, fixture.reason) {
 				t.Fatalf("persistent source diagnostic = %q, recognized=%v", diagnostic, ok)
 			}
+			if fixture.name == "mode" && (!strings.Contains(diagnostic, "observed type=regular, mode=0622") || !strings.Contains(diagnostic, "mask=0022")) {
+				t.Fatal(diagnostic)
+			}
 		})
+	}
+}
+
+func TestOwnerMetadataDiagnosticsStayLocalAndPreserveCauses(t *testing.T) {
+	if quoted := QuoteMetadataPath("/invalid/https://credential:SECRET@host/path"); strings.Contains(quoted, "SECRET") || !strings.Contains(quoted, "unavailable") {
+		t.Fatal(quoted)
+	}
+	path := "/owner/" + strings.Repeat("x", 300) + "\n\x1b[31m"
+	cause := &os.PathError{Op: "stat", Path: "PRIVATE_CAUSE", Err: os.ErrNotExist}
+	err := OwnerMetadataError(path, "installation inventory", MetadataAccessReason(cause), "configHome: stored="+QuoteMetadataPath("/stored\n\x1b")+", current="+QuoteMetadataPath("/current"), cause)
+	err = OwnerMetadataContext(path, "installation inventory", fmt.Errorf("outer: %w", err))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("missing cause lost")
+	}
+	var pathError *os.PathError
+	if !errors.As(err, &pathError) {
+		t.Fatal("typed path cause lost")
+	}
+	for _, public := range []string{err.Error(), func() string { text, _ := SourceDiagnostic("/config", err); return text }(), func() string { text, _ := SourceDiagnostic("", err); return text }()} {
+		for _, private := range []string{"/owner/", "/stored", "/current", "PRIVATE_CAUSE"} {
+			if strings.Contains(public, private) {
+				t.Fatalf("public diagnostic exposed local facts: %q", public)
+			}
+		}
+	}
+	local, ok := OwnerSourceDiagnostic(err)
+	if !ok || !strings.Contains(local, `configHome: stored="/stored\n\x1b"`) || !strings.Contains(local, `current="/current"`) || !strings.Contains(local, "source is missing") || len(local) > 600 || strings.ContainsAny(local, "\n\x1b") || strings.Contains(local, "PRIVATE_CAUSE") {
+		t.Fatalf("unsafe or incomplete local diagnostic: %q", local)
+	}
+	for _, test := range []struct {
+		cause error
+		want  string
+	}{{os.ErrPermission, "permission denied"}, {errors.New("SECRET"), "cannot read source"}} {
+		if got := MetadataAccessReason(test.cause); !strings.Contains(got, test.want) || strings.Contains(got, "SECRET") {
+			t.Fatal(got)
+		}
 	}
 }
