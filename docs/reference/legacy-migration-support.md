@@ -52,8 +52,10 @@ Supported historical updates do not invent project ownership labels. Plain `yard
 an existing unlabelled project without proven authority, including one created by v0.11.0,
 even after its supported update succeeds. Explicit `yard init --adopt` can register the existing
 yard for normal management while preserving unproven shared and host creation ownership.
-This metadata-only lifecycle operation is separate from release migration; run plain init
-after adoption to reconcile. Older releases refuse its versioned adopted ownership marker.
+This lifecycle operation is separate from release migration. Its metadata-only registration
+substep is followed by ordinary initialization under the same assessed plan and confirmation.
+If initialization fails after registration, rerun the same `yard init --adopt` to finish.
+Older releases refuse its versioned adopted ownership marker.
 Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
 exactly assessed legacy resource. It does not relabel the project or authorize full removal.

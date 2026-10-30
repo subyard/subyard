@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -98,10 +98,10 @@ func TestYardAdoptionPublishesOnlyMetadataAndRetiresExactContinuation(t *testing
 				t.Fatal(err)
 			}
 			_, delta, err := execution.actionPlan()
-			if err != nil || !delta.Changed || len(execution.operationSteps()) != 1 || fake.writes != 0 {
+			if err != nil || !delta.Changed || execution.operationSteps()[0].ID != "init.adopt" || fake.writes != 0 {
 				t.Fatal("adoption not assessed read-only", err)
 			}
-			if err := execution.run(context.Background(), program, io.Discard); err != nil {
+			if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(before, fake.Reconcile.Instance) || fake.writes != 1 || len(fake.ConfigUpdates) != 0 {
@@ -181,7 +181,7 @@ func TestYardAdoptionRejectsDriftAndRecoversAfterPublication(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if err := execution.run(context.Background(), program, io.Discard); err == nil {
+				if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err == nil {
 					t.Fatal("retired concurrent record replacement")
 				}
 				fake.afterWrite = nil
@@ -189,14 +189,14 @@ func TestYardAdoptionRejectsDriftAndRecoversAfterPublication(t *testing.T) {
 				if err := program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true}); err != nil {
 					t.Fatal(err)
 				}
-				if err := execution.run(context.Background(), program, io.Discard); err != nil {
+				if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err != nil {
 					t.Fatal(err)
 				}
 				return
 			}
 			if scenario == "drift" {
 				fake.Reconcile.Instance.Config["volatile.uuid"] = "replacement"
-				if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
+				if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
 					t.Fatal("post-consent drift wrote metadata", err)
 				}
 				return
@@ -209,7 +209,7 @@ func TestYardAdoptionRejectsDriftAndRecoversAfterPublication(t *testing.T) {
 			if err := program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true}); err != nil {
 				t.Fatal("published adoption cannot recover", err)
 			}
-			if err := execution.run(context.Background(), program, io.Discard); err != nil {
+			if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -236,7 +236,7 @@ func TestYardAdoptionRequiresExplicitLocalScope(t *testing.T) {
 	if err := config.CompareAndSwapLocalSettingsFile(execution.loaded.Context.Paths.ConfigHome, execution.legacyContinuation.registrationPath, before, append(before.Content, []byte("\n# drift\n")...)); err != nil {
 		t.Fatal(err)
 	}
-	if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
+	if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
 		t.Fatal("changed protected registration admitted", err)
 	}
 }
@@ -295,7 +295,7 @@ func TestYardAdoptionRetainsValidatedContinuationDuringVerification(t *testing.T
 					t.Fatal("published adoption cannot recover", err)
 				}
 			}
-			if err := execution.run(context.Background(), program, io.Discard); err != nil {
+			if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err != nil {
 				t.Fatal("verified continuation was lost after publication", err)
 			}
 			record, err := readLegacyContinuation(execution.loaded.Context)
@@ -309,30 +309,123 @@ func TestYardAdoptionRetainsValidatedContinuationDuringVerification(t *testing.T
 	}
 }
 
+type adoptionHookExecutor struct{}
+
+func (adoptionHookExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if len(request.Command) == 0 || request.Command[0] != "bash" || request.Command[len(request.Command)-1] != "--observe" {
+		return (activationIntegrationExecutor{}).Exec(ctx, project, instance, request)
+	}
+	return ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + strings.Repeat("1", 64) + `","wiring":"` + strings.Repeat("2", 64) + `","hooks":[],"roots":[],"facts":{},"resolved":{}}`)}, nil
+}
+
 func TestYardAdoptionPreparedCommandRequiresConsent(t *testing.T) {
-	for _, accept := range []bool{false, true} {
-		t.Run(map[bool]string{false: "decline", true: "accept"}[accept], func(t *testing.T) {
+	for _, scenario := range []string{"decline", "accept", "stopped", "partial-retry", "repeat", "skip-drift", "stale-native"} {
+		t.Run(scenario, func(t *testing.T) {
 			program, execution, fake := adoptionFixture(t)
-			program.options.InitPlatform = execution.platform
+			runtime := execution.platform.(reconcileruntime.Runtime)
+			runtime.Executor = adoptionHookExecutor{}
+			fake.ServerInfo.Version = "6.0.7"
+			fake.Reconcile.HostPoolFound, fake.Reconcile.HostNetworkFound = true, true
+			runtime.ACLToolsAvailable = func() (bool, error) { return true, nil }
+			program.options.InitPlatform = runtime
+			// This test owns init composition; release readiness has separate native
+			// and CLI contracts, while the synthetic installed runtime has drift.
+			program.releaseTransitionChild = true
+			normal := newInitPlatformFixture()
+			normal.converged[ports.ReconcileStageExtras] = false
+			if scenario == "stopped" {
+				fake.Reconcile.Instance.Status = "Stopped"
+				fake.Reconcile.Instance.Config["user.subyard.desired_power"] = "stopped"
+				fake.Reconcile.Instance.LocalConfig["user.subyard.desired_power"] = "stopped"
+			}
+			before := operationStateDigest(fake.Reconcile.Instance)
 			var output bytes.Buffer
-			program.options.Stdout = &output
-			program.options.Stderr = &output
+			program.options.Stdout, program.options.Stderr = &output, &output
 			definition, _ := program.manifest.Lookup("init")
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.loaded, Arguments: []string{"--adopt"}}
-			prepared.policy = commandPolicy(definition, execution.loaded.Context, nil, nil)
-			if err := prepared.prepareInit(context.Background(), nil); err != nil {
-				t.Fatal(err)
-			}
-			if err := prepared.preparePlan(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			result := program.runPreparedCommand(context.Background(), prepared, accept)
-			if accept {
-				if result != 0 || fake.writes != 1 {
-					t.Fatal("explicit adoption failed", result, output.String())
+			prepare := func() *preparedCommand {
+				if fake.writes > 0 {
+					// Keep later physical checks conditional in this synthetic runtime;
+					// the native fixture owns their actual installed adapters.
+					fake.Reconcile.HostPoolFound = false
 				}
-			} else if result == 0 || fake.writes != 0 {
-				t.Fatal("declined adoption wrote ownership", result, output.String())
+				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.loaded, Arguments: []string{"--adopt"}}
+				prepared.policy = commandPolicy(definition, execution.loaded.Context, nil, nil)
+				if err := prepared.prepareInit(context.Background(), nil); err != nil {
+					t.Fatal(err)
+				}
+				fake.afterWrite = func() {
+					normal.converged[ports.ReconcileStageProject] = true
+					prepared.initExecution.platform = normal
+					if scenario == "skip-drift" {
+						normal.converged[ports.ReconcileStageIncus] = false
+					}
+					if scenario == "partial-retry" && fake.writes == 1 {
+						fake.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
+						fake.Reconcile.Instance.LocalConfig["user.subyard.initialized"] = "false"
+					}
+				}
+				if err := prepared.preparePlan(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				steps := prepared.initExecution.operationSteps()
+				if steps[0].ID != "init.adopt" || !slices.ContainsFunc(steps, func(step domain.OperationStep) bool { return step.ID == "init.stage.extras" }) || steps[len(steps)-1].ID != "init.finalize" {
+					t.Fatal("combined effects absent from initial operation plan", steps)
+				}
+				if slices.ContainsFunc(steps, func(step domain.OperationStep) bool { return step.ID == "init.legacy-continuation" }) {
+					t.Fatal("adoption would publish a continuation grant")
+				}
+				return prepared
+			}
+			prepared := prepare()
+			if scenario == "partial-retry" {
+				normal.applyErr = errors.New("injected extras failure")
+			}
+			if scenario == "stale-native" {
+				fake.Reconcile.Instance.Config["volatile.uuid"] = "replacement"
+			}
+			result := program.runPreparedCommand(context.Background(), prepared, scenario != "decline")
+			switch scenario {
+			case "decline", "stale-native":
+				if result == 0 || fake.writes != 0 || len(normal.applied) != 0 || normal.projectHooks != 0 {
+					t.Fatal("unapproved init mutated", result, output.String())
+				}
+				return
+			case "partial-retry", "skip-drift":
+				if result == 0 || fake.writes != 1 || !strings.Contains(output.String(), "registration is complete; initialization did not finish; rerun yard init --adopt") {
+					t.Fatal("partial failure lost truthful retry", result, output.String())
+				}
+				if scenario == "skip-drift" {
+					if len(normal.applied) != 0 {
+						t.Fatal("unapproved skip expansion applied work")
+					}
+					return
+				}
+				normal.applyErr = nil
+				output.Reset()
+				prepared = prepare()
+				result = program.runPreparedCommand(context.Background(), prepared, true)
+			case "repeat":
+				if result != 0 {
+					t.Fatal("first init failed", output.String())
+				}
+				prepared = prepare()
+				result = program.runPreparedCommand(context.Background(), prepared, true)
+			}
+			if result != 0 || !slices.Contains(normal.applied, ports.ReconcileStageExtras) || normal.projectHooks == 0 || !slices.Contains(normal.applied, ports.ReconcileStageFinalize) {
+				t.Fatal("combined adoption did not reconcile", result, output.String())
+			}
+			if fake.Reconcile.ProjectConfig["user.subyard.installation"] != domain.AdoptedInstallation {
+				t.Fatal("registration lost")
+			}
+			if scenario != "partial-retry" && operationStateDigest(fake.Reconcile.Instance) != before {
+				t.Fatal("init changed native identity or power in converged fixture")
+			}
+			if len(fake.PowerUpdates) != 0 {
+				t.Fatal("adoption changed desired power")
+			}
+			snapshot, err := readLegacyContinuation(execution.loaded.Context)
+			if err != nil || snapshot.Exists {
+				t.Fatal("adoption manufactured continuation", err)
 			}
 		})
 	}
@@ -669,12 +762,12 @@ func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
 				record.ImportedAt = "changed-after-assessment"
 				payload, _ = json.Marshal(record)
 				testkit.WriteFile(t, path, payload, 0600)
-				if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
+				if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
 					t.Fatalf("registry change not rejected: %v", err)
 				}
 				return
 			}
-			if err := execution.run(context.Background(), program, io.Discard); err != nil {
+			if err := execution.legacyContinuation.applyAdoption(context.Background(), program, execution); err != nil {
 				t.Fatal(err)
 			}
 			if operationStateDigest(fake.Reconcile.Instance) != before || fake.writes != 1 {
@@ -702,5 +795,18 @@ func TestYardAdoptionAllowsAbsentSelectedTelemetry(t *testing.T) {
 	}
 	if operationStateDigest(fake.Reconcile.Instance) != before || fake.writes != 0 {
 		t.Fatal("telemetry adoption mutated workload")
+	}
+}
+
+func TestYardAdoptionRebuildKeepsNormalInitAuthority(t *testing.T) {
+	program, execution, _ := adoptionFixture(t)
+	if err := program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true}); err != nil {
+		t.Fatal(err)
+	}
+	program.options.InitPlatform = nil
+	execution.rebuildPlatform(program)
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	if runtime.LegacyContinuation != nil {
+		t.Fatal("adoption acquired a legacy continuation grant during privilege setup")
 	}
 }

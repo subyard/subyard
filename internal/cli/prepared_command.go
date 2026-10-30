@@ -659,7 +659,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err := cli.prepareInitProfileProvision(ctx, prepared.Loaded, execution, prepared.Arguments); err != nil {
 		return err
 	}
-	if prepared.interactiveSetup && !execution.adopting() {
+	if prepared.interactiveSetup {
 		execution.profileSetup, err = cli.prepareInitProfiles(ctx, execution, prepared.Arguments)
 		if err != nil {
 			return err
@@ -700,9 +700,6 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err := execution.inputBaseline.check(ctx, cli); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
-		if execution.adopting() {
-			return execution.actionPlan()
-		}
 		if err := execution.checkIntegrationBaseline(cli); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -740,7 +737,12 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
 		}
 	}
-	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (result domain.AdapterResult, runErr error) {
+		defer func() {
+			if runErr != nil && execution.adopting() && execution.legacyContinuation.published {
+				runErr = fmt.Errorf("yard registration is complete; initialization did not finish; rerun yard init --adopt: %w", runErr)
+			}
+		}()
 		if cli.profileInitRepair != nil {
 			if err := execution.validateProfileRepair(ctx, cli); err != nil {
 				return domain.AdapterResult{}, err
@@ -751,7 +753,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			}
 			defer unlock()
 		}
-		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() && !execution.adopting() {
+		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
 			}
@@ -767,13 +769,10 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err == nil && cli.profileInitRepair != nil {
 			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
 		}
-		if err == nil && !cli.releaseTransitionChild && !execution.adopting() {
+		if err == nil && !cli.releaseTransitionChild {
 			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
 		}
-		if err == nil && execution.adopting() {
-			fmt.Fprintln(diagnostics, "  [ ok ] Yard adopted; run plain init to reconcile")
-		}
-		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() && !execution.adopting() {
+		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 		}
 		return result, err

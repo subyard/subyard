@@ -180,22 +180,22 @@ EOF
     [ "$(incus query "/1.0/instances/$instance?project=$project" | jq -cS '.devices | with_entries(select(.key|startswith("ws-")))')" = "$bind_before" ] || die 'adoption changed registered bind devices'
     [ "$(guest cat "/srv/workspaces/bind-$kind/src/bind-sentinel")" = preserved ] || die 'adoption lost bound project data'
   fi
-  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
-    incus query "/1.0/instances/$instance?project=$project" | jq -e '.devices["subyard-host-memory"] == null and .config["user.subyard.host_memory"] == null' >/dev/null || die 'adoption mutated absent telemetry'
-  fi
   [ "$(incus project get "$project" user.subyard.installation)" = adopted-v1 ] || die 'missing versioned adoption provenance'
-  yard init --yes
   if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
-    incus query "/1.0/instances/$instance?project=$project" | jq -e '.config["user.subyard.host_memory"] == "v1" and .devices["subyard-host-memory"] == {type:"disk",source:"/proc/meminfo",path:"/var/lib/subyard/host-meminfo",readonly:"true"}' >/dev/null || die 'ordinary init did not reconcile telemetry'
+    incus query "/1.0/instances/$instance?project=$project" | jq -e '.config["user.subyard.host_memory"] == "v1" and .devices["subyard-host-memory"] == {type:"disk",source:"/proc/meminfo",path:"/var/lib/subyard/host-meminfo",readonly:"true"}' >/dev/null || die 'combined adoption did not reconcile telemetry'
     guest cat /var/lib/subyard/host-meminfo >/dev/null || die 'reconciled telemetry is unreadable'
-    printf 'evidence: synthetic_profile_absent_telemetry_adoption_then_ordinary_init=PASS\n'
+    printf 'evidence: synthetic_profile_absent_telemetry_combined_adoption_init=PASS\n'
   fi
-  [ "$(incus project get "$project" user.subyard.installation)" = adopted-v1 ] || die 'ordinary init erased adoption provenance'
+  # Repeating the same command resumes ordinary management idempotently.
+  yard init --adopt --yes
+  [ "$(incus project get "$project" user.subyard.installation)" = adopted-v1 ] || die 'repeat adoption erased provenance'
+  [ "$(incus config get "$instance" volatile.uuid --project "$project")" = "$uuid" ] || die 'repeat adoption replaced instance'
+  [ "$(incus query "/1.0/instances/$instance/state?project=$project" | jq -r .pid)" = "$pid" ] || die 'repeat adoption restarted converged workload'
   yard stop --yes
   yard init --adopt --yes
   [ "$(incus config get "$instance" user.subyard.desired_power --project "$project")" = stopped ] || die 'adoption changed desired stopped state'
   [ "$(incus query "/1.0/instances/$instance/state?project=$project" | jq -r .status)" = Stopped ] || die 'adoption started stopped yard'
-  printf 'evidence: %s metadata_adoption_identity_data_power_and_ordinary_init=PASS\n' "$kind"
+  printf 'evidence: %s combined_adoption_init_identity_data_power_and_repeat=PASS\n' "$kind"
   if [ "$kind" = vm ]; then
     # Erase only this marker-owned fixture's modern host creation receipt to
     # model an unrecorded historical namespace; retain its data as the oracle.

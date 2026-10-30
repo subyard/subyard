@@ -96,7 +96,10 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 	if !maps.Equal(root, state.ProfileDevices["root"]) || !maps.Equal(map[string]string{"type": "nic", "network": runtime.Yard.IncusBridge}, state.ProfileDevices["eth0"]) {
 		return state, nil, nil, nil, errors.New("yard adoption refuses noncanonical project root or NIC properties")
 	}
-	state, resources, err := runtime.inspectLegacyYard(ctx, state, true)
+	// A verified prior publication may be followed by an interrupted ordinary
+	// init, which marks the instance uninitialized until finalization. Only the
+	// complete matching adopted metadata above authorizes this retry state.
+	state, resources, err := runtime.inspectLegacyYard(ctx, state, true, stamped)
 	if err != nil {
 		return state, nil, nil, nil, err
 	}

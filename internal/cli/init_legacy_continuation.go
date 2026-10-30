@@ -177,7 +177,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 		return errors.New("legacy continuation permits only local plain init; reset, configs and profile expansion are not authorized")
 	}
 	if !snapshot.Exists && !request.continueLegacy && !request.adopt {
-		return errors.New("existing unmarked project has no continuation consent; use yard init --adopt to assess adoption for normal management, then rerun yard init to reconcile; alternatively, use yard init --continue-legacy to assess limited normal reconciliation without deletion ownership")
+		return errors.New("existing unmarked project has no continuation consent; use yard init --adopt to assess registration and initialization together; alternatively, use yard init --continue-legacy to assess limited normal reconciliation without deletion ownership")
 	}
 	if execution.hostIDPending {
 		return errors.New("legacy continuation requires the existing protected owner HostID")

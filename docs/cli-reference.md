@@ -48,7 +48,7 @@ Usage: yard init [--configs | --reset | --profile <name> | --continue-legacy | -
 With -Y <new-name>, plain init creates a local yard with no environment profiles or coding tools and chooses an available owner-local SSH port.
 Existing yards retain their saved settings and selections; --profile creates a new yard from a named-yard preset.
 
---adopt registers an assessed existing local yard for normal management without changing workloads or power; run plain init afterwards. Unproven shared infrastructure and host namespaces remain preserved.
+--adopt registers an assessed existing local yard, then completes ordinary initialization under the same reviewed plan and confirmation. Registration preserves workloads and power; approved init stages retain their normal effects. Unproven shared infrastructure and host namespaces remain preserved.
 --continue-legacy assesses a protected local legacy yard for normal reconciliation only; it grants no reset or full removal ownership.
 Interactive init offers initial setup declared by selected profiles.
 Leave a setup field empty to skip; --yes and non-interactive runs leave profile settings unchanged.

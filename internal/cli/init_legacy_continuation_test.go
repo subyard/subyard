@@ -279,7 +279,7 @@ func TestLegacyContinuationRefusesForeignIncompleteAndExpandedScope(t *testing.T
 	if err == nil {
 		t.Fatal("plain init silently granted authority", err)
 	}
-	for _, hint := range []string{"yard init --adopt", "then rerun yard init", "yard init --continue-legacy", "without deletion ownership"} {
+	for _, hint := range []string{"yard init --adopt", "registration and initialization together", "yard init --continue-legacy", "without deletion ownership"} {
 		if !strings.Contains(err.Error(), hint) {
 			t.Errorf("plain init refusal is missing %q: %v", hint, err)
 		}

@@ -31,10 +31,10 @@ func (runtime Runtime) InspectLegacyContinuation(ctx context.Context) (ports.Rec
 	if err != nil {
 		return state, nil, err
 	}
-	return runtime.inspectLegacyYard(ctx, state, false)
+	return runtime.inspectLegacyYard(ctx, state, false, false)
 }
 
-func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.ReconcileState, adopt bool) (ports.ReconcileState, []ports.TeardownResource, error) {
+func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.ReconcileState, adopt, registered bool) (ports.ReconcileState, []ports.TeardownResource, error) {
 	if runtime.Yard.AccessKind != domain.AccessLocal || runtime.Yard.IncusProject == "default" ||
 		!state.ProjectFound || !state.ProfileFound || !state.InstanceFound || !state.VolumeFound {
 		return state, nil, errors.New("legacy continuation requires an existing dedicated local project, profile, instance and volume")
@@ -82,7 +82,7 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 	if instance.Config["volatile.uuid"] == "" {
 		identityDifferences = append(identityDifferences, "volatile.uuid: observed empty, required nonempty")
 	}
-	if runtime.LegacyContinuation == nil && instance.Config["user.subyard.initialized"] != "true" {
+	if runtime.LegacyContinuation == nil && !registered && instance.Config["user.subyard.initialized"] != "true" {
 		identityDifferences = append(identityDifferences, "user.subyard.initialized: observed="+legacyIdentityValue(instance.Config["user.subyard.initialized"])+", required=true")
 	}
 	if power := instance.Config["user.subyard.desired_power"]; power != "running" && power != "stopped" {

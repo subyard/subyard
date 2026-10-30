@@ -531,21 +531,6 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		return nil, fmt.Errorf("invalid effective INCUS_PROJECT %q for yard %q: must use lowercase letters, digits or hyphens, start and end with a letter or digit, and be 2-64 bytes long; set a valid INCUS_PROJECT override", projectName, loaded.Context.YardName)
 	}
 	mode := request.mode
-	if request.adopt {
-		powerYards, err := cli.powerYardContexts(loaded)
-		if err != nil {
-			return nil, err
-		}
-		execution := &initExecution{loaded: loaded, mode: mode, bootstrap: bootstrap, platform: cli.initPlatform(loaded, powerYards), powerYards: powerYards}
-		execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(loaded.Context.Paths.ConfigHome, loaded.Environment)
-		if err != nil {
-			return nil, err
-		}
-		if err := cli.prepareLegacyContinuation(ctx, execution, request); err != nil {
-			return nil, err
-		}
-		return execution, nil
-	}
 	baseline, err := captureInitIntegrationBaseline(loaded)
 	if err != nil {
 		return nil, err
@@ -668,14 +653,14 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 }
 
 func (execution *initExecution) consequences() []string {
-	if execution.adopting() {
-		return []string{"adopt the assessed existing yard project into normal management; preserve instance identity, disks and power state", "retain adopted provenance; unproven shared infrastructure and host namespaces gain no deletion ownership", "retire only the exact assessed legacy continuation record after verified adoption; run plain init afterwards to reconcile"}
-	}
 	if execution.hooksOnly() {
 		return []string{"restore missing registered project metadata and retry installed project hooks once for active resources"}
 	}
 	hostIDConsequences := execution.profileProvisionConsequences()
-	if execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists {
+	if execution.adopting() {
+		hostIDConsequences = append(hostIDConsequences, "register the assessed existing yard, then reconcile the approved init stages", "retain adopted provenance; unproven shared infrastructure and host namespaces gain no deletion ownership", "retire only the exact assessed legacy continuation record after verified registration")
+	}
+	if execution.legacyContinuation != nil && !execution.adopting() && !execution.legacyContinuation.before.Exists {
 		hostIDConsequences = append(hostIDConsequences, "grant normal reconciliation of the assessed existing legacy instance; no project creation, reset or full removal ownership")
 	}
 	hostIDConsequences = append(hostIDConsequences, integrationAdoptionConsequences(execution.loaded.Context.YardName, execution.integrationAdoption)...)
@@ -824,9 +809,6 @@ func (execution *initExecution) refreshAssessment(ctx context.Context, cli *CLI)
 	if err := execution.checkHookProjects(ctx); err != nil {
 		return err
 	}
-	if execution.adopting() {
-		return nil
-	}
 	if err := execution.checkNativePlans(ctx, true); err != nil {
 		return err
 	}
@@ -952,9 +934,10 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		}
 	}
 	if execution.adopting() {
-		return execution.legacyContinuation.applyAdoption(ctx, cli, execution)
-	}
-	if err := execution.legacyContinuation.publish(execution); err != nil {
+		if err := execution.legacyContinuation.applyAdoption(ctx, cli, execution); err != nil {
+			return err
+		}
+	} else if err := execution.legacyContinuation.publish(execution); err != nil {
 		return err
 	}
 	if cli.options.InitPlatform == nil && execution.mode == initReconcile {
@@ -1268,7 +1251,7 @@ func (execution *initExecution) rebuildPlatform(cli *CLI) {
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.RuntimePlan = execution.runtimePlan
 		runtime.HookPlan = execution.hookPlan
-		if execution.legacyContinuation != nil {
+		if execution.legacyContinuation != nil && !execution.adopting() {
 			runtime.LegacyContinuation = &execution.legacyContinuation.grant
 		}
 		runtime.InitProfile = execution.requestedProfile

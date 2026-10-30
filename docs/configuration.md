@@ -963,7 +963,8 @@ installation generation before writing.
 After completing the supported release transition, run `yard init --adopt`
 through the installed local owner launcher to register an existing Subyard yard
 for normal management. This is an explicit lifecycle operation, separate from
-release migration. Review its single operation plan; `--yes` accepts adoption
+release migration. Review its single operation plan, which includes registration and ordinary
+initialization; one confirmation authorizes both. `--yes` accepts this operation
 only when `--adopt` is explicitly selected.
 
 Adoption verifies protected persisted configuration, owner HostID, installed
@@ -980,13 +981,18 @@ yard. Adoption binds those records before consent; an unknown `ws-` device name
 does not establish ownership. Selected physical-memory telemetry may be absent
 or retain a recognized interrupted installation state when its owning validator
 proves that ordinary init can finish safely. Unmarked existing mounts, foreign
-markers, inherited devices and occupied telemetry paths are refused. Adoption
-leaves telemetry unchanged; the subsequent plain init reconciles it.
+markers, inherited devices and occupied telemetry paths are refused. The registration
+substep leaves telemetry unchanged; the same command then reconciles it through
+the ordinary init stages.
 
-The operation atomically publishes complete project registration with adopted
-provenance. It preserves the instance, disks, running workloads and desired
-power state. Run plain `yard init` afterwards to reconcile configuration or
-selected profiles. Adoption creates no resource-creation receipts: full removal
+The operation first atomically publishes complete project registration with
+adopted provenance, preserving instance identity, disks, workloads and desired
+power state during that substep. It then executes the ordinary init stages
+already captured in the same plan, including their disclosed workload effects,
+and restores desired power. No follow-up command is required. If initialization
+fails after registration, the registration remains valid; rerun the same
+`yard init --adopt` to assess and finish the remaining work. Registration creates
+no resource-creation receipts: full removal
 preserves shared infrastructure and unrecorded host namespaces whose creation
 ownership was not proven. Its versioned ownership marker makes older releases
 refuse the adopted project rather than infer creation ownership on rollback.

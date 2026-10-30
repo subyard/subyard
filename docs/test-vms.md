@@ -29,14 +29,14 @@ CI additionally runs
 Linux CLI tests also require util-linux `script` to exercise resource commands with a real
 controlling terminal, including terminal-input isolation and cancellation.
 
-For the metadata-only existing-yard adoption regression, run
+For the combined existing-yard adoption and initialization regression, run
 `bash dev/e2e/yard-adoption.sh --preflight`, package the current candidate with
 `dev/release-acceptance.py prepare`, and pass its candidate bundle to the existing
 agent controller. The one-VM command is
 `dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose yard-adoption -- timeout --signal=TERM --kill-after=60 1800 bash dev/e2e/yard-adoption.sh`.
 The fixture installs that candidate and sequentially exercises a container and VM,
 seeding only their project ownership metadata. It checks UUID, disk data, active
-workload continuity, desired stopped state, and subsequent ordinary init.
+workload continuity, desired stopped state, and initialization in the same command.
 This seeded native regression does not prove an authenticated historical upgrade.
 
 The same fixture accepts `SUBYARD_E2E_ADOPTION_HOST_MEMORY_PROFILE=adoption-telemetry`
@@ -51,8 +51,8 @@ owns this synthetic contract, so the normal profile inventory remains complete.
 Use the same version as the ordinary candidate and set
 `SUBYARD_E2E_ADOPTION_ENGINE_SHA256` to the ordinary candidate's engine checksum.
 The fixture requires the installed synthetic candidate's engine to match exactly,
-labels the added profile in evidence, and checks metadata-only adoption of absent
-selected telemetry followed by its reconciliation through ordinary init. It also
+labels the added profile in evidence, and checks that one `init --adopt` registers
+the yard and reconciles absent selected telemetry through ordinary init. It also
 retains the registered-bind, container and VM checks. Keep both original candidate
 receipts; synthetic profile assets do not establish shipped-profile acceptance.
 
