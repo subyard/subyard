@@ -44,6 +44,7 @@ PEER_PROFILE_BACKUP="$PEER_ROOT/user-profile.backup"
 PEER_PROFILE_STATE="$PEER_ROOT/.user-profile-state"
 PEER_AUTH_STATE="$PEER_ROOT/.authorized-keys-state"
 PEER_CONFIG_STATE="$PEER_ROOT/.ssh-config-state"
+PEER_CONFIG_BACKUP="$PEER_ROOT/user-ssh-config.backup"
 PEER_REAL_YARD_MARKER="$PEER_ROOT/.subyard-p0-real-yard"
 OWNER_BASELINE_IMAGES=''
 OWNER_BASELINE_CAPTURED=0
@@ -693,6 +694,7 @@ broker_recovery_owner() (
 
 install_peer_wrapper() {
   local wrapper="$PEER_ROOT/yard-wrapper" profile="$HOME/.profile"
+  preserve_peer_ssh_config
   [ ! -e "$PEER_YARD_STATE" ] && [ ! -e "$PEER_YARD_BACKUP" ] \
     && [ ! -L "$PEER_YARD_BACKUP" ] || die 'peer yard entry backup is already staged'
   [ ! -d "$PEER_YARD_ENTRY" ] || die 'peer yard entry is a directory'
@@ -706,8 +708,9 @@ install_peer_wrapper() {
   fi
   {
     printf '#!/usr/bin/env bash\n# %s\n' "$MARKER"
+    # User-service registration must share the real account's manager home.
     printf 'export HOME=%q SUBYARD_OPERATOR_HOME=%q SUBYARD_CONFIG_HOME=%q\n' \
-      "$PEER_ROOT/home" "$PEER_ROOT/home" "$PEER_ROOT/config"
+      "$HOME" "$HOME" "$PEER_ROOT/config"
     printf 'export SUBYARD_HOME=%q HOST_BASE=%q RESTRICTED_DISK_PATHS=%q\n' \
       "$PEER_DATA_ROOT" "$PEER_HOST_BASE" "$PEER_HOST_BASE"
     printf 'export SUBYARD_KEYS_ROOT=%q SUBYARD_KEYS_TOOLS_DIR=%q SUBYARD_KEYS_CONSUMER_ROOT=%q\n' \
@@ -774,8 +777,22 @@ remove_peer_wrapper() {
   fi
 }
 
+preserve_peer_ssh_config() {
+  local ssh_config="$HOME/.ssh/config"
+  [ ! -e "$PEER_CONFIG_STATE" ] || return 0
+  [ ! -L "$HOME/.ssh" ] && [ ! -L "$ssh_config" ] \
+    || die 'refusing symlinked SSH config paths'
+  if [ -e "$ssh_config" ]; then
+    [ -f "$ssh_config" ] && [ -O "$ssh_config" ] || die 'SSH config target is not an operator-owned regular file'
+    cp -p -- "$ssh_config" "$PEER_CONFIG_BACKUP"
+    printf 'file\t%s\n' "$(stat -c '%a' "$ssh_config")" > "$PEER_CONFIG_STATE"
+  else
+    printf 'absent\n' > "$PEER_CONFIG_STATE"
+  fi
+}
+
 bootstrap_peer_keys() {
-  HOME="$PEER_ROOT/home" SUBYARD_OPERATOR_HOME="$PEER_ROOT/home" \
+  SUBYARD_OPERATOR_HOME="$HOME" \
     SUBYARD_CONFIG_HOME="$PEER_ROOT/config" SUBYARD_HOME="$PEER_DATA_ROOT" \
     HOST_BASE="$PEER_HOST_BASE" RESTRICTED_DISK_PATHS="$PEER_HOST_BASE" \
     SUBYARD_KEYS_ROOT="$PEER_KEYS_ROOT" SUBYARD_KEYS_TOOLS_DIR="$PEER_KEYS_TOOLS" \
@@ -1249,7 +1266,7 @@ peer_credentials() {
 peer_projects() {
   local source="$PEER_ROOT/project" remote_pwd inventory owner_selector="e2e-vm-2/default"
   local ssh_config="$HOME/.ssh/config"
-  local include="Include $PEER_ROOT/home/.ssh/subyard-peer.config"
+  local include="Include $HOME/.ssh/subyard-peer.config"
   local sync_pid_one sync_pid_two
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'remote project controller requires VM1'
   valid_ip "$PEER_IP" || die 'peer IP is invalid'
@@ -1258,14 +1275,6 @@ peer_projects() {
   [ ! -L "$HOME/.ssh" ] && [ ! -L "$ssh_config" ] \
     || die 'refusing symlinked SSH config paths'
   install -d -m 0700 "$HOME/.ssh"
-  if [ ! -e "$PEER_CONFIG_STATE" ]; then
-    if [ -e "$ssh_config" ]; then
-      [ -f "$ssh_config" ] || die 'SSH config target is not a regular file'
-      printf 'file\t%s\n' "$(stat -c '%a' "$ssh_config")" > "$PEER_CONFIG_STATE"
-    else
-      printf 'absent\n' > "$PEER_CONFIG_STATE"
-    fi
-  fi
   touch "$ssh_config"
   chmod 0600 "$ssh_config"
   grep -Fqx "$include" "$ssh_config" || printf '%s\n' "$include" >> "$ssh_config"
@@ -1303,7 +1312,7 @@ peer_projects() {
 
 peer_projects_offline() {
   local source="$PEER_ROOT/project" inventory rc
-  local owner_config="$PEER_ROOT/home/.ssh/subyard-peer.config"
+  local owner_config="$HOME/.ssh/subyard-peer.config"
   local owner_backup="$PEER_ROOT/home/.ssh/subyard-peer.config.online"
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'remote project controller requires VM1'
   ssh -O exit yard-peer >/dev/null 2>&1 || true
@@ -1368,7 +1377,7 @@ peer_allow() {
 
 remove_peer_ssh_include() {
   local ssh_config="$HOME/.ssh/config"
-  local include="Include $PEER_ROOT/home/.ssh/subyard-peer.config"
+  local include="Include $HOME/.ssh/subyard-peer.config"
   local state mode extra temporary
   [ -e "$PEER_CONFIG_STATE" ] || return 0
   read -r state mode extra < "$PEER_CONFIG_STATE" \
@@ -1379,17 +1388,27 @@ remove_peer_ssh_include() {
     file) [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die 'SSH config restore mode is invalid' ;;
     *) die 'SSH config restore state is invalid' ;;
   esac
+  # Smoke skips credential cleanup, which normally removes this remote alias.
+  if [ -e "$PEER_ROOT/config/yards/peer/config.env" ] || [ -L "$PEER_ROOT/config/yards/peer/config.env" ]; then
+    "$PEER_YARD_ENTRY" remote remove peer --yes >/dev/null
+  fi
   [ "$state" != absent ] || [ -e "$ssh_config" ] || return 0
   [ -f "$ssh_config" ] && [ ! -L "$ssh_config" ] \
     || die 'SSH config restore target is unavailable or unsafe'
   temporary="$(mktemp "$HOME/.ssh/.config.XXXXXX")"
-  grep -vxF "$include" "$ssh_config" > "$temporary" || true
+  if grep -vxF "$include" "$ssh_config" > "$temporary"; then :; else
+    [ "$?" = 1 ] || die 'could not remove the fixture SSH include'
+  fi
   chmod 0600 "$temporary"
   mv -f "$temporary" "$ssh_config"
   if [ "$state" = absent ] && [ ! -s "$ssh_config" ]; then
     find "$ssh_config" -delete
   elif [ "$state" = file ]; then
-    chmod "$mode" "$ssh_config"
+    [ -f "$PEER_CONFIG_BACKUP" ] && [ ! -L "$PEER_CONFIG_BACKUP" ] && [ -O "$PEER_CONFIG_BACKUP" ] \
+      || die 'SSH config backup is unavailable or unsafe'
+    temporary="$(mktemp "$HOME/.ssh/.config.XXXXXX")"
+    cp -p -- "$PEER_CONFIG_BACKUP" "$temporary"
+    mv -f -- "$temporary" "$ssh_config"
   fi
 }
 
@@ -1403,8 +1422,8 @@ cleanup_peer_yard() {
 
 peer_clean() {
   remove_peer_authorization
-  remove_peer_ssh_include
   cleanup_peer_yard
+  remove_peer_ssh_include
   remove_peer_wrapper
   cleanup_peer_snapshot_fixture
   cleanup_peer_incus

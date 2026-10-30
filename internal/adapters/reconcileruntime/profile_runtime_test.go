@@ -1,15 +1,17 @@
 package reconcileruntime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -22,13 +24,17 @@ import (
 
 type profileBatchEvent struct {
 	Event, Name string
-	PID, Child  int
 }
 
 func TestObserveProfileRuntimeBatchBoundsOrdersAndDrainsNativeProcesses(t *testing.T) {
 	for _, scenario := range []string{"ready", "pinned", "ordered errors", "cancel"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Net: "unix", Name: filepath.Join(root, "c")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
 			eventsPath := filepath.Join(root, "events")
 			testkit.WriteFile(t, eventsPath, nil, 0o600)
 			runtime := Runtime{RepositoryRoot: root, Environment: []string{"BATCH_ROOT=" + root},
@@ -44,10 +50,19 @@ import json,os,subprocess,time
 from pathlib import Path
 root=Path(os.environ['BATCH_ROOT'])
 name=Path.cwd().name
-child=subprocess.Popen(['/bin/sleep','30'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+child=subprocess.Popen(['/usr/bin/python3','-c',r'''
+import socket,sys
+connection=socket.socket(socket.AF_UNIX)
+connection.connect(sys.argv[1])
+connection.sendall(sys.argv[2].encode()+b'\n')
+print('ready',flush=True)
+connection.recv(1)
+''',str(root/'c'),name],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+if child.stdout.readline()!=b'ready\n': raise SystemExit('child handshake failed')
+child.stdout.close()
 def emit(event):
     with (root/'events').open('ab',buffering=0) as stream:
-        stream.write((json.dumps(dict(Event=event,Name=name,PID=os.getpid(),Child=child.pid))+'\n').encode())
+        stream.write((json.dumps(dict(Event=event,Name=name))+'\n').encode())
 emit('start')
 while not (root/('release-'+name)).exists(): time.sleep(.005)
 child.terminate()
@@ -145,22 +160,40 @@ print(output)
 			}
 			<-done
 			active, peak := 0, 0
+			children := make(map[string]bool)
 			for _, event := range readEvents() {
 				if event.Event == "start" {
 					active++
 					peak = max(peak, active)
-					for _, pid := range []int{event.PID, event.Child} {
-						if err := syscall.Kill(pid, 0); err == nil {
-							// A killed descendant can await reaping by init; it must
-							// no longer execute after the native batch has joined.
-							stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-							if err == nil && !strings.HasPrefix(string(stat)[strings.LastIndex(string(stat), ")")+1:], " Z ") {
-								t.Fatalf("batch returned with native process %d still running", pid)
-							}
-						}
-					}
+					children[event.Name] = true
 				} else {
 					active--
+				}
+			}
+			// Each start follows the child's connection handshake. A surviving
+			// child keeps its connection open; process death produces EOF.
+			exitDeadline := time.Now().Add(500 * time.Millisecond)
+			if err := listener.SetDeadline(exitDeadline); err != nil {
+				t.Fatal(err)
+			}
+			for remaining := len(children); remaining > 0; remaining-- {
+				connection, err := listener.AcceptUnix()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if err := connection.SetReadDeadline(exitDeadline); err != nil {
+					t.Fatal(err)
+				}
+				reader := bufio.NewReader(connection)
+				name, err := reader.ReadString('\n')
+				name = strings.TrimSuffix(name, "\n")
+				if err != nil || !children[name] {
+					t.Fatalf("unexpected native child handshake %q: %v", name, err)
+				}
+				delete(children, name)
+				if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+					t.Fatalf("native child %s did not close its lifetime connection after batch completion: %v", name, err)
 				}
 			}
 			if peak != 3 {

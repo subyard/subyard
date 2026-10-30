@@ -274,6 +274,63 @@ echo false
             self.assertRegex(steps, r'step=stalled state=end duration_seconds=[0-9]+ exit=124')
 
 
+class AdministrativeRepeatDownTest(unittest.TestCase):
+    def test_running_fixture_waits_for_agent_before_repeating_down(self):
+        owner = (PROFILE / 'tests/e2e/owner.sh').read_text()
+        functions = owner[owner.index('yard() {'):owner.index('verify_resources() {')]
+        phase = re.search(r'\n  admin-down(?:\|admin-down-check)?\)\n(.*?)\n    ;;', owner, re.S).group(1)
+        host = (PROFILE.parents[2] / 'scripts/lib/host.sh').read_text()
+        readiness = host[host.index('incus_wait_instance_agent() {'):host.index('incus_project_has_isolated_images() {')]
+        for scenario, expected in (('ready', 0), ('timeout', 1), ('cancel', -signal.SIGTERM)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                root = Path(temporary)
+                binary = root / 'bin'
+                binary.mkdir(mode=0o700)
+                driver = binary / 'driver'
+                driver.write_text('''#!/usr/bin/python3
+import os,signal,sys
+from pathlib import Path
+root=Path(os.environ['FIXTURE_ROOT'])
+name=Path(sys.argv[0]).name
+with (root/'calls').open('a') as stream: stream.write(name+'\\n')
+if name=='yard':
+    assert sys.argv[1:]==['-Y','vpn-e2e','vpn-admin','down','--yes']
+    if not (root/'booting').exists():
+        (root/'booting').touch()
+    elif not (root/'ready').exists():
+        sys.exit(97)
+elif name=='incus':
+    assert sys.argv[1:]==['exec','yard-vpn-e2e','--project','subyard-vpn-e2e','--','true']
+    if os.environ['SCENARIO']=='cancel':
+        os.kill(int(os.environ['OWNER_SHELL_PID']),signal.SIGTERM)
+        sys.exit(1)
+    count=(root/'calls').read_text().splitlines().count('incus')
+    if os.environ['SCENARIO']=='ready' and count>=2:
+        (root/'ready').touch()
+    elif not (root/'ready').exists():
+        sys.exit(1)
+else:
+    sys.exit(98)
+''')
+                driver.chmod(0o700)
+                (binary / 'yard').symlink_to(driver)
+                (binary / 'incus').symlink_to(driver)
+                script = ('set -euo pipefail\nphase=admin-down\nexport OWNER_SHELL_PID=$BASHPID\n'
+                          'verify_enabled() { :; }\n' + readiness + functions + '\n' + phase)
+                observed = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=8,
+                    env=dict(PATH=str(binary)+':/usr/bin:/bin', YARD_BIN=str(binary/'yard'),
+                             FIXTURE_ROOT=str(root), SCENARIO=scenario,
+                             SUBYARD_INCUS_AGENT_WAIT_TIMEOUT='3' if scenario == 'ready' else '1'))
+                self.assertEqual(observed.returncode, expected, observed.stdout + observed.stderr)
+                calls = (root / 'calls').read_text().splitlines()
+                self.assertEqual(calls[0], 'yard')
+                self.assertIn('incus', calls)
+                self.assertEqual(calls.count('yard'), 2 if scenario == 'ready' else 1)
+                if scenario == 'ready':
+                    self.assertEqual(calls[-1], 'yard')
+                    self.assertTrue((root / 'ready').exists())
+
+
 class OwnerHandlerTest(unittest.TestCase):
     def setUp(self):
         values = {
