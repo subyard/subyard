@@ -2275,6 +2275,9 @@ func (runtime Runtime) runPathEnvironment(
 			environment[index] = replaceRepositoryLabel(environment[index], runtime.RepositoryRoot, childRoot)
 		}
 	}
+	if (filepath.Base(path) == "04-provision-subyard.sh" || filepath.Base(path) == "refresh-installed-guest-runtime.sh") && runtime.guestFactsAvailable() {
+		environment = append(append([]string(nil), environment...), "SUBYARD_GUEST_RUNTIME_FACTS="+string(runtime.guestRuntimeFacts()))
+	}
 	command := exec.CommandContext(ctx, path, arguments...)
 	command.Dir = childRoot
 	command.Env = environment

@@ -42,12 +42,12 @@ bash tests/agent-skills.sh
 | Contract | Existing owner and selected coverage | Remaining baseline coverage |
 | --- | --- | --- |
 | Private root and durable private files, exact `0700`/`0600`, idempotent replacement | Telemetry `records-test.py` (6 cases), `resources-test.py` (24 cases): real record emission and missing-root `request → held`, durable intent retry | Launcher admission and guest initialization remain in the normal Telemetry suite |
-| Public `0644`/`0755`, private receipt, replacement/repair and unsafe existing objects retained | Shared synthetic `config/skills/tests/delivery-test.py` (13 cases), already checked under all three masks | Full packaging and installer contracts remain in core |
+| Public `0644`/`0755`, private receipt, replacement/repair and unsafe existing objects retained | Shared synthetic `config/skills/tests/delivery-test.py` (14 cases) and `guest-facts-test.py` (7 cases), checked under all three masks | Full packaging and installer contracts remain in core |
 | Unsafe mode, owner, symlink and hardlink refusal | Existing owning Go permission selections and profile suites; selected shared delivery and Telemetry cases retain their refusals | Explicitly prepared unsafe fixtures retain full-suite assertions; a matrix is not a replacement for these |
 
 The two Telemetry modules are a small selection from its full suite (30 cases per mask);
 keeping these modules together preserves their existing fixtures without another case registry.
-The shared skills module keeps its existing three-mask coverage. Neither selection repeats
+The shared skill delivery and guest-facts modules use three-mask coverage. Neither selection repeats
 later in the same normal run. Together these checks normally take seconds, without installed
 services, credentials or VM allocation.
 

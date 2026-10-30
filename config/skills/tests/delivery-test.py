@@ -55,6 +55,17 @@ class Delivery(unittest.TestCase):
         self.assertEqual(self.run_mode('check-removed'), 0)
         self.assertEqual((user_skill/'SKILL.md').read_text(), 'keep')
 
+    def test_core_native_extra_links_and_repair(self):
+        self.args.provider = 'core'
+        self.args.extra = True
+        self.run_mode('apply')
+        for adapter in deliver.ADAPTERS + deliver.EXTRA:
+            self.assertEqual((self.home/adapter/'synthetic-capability').resolve(), self.installed)
+        (self.home/'.hermes/skills/synthetic-capability').unlink()
+        self.assertEqual(self.run_mode('check'), 10)
+        self.run_mode('apply')
+        self.assertEqual(self.run_mode('check'), 0)
+
     def test_permissions_and_broken_links(self):
         self.run_mode('apply')
         path = self.installed/'SKILL.md'

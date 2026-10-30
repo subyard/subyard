@@ -54,8 +54,8 @@ capability removal follows its owning lifecycle separately.
 All providers link the same content into `~/.agents/skills` (Codex), `~/.claude/skills`,
 and `~/.config/opencode/skills`. Links are installed ahead of client installation and
 persist through client enable/disable; capability/provider removal owns retirement.
-This supports late installation without reprovisioning the capability. The GitHub
-provider additionally retains its pi/Hermes links. Recognized legacy `.codex/skills`
+This supports late installation without reprovisioning the capability. Core and the GitHub
+provider additionally use pi (`~/.pi/agent/skills`) and Hermes (`~/.hermes/skills`) links. Recognized legacy `.codex/skills`
 links to the same canonical directory are removed to avoid duplicate Codex discovery.
 Foreign links or skill directories are preserved and diagnosed.
 
@@ -81,3 +81,9 @@ Run shared contracts with `bash tests/agent-skills.sh`. Owning profile test runn
 cover Android content and GitHub's existing canonical source/discovery migration.
 File/readability checks establish delivery only. Native client discovery and model
 selection are separate acceptance results.
+
+The [subyard-environment](core/subyard-environment/SKILL.md) skill reads `/etc/subyard/guest-runtime.json`.
+Refresh atomically marks it `incomplete` before helper mutations and `current` after delivery
+and convergence markers succeed; `last_success` records only completed refreshes. Facts bind the
+engine version and effective selection to the guest's yard/machine identity. Capabilities and
+readiness remain unknown. Service yards omit core skills but still receive facts.

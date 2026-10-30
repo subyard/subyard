@@ -10,6 +10,17 @@ subyard_require_engine_context
 # shellcheck source=scripts/lib/ui.sh
 . "$SCRIPT_DIR/lib/ui.sh"
 PROJ=(--project "$INCUS_PROJECT")
+# Publish incomplete before any guest-helper mutation. Preserve the prior success.
+FACTS_SOURCE="$SCRIPT_DIR/../config/skills/core/subyard-environment/facts.py"
+refresh_facts() {
+  printf '%s' "${SUBYARD_GUEST_RUNTIME_FACTS:?prepared guest runtime facts required}" | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- \
+    python3 -B -c "$(cat "$FACTS_SOURCE")" "$1"
+}
+incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- sh -eu -c '
+  [ ! -L /etc/subyard ]
+  install -d -m 0755 -o root -g root /etc/subyard
+'
+refresh_facts begin
 bash "$SCRIPT_DIR/refresh-agent-skills.sh" apply
 PREVIEW_SOURCE="$SCRIPT_DIR/../config/preview/subyard-preview"
 PREVIEW_ENDPOINT="${SUBYARD_PREVIEW_ENDPOINT:?prepared preview endpoint required}"
@@ -81,3 +92,6 @@ if [ "${ALLOWS_CODING_TOOLS:-true}" != false ]; then
 incus config set "$YARD_INSTANCE_NAME" user.subyard.ccusage_version "$CCUSAGE_VERSION" "${PROJ[@]}" \
   || die "could not record ccusage convergence"
 fi
+
+# All release-owned helper effects and their convergence markers succeeded.
+refresh_facts commit

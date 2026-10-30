@@ -153,7 +153,7 @@ func (runtime Runtime) installedRuntimeSettings(names ...string) map[string]stri
 }
 
 const installedGuestProbe = `
-for path in /usr/local/bin/subyard-preview /etc/subyard/preview.json /usr/local/bin/ccusage /usr/local/bin/ccusage.subyard-runtime.json /var/lib/subyard/ccusage-ownership; do
+for path in /usr/local/bin/subyard-preview /etc/subyard/preview.json /usr/local/bin/ccusage /usr/local/bin/ccusage.subyard-runtime.json /var/lib/subyard/ccusage-ownership /etc/subyard/guest-runtime.json; do
   printf '%s\n' "$path"
   if [ -e "$path" ] || [ -L "$path" ]; then
     stat -c '%F|%a|%u|%g|%d|%i|%s|%Y|%Z' "$path"
@@ -207,6 +207,9 @@ func (runtime Runtime) observeInstalledGuestRuntime(ctx context.Context) (ports.
 		return ports.RuntimeObservation{}, err
 	}
 	settings := runtime.installedRuntimeSettings("ALLOWS_CODING_TOOLS", "CCUSAGE_VERSION", "CCUSAGE_SHA256_AMD64", "CCUSAGE_SHA256_ARM64", "INCUS_PROJECT", "YARD_INSTANCE_NAME")
+	if runtime.guestFactsAvailable() {
+		settings["guest_runtime_facts"] = string(runtime.guestRuntimeFacts())
+	}
 	ready, err := runtime.previewConverged(ctx)
 	if err != nil {
 		return ports.RuntimeObservation{}, err
@@ -244,6 +247,12 @@ esac
 			return ports.RuntimeObservation{}, errors.New("ccusage readiness check failed")
 		}
 		ready = ready && string(result.Stdout) == "ccusage-current\n"
+	}
+	if ready && runtime.guestFactsAvailable() {
+		ready, err = runtime.guestFactsConverged(ctx)
+		if err != nil {
+			return ports.RuntimeObservation{}, err
+		}
 	}
 	markers := map[string]string{}
 	for _, name := range []string{"user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "user.subyard.ccusage_version", previewroute.Key} {

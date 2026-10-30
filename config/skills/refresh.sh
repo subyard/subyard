@@ -28,7 +28,7 @@
     if [ "$1" = check ]; then core_mode=check-removed; else core_mode=remove; fi
   fi
   if [ "$1" = apply ]; then python3 "$work/config/skills/migrate-preview.py" "$home" "$uid"; fi
-  operation "$core_mode" core "$work/config/skills/core"
+  operation "$core_mode" core "$work/config/skills/core" --extra
   for receipt in /var/lib/subyard/agent-skills/profile-*.json; do
     [ -f "$receipt" ] || continue
     provider=$(basename "$receipt" .json)

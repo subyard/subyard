@@ -29,13 +29,14 @@ def main():
     namespace['sources'] = lambda source: providers[source]
     user = pwd.getpwnam(request['user'])
     selected = request['profiles'].split()
-    args = type('Args', (), dict(root=Path('/'), home=Path(user.pw_dir), uid=user.pw_uid, gid=user.pw_gid, provider='core', mode='check' if request['coding'] else 'check-removed', source='core', registered=False, extra=False))()
+    args = type('Args', (), dict(root=Path('/'), home=Path(user.pw_dir), uid=user.pw_uid, gid=user.pw_gid, provider='core', mode='check' if request['coding'] else 'check-removed', source='core', registered=False, extra=True))()
     if namespace['delivery'](args):
         return False
     for receipt in Path('/var/lib/subyard/agent-skills').glob('profile-*.json'):
         args.provider = receipt.stem
         args.source = args.provider
         args.registered = True
+        args.extra = False
         args.mode = 'check' if args.provider.removeprefix('profile-') in selected else 'check-removed'
         if namespace['delivery'](args):
             return False

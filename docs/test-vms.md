@@ -445,6 +445,17 @@ verifies the SDK's owned `/srv` backing and volume, instance, project and state 
 preserving the reusable yard definition and an unrelated user file. It needs no Gradle download or emulator runtime.
 See [Android acceptance](android.md#release-acceptance).
 
+For core facts, refresh recovery and native Codex/Claude/OpenCode discovery without profiles:
+
+```sh
+bash dev/e2e/guest-environment.sh --preflight
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose guest-environment --vm 1 -- \
+  bash dev/e2e/guest-environment.sh
+```
+
+Use the normal frozen candidate bundle/checksum inputs. The singleton needs 14 GiB free disk
+and 2 GiB available RAM. pi/Hermes coverage checks discovery links only.
+
 For agent skill delivery and native discovery, use the focused Android lane:
 
 ```sh
