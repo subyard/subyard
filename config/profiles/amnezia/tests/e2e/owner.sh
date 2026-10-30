@@ -111,6 +111,13 @@ else
 fi
 yard() { "$YARD_BIN" -Y vpn-e2e "$@"; }
 guest() { incus exec yard-vpn-e2e --project subyard-vpn-e2e -- "$@"; }
+repeat_admin_down() {
+  yard vpn-admin down --yes || return
+  # ACL changes can restart this running fixture. Observe its agent before
+  # the separate idempotence assertion; public down still supports no agent.
+  YARD_KIND=vm incus_wait_instance_agent subyard-vpn-e2e yard-vpn-e2e || return
+  yard vpn-admin down --yes
+}
 verify_resources() {
   [ "$(incus config get yard-vpn-e2e limits.cpu --project subyard-vpn-e2e)" = 2 ] \
     && [ "$(incus config get yard-vpn-e2e limits.memory --project subyard-vpn-e2e)" = 2GiB ] \
@@ -345,10 +352,9 @@ case "$phase" in
     fi
     guest findmnt -n -o FSTYPE,SIZE /srv
     ;;
-  admin-down)
-    yard vpn-admin down --yes
-    yard vpn-admin down --yes
-    verify_enabled
+  admin-down|admin-down-check)
+    repeat_admin_down
+    [ "$phase" = admin-down-check ] || verify_enabled
     ;;
   admin-up)
     yard vpn-admin up --yes

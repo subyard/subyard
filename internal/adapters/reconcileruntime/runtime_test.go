@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -1544,9 +1545,39 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 		t.Fatal("inherited reporting override accepted")
 	}
 	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
-	incus.ServerInfo.Version = "6.1.0"
-	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
-		t.Fatal("unsupported Incus version accepted")
+	localConfig := maps.Clone(incus.Reconcile.Instance.LocalConfig)
+	effectiveConfig := maps.Clone(incus.Reconcile.Instance.Config)
+	projectConfig := maps.Clone(incus.Reconcile.ProjectConfig)
+	for _, test := range []struct {
+		version string
+		allowed bool
+	}{
+		{"6.0.6", true}, {"6.0.6-debian13", true},
+		{"6.0.7", true}, {"6.0.7-debian13", true},
+		{"6.0.5", false}, {"6.0.8", false}, {"6.1.0", false},
+		{"6.0.70", false}, {"6.0.7.1", false}, {"6.0.7garbage", false}, {"", false},
+	} {
+		t.Run("version="+test.version, func(t *testing.T) {
+			incus.ServerInfo.Version = test.version
+			converged, err := runtime.CheckStage(context.Background(), "project")
+			if test.allowed {
+				if err != nil || !converged {
+					t.Fatalf("allowed Incus version rejected: converged %t, error %v", converged, err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "unsupported Incus version") {
+					t.Fatalf("unsupported Incus version was not refused: %v", err)
+				}
+				if err := runtime.ApplyStage(context.Background(), "instance"); err == nil ||
+					!strings.Contains(err.Error(), "unsupported Incus version") {
+					t.Fatalf("unsupported Incus version reached instance apply: %v", err)
+				}
+			}
+			if len(incus.ConfigUpdates) != 0 || !maps.Equal(localConfig, incus.Reconcile.Instance.LocalConfig) ||
+				!maps.Equal(effectiveConfig, incus.Reconcile.Instance.Config) || !maps.Equal(projectConfig, incus.Reconcile.ProjectConfig) {
+				t.Fatal("version admission changed native configuration")
+			}
+		})
 	}
 	runtime.Yard.YardKind = domain.YardContainer
 	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {

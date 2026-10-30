@@ -400,8 +400,9 @@ func (runtime Runtime) vmPageReporting(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("inspect Incus for VM Free Page Reporting: %w", err)
 	}
-	if server.Version != "6.0.6" && !strings.HasPrefix(server.Version, "6.0.6-") {
-		return false, fmt.Errorf("unsupported Incus version %q for VM Free Page Reporting (tested: 6.0.6)", server.Version)
+	if server.Version != "6.0.6" && !strings.HasPrefix(server.Version, "6.0.6-") &&
+		server.Version != "6.0.7" && !strings.HasPrefix(server.Version, "6.0.7-") {
+		return false, fmt.Errorf("unsupported Incus version %q for VM Free Page Reporting (allowed: 6.0.6, 6.0.7)", server.Version)
 	}
 	return true, nil
 }

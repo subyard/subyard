@@ -362,6 +362,7 @@ if [ "$lane" = setup ]; then
 fi
 if [ "$lane" = share ]; then
   prepare_native_exports
+  native_app discover --name acceptance-two
   native_app close
   printf 'amnezia_acceptance=result-pass source_bundle_sha256=%s lane=%s\n' "$bundle_hash" "$lane"
   exit 0

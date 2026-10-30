@@ -1145,6 +1145,7 @@ release_smoke_lane() {
 peer_lane() {
   local scope="${1:-full}"
   local peer1_info peer2_info peer1_key peer2_key vm1_host_key vm2_host_key vm
+  local expected_ssh_state restored_ssh_state
   case "$scope" in smoke|full) ;; *) die "unknown peer scope '$scope'" ;; esac
   VM1_YARD_ENTRY="$(yard_entry_state 1)"
   VM2_YARD_ENTRY="$(yard_entry_state 2)"
@@ -1193,10 +1194,16 @@ peer_lane() {
     || die 'VM1 user yard entry was not restored exactly'
   [ "$(yard_entry_state 2)" = "$VM2_YARD_ENTRY" ] \
     || die 'VM2 user yard entry was not restored exactly'
-  [ "$(ssh_state 1)" = "$VM1_SSH_STATE" ] \
-    || die 'VM1 SSH state was not restored exactly'
-  [ "$(ssh_state 2)" = "$VM2_SSH_STATE" ] \
-    || die 'VM2 SSH state was not restored exactly'
+  for vm in 1 2; do
+    expected_ssh_state="$VM1_SSH_STATE"
+    [ "$vm" = 1 ] || expected_ssh_state="$VM2_SSH_STATE"
+    restored_ssh_state="$(ssh_state "$vm")"
+    if [ "$restored_ssh_state" != "$expected_ssh_state" ]; then
+      printf 'p0-acceptance: VM%s SSH state before:\n%s\nafter:\n%s\n' \
+        "$vm" "$expected_ssh_state" "$restored_ssh_state" >&2
+      die "VM$vm SSH state was not restored exactly"
+    fi
+  done
   [ "$(public_tree_hash | sha256sum | awk '{print $1}')" = "$CANDIDATE_HASH" ] \
     || die 'public candidate changed during acceptance'
   assert_no_worktrees

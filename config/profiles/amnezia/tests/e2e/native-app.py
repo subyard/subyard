@@ -44,6 +44,9 @@ DIGEST = '0335f2643f58c4d7494be4c6d47582574fa7e5a463450e9a47b0c5c2eda797c2'
 LAUNCHER = '/opt/AmneziaVPN/bin/AmneziaVPN'
 GUI_BINARY = LAUNCHER
 SESSION = ROOT / 'session.json'
+NAVIGATION_LANDMARKS = {'Settings': 'settings', 'Servers': 'servers', 'Connection': 'connection',
+                        'Application': 'application', 'Backup': 'backup', 'About AmneziaVPN': 'about',
+                        'Close application': 'close_application', 'Close': 'close', 'Cancel': 'cancel'}
 
 
 class Failure(Exception):
@@ -467,7 +470,12 @@ class GUI:
         tsv = run(['tesseract', 'stdin', 'stdout', '-l', 'eng', '--psm', '11', 'tsv'],
                   capture=True, input_data=image, timeout=5, operation='ocr')
         require(len(tsv) <= 262144, 'OCR output is too large')
-        return visible_text(tsv.decode(), names, frame, scale=2)
+        text = tsv.decode()
+        if names == ('Servers',) and getattr(self, 'discover_evidence', {}).get('stage') == 'servers-control':
+            # Keep only the last existing OCR observation in memory. Failure
+            # diagnostics emit whitelist counts, never this text or an image.
+            self._discovery_ocr = (text, frame, time.monotonic())
+        return visible_text(text, names, frame, scale=2)
 
     def click_node(self, node):
         evidence = getattr(self, 'share_evidence', None)
@@ -517,7 +525,10 @@ class GUI:
             raise
 
     def click(self, names, seconds=30, description='a named control'):
-        nodes = self.wait(lambda: self.matching(names), description, seconds)
+        matching = lambda: self.matching(names)
+        if names == 'Servers' and getattr(self, 'discover_evidence', {}).get('stage') == 'servers-control':
+            matching = lambda: discovery_match(self, names, 'servers')
+        nodes = self.wait(matching, description, seconds)
         evidence = getattr(self, 'share_evidence', None)
         if isinstance(evidence, dict):
             evidence['candidate_count'] = min(len(nodes), 3000)
@@ -1059,6 +1070,69 @@ def discovery_snapshot(gui, target=None):
     return result
 
 
+def navigation_snapshot(gui, include_ocr=False):
+    started = time.monotonic()
+    result = dict(session_owned=False, owned_frames=0, frame_active=None, frame_eligible=False,
+                  bottom_tabs=[], owned_modals=None, owned_dialogs=0,
+                  landmarks={key: 0 for key in NAVIGATION_LANDMARKS.values()})
+    try:
+        state = json.loads(private_file(SESSION))
+        app = state['app']
+        if process_identity(app['pid']) != app['start'] or os.environ.get('DISPLAY') != state['environment']['DISPLAY']:
+            return result
+        result['session_owned'] = True
+        nodes = gui.nodes()[:3000]
+        def owned(node):
+            return node.getApplication().get_process_id() == app['pid']
+        frames = [node for node in nodes if node.getRoleName() in ('frame', 'window') and owned(node)]
+        result['owned_frames'] = len(frames)
+        if len(frames) != 1:
+            return result
+        frame = frames[0]
+        bounds = frame.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+        if not (bounds.x >= 0 and bounds.y >= 0 and bounds.width > 0 and bounds.height > 0
+                and bounds.x + bounds.width <= 1024 and bounds.y + bounds.height <= 900):
+            return result
+        result['frame_eligible'] = True
+        result['frame_active'] = frame.getState().contains(gui.api.STATE_ACTIVE)
+        modal = getattr(gui.api, 'STATE_MODAL', None)
+        result['owned_modals'] = 0 if modal is not None else None
+        tabs = []
+        for node in nodes:
+            role, label = node.getRoleName(), node.name.strip()
+            if role not in ('page tab', 'dialog') and label not in NAVIGATION_LANDMARKS:
+                continue
+            flags = node.getState()
+            if not owned(node) or not flags.contains(gui.api.STATE_SHOWING) or flags.contains(gui.api.STATE_DEFUNCT):
+                continue
+            if role == 'dialog':
+                result['owned_dialogs'] += 1
+                if modal is not None and flags.contains(modal):
+                    result['owned_modals'] += 1
+            if label in NAVIGATION_LANDMARKS:
+                result['landmarks'][NAVIGATION_LANDMARKS[label]] += 1
+            if role == 'page tab' and node.get_parent().getRoleName() == 'page tab list':
+                rectangle = node.queryComponent().getExtents(gui.api.DESKTOP_COORDS)
+                if (rectangle.width > 0 and rectangle.height > 0 and bounds.x <= rectangle.x and bounds.y <= rectangle.y
+                        and rectangle.x + rectangle.width <= bounds.x + bounds.width
+                        and rectangle.y + rectangle.height <= bounds.y + bounds.height):
+                    tabs.append((rectangle.y, rectangle.x, dict(enabled=flags.contains(gui.api.STATE_ENABLED),
+                        checked=flags.contains(gui.api.STATE_CHECKED), selected=flags.contains(gui.api.STATE_SELECTED))))
+        if tabs:
+            bottom = max(tab[0] for tab in tabs)
+            result['bottom_tabs'] = [tab[2] for tab in sorted(tabs, key=lambda tab: tab[1]) if tab[0] == bottom][:8]
+        if include_ocr and getattr(gui, '_discovery_ocr', None) is not None:
+            text, rectangle, observed = gui._discovery_ocr
+            result['ocr_age_ms'] = max(0, round((time.monotonic() - observed) * 1000))
+            result['ocr_landmarks'] = {key: min(len(visible_text(text, (label,), rectangle, scale=2)), 3000)
+                                       for label, key in NAVIGATION_LANDMARKS.items()}
+    except Exception:
+        result['probe_failure'] = 'unavailable'
+    finally:
+        result['duration_ms'] = max(0, round((time.monotonic() - started) * 1000))
+    return result
+
+
 def discovery_match(gui, label, key):
     # Record only calls already required by discovery, with the same short circuit.
     try:
@@ -1066,6 +1140,10 @@ def discovery_match(gui, label, key):
     except Exception as error:
         gui.discover_evidence['matches'][key] = dict(count=None, failure='matching-failure' if isinstance(error, Failure)
                                                    else 'matching-exception')
+        category = ('failure' if isinstance(error, Failure) else 'timeout' if isinstance(error, TimeoutError)
+                    else 'os-error' if isinstance(error, OSError) else 'other-exception')
+        counts = gui.discover_evidence.setdefault('matching_failure_counts', {}).setdefault(key, {})
+        counts[category] = min(counts.get(category, 0) + 1, 3000)
         raise
     gui.discover_evidence['matches'][key] = dict(count=min(len(nodes), 3000), failure='none')
     return nodes
@@ -1075,6 +1153,11 @@ def activate_management(gui):
     # Pinned PageSettingsServerInfo.qml binds Management Return/Enter to index 2.
     # Keep one activation within the existing named-control wait budget.
     deadline = time.monotonic() + 30
+    nodes = gui.wait(lambda: gui.matching('Management'), 'native server management control',
+                     max(0, deadline - time.monotonic()))
+    # Pinned PageType.qml resets default focus 200 ms after the page appears.
+    # Use GUI.click's 350 ms settle, then acquire the current accessible target.
+    time.sleep(min(0.35, max(0, deadline - time.monotonic())))
     nodes = gui.wait(lambda: gui.matching('Management'), 'native server management control',
                      max(0, deadline - time.monotonic()))
     require(len(nodes) == 1, 'native Management control is ambiguous')
@@ -1138,7 +1221,11 @@ def activate_management(gui):
 def discover(gui, args):
     gui.discover_evidence = dict(stage='servers-control', matches={})
     gui.share_evidence = gui.discover_evidence  # Existing bounded action receipt, emitted only on failure.
+    gui.discover_evidence['before_tab'] = navigation_snapshot(gui)
+    started = time.monotonic()
     gui.tab(2)
+    gui.discover_evidence['tab_duration_ms'] = max(0, round((time.monotonic() - started) * 1000))
+    gui.discover_evidence['after_tab'] = navigation_snapshot(gui)
     gui.click('Servers', description='native servers control')
     # The fixture owns exactly one admin server. No client import adds another.
     gui.discover_evidence['stage'] = 'saved-server'
@@ -1184,11 +1271,18 @@ def discovery_self_check():
                           STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_FOCUSABLE=15,
                           STATE_FOCUSED=16, STATE_ACTIVE=17, DESKTOP_COORDS=0)
     session_bytes = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
-    for scenario in ('ready', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
+    for scenario in ('ready', 'servers-matching-exception', 'focus-delayed-default', 'focus-after-deadline', 'focus-near-deadline', 'focus-return', 'not-accepted', 'action-exception', 'read-only', 'unknown-match',
                      'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
                      'inactive-frame', 'ambiguous-management', 'focus-no-selection'):
         state = dict(page='info', clock=0.0, dispatches=0, focus_requests=0, focused=False, keys=0, pointers=0,
-                     clock_consumed=False, key_timeouts=[])
+                     clock_consumed=False, key_timeouts=[], default_focus_due=None,
+                     default_focus_reset=False, delayed_focus_sample=False, focus_requested_at=None)
+        def advance(seconds):
+            state['clock'] += seconds
+            if (scenario == 'focus-delayed-default' and state['default_focus_due'] is not None
+                    and not state['default_focus_reset'] and state['clock'] >= state['default_focus_due']):
+                state['focused'] = False
+                state['default_focus_reset'] = True
         def node(label, role, action=lambda: True, parent=None):
             item = SimpleNamespace(name=label, parent=parent)
             item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
@@ -1196,9 +1290,15 @@ def discovery_self_check():
             item.getRoleName = lambda: {1: 'frame', 3: 'button', 8: 'text', 14: 'page tab'}[role]
             item.get_parent = lambda: parent
             def contains(flag):
+                if (label == 'Management' and flag == 16 and scenario == 'focus-delayed-default'
+                        and state['focus_requests'] and not state['delayed_focus_sample']):
+                    # One native accessibility round trip misses a brief focus
+                    # acquired before PageType's 200 ms default-focus timer.
+                    state['delayed_focus_sample'] = True
+                    advance(0.25)
                 if (label == 'Management' and flag == 16 and state['focused'] and not state['clock_consumed']
                         and scenario in ('focus-after-deadline', 'focus-near-deadline')):
-                    state['clock'] += 31 if scenario == 'focus-after-deadline' else 29.9
+                    state['clock'] = state['activation_deadline'] + (1 if scenario == 'focus-after-deadline' else -0.1)
                     state['clock_consumed'] = True
                 return (flag in (5, 9) or
                 flag in (6, 13) and label == 'Management' and state['page'] in ('data', 'scan-complete') or
@@ -1208,6 +1308,7 @@ def discovery_self_check():
             item.getState = lambda: SimpleNamespace(contains=contains)
             def focus():
                 state['focus_requests'] += 1
+                state['focus_requested_at'] = state['clock']
                 if scenario == 'focus-exception':
                     raise RuntimeError('synthetic-private-focus')
                 state['focused'] = scenario not in ('focus-refused', 'focus-unconfirmed')
@@ -1254,13 +1355,16 @@ def discovery_self_check():
             return [frame] + [item for item in controls if item.name in valid] + (
                 [node('Management', 14, management, frame)] if scenario == 'ambiguous-management' else [])
         def matching(labels):
+            if labels == 'Servers' and scenario == 'servers-matching-exception':
+                raise RuntimeError('synthetic-private-navigation')
             if labels == controls[1].name and scenario == 'unknown-match':
                 raise RuntimeError('synthetic-private-matching')
             labels = (labels,) if isinstance(labels, str) else labels
             return [item for item in current_nodes() if item.name in labels]
         gui = GUI.__new__(GUI)
         gui.api, gui.nodes, gui.matching = api, current_nodes, matching
-        gui.click_saved_server = lambda: None  # Isolate the next native boundary.
+        # Entering the settings page arms PageType's timer, after the Servers click.
+        gui.click_saved_server = lambda: state.update(default_focus_due=state['clock'] + 0.2)
         gui.tab = lambda index: state.update(page='users') if index == 1 else None
         def external(command, **kwargs):
             if command != ['xdotool', 'key', 'Return']:
@@ -1287,11 +1391,12 @@ def discovery_self_check():
                 mock.patch.dict(os.environ, DISPLAY=':synthetic'), \
                 mock.patch.object(subprocess, 'run', side_effect=external), \
                 mock.patch.object(time, 'monotonic', side_effect=lambda: state['clock']), \
-                mock.patch.object(time, 'sleep', side_effect=lambda seconds: state.update(clock=state['clock'] + seconds)):
+                mock.patch.object(time, 'sleep', side_effect=advance):
             try:
                 discover(gui, SimpleNamespace(name='retained-test-user'))
             except Failure as error:
                 expected = {
+                    'servers-matching-exception': 'GUI timed out waiting for native servers control',
                     'not-accepted': 'native Management activation was not accepted',
                     'action-exception': 'native Management action failed',
                     'focus-unavailable': 'native Management control is not focusable',
@@ -1305,25 +1410,34 @@ def discovery_self_check():
                     'ambiguous-management': 'native Management control is ambiguous',
                     'focus-no-selection': 'GUI timed out waiting for selected native Management page',
                 }.get(scenario, 'GUI timed out waiting for native service discovery control')
-                require(scenario not in ('ready', 'focus-return') and str(error) == expected,
-                        'Management activation changed its safe failure boundary')
+                require(scenario not in ('ready', 'focus-return', 'focus-delayed-default') and str(error) == expected,
+                        'Management activation changed its safe failure boundary: ' + scenario)
             else:
-                require(scenario in ('ready', 'focus-return'), 'unready discovery was accepted')
+                require(scenario in ('ready', 'focus-return', 'focus-delayed-default'), 'unready discovery was accepted')
                 require(('native server scan', 120) in waits and ('retained native user after discovery', 90) in waits,
                         'discovery observation changed existing completion waits')
             snapshot = discovery_snapshot(gui)
-            if scenario in ('ready', 'focus-return', 'read-only', 'unknown-match'):
+            if scenario in ('ready', 'focus-return', 'focus-delayed-default', 'read-only', 'unknown-match'):
                 require(('native service discovery control', 30) in waits, 'discovery changed the control wait')
-            refused = scenario in ('focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
+            refused = scenario in ('servers-matching-exception', 'focus-after-deadline', 'focus-unavailable', 'focus-refused', 'focus-exception', 'focus-unconfirmed', 'foreign-management',
                                    'inactive-frame', 'ambiguous-management')
             require(state['dispatches'] == (0 if refused else 1), 'Management activation was repeated or bypassed refusal')
             require(state['pointers'] == 0, 'Management activation used coordinate input')
-            require(state['keys'] == int(scenario in ('focus-return', 'focus-no-selection', 'focus-near-deadline')),
+            if scenario == 'servers-matching-exception':
+                require(gui.discover_evidence['stage'] == 'servers-control'
+                        and gui.discover_evidence['matches']['servers'] == dict(count=None, failure='matching-exception')
+                        and gui.discover_evidence['matching_failure_counts']['servers']['other-exception'] > 0,
+                        'Servers matching failure was swallowed without a sanitized receipt')
+            require(state['keys'] == int(scenario in ('focus-return', 'focus-delayed-default', 'focus-no-selection', 'focus-near-deadline')),
                     'Management key escaped its focused single activation')
-            require(state['focus_requests'] == int(scenario in ('focus-return', 'focus-refused',
+            require(state['focus_requests'] == int(scenario in ('focus-return', 'focus-delayed-default', 'focus-refused',
                     'focus-exception', 'focus-unconfirmed', 'focus-no-selection', 'inactive-frame',
                     'focus-after-deadline', 'focus-near-deadline')),
                     'Management focus was retried or unnecessarily requested')
+            if scenario == 'focus-delayed-default':
+                require(state['default_focus_reset'] and state['focus_requested_at'] >= state['default_focus_due']
+                        and state['clock'] <= state['activation_deadline'],
+                        'Management focus raced the page default or exceeded its deadline')
             if scenario == 'focus-after-deadline':
                 require(not state['key_timeouts'], 'expired Management activation dispatched a keyboard command')
             if scenario == 'focus-near-deadline':
@@ -1341,7 +1455,7 @@ def discovery_self_check():
                 require(gui.discover_evidence['matches']['title'] == dict(count=None, failure='matching-exception')
                         and snapshot['classification'] == 'selected-management-scan-visible',
                         'matching failure was mistaken for a missing scan row')
-            elif scenario in ('ready', 'focus-return'):
+            elif scenario in ('ready', 'focus-return', 'focus-delayed-default'):
                 state['page'] = 'data'
                 require(discovery_snapshot(gui)['classification'] == 'selected-management-scan-visible',
                         'ready selected Management page was not distinguished')
@@ -1368,7 +1482,64 @@ def discovery_self_check():
                 item.queryText.assert_not_called()
 
 
+def navigation_self_check():
+    from unittest import mock
+    api = SimpleNamespace(STATE_ENABLED=5, STATE_CHECKED=6, STATE_SHOWING=9,
+                          STATE_DEFUNCT=12, STATE_SELECTED=13, STATE_ACTIVE=17, STATE_MODAL=18, DESKTOP_COORDS=0)
+    selected = 0
+    def node(role, label='', parent=None, index=None):
+        item = SimpleNamespace(name=label)
+        item.getRoleName = lambda: role
+        item.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 42)
+        item.get_parent = lambda: parent
+        item.getState = lambda: SimpleNamespace(contains=lambda flag: flag in (5, 9, 17)
+            or flag in (6, 13) and index == selected and index is not None
+            or flag == 18 and role == 'dialog')
+        item.queryComponent = lambda: SimpleNamespace(getExtents=lambda coordinates: SimpleNamespace(
+            x=0 if index is None else 100 + index * 40, y=0 if index is None else 730,
+            width=380 if index is None else 40, height=800 if index is None else 48))
+        return item
+    frame = node('frame')
+    tab_bar = node('page tab list', parent=frame)
+    tabs = [node('page tab', parent=tab_bar, index=index) for index in range(4)]
+    settings, servers = node('label', 'Settings', frame), node('label', 'Servers', frame)
+    foreign = node('label', 'Servers', frame)
+    foreign.getApplication = lambda: SimpleNamespace(get_process_id=lambda: 99)
+    private = node('label', 'synthetic-private-QR-config', frame)
+    gui = GUI.__new__(GUI)
+    gui.api = api
+    nodes = [frame, tab_bar, *tabs, private, foreign]
+    gui.nodes = lambda: nodes
+    session = b'{"app":{"pid":42,"start":"owned"},"environment":{"DISPLAY":":synthetic"}}'
+    with mock.patch.object(sys.modules[__name__], 'private_file', return_value=session), \
+            mock.patch.object(sys.modules[__name__], 'process_identity', return_value='owned'), \
+            mock.patch.dict(os.environ, DISPLAY=':synthetic'):
+        wrong = navigation_snapshot(gui)
+        require(len(wrong['bottom_tabs']) == 4 and wrong['bottom_tabs'][0]['selected']
+                and not wrong['bottom_tabs'][2]['selected'] and wrong['landmarks']['servers'] == 0,
+                'wrong selected tab or foreign Servers landmark was not distinguished')
+        selected = 2
+        nodes.append(settings)
+        missing = navigation_snapshot(gui)
+        require(missing['bottom_tabs'][2]['checked'] and missing['landmarks']['settings'] == 1
+                and missing['landmarks']['servers'] == 0, 'Settings without Servers was not distinguished')
+        nodes.extend([servers, node('dialog', parent=frame)])
+        ready = navigation_snapshot(gui)
+        require(ready['landmarks']['servers'] == 1 and ready['owned_modals'] == ready['owned_dialogs'] == 1,
+                'Servers landmark or owned modal was not recorded')
+        header = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
+        text = header + '5\t1\t1\t1\t1\t1\t20\t40\t80\t24\t99\tServers\n'
+        gui._discovery_ocr = (text, SimpleNamespace(x=0, y=0, width=380, height=800), time.monotonic())
+        require('ocr_landmarks' not in navigation_snapshot(gui), 'navigation probe added a normal-path OCR observation')
+        observed = navigation_snapshot(gui, include_ocr=True)
+        require(observed['ocr_landmarks']['servers'] == 1 and observed['ocr_landmarks']['settings'] == 0,
+                'last existing OCR observation was not reduced to fixed landmark counts')
+        require('synthetic-private' not in json.dumps([wrong, missing, ready, observed]),
+                'navigation receipt exposed raw UI names or configuration')
+
+
 def self_check():
+    navigation_self_check()
     discovery_self_check()
     from unittest import mock
     from types import SimpleNamespace
@@ -1927,7 +2098,8 @@ def main():
                 pass
             if args.mode == 'discover':
                 print('native_app_discover_evidence=' + json.dumps(dict(
-                    getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui)), sort_keys=True),
+                    getattr(gui, 'discover_evidence', {}), snapshot=discovery_snapshot(gui),
+                    navigation=navigation_snapshot(gui, include_ocr=True)), sort_keys=True),
                       file=sys.stderr)
         return 1
 
