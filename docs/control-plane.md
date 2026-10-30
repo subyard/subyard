@@ -1381,7 +1381,7 @@ The generic VM settings are:
 
 | Setting | Contract |
 | --- | --- |
-| `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; reject unsupported Incus/QEMU or conflicting raw configuration. No arbitrary QEMU input is accepted. |
+| `VM_FREE_PAGE_REPORTING=1` | Set the existing virtio balloon's fixed reporting property and guest reporting order 1; require the QEMU `free-page-reporting` property and guest negotiation, and reject conflicting raw configuration. No arbitrary QEMU input is accepted. |
 | `VM_PIN_IPV4=1` | Pin the private primary NIC to its observed DHCP address after ownership and collision checks. |
 | `VM_CPU_WEIGHT` | Optional Linux cgroup-v2 CPU weight (1–10000; normal weight 100). Persist local owned VM metadata and attach its verified QEMU process to a transient systemd scope in the root slice. Refuse placement that would bypass an ancestor CPU, memory, task, cpuset or I/O ceiling. |
 | `ROOT_DISK_SIZE` | Bound the root disk at creation; refuse implicit resizing of an existing VM. |
@@ -1404,6 +1404,7 @@ fails closed. See [configuration reset](configuration.md#resetting-one-yard).
 
 Reporting returns unused guest pages to the immediate owner; it does not change configured memory,
 inflate the balloon, or reserve capacity for other workloads.
+Reporting has no tested-version allowlist for Incus or QEMU; the general Incus minimum still applies.
 The owner persists guest reporting order 1 through a root-owned `/etc/tmpfiles.d` rule and applies it
 after the VM agent becomes ready. The guest readiness check verifies the negotiated reporting feature,
 the exact rule and its permissions, and the live kernel order; drift remains a read-only diagnostic.

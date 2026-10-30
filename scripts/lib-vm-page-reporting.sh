@@ -10,15 +10,9 @@ vm_page_reporting_required() {
 }
 
 vm_page_reporting_check_host() {
-  local version help
+  local help
   command -v qemu-system-x86_64 >/dev/null 2>&1 \
     || { printf 'VM Free Page Reporting requires qemu-system-x86_64\n' >&2; return 1; }
-  version="$(qemu-system-x86_64 --version 2>/dev/null)" \
-    || { printf 'cannot identify QEMU for VM Free Page Reporting\n' >&2; return 1; }
-  case "$version" in
-    'QEMU emulator version 8.2.'* | 'QEMU emulator version 10.0.'*) ;;
-    *) printf 'unsupported QEMU for VM Free Page Reporting: expected tested 8.2.x or 10.0.x\n' >&2; return 1 ;;
-  esac
   help="$(qemu-system-x86_64 -device virtio-balloon-pci,help 2>&1)" \
     || { printf 'cannot inspect QEMU virtio-balloon-pci reporting capability\n' >&2; return 1; }
   printf '%s\n' "$help" | grep -q 'free-page-reporting' \
@@ -123,7 +117,6 @@ vm_page_reporting_check_guest() { # <project> <instance>
 
 vm_page_reporting_prepare_guest() { # <project> <instance>
   local project="$1" instance="$2"
-  vm_page_reporting_check_guest_feature "$project" "$instance" || return $?
   printf '%s\n' "$VM_PAGE_REPORTING_TMPFILES_RULE" | \
     timeout --foreground 30 incus exec "$instance" --project "$project" -T -- sh -ec '
       rule=/etc/tmpfiles.d/subyard-vm-page-reporting.conf

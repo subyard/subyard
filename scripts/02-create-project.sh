@@ -37,7 +37,6 @@ if [ "$owner_phase" != after-project ]; then
 incus_preflight
 if vm_page_reporting_required; then
   [ "${YARD_KIND:-}" = vm ] || die "VM_FREE_PAGE_REPORTING requires YARD_KIND=vm"
-  vm_page_reporting_check_host || die "VM Free Page Reporting host preflight failed"
   if incus project show "$INCUS_PROJECT" >/dev/null 2>&1; then
     vm_page_reporting_check_profile "$INCUS_PROJECT" \
       || die "VM profile has raw QEMU configuration"

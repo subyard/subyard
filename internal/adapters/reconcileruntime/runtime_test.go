@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -1432,7 +1431,7 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
-		"#!/bin/sh\ncase \"$1\" in --check-page-reporting) exit 0 ;; --check-page-reporting-guest) exit \"${MOCK_GUEST_EXIT:-0}\" ;; esac\nexit 1\n"), 0o700)
+		"#!/bin/sh\ncase \"$1\" in --check-page-reporting-guest) exit \"${MOCK_GUEST_EXIT:-0}\" ;; esac\nexit 1\n"), 0o700)
 	incus := &vmPinIncusFixture{pinned: true, Incus: &testkit.Incus{
 		ServerInfo: ports.ServerInfo{Environment: "incus", Version: "6.0.6-debian13"},
 		Reconcile: ports.ReconcileState{
@@ -1545,46 +1544,20 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 		t.Fatal("inherited reporting override accepted")
 	}
 	incus.Reconcile.Instance.LocalConfig["raw.qemu.conf"] = vmPageReportingConfig
-	localConfig := maps.Clone(incus.Reconcile.Instance.LocalConfig)
-	effectiveConfig := maps.Clone(incus.Reconcile.Instance.Config)
-	projectConfig := maps.Clone(incus.Reconcile.ProjectConfig)
-	for _, test := range []struct {
-		version string
-		allowed bool
-	}{
-		{"6.0.6", true}, {"6.0.6-debian13", true},
-		{"6.0.7", true}, {"6.0.7-debian13", true},
-		{"6.0.5", false}, {"6.0.8", false}, {"6.1.0", false},
-		{"6.0.70", false}, {"6.0.7.1", false}, {"6.0.7garbage", false}, {"", false},
-	} {
-		t.Run("version="+test.version, func(t *testing.T) {
-			incus.ServerInfo.Version = test.version
-			converged, err := runtime.CheckStage(context.Background(), "project")
-			if test.allowed {
-				if err != nil || !converged {
-					t.Fatalf("allowed Incus version rejected: converged %t, error %v", converged, err)
-				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), "unsupported Incus version") {
-					t.Fatalf("unsupported Incus version was not refused: %v", err)
-				}
-				if err := runtime.ApplyStage(context.Background(), "instance"); err == nil ||
-					!strings.Contains(err.Error(), "unsupported Incus version") {
-					t.Fatalf("unsupported Incus version reached instance apply: %v", err)
-				}
-			}
-			if len(incus.ConfigUpdates) != 0 || !maps.Equal(localConfig, incus.Reconcile.Instance.LocalConfig) ||
-				!maps.Equal(effectiveConfig, incus.Reconcile.Instance.Config) || !maps.Equal(projectConfig, incus.Reconcile.ProjectConfig) {
-				t.Fatal("version admission changed native configuration")
-			}
-		})
+	incus.Reconcile.ProfileConfig = map[string]string{"raw.qemu.conf": vmPageReportingConfig}
+	if _, err := runtime.CheckStage(context.Background(), "instance"); err == nil ||
+		!strings.Contains(err.Error(), "unexpected inherited raw.qemu.conf") {
+		t.Fatalf("profile reporting override shadowed by the managed local override was accepted: %v", err)
 	}
+	delete(incus.Reconcile.ProfileConfig, "raw.qemu.conf")
+	incus.ServerInfo.Version = "6.19.1"
+	assertStage(t, runtime, "project", true, "another Incus version supports project policy")
+	assertStageConverged(t, runtime, true, "another Incus version supports reporting")
 	runtime.Yard.YardKind = domain.YardContainer
 	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
 		t.Fatal("VM container accepted")
 	}
 	runtime.Yard.YardKind = domain.YardVM
-	incus.ServerInfo.Version = "6.0.6-debian13"
 	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
 		"#!/bin/sh\nexit 1\n"), 0o700)
 	if err := runtime.ApplyStage(context.Background(), "instance"); err == nil ||
@@ -1593,8 +1566,6 @@ func TestVMPageReportingIsFixedAndScoped(t *testing.T) {
 	}
 	runtime.Environment = []string{"SUBYARD_HOME=/fixture-data", "SUBYARD_CONFIG_HOME=/fixture-config"}
 	assertStage(t, runtime, "project", true, "ordinary yard ignores VM policy")
-	testkit.WriteFile(t, filepath.Join(root, "scripts", "03-create-subyard.sh"), []byte(
-		"#!/bin/sh\nexit 0\n"), 0o700)
 	runtime.Environment = []string{"VM_PIN_IPV4=1", "ALLOWS_HOST_ACCESS=false", "LIMITS_CPU=2", "LIMITS_MEMORY=2GiB"}
 	incus.Reconcile.Instance.LocalConfig["limits.cpu"] = "2"
 	incus.Reconcile.Instance.LocalConfig["limits.memory"] = "2GiB"

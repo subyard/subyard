@@ -19,6 +19,7 @@ export MOCK_RAW_EFFECTIVE=''
 export MOCK_RAW_LOCAL=''
 export MOCK_PROFILE_RAW=''
 export MOCK_GUEST_RULE_INPUT="$TMP/page-reporting-rule"
+export MOCK_QEMU_LOG="$TMP/qemu.log"
 mkdir -p "$HOME" "$TMP/bin"
 
 cat > "$TMP/bin/incus" <<'MOCK'
@@ -109,9 +110,13 @@ grep -F 'user.subyard.srv_pool=custom-approved-pool' "$MOCK_INCUS_LOG" | grep -F
 cat > "$TMP/bin/qemu-system-x86_64" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"$MOCK_QEMU_LOG"
 case "$*" in
   --version) printf 'QEMU emulator version %s\n' "${MOCK_QEMU_VERSION:-8.2.0}" ;;
-  '-device virtio-balloon-pci,help') printf '%s\n' "${MOCK_QEMU_PROPERTY:-free-page-reporting=<bool>}" ;;
+  '-device virtio-balloon-pci,help')
+    [ "${MOCK_QEMU_PROBE_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n' "${MOCK_QEMU_PROPERTY:-free-page-reporting=<bool>}"
+    ;;
   *) exit 90 ;;
 esac
 MOCK
@@ -125,16 +130,22 @@ grep -Fxq 'subyard|project set subyard restricted.virtual-machines.lowlevel allo
 # shellcheck source=scripts/lib-vm-page-reporting.sh
 . "$ROOT/scripts/lib-vm-page-reporting.sh"
 vm_page_reporting_check_host || fail 'tested QEMU reporting property was rejected'
-MOCK_QEMU_VERSION=10.0.13
-export MOCK_QEMU_VERSION
-vm_page_reporting_check_host || fail 'Debian 13 QEMU reporting property was rejected'
 MOCK_QEMU_VERSION=7.2.0
 export MOCK_QEMU_VERSION
-if vm_page_reporting_check_host >/dev/null 2>&1; then fail 'unsupported QEMU version accepted'; fi
-MOCK_QEMU_VERSION=8.2.0
+vm_page_reporting_check_host || fail 'QEMU reporting property outside the former version list was rejected'
+! grep -Fxq -- --version "$MOCK_QEMU_LOG" || fail 'reporting queried the QEMU version'
 MOCK_QEMU_PROPERTY=other-property
-export MOCK_QEMU_VERSION MOCK_QEMU_PROPERTY
-if vm_page_reporting_check_host >/dev/null 2>&1; then fail 'missing QEMU reporting property accepted'; fi
+export MOCK_QEMU_PROPERTY
+if vm_page_reporting_check_host >/dev/null 2>"$TMP/host-error"; then fail 'missing QEMU reporting property accepted'; fi
+grep -Fq 'has no free-page-reporting property' "$TMP/host-error" || fail 'missing QEMU property lacked a precise diagnostic'
+MOCK_QEMU_PROBE_FAIL=1
+export MOCK_QEMU_PROBE_FAIL
+if vm_page_reporting_check_host >/dev/null 2>"$TMP/host-error"; then fail 'failed QEMU property probe accepted'; fi
+grep -Fq 'cannot inspect QEMU virtio-balloon-pci reporting capability' "$TMP/host-error" || fail 'failed QEMU probe lacked a precise diagnostic'
+: > "$MOCK_QEMU_LOG"
+VM_FREE_PAGE_REPORTING=0 "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
+[ ! -s "$MOCK_QEMU_LOG" ] || fail 'ordinary project probed QEMU reporting'
+unset MOCK_QEMU_PROBE_FAIL MOCK_QEMU_PROPERTY
 
 MOCK_RAW_EFFECTIVE="$VM_PAGE_REPORTING_CONF"
 MOCK_RAW_LOCAL="$VM_PAGE_REPORTING_CONF"

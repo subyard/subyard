@@ -7,15 +7,12 @@ There is no browser administration panel or Subyard client registry.
 
 ## Create the environment
 
-Use an amd64 owner with KVM, Incus 6.0.6 or 6.0.7 and a supported QEMU reporting implementation (8.2.x or
-10.0.x). The preset uses Debian 13, with Ubuntu 24.04 as its image fallback, two virtual CPUs,
+Use an amd64 owner with KVM, Incus meeting Subyard's general minimum, and QEMU exposing the
+`virtio-balloon-pci` `free-page-reporting` property. Initialization verifies the fixed override and
+the guest's negotiated reporting feature and setting. The preset uses Debian 13, with Ubuntu 24.04 as its image fallback, two virtual CPUs,
 2 GiB RAM, host CPU weight 1000, a 10 GiB root disk and a separate 2 GiB state block volume. It requests Free Page
 Reporting and a pinned private IPv4. Coding integrations, work projects, host mounts, shared
 credentials, agent forwarding and nested VM access are excluded.
-
-The Incus allowlist includes distribution package suffixes for those two patch versions.
-Accept a candidate on 6.0.7 only after the [native acceptance check](#acceptance-check) confirms
-negotiated reporting, memory reclamation and persistence across reboot.
 
 Budget CPU and RAM for the VPN and owner alongside busy coding yards. Use the shared
 [yard resource limits](configuration.md#yard-resource-limits) to cap those yards, including

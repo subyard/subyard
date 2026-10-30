@@ -95,7 +95,7 @@ func (runtime Runtime) inspectLegacyYard(ctx context.Context, state ports.Reconc
 	if err := runtime.legacyInstancePolicy(ctx, state, adopt); err != nil {
 		return state, nil, err
 	}
-	reporting, err := runtime.vmPageReporting(ctx)
+	reporting, err := runtime.vmPageReporting()
 	if err != nil {
 		return state, nil, err
 	}

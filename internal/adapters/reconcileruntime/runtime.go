@@ -386,23 +386,12 @@ func probeConverged(err error) (bool, error) {
 
 const vmPageReportingConfig = "[device \"qemu_balloon\"]\nfree-page-reporting = \"on\""
 
-func (runtime Runtime) vmPageReporting(ctx context.Context) (bool, error) {
+func (runtime Runtime) vmPageReporting() (bool, error) {
 	if runtime.environmentValue("VM_FREE_PAGE_REPORTING") != "1" {
 		return false, nil
 	}
 	if runtime.Yard.YardKind != domain.YardVM {
 		return false, errors.New("VM_FREE_PAGE_REPORTING requires YARD_KIND=vm")
-	}
-	if runtime.Incus == nil {
-		return false, errors.New("Incus reader is required for VM Free Page Reporting")
-	}
-	server, err := runtime.Incus.Server(ctx)
-	if err != nil {
-		return false, fmt.Errorf("inspect Incus for VM Free Page Reporting: %w", err)
-	}
-	if server.Version != "6.0.6" && !strings.HasPrefix(server.Version, "6.0.6-") &&
-		server.Version != "6.0.7" && !strings.HasPrefix(server.Version, "6.0.7-") {
-		return false, fmt.Errorf("unsupported Incus version %q for VM Free Page Reporting (allowed: 6.0.6, 6.0.7)", server.Version)
 	}
 	return true, nil
 }
@@ -432,7 +421,7 @@ func vmRawQEMUConverged(instance ports.InstanceInfo) (bool, error) {
 }
 
 func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
-	reporting, err := runtime.vmPageReporting(ctx)
+	reporting, err := runtime.vmPageReporting()
 	if err != nil {
 		return false, err
 	}
@@ -494,18 +483,13 @@ func (runtime Runtime) projectPolicyConverged(state ports.ReconcileState, report
 }
 
 func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
-	reporting, err := runtime.vmPageReporting(ctx)
+	reporting, err := runtime.vmPageReporting()
 	if err != nil {
 		return false, err
 	}
 	ready, err := runtime.incusReady(ctx)
 	if err != nil || !ready {
 		return false, err
-	}
-	if reporting {
-		if err := runtime.runScript(ctx, runtime.Stderr, "03-create-subyard.sh", "--check-page-reporting"); err != nil {
-			return false, fmt.Errorf("VM Free Page Reporting preflight: %w", err)
-		}
 	}
 	appArmorDisabled := false
 	if runtime.Yard.YardKind == domain.YardContainer {
@@ -522,6 +506,11 @@ func (runtime Runtime) instanceConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if reporting {
+		for key, value := range state.ProfileConfig {
+			if strings.HasPrefix(key, "raw.qemu") && value != "" {
+				return false, fmt.Errorf("unexpected inherited %s in VM project %s", key, runtime.Yard.IncusProject)
+			}
+		}
 		converged, err := vmRawQEMUConverged(state.Instance)
 		if err != nil || !converged {
 			return false, err
@@ -1117,7 +1106,7 @@ func (runtime Runtime) powerService() application.PowerService {
 }
 
 func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
-	reporting, err := runtime.vmPageReporting(ctx)
+	reporting, err := runtime.vmPageReporting()
 	if err != nil {
 		return err
 	}
