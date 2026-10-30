@@ -23,6 +23,9 @@ import (
 )
 
 type initLegacyContinuation struct {
+	adopt              bool
+	adoptionConfig     map[string]string
+	projectBefore      map[string]string
 	grant              domain.LegacyContinuation
 	path               string
 	before             config.PersistentFileSnapshot
@@ -145,7 +148,7 @@ func (cli *CLI) legacyContinuationSource(ctx context.Context, loaded config.Load
 func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initExecution, request initArguments) error {
 	runtime, ok := execution.platform.(reconcileruntime.Runtime)
 	if !ok {
-		if request.continueLegacy {
+		if request.continueLegacy || request.adopt {
 			return errors.New("legacy continuation requires native local assessment")
 		}
 		return nil
@@ -159,18 +162,21 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	}
 	state, err := runtime.Incus.ReconcileState(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.SRVPool, runtime.SRVVolume, runtime.Yard.IncusBridge)
 	if err != nil {
-		if request.continueLegacy || snapshot.Exists {
+		if request.continueLegacy || request.adopt || snapshot.Exists {
 			return fmt.Errorf("legacy continuation needs read-only native access: %w", err)
 		}
 		return nil
 	}
-	if !snapshot.Exists && !request.continueLegacy && (!state.ProjectFound || state.ProjectConfig["user.subyard.installation"] == "1") {
+	if !snapshot.Exists && !request.continueLegacy && !request.adopt && (!state.ProjectFound || state.ProjectConfig["user.subyard.installation"] == "1" || state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation) {
 		return nil
+	}
+	if snapshot.Exists && !request.adopt && state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation {
+		return errors.New("adoption metadata is present; rerun yard init --adopt to verify publication and retire the exact continuation record")
 	}
 	if request.mode != initReconcile || request.profile != "" || execution.bootstrap != nil || runtime.Yard.AccessKind != domain.AccessLocal {
 		return errors.New("legacy continuation permits only local plain init; reset, configs and profile expansion are not authorized")
 	}
-	if !snapshot.Exists && !request.continueLegacy {
+	if !snapshot.Exists && !request.continueLegacy && !request.adopt {
 		return errors.New("existing unmarked project has no continuation consent; use yard init --continue-legacy to assess limited normal reconciliation; this grants no deletion ownership")
 	}
 	if execution.hostIDPending {
@@ -238,7 +244,7 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	if err != nil {
 		return err
 	}
-	continuation, err := assessLegacyContinuation(ctx, runtime, execution.hostID, runtimeRoot, source, snapshot)
+	continuation, err := assessLegacyYard(ctx, runtime, execution.hostID, runtimeRoot, source, snapshot, request.adopt)
 	if err != nil {
 		return err
 	}
@@ -260,12 +266,18 @@ func (cli *CLI) prepareLegacyContinuation(ctx context.Context, execution *initEx
 	continuation.registrationBefore = registration
 	continuation.legacyHostBefore = legacyHost
 	execution.legacyContinuation = continuation
-	runtime.LegacyContinuation = &continuation.grant
+	if !request.adopt {
+		runtime.LegacyContinuation = &continuation.grant
+	}
 	execution.platform = runtime
 	return nil
 }
 
 func assessLegacyContinuation(ctx context.Context, runtime reconcileruntime.Runtime, hostID, runtimeRoot, source string, before config.PersistentFileSnapshot) (*initLegacyContinuation, error) {
+	return assessLegacyYard(ctx, runtime, hostID, runtimeRoot, source, before, false)
+}
+
+func assessLegacyYard(ctx context.Context, runtime reconcileruntime.Runtime, hostID, runtimeRoot, source string, before config.PersistentFileSnapshot, adopt bool) (*initLegacyContinuation, error) {
 	var grant domain.LegacyContinuation
 	var err error
 	if before.Exists {
@@ -275,7 +287,14 @@ func assessLegacyContinuation(ctx context.Context, runtime reconcileruntime.Runt
 		}
 		runtime.LegacyContinuation = &grant
 	}
-	state, resources, err := runtime.InspectLegacyContinuation(ctx)
+	var state ports.ReconcileState
+	var resources []ports.TeardownResource
+	var adoptionConfig, projectBefore map[string]string
+	if adopt {
+		state, resources, adoptionConfig, projectBefore, err = runtime.InspectYardAdoption(ctx)
+	} else {
+		state, resources, err = runtime.InspectLegacyContinuation(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +320,7 @@ func assessLegacyContinuation(ctx context.Context, runtime reconcileruntime.Runt
 	} else {
 		grant = expected
 	}
-	return &initLegacyContinuation{grant: grant, path: legacyContinuationPath(runtime.Yard), before: before, native: native, source: source}, nil
+	return &initLegacyContinuation{adopt: adopt, adoptionConfig: adoptionConfig, projectBefore: projectBefore, grant: grant, path: legacyContinuationPath(runtime.Yard), before: before, native: native, source: source}, nil
 }
 
 func (continuation *initLegacyContinuation) check(ctx context.Context, cli *CLI, execution *initExecution) error {
@@ -339,11 +358,11 @@ func (continuation *initLegacyContinuation) check(ctx context.Context, cli *CLI,
 	if !ok {
 		return domain.ErrPlanStale
 	}
-	actual, err := assessLegacyContinuation(ctx, runtime, execution.hostID, root, source, current)
+	actual, err := assessLegacyYard(ctx, runtime, execution.hostID, root, source, current, continuation.adopt)
 	if err != nil {
 		return fmt.Errorf("%w: inspect legacy continuation assessment: %w", domain.ErrPlanStale, err)
 	}
-	if actual.native != continuation.native || !reflect.DeepEqual(actual.grant, continuation.grant) {
+	if actual.native != continuation.native || !reflect.DeepEqual(actual.grant, continuation.grant) || !reflect.DeepEqual(actual.adoptionConfig, continuation.adoptionConfig) || !reflect.DeepEqual(actual.projectBefore, continuation.projectBefore) {
 		return fmt.Errorf("%w: legacy continuation assessment changed", domain.ErrPlanStale)
 	}
 	return nil
@@ -372,12 +391,14 @@ func (continuation *initLegacyContinuation) binding() string {
 		return ""
 	}
 	return operationStateDigest(struct {
+		Adopt                          bool
+		AdoptionConfig, ProjectBefore  map[string]string
 		Grant                          domain.LegacyContinuation
 		Before                         config.PersistentFileSnapshot
 		Native, Source                 string
 		Host, Registration, LegacyHost config.PersistentFileSnapshot
 		RegistrationPath               string
-	}{continuation.grant, continuation.before, continuation.native, continuation.source, continuation.hostBefore, continuation.registrationBefore, continuation.legacyHostBefore, continuation.registrationPath})
+	}{continuation.adopt, continuation.adoptionConfig, continuation.projectBefore, continuation.grant, continuation.before, continuation.native, continuation.source, continuation.hostBefore, continuation.registrationBefore, continuation.legacyHostBefore, continuation.registrationPath})
 }
 
 // Compare the existing protected grant once, field by field. Only explicitly

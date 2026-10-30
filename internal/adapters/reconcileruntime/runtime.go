@@ -443,8 +443,14 @@ func (runtime Runtime) projectConverged(ctx context.Context) (bool, error) {
 	if err != nil || !state.ProjectFound {
 		return false, err
 	}
+	if state.ProjectConfig["user.subyard.installation"] == domain.AdoptedInstallation && state.ProjectConfig["user.subyard.adopted_uuid"] == "" {
+		return false, errors.New("adopted project native identity is incomplete or changed")
+	}
+	if _, present := state.ProjectConfig["user.subyard.adopted_uuid"]; present && state.ProjectConfig["user.subyard.installation"] == "1" {
+		return false, errors.New("project has conflicting creation and adoption ownership")
+	}
 	if runtime.environmentValue("SUBYARD_HOME") == "" || runtime.environmentValue("SUBYARD_CONFIG_HOME") == "" ||
-		state.ProjectConfig["user.subyard.installation"] != "1" ||
+		(state.ProjectConfig["user.subyard.installation"] != "1" && state.ProjectConfig["user.subyard.installation"] != domain.AdoptedInstallation) ||
 		state.ProjectConfig["user.subyard.operator_uid"] != strconv.Itoa(os.Getuid()) ||
 		state.ProjectConfig["user.subyard.data_home"] != runtime.environmentValue("SUBYARD_HOME") ||
 		state.ProjectConfig["user.subyard.config_home"] != runtime.environmentValue("SUBYARD_CONFIG_HOME") {

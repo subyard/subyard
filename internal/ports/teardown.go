@@ -112,6 +112,7 @@ type InstallationYardReader interface {
 }
 
 type InstallationYard struct {
+	Adopted     bool
 	Context     *domain.Context
 	Project     string
 	Name        string

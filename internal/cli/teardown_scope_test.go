@@ -181,6 +181,7 @@ type fullOwnershipFixture struct {
 	*testkit.Incus
 	owner       ports.InstallationYard
 	inventories int
+	shared      []ports.TeardownResource
 }
 
 func (fake *fullOwnershipFixture) InstallationYards(context.Context) ([]ports.InstallationYard, error) {
@@ -191,7 +192,7 @@ func (fake *fullOwnershipFixture) InstallationYards(context.Context) ([]ports.In
 }
 
 func (fake *fullOwnershipFixture) InstallationSharedInventory(context.Context, string, string) ([]ports.TeardownResource, error) {
-	return nil, nil
+	return fake.shared, nil
 }
 
 func (fake *fullOwnershipFixture) TeardownInventory(ctx context.Context, project string) ([]ports.TeardownResource, error) {
@@ -209,7 +210,7 @@ func (fake *fullOwnershipFixture) ReconcileState(ctx context.Context, project, i
 }
 
 func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *testing.T) {
-	for _, kind := range []string{"same-uid-other-data", "same-uid-other-config", "other-operator", "unproven-legacy", "owned-partial", "owned-unregistered", "foreign-missing-roots"} {
+	for _, kind := range []string{"same-uid-other-data", "same-uid-other-config", "other-operator", "unproven-legacy", "owned-partial", "owned-unregistered", "foreign-missing-roots", "adopted"} {
 		t.Run(kind, func(t *testing.T) {
 			program, loaded, incus, _ := teardownResetFixture(t)
 			incus.Reconcile.ProjectFound = true
@@ -233,6 +234,28 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 			owner := ports.InstallationYard{Project: loaded.Context.IncusProject, OperatorUID: strconv.Itoa(os.Getuid()), DataHome: installation.DataHome, ConfigHome: installation.ConfigHome, HostBase: loaded.Context.Paths.HostBase}
 			partialProfile, _ := json.Marshal(map[string]any{"name": "default", "config": map[string]string{}, "devices": map[string]any{}, "description": "partial profile"})
 			switch kind {
+			case "adopted":
+				owner.Adopted = true
+				program.options.DispatcherPath = filepath.Join(program.options.RepositoryRoot, "bin", "yard")
+				for _, relative := range []string{"scripts/teardown-physical.sh", "scripts/lib/teardown-services.sh", "bin/yard"} {
+					body := []byte("fixture retained executable\n")
+					if relative != "bin/yard" {
+						var err error
+						body, err = os.ReadFile(filepath.Join("../..", relative))
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					path := filepath.Join(program.options.RepositoryRoot, relative)
+					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, path, body, 0700)
+				}
+				if err := os.MkdirAll(filepath.Join(loaded.Context.Paths.HostBase, "backups"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(loaded.Context.Paths.HostBase, "backups", "preserved"), []byte("preserve"), 0600)
 			case "same-uid-other-data":
 				owner.DataHome += "-other"
 			case "same-uid-other-config":
@@ -264,10 +287,25 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 				program.catalog = catalog
 			}
 			fake := &fullOwnershipFixture{Incus: incus, owner: owner}
+			if kind == "adopted" {
+				fake.shared = []ports.TeardownResource{{Kind: "pool", Name: "default", Binding: "pool", Path: loaded.Context.Paths.StoragePath}, {Kind: "network", Name: loaded.Context.IncusBridge, Binding: "network"}, {Kind: "host-profile", Name: "default", Binding: "profile"}}
+			}
 			program.options.Incus = fake
 			execution := &fullTeardown{}
 			err := program.observeFullTeardown(context.Background(), loaded, execution)
-			if kind == "owned-partial" || kind == "owned-unregistered" {
+			if kind == "adopted" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(execution.Shared) != 0 || !slices.Contains(execution.PreservedRoots, loaded.Context.Paths.HostBase) {
+					t.Fatal("adoption inferred shared or host creation ownership")
+				}
+				for _, tree := range execution.Trees {
+					if tree.Path == loaded.Context.Paths.HostBase {
+						t.Fatal("unrecorded adopted host namespace scheduled for deletion")
+					}
+				}
+			} else if kind == "owned-partial" || kind == "owned-unregistered" {
 				if fake.inventories == 0 || len(execution.Yards) != 1 {
 					t.Fatal("owned partial project was not admitted", err)
 				}

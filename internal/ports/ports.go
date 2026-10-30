@@ -61,6 +61,11 @@ type InstanceConfigWriter interface {
 	SetInstanceConfig(context.Context, string, string, map[string]string) error
 }
 
+// ProjectAdopter publishes assessed ownership without changing native policy.
+type ProjectAdopter interface {
+	AdoptProject(context.Context, string, map[string]string, map[string]string) error
+}
+
 type InstanceInventory interface {
 	ListInstances(context.Context) ([]InstanceInfo, error)
 }

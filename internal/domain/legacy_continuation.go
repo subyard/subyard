@@ -1,5 +1,8 @@
 package domain
 
+// AdoptedInstallation is deliberately unreadable as creation ownership by older releases.
+const AdoptedInstallation = "adopted-v1"
+
 // LegacyContinuation grants only normal reconciliation of an existing native
 // identity. It is never installation creation or destructive ownership evidence.
 type LegacyContinuation struct {

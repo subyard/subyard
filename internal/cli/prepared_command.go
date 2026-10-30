@@ -659,7 +659,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	if err := cli.prepareInitProfileProvision(ctx, prepared.Loaded, execution, prepared.Arguments); err != nil {
 		return err
 	}
-	if prepared.interactiveSetup {
+	if prepared.interactiveSetup && !execution.adopting() {
 		execution.profileSetup, err = cli.prepareInitProfiles(ctx, execution, prepared.Arguments)
 		if err != nil {
 			return err
@@ -699,6 +699,9 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		}
 		if err := execution.inputBaseline.check(ctx, cli); err != nil {
 			return "", domain.ActionDelta{}, err
+		}
+		if execution.adopting() {
+			return execution.actionPlan()
 		}
 		if err := execution.checkIntegrationBaseline(cli); err != nil {
 			return "", domain.ActionDelta{}, err
@@ -748,7 +751,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			}
 			defer unlock()
 		}
-		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
+		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() && !execution.adopting() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
 			}
@@ -764,10 +767,13 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 		if err == nil && cli.profileInitRepair != nil {
 			err = cli.finishConfigApplyRepair(ctx, cli.profileInitRepair)
 		}
-		if err == nil && !cli.releaseTransitionChild {
+		if err == nil && !cli.releaseTransitionChild && !execution.adopting() {
 			err = cli.verifyInitReleaseReadiness(ctx, execution.loaded.Context.YardName)
 		}
-		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() {
+		if err == nil && execution.adopting() {
+			fmt.Fprintln(diagnostics, "  [ ok ] Yard adopted; run plain init to reconcile")
+		}
+		if err == nil && execution.mode != initConfigs && !execution.hooksOnly() && !execution.adopting() {
 			fmt.Fprintln(diagnostics, "  [ ok ] Subyard initialized")
 		}
 		return result, err

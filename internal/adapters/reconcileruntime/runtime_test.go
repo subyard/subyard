@@ -1369,6 +1369,22 @@ func TestProjectProbeOwnsRestrictedPolicy(t *testing.T) {
 	if err != nil || !converged {
 		t.Fatalf("matching project rejected: %v, %v", converged, err)
 	}
+	incus.Reconcile.ProjectConfig["user.subyard.installation"] = domain.AdoptedInstallation
+	incus.Reconcile.ProjectConfig["user.subyard.adopted_uuid"] = "historical-instance"
+	incus.Reconcile.Instance.Config = map[string]string{"volatile.uuid": "authorized-successor"}
+	if ready, err := runtime.CheckStage(context.Background(), "project"); err != nil || !ready {
+		t.Fatal("adopted provenance blocked authorized instance recreation", ready, err)
+	}
+	delete(incus.Reconcile.ProjectConfig, "user.subyard.adopted_uuid")
+	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
+		t.Fatal("adopted project without UUID accepted")
+	}
+	incus.Reconcile.ProjectConfig["user.subyard.installation"] = "1"
+	incus.Reconcile.ProjectConfig["user.subyard.adopted_uuid"] = "historical-instance"
+	if _, err := runtime.CheckStage(context.Background(), "project"); err == nil {
+		t.Fatal("mixed creation and adoption ownership accepted")
+	}
+	delete(incus.Reconcile.ProjectConfig, "user.subyard.adopted_uuid")
 	for _, key := range []string{"user.subyard.installation", "user.subyard.operator_uid", "user.subyard.data_home", "user.subyard.config_home"} {
 		original := incus.Reconcile.ProjectConfig[key]
 		incus.Reconcile.ProjectConfig[key] = "foreign"

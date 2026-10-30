@@ -232,7 +232,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	foreignProjects := map[string]bool{}
 	installationYards := []ports.InstallationYard{}
 	admittedProjects := map[string]bool{}
-	legacyProjects := map[string]bool{}
+	unprovenProjects := map[string]bool{}
 	if reader, ok := incusPort.(ports.InstallationYardReader); ok {
 		installationYards, err = reader.InstallationYards(ctx)
 		if err != nil {
@@ -252,6 +252,9 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 				}
 			} else {
 				admittedProjects[yard.Project] = true
+				if yard.Adopted {
+					unprovenProjects[yard.Project] = true
+				}
 			}
 		}
 	}
@@ -289,7 +292,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			if err := validateLegacyFullYard(loaded, installation, execution.snapshot()); err != nil {
 				return fmt.Errorf("project %s has no exact installation ownership: %w; preserve its resources and restore proven ownership before full removal", loaded.Context.IncusProject, err)
 			}
-			legacyProjects[loaded.Context.IncusProject] = true
+			unprovenProjects[loaded.Context.IncusProject] = true
 			execution.ManagedRoots = append(execution.ManagedRoots, filepath.Join(installation.DataHome, "e2e", "routes"))
 		}
 		if execution.snapshot().State.ProjectFound || execution.snapshot().State.InstanceFound {
@@ -485,7 +488,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	for _, root := range execution.MutableRoots {
 		roots = append(roots, root)
 	}
-	storageTrees, err := cli.captureFullShared(ctx, execution, knownProjects, legacyProjects)
+	storageTrees, err := cli.captureFullShared(ctx, execution, knownProjects, unprovenProjects)
 	if err != nil {
 		return err
 	}
@@ -498,7 +501,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 	}
 	for _, yard := range execution.Yards {
 		root := yard.Context.Paths.HostBase
-		if legacyProjects[yard.Context.IncusProject] && !hostRecorded[root] {
+		if unprovenProjects[yard.Context.IncusProject] && !hostRecorded[root] {
 			// Association proves the yard, not who created old host directories.
 			// Retain the entire unrecorded host namespace, including backups.
 			protected = append(protected, root)

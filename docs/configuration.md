@@ -958,6 +958,36 @@ coordination locks and atomic nonsecret epoch files under `/tmp/subyard-owner-lo
 bypass serialization. Queued mutations and late audit/cache writers recheck their original
 installation generation before writing.
 
+### Adopting an existing yard
+
+After completing the supported release transition, run `yard init --adopt`
+through the installed local owner launcher to register an existing Subyard yard
+for normal management. This is an explicit lifecycle operation, separate from
+release migration. Review its single operation plan; `--yes` accepts adoption
+only when `--adopt` is explicitly selected.
+
+Adoption verifies protected persisted configuration, owner HostID, installed
+source and completed release history, native instance UUID, dedicated project
+inventory and configured native capabilities. Supported containers, nested
+containers and VMs use the same generic capability validators as reconciliation.
+Unknown workloads, snapshots, uninventoried enabled namespaces, noncanonical
+devices, temporary configuration overrides and partial or foreign ownership
+are refused. The existing project policy must already be converged.
+
+The operation atomically publishes complete project registration with adopted
+provenance. It preserves the instance, disks, running workloads and desired
+power state. Run plain `yard init` afterwards to reconcile configuration or
+selected profiles. Adoption creates no resource-creation receipts: full removal
+preserves shared infrastructure and unrecorded host namespaces whose creation
+ownership was not proven. Its versioned ownership marker makes older releases
+refuse the adopted project rather than infer creation ownership on rollback.
+
+An existing narrow continuation record is retired only after native publication
+is verified. If interrupted between publication and retirement, rerun
+`yard init --adopt` to verify the same identity and retire the exact old record.
+`--adopt` cannot be combined with `--continue-legacy`, `--configs`, `--reset`
+or `--profile`.
+
 ### Continuing an existing legacy yard
 
 After upgrading through the supported release transition, a legacy project may

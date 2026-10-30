@@ -29,6 +29,16 @@ CI additionally runs
 Linux CLI tests also require util-linux `script` to exercise resource commands with a real
 controlling terminal, including terminal-input isolation and cancellation.
 
+For the metadata-only existing-yard adoption regression, run
+`bash dev/e2e/yard-adoption.sh --preflight`, package the current candidate with
+`dev/release-acceptance.py prepare`, and pass its candidate bundle to the existing
+agent controller. The one-VM command is
+`dev/agent-e2e.sh --slot "$slot" --vm-count 1 --vm 1 --purpose yard-adoption -- timeout --signal=TERM --kill-after=60 1800 bash dev/e2e/yard-adoption.sh`.
+The fixture installs that candidate and sequentially exercises a container and VM,
+seeding only their project ownership metadata. It checks UUID, disk data, active
+workload continuity, desired stopped state, and subsequent ordinary init.
+This seeded native regression does not prove an authenticated historical upgrade.
+
 When a selected check needs real GNU/Linux hosts, use an allocated `test-vms` slot.
 The operator owns outer-yard start, stop and teardown; the
 root broker owns inner slot create, start and stop; agents acquire leases only.

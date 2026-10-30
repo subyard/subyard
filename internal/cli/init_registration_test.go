@@ -103,7 +103,7 @@ func TestInitEmptyNamedYardPreservesRegisteredSelectionAndUnknownModes(t *testin
 	if err != nil || bootstrap != nil || loaded.Environment["ENVIRONMENT_PROFILES"] != "sample" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("registered selection changed: %v", err)
 	}
-	for _, arguments := range [][]string{{"--configs"}, {"--reset"}, {"--continue-legacy"}} {
+	for _, arguments := range [][]string{{"--configs"}, {"--reset"}, {"--continue-legacy"}, {"--adopt"}} {
 		if _, _, err := program.loadInitContext("missing", true, arguments); !errors.Is(err, config.ErrUnknownYard) {
 			t.Fatalf("mode %v implicitly created missing name: %v", arguments, err)
 		}

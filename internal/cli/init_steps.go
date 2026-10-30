@@ -35,6 +35,10 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 		steps = append(steps, step)
 	}
+	if execution.adopting() {
+		appendStep("init.adopt", target+" UUID "+execution.legacyContinuation.grant.InstanceUUID, "complete adopted project registration", "atomic metadata publication and native identity verified before exact continuation retirement", strings.Join(execution.consequences(), "; "), false, false)
+		return steps
+	}
 	if execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists {
 		grant := execution.legacyContinuation.grant
 		appendStep("init.legacy-continuation", target+" UUID "+grant.InstanceUUID, fmt.Sprintf("normal reconciliation only; owner %s UID %d; data %s; config %s; runtime %s; retain workloads and unproven destructive ownership", grant.HostID, grant.OperatorUID, grant.Context.Paths.DataHome, grant.Context.Paths.ConfigHome, grant.RuntimeRoot), "protected CAS grant matches assessed owner and native identity", "grant limited legacy continuation; no reset or full uninstall authority", false, false)

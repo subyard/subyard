@@ -50,7 +50,11 @@ The source-version cutoff does not raise the domain epoch floor or retire V2 che
 
 Supported historical updates do not invent project ownership labels. Plain `yard init` refuses
 an existing unlabelled project without proven authority, including one created by v0.11.0,
-even after its supported update succeeds. Explicit `yard init --continue-legacy` can establish
+even after its supported update succeeds. Explicit `yard init --adopt` can register the existing
+yard for normal management while preserving unproven shared and host creation ownership.
+This metadata-only lifecycle operation is separate from release migration; run plain init
+after adoption to reconcile. Older releases refuse its versioned adopted ownership marker.
+Explicit `yard init --continue-legacy` can establish
 a separately confirmed, protected grant for bounded normal reconciliation of a supported,
 exactly assessed legacy resource. It does not relabel the project or authorize full removal.
 The power acceptance fixture exercises this opt-in, repeated plain init, two reboots and

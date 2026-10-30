@@ -32,6 +32,50 @@ func CompareAndSwapLocalSettingsFile(configHome, path string, expected Persisten
 	return compareAndSwapPersistentFileGuarded(configHome, path, expected, desired, func() error { return checkLocalSettingsTargetWritable(configHome, path) }, nil, true)
 }
 
+// RemovePersistentFileSnapshot retires only the exact assessed protected file.
+// It uses the same root flock and pinned no-follow traversal as publication.
+func RemovePersistentFileSnapshot(configHome, path string, expected PersistentFileSnapshot) error {
+	if !expected.Exists || expected.Identity == (PersistentFileIdentity{}) {
+		return ErrPersistentTargetStale
+	}
+	parts, err := persistentRelativeParts(configHome, path)
+	if err != nil {
+		return err
+	}
+	root, err := unix.Open(filepath.Clean(configHome), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(root)
+	if err := validatePersistentDirectoryFD(root); err != nil {
+		return err
+	}
+	if err := unix.Flock(root, unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(root, unix.LOCK_UN)
+	parent := "."
+	if len(parts) > 1 {
+		parent = strings.Join(parts[:len(parts)-1], "/")
+	}
+	fd, err := openPersistentDirectoryAt(root, parent)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	current, err := readPersistentSnapshotAt(fd, parts[len(parts)-1])
+	if err != nil {
+		return err
+	}
+	if !samePersistentFileSnapshotExact(current, expected) {
+		return ErrPersistentTargetStale
+	}
+	if err := unix.Unlinkat(fd, parts[len(parts)-1], 0); err != nil {
+		return err
+	}
+	return unix.Fsync(fd)
+}
+
 func compareAndSwapPersistentFile(
 	configHome string,
 	path string,

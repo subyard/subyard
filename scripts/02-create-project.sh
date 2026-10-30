@@ -81,13 +81,18 @@ if [ "$created_project" = 0 ] && [ -z "$existing_installation" ]; then
   die "existing project has no proven installation ownership; preserve its workloads and restore its original ownership record"
 fi
 if [ -n "$existing_installation" ]; then
-  [ "$existing_installation" = 1 ] \
+  { [ "$existing_installation" = 1 ] || [ "$existing_installation" = adopted-v1 ]; } \
     && [ "$(incus project get "$INCUS_PROJECT" user.subyard.operator_uid)" = "$operator_uid" ] \
     && [ "$(incus project get "$INCUS_PROJECT" user.subyard.data_home)" = "$SUBYARD_HOME" ] \
     && [ "$(incus project get "$INCUS_PROJECT" user.subyard.config_home)" = "$SUBYARD_CONFIG_HOME" ] \
     || die "project belongs to another or unknown installation"
 fi
 subyard_project_owner_config "$operator_uid"
+if [ "$existing_installation" = adopted-v1 ]; then
+  [ -n "$(incus project get "$INCUS_PROJECT" user.subyard.adopted_uuid)" ] \
+    || die "project has incomplete adopted ownership"
+  SUBYARD_PROJECT_OWNER_CONFIG[0]=user.subyard.installation=adopted-v1
+fi
 incus project set "$INCUS_PROJECT" "${SUBYARD_PROJECT_OWNER_CONFIG[@]}" </dev/null
 
 

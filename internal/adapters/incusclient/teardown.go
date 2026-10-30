@@ -34,8 +34,14 @@ func (client *Client) InstallationYards(ctx context.Context) ([]ports.Installati
 		if values["user.subyard.installation"] == "" {
 			continue
 		}
-		if values["user.subyard.installation"] != "1" {
+		if values["user.subyard.installation"] != "1" && values["user.subyard.installation"] != domain.AdoptedInstallation {
 			return nil, fmt.Errorf("unsupported Subyard installation ownership in project %s", project.Name)
+		}
+		if values["user.subyard.installation"] == domain.AdoptedInstallation && values["user.subyard.adopted_uuid"] == "" {
+			return nil, fmt.Errorf("incomplete adopted ownership in project %s", project.Name)
+		}
+		if _, present := values["user.subyard.adopted_uuid"]; present && values["user.subyard.installation"] == "1" {
+			return nil, fmt.Errorf("conflicting creation ownership in project %s", project.Name)
 		}
 		var ownerContext *domain.Context
 		if raw := values["user.subyard.context"]; raw != "" {
@@ -50,7 +56,11 @@ func (client *Client) InstallationYards(ctx context.Context) ([]ports.Installati
 				return nil, fmt.Errorf("inconsistent installation context in project %s", project.Name)
 			}
 		}
+		if values["user.subyard.installation"] == domain.AdoptedInstallation && ownerContext == nil {
+			return nil, fmt.Errorf("adopted project %s has no complete ownership context", project.Name)
+		}
 		result = append(result, ports.InstallationYard{
+			Adopted: values["user.subyard.installation"] == domain.AdoptedInstallation,
 			Context: ownerContext,
 			Project: project.Name, Name: values["user.subyard.yard_name"], Instance: values["user.subyard.instance_name"],
 			OperatorUID: values["user.subyard.operator_uid"], DataHome: values["user.subyard.data_home"], ConfigHome: values["user.subyard.config_home"],
@@ -135,13 +145,27 @@ func (client *Client) TeardownInventory(ctx context.Context, project string) ([]
 		}
 	}
 	var pools []api.StoragePool
-	if config.Config["features.storage.volumes"] != "false" {
+	if config.Config["features.storage.volumes"] != "false" || config.Config["features.storage.buckets"] == "true" {
 		pools, err = server.GetStoragePools()
 		if err != nil {
 			return nil, normalizeError("read teardown storage pools", err)
 		}
 	}
 	for _, pool := range pools {
+		if config.Config["features.storage.buckets"] == "true" {
+			buckets, err := scoped.GetStoragePoolBucketNames(pool.Name)
+			if err != nil {
+				return nil, normalizeError("read teardown bucket namespace", err)
+			}
+			for _, name := range buckets {
+				if err := add("bucket", name, pool.Name, name); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if config.Config["features.storage.volumes"] == "false" {
+			continue
+		}
 		volumes, err := scoped.GetStoragePoolVolumes(pool.Name)
 		if err != nil {
 			return nil, normalizeError("read teardown volumes", err)

@@ -28,6 +28,10 @@ func (runtime Runtime) RenderOwnerProjectConfig(ctx context.Context, original *P
 	if err != nil {
 		return nil, err
 	}
+	return runtime.renderProjectConfig(ctx, helper)
+}
+
+func (runtime Runtime) renderProjectConfig(ctx context.Context, helper []byte) ([]byte, error) {
 	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	// Privileged shell mode disables inherited BASH_ENV/functions; this probe

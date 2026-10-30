@@ -35,6 +35,7 @@ const forwardedSSHAgentConsequence = "SSH agent forwarding enables git push and 
 	"exercise it; agent ask-rules are a UX safeguard, not a security boundary"
 
 type initArguments struct {
+	adopt          bool
 	continueLegacy bool
 	mode           initMode
 	profile        string
@@ -153,6 +154,11 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 		argument := arguments[index]
 		switch argument {
 		case "-y", "--yes":
+		case "--adopt":
+			if request.adopt {
+				return initArguments{}, errors.New("--adopt may be specified only once")
+			}
+			request.adopt = true
 		case "--continue-legacy":
 			if request.continueLegacy {
 				return initArguments{}, errors.New("--continue-legacy may be specified only once")
@@ -190,6 +196,9 @@ func parseInitArguments(arguments []string) (initArguments, error) {
 	if request.continueLegacy && (request.mode != initReconcile || request.profile != "") {
 		return initArguments{}, errors.New("--continue-legacy cannot be combined with --configs, --reset or --profile")
 	}
+	if request.adopt && (request.continueLegacy || request.mode != initReconcile || request.profile != "") {
+		return initArguments{}, errors.New("--adopt cannot be combined with --continue-legacy, --configs, --reset or --profile")
+	}
 	return request, nil
 }
 
@@ -204,11 +213,15 @@ func (cli *CLI) loadInitContext(
 	}
 	if request.profile == "" {
 		loaded, err := cli.loadContext(yard)
-		if errors.Is(err, config.ErrUnknownYard) && explicit && yard != "" && yard != "default" && request.mode == initReconcile && !request.continueLegacy {
+		if errors.Is(err, config.ErrUnknownYard) && explicit && yard != "" && yard != "default" && request.mode == initReconcile && !request.continueLegacy && !request.adopt {
 			return cli.loadEmptyNamedYard(yard)
 		}
-		if err == nil && request.continueLegacy && loaded.Context.AccessKind != domain.AccessLocal {
-			return config.Loaded{}, nil, errors.New("--continue-legacy must run locally through the installed owner launcher")
+		if err == nil && (request.continueLegacy || request.adopt) && loaded.Context.AccessKind != domain.AccessLocal {
+			flag := "--continue-legacy"
+			if request.adopt {
+				flag = "--adopt"
+			}
+			return config.Loaded{}, nil, fmt.Errorf("%s must run locally through the installed owner launcher", flag)
 		}
 		return loaded, nil, err
 	}
@@ -518,6 +531,21 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		return nil, fmt.Errorf("invalid effective INCUS_PROJECT %q for yard %q: must use lowercase letters, digits or hyphens, start and end with a letter or digit, and be 2-64 bytes long; set a valid INCUS_PROJECT override", projectName, loaded.Context.YardName)
 	}
 	mode := request.mode
+	if request.adopt {
+		powerYards, err := cli.powerYardContexts(loaded)
+		if err != nil {
+			return nil, err
+		}
+		execution := &initExecution{loaded: loaded, mode: mode, bootstrap: bootstrap, platform: cli.initPlatform(loaded, powerYards), powerYards: powerYards}
+		execution.hostID, execution.hostIDPending, err = configsync.ResolveHostID(loaded.Context.Paths.ConfigHome, loaded.Environment)
+		if err != nil {
+			return nil, err
+		}
+		if err := cli.prepareLegacyContinuation(ctx, execution, request); err != nil {
+			return nil, err
+		}
+		return execution, nil
+	}
 	baseline, err := captureInitIntegrationBaseline(loaded)
 	if err != nil {
 		return nil, err
@@ -640,6 +668,9 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 }
 
 func (execution *initExecution) consequences() []string {
+	if execution.adopting() {
+		return []string{"adopt the assessed existing yard project into normal management; preserve instance identity, disks and power state", "retain adopted provenance; unproven shared infrastructure and host namespaces gain no deletion ownership", "retire only the exact assessed legacy continuation record after verified adoption; run plain init afterwards to reconcile"}
+	}
 	if execution.hooksOnly() {
 		return []string{"restore missing registered project metadata and retry installed project hooks once for active resources"}
 	}
@@ -699,7 +730,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists || execution.profileSetup != nil || execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
+	changed := execution.adopting() || execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists || execution.profileSetup != nil || execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -722,7 +753,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 }
 
 func (execution *initExecution) hooksOnly() bool {
-	return (execution.legacyContinuation == nil || execution.legacyContinuation.before.Exists) && execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
+	return !execution.adopting() && (execution.legacyContinuation == nil || execution.legacyContinuation.before.Exists) && execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
@@ -792,6 +823,9 @@ func (execution *initExecution) refreshAssessment(ctx context.Context, cli *CLI)
 	}
 	if err := execution.checkHookProjects(ctx); err != nil {
 		return err
+	}
+	if execution.adopting() {
+		return nil
 	}
 	if err := execution.checkNativePlans(ctx, true); err != nil {
 		return err
@@ -916,6 +950,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		if err := (application.Reconciler{Stages: stages, Runner: execution.platform}).CheckApproved(ctx, approved); err != nil {
 			return err
 		}
+	}
+	if execution.adopting() {
+		return execution.legacyContinuation.applyAdoption(ctx, cli, execution)
 	}
 	if err := execution.legacyContinuation.publish(execution); err != nil {
 		return err
