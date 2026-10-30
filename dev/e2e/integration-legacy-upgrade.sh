@@ -305,7 +305,7 @@ operator_env "$CANDIDATE_LAUNCHER" init >"$STATE_ROOT/init-continuation-required
 init_rc=$?
 set -e
 [ "$init_rc" -eq 1 ] \
-  && grep -Fq 'existing unmarked project has no continuation consent; use yard init --continue-legacy to assess limited normal reconciliation; this grants no deletion ownership' \
+  && grep -Fq 'existing unmarked project has no continuation consent; use yard init --adopt to assess adoption for normal management, then rerun yard init to reconcile; alternatively, use yard init --continue-legacy to assess limited normal reconciliation without deletion ownership' \
     "$STATE_ROOT/init-continuation-required.log" \
   || die 'candidate init did not refuse the exact missing-continuation boundary'
 assert_unadopted "$BASELINE_FINGERPRINT"

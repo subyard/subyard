@@ -275,8 +275,14 @@ func TestLegacyContinuationRefusesForeignIncompleteAndExpandedScope(t *testing.T
 	}
 	runtime, _ := legacyContinuationFixture(t)
 	cli := &CLI{}
-	if err := cli.prepareLegacyContinuation(context.Background(), &initExecution{loaded: config.Loaded{Context: runtime.Yard}, platform: runtime}, initArguments{}); err == nil || !strings.Contains(err.Error(), "--continue-legacy") {
+	err := cli.prepareLegacyContinuation(context.Background(), &initExecution{loaded: config.Loaded{Context: runtime.Yard}, platform: runtime}, initArguments{})
+	if err == nil {
 		t.Fatal("plain init silently granted authority", err)
+	}
+	for _, hint := range []string{"yard init --adopt", "then rerun yard init", "yard init --continue-legacy", "without deletion ownership"} {
+		if !strings.Contains(err.Error(), hint) {
+			t.Errorf("plain init refusal is missing %q: %v", hint, err)
+		}
 	}
 }
 
