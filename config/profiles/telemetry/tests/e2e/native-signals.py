@@ -78,7 +78,39 @@ def query(data, sql, args=()):
         return db.execute(sql, args).fetchall()
 
 
-def wait_sessions(data, agent, expected):
+def session_failure_metadata(data, agent, expected, stderr):
+    selected = sorted(expected)[:8]
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    result = dict(schema='subyard.telemetry.session-binding-failure/v1', agent=agent,
+                  expected_count=len(expected), expected_digests=[digest(value) for value in selected],
+                  digests_truncated=len(expected) > len(selected))
+    error_text = stderr[:65536].decode('utf-8', errors='replace').lower()
+    result['stderr_truncated'] = len(stderr) > 65536
+    result['stderr_error_classes'] = {label: error_text.count(text) for label, text in (
+        ('authentication_required', 'telemetry authentication required'),
+        ('invalid_run_context', 'invalid run context'),
+        ('conflicting_run_context', 'conflicting resource and header run context'),
+        ('registration_pending', 'run registration pending'),
+        ('exporter_error', '[3p telemetry]'), ('connection_refused', 'econnrefused'),
+        ('timeout', 'timed out')) if text in error_text}
+    deadline = time.perf_counter()+.25
+    try:
+        with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=.1)) as db:
+            db.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
+            classification = "CASE coalesce(json_extract(runs.body,'$.agent'),'missing') WHEN 'codex' THEN 'codex' WHEN 'claude' THEN 'claude' WHEN 'other' THEN 'other' WHEN 'missing' THEN 'missing' ELSE 'unknown' END"
+            for label, source in (('managed_runs', 'runs'), ('relations', 'relations LEFT JOIN runs USING(agent_run_id)')):
+                result[label] = dict(db.execute('SELECT '+classification+',count(*) FROM '+source+' GROUP BY 1').fetchall())
+            result['otlp_signals'] = dict(db.execute("SELECT kind,count(*) FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces') GROUP BY kind").fetchall())
+            placeholders = ','.join('?' for _ in selected)
+            matched = db.execute("SELECT DISTINCT relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,'$.agent')=? AND relations.session_id IN ("+placeholders+') LIMIT 8', (agent, *selected)).fetchall()
+            result['matched_count'] = len(matched)
+            result['matched_digests'] = sorted(digest(row[0]) for row in matched)
+    except sqlite3.Error:
+        result['database'] = 'unavailable'
+    return result
+
+
+def wait_sessions(data, agent, expected, stderr=b''):
     deadline = time.monotonic()+40
     while time.monotonic() < deadline:
         rows = query(data, 'SELECT relations.agent_run_id,relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,\'$.agent\')=?', (agent,))
@@ -86,6 +118,10 @@ def wait_sessions(data, agent, expected):
         if expected <= found:
             return {row[0] for row in rows if row[1] in expected}
         time.sleep(0.2)
+    try:
+        print(json.dumps(session_failure_metadata(data, agent, expected, stderr), sort_keys=True), flush=True)
+    except Exception:
+        pass  # Diagnostics must not replace the original binding failure.
     raise AssertionError(agent+': native exported session IDs did not bind to managed runs')
 
 
@@ -505,7 +541,7 @@ def exercise(args):
                 provider.server_close()
         if agent != 'codex':
             require_command_success(receipt, agent)
-        runs = wait_sessions(args.data_dir, agent, {session})
+        runs = wait_sessions(args.data_dir, agent, {session}, stderr=result.stderr if agent == 'claude' else b'')
         assert len(runs) == 1
         run = next(iter(runs))
         deadline = time.monotonic()+45
@@ -606,7 +642,7 @@ def main():
     finally:
         server.shutdown()
         server.server_close()
-    wait_sessions(args.data_dir, 'claude', {session})
+    wait_sessions(args.data_dir, 'claude', {session}, stderr=result.stderr)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')

@@ -50,6 +50,89 @@ func TestProfileDefaultsAndExplicitSelection(t *testing.T) {
 	}
 }
 
+func TestBrokerFixtureSeparatesDefaultAndNamedHostNamespaces(t *testing.T) {
+	root := testkit.TempDir(t)
+	repository, err := filepath.Abs("../../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(filepath.Join(repository, "config/profiles/github/tests/e2e/acceptance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "write_config() {\n")
+	if start < 0 {
+		t.Fatal("broker configuration helper missing")
+	}
+	end := strings.Index(string(source)[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("broker configuration helper boundary missing")
+	}
+	home, configHome := filepath.Join(root, "home"), filepath.Join(root, "config")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	environment := map[string]string{
+		"HOME": home, "SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome,
+		"SUBYARD_HOME": filepath.Join(root, "data"), "STORAGE_PATH": filepath.Join(root, "storage"),
+		"SUBYARD_KEYS_CONSUMER_ROOT": filepath.Join(root, "keys"),
+	}
+	command := exec.Command("bash", "-ceu", string(source)[start:start+end+3]+"\nwrite_config\n")
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "STATE=" + root, "MARKER=fixture", "SSH_PORT=39999", "PROJECT=github-fixture", "INSTANCE=github-e2e"}
+	for key, value := range environment {
+		command.Env = append(command.Env, key+"="+value)
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("write broker configuration: %v: %s", err, output)
+	}
+	defaultPath := filepath.Join(configHome, "yards/default/config.env")
+	hostBefore, err := os.ReadFile(filepath.Join(configHome, "config.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultBefore, err := os.ReadFile(defaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preset := filepath.Join(repository, "config/profiles/hermes/yard.env")
+	presetBefore, err := os.ReadFile(preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := func(name, settings string) config.Loaded {
+		t.Helper()
+		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: repository, OperatorHome: home, DisablePrivate: true,
+			Environment: environment, YardName: name, YardSettingsFile: settings})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loaded
+	}
+	current, named := load("default", ""), load("hermes-fixture", preset)
+	if current.Context.Paths.HostBase != filepath.Join(root, "host") || current.Context.Paths.HostBase == named.Context.Paths.HostBase {
+		t.Fatal("broker fixture shares the default yard host namespace with the new Hermes yard")
+	}
+	if current.Context.IncusProject != "github-fixture" || current.Context.YardInstanceName != "github-e2e" || current.Context.SSHPort != 39999 ||
+		named.Context.IncusProject != "subyard-hermes-fixture" || named.Context.SSHPort != 2224 {
+		t.Fatal("fixture yard identities or preset endpoint changed")
+	}
+	for path, before := range map[string][]byte{filepath.Join(configHome, "config.env"): hostBefore, defaultPath: defaultBefore, preset: presetBefore} {
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(before) {
+			t.Fatalf("configuration assessment changed %s: %v", path, err)
+		}
+		if path != preset {
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("fixture configuration mode changed: %v", err)
+			}
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(configHome, "yards/hermes-fixture/config.env")); !os.IsNotExist(err) {
+		t.Fatal("assessment prematurely registered the named yard", err)
+	}
+}
+
 // The peer fixture also exercises the implicit default GitHub profile. Its
 // wrappers must retain the account home used by the real user manager. Its
 // consumer root must agree with installed release inspection, which reloads

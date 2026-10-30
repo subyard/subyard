@@ -390,6 +390,60 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
                 fixture.wait_shared_scope(data, 'run', timeout=1)
             sleep.assert_called_once_with(.2)
 
+    def test_session_timeout_reports_only_binding_metadata_and_preserves_failure(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            data = self.database(directory)
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+                db.executescript('''CREATE TABLE records(kind TEXT,body TEXT);
+                    INSERT INTO records VALUES('otlp/logs','PRIVATE_PROMPT');
+                    INSERT INTO records VALUES('otlp/metrics','PRIVATE_HEADER');
+                    INSERT INTO runs VALUES('claude-run','{"agent":"claude"}');
+                    INSERT INTO runs VALUES('foreign-run','{"agent":"PRIVATE_AGENT"}');
+                    INSERT INTO runs VALUES('missing-agent','{}');
+                    INSERT INTO relations VALUES('claude-run','PRIVATE_SESSION');
+                    INSERT INTO relations VALUES('foreign-run','PRIVATE_FOREIGN_SESSION');
+                    INSERT INTO relations VALUES('orphan','PRIVATE_ORPHAN_SESSION');''')
+                db.commit()
+            with redirect_stdout(io.StringIO()) as output, patch.object(fixture.time, 'monotonic', side_effect=[0, 0, 41]), \
+                 patch.object(fixture.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(AssertionError, '^claude: native exported session IDs did not bind to managed runs$'):
+                    fixture.wait_sessions(data, 'claude', {'PRIVATE_SESSION', 'PRIVATE_MISSING_SESSION'},
+                        stderr=b'telemetry authentication required; run registration pending; [3P telemetry] PRIVATE_TOKEN https://private-provider/')
+            sleep.assert_called_once_with(.2)
+            metadata = json.loads(output.getvalue())
+            self.assertNotIn('PRIVATE_', output.getvalue())
+            self.assertNotIn('private-provider', output.getvalue())
+            self.assertLess(len(output.getvalue()), 2048)
+            self.assertEqual(metadata['expected_count'], 2)
+            self.assertEqual(metadata['matched_count'], 1)
+            self.assertEqual(len(metadata['expected_digests']), 2)
+            self.assertEqual(len(metadata['matched_digests']), 1)
+            self.assertTrue(set(metadata['matched_digests']) <= set(metadata['expected_digests']))
+            self.assertEqual(metadata['managed_runs'], dict(codex=1, claude=1, unknown=1, missing=1))
+            self.assertEqual(metadata['relations'], dict(codex=1, claude=1, unknown=1, missing=1))
+            self.assertEqual(metadata['otlp_signals'], {'otlp/logs': 1, 'otlp/metrics': 1})
+            self.assertEqual(metadata['stderr_error_classes'], dict(authentication_required=1, registration_pending=1, exporter_error=1))
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+                db.execute('DROP TABLE records')
+                db.commit()
+            with redirect_stdout(io.StringIO()) as output, patch.object(fixture.time, 'monotonic', side_effect=[0, 41]):
+                with self.assertRaisesRegex(AssertionError, '^claude: native exported session IDs did not bind to managed runs$'):
+                    fixture.wait_sessions(data, 'claude', {'PRIVATE_MISSING_SESSION'})
+            self.assertEqual(json.loads(output.getvalue())['database'], 'unavailable')
+            self.assertNotIn('PRIVATE_', output.getvalue())
+
+    def test_session_diagnostics_never_run_on_success_or_replace_binding_failure(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            data = self.database(directory)
+            with patch.object(fixture, 'session_failure_metadata', side_effect=RuntimeError('PRIVATE_ERROR')) as diagnostic:
+                self.assertEqual(fixture.wait_sessions(data, 'codex', {'session'}), {'run'})
+                diagnostic.assert_not_called()
+                with redirect_stdout(io.StringIO()) as output, patch.object(fixture.time, 'monotonic', side_effect=[0, 41]):
+                    with self.assertRaisesRegex(AssertionError, '^claude: native exported session IDs did not bind to managed runs$'):
+                        fixture.wait_sessions(data, 'claude', {'missing'})
+                diagnostic.assert_called_once()
+                self.assertEqual(output.getvalue(), '')
+
     def test_present_incorrect_shared_is_never_accepted(self):
         for shared in (False, None, 'PRIVATE_CONTENT'):
             with self.subTest(shared=type(shared).__name__), tempfile.TemporaryDirectory(dir='/tmp') as directory:

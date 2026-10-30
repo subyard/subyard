@@ -320,8 +320,7 @@ wait_status() {
 write_config() {
   {
     printf '# %s\nSSH_PORT=%s\nCODING_TOOL_INTEGRATIONS=\n' "$MARKER" "$SSH_PORT"
-    printf 'HOST_BASE=%s/host\nHOST_MOUNTS=\nHOST_LINKS=\n' "$STATE"
-    printf 'RESTRICTED_DISK_PATHS=%s/host\nFORWARD_SSH_AGENT=0\n' "$STATE"
+    printf 'HOST_MOUNTS=\nHOST_LINKS=\nFORWARD_SSH_AGENT=0\n'
     printf 'HOST_CLAUDE_MD=\nHOST_CODEX_AGENTS_MD=\nHOST_OPENCODE_AGENTS_MD=\n'
     printf 'STORAGE_PATH=%s\nSUBYARD_KEYS_CONSUMER_ROOT=%s\n' \
       "$STORAGE_PATH" "$SUBYARD_KEYS_CONSUMER_ROOT"
@@ -329,8 +328,10 @@ write_config() {
   chmod 0600 "$SUBYARD_CONFIG_HOME/config.env.tmp"
   mv -f -- "$SUBYARD_CONFIG_HOME/config.env.tmp" "$SUBYARD_CONFIG_HOME/config.env"
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/default"
-  printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE" \
-    > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
+  {
+    printf 'INCUS_PROJECT=%s\nYARD_INSTANCE_NAME=%s\n' "$PROJECT" "$INSTANCE"
+    printf 'HOST_BASE=%s/host\nRESTRICTED_DISK_PATHS=%s/host\n' "$STATE" "$STATE"
+  } > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/default/config.env"
 }
 assert_wiring() {
