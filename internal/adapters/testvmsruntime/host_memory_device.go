@@ -29,6 +29,17 @@ func HostMemoryPolicy(config map[string]string, local, expanded map[string]map[s
 	return nil
 }
 
+// HostMemoryAdoptionPolicy admits safe, recoverable selected telemetry state.
+// Adoption publishes metadata only; ordinary init owns device reconciliation.
+// The owning validator still requires recognized markers, exact owned devices
+// and unoccupied paths, including when an interrupted installation is pending.
+func HostMemoryAdoptionPolicy(config map[string]string, local, expanded map[string]map[string]string, enabled bool) error {
+	if enabled {
+		return validateHostMemoryInstance(hostMemoryInstance{Config: config, Devices: local, ExpandedDevices: expanded})
+	}
+	return HostMemoryPolicy(config, local, expanded, enabled)
+}
+
 type hostMemoryInstance struct {
 	Config          map[string]string            `json:"config"`
 	Devices         map[string]map[string]string `json:"devices"`

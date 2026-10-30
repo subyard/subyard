@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ "${1:-}" = --preflight ]; then
   for command in go python3 bash; do command -v "$command" >/dev/null; done
   bash -n "$0"
-  go test ./internal/cli ./internal/adapters/incusclient ./internal/config \
-    -run 'TestYardAdoption|TestProjectAdoption|TestTeardownInventoryProves|TestRemovePersistentFileSnapshot|TestFullTeardownClassifiesNativeOwnership' -count=1
+  go test ./internal/cli ./internal/adapters/incusclient ./internal/config ./internal/adapters/testvmsruntime \
+    -run 'TestYardAdoption|TestHostMemoryAdoptionPolicy|TestProjectAdoption|TestTeardownInventoryProves|TestRemovePersistentFileSnapshot|TestFullTeardownClassifiesNativeOwnership' -count=1
   exit
 fi
 RUN_ID="${SUBYARD_E2E_RUN_ID:?run through dev/agent-e2e.sh}"
@@ -17,6 +17,7 @@ printf '%s\n' "$RUN_ID" > "$STATE/.fixture-run"
 NAMES=()
 fixture_pool='' fixture_bridge=''
 launcher=''
+telemetry_profile="${SUBYARD_E2E_ADOPTION_HOST_MEMORY_PROFILE:-}"
 die() { printf 'yard-adoption: %s\n' "$*" >&2; exit 1; }
 incus() { sudo -n /usr/bin/incus "$@"; }
 native_owner() {
@@ -93,6 +94,13 @@ launcher="$(native_owner bash -c '
   "$engine" config status --all-local >/dev/null
   release_candidate_install "$1" "$2"
 ' _ "$ROOT" "$STATE/candidate")"
+if [ -n "$telemetry_profile" ]; then
+  [[ "$telemetry_profile" =~ ^[a-z][a-z0-9-]*$ ]] || die 'unsafe synthetic telemetry profile name'
+  expected_engine="${SUBYARD_E2E_ADOPTION_ENGINE_SHA256:?set the ordinary candidate engine checksum for the synthetic-profile run}"
+  [[ "$expected_engine" =~ ^[0-9a-f]{64}$ ]] || die 'invalid ordinary candidate engine checksum'
+  [ "$(sha256sum "$YARD_RUNTIME_ROOT/current/bin/yard-engine" | cut -d' ' -f1)" = "$expected_engine" ] || die 'synthetic-profile engine differs from ordinary candidate'
+  printf 'evidence: synthetic_host_memory_profile=%s engine_sha256=%s\n' "$telemetry_profile" "$expected_engine"
+fi
 for kind in container vm; do
   suffix="${STATE##*.}"
   name="adopt-$kind-${suffix,,}"
@@ -137,6 +145,27 @@ EOF
   yard init --yes
   yard start --yes
   guest sh -eu -c 'printf preserved > /srv/adoption-sentinel'
+  if [ "$kind" = container ]; then
+    # Use the supported project command to establish registry and native identity.
+    # A registered bind must survive adoption without device or workload changes.
+    bind_source="$STATE/bind-$kind"
+    install -d -m 0755 "$bind_source"
+    printf preserved > "$bind_source/bind-sentinel"
+    # The fixture deliberately uses DEV_UID=1001, independent of the VM
+    # operator. A shifted bind must expose a developer-owned source for the
+    # ordinary init metadata contract; a foreign source is correctly refused.
+    sudo -n chown 1001:1001 "$bind_source" "$bind_source/bind-sentinel"
+    yard bind "$bind_source" --yes
+    [ "$(guest stat -c '%u:%g' "/srv/workspaces/bind-$kind/src")" = 1001:1001 ] || die 'fixture bind source does not belong to configured developer'
+    bind_before="$(incus query "/1.0/instances/$instance?project=$project" | jq -cS '.devices | with_entries(select(.key|startswith("ws-")))')"
+    [ "$bind_before" != '{}' ] || die 'supported bind did not create a workspace device'
+  fi
+  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
+    # Introduce a desired telemetry capability while its optional device is
+    # absent. Adoption must leave it absent; ordinary init owns hotplug repair.
+    printf '\nENVIRONMENT_PROFILES=%s\n' "$telemetry_profile" >> "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
+    [ -z "$(incus config get "$instance" user.subyard.host_memory --project "$project")" ] || die 'telemetry fixture was not initially absent'
+  fi
   uuid="$(incus config get "$instance" volatile.uuid --project "$project")"
   pid="$(incus query "/1.0/instances/$instance/state?project=$project" | jq -r .pid)"
   # Model the unmarked native boundary without claiming an authenticated old release.
@@ -147,8 +176,20 @@ EOF
   [ "$(incus config get "$instance" volatile.uuid --project "$project")" = "$uuid" ] || die 'adoption replaced instance'
   [ "$(incus query "/1.0/instances/$instance/state?project=$project" | jq -r .pid)" = "$pid" ] || die 'adoption restarted running workload'
   [ "$(guest cat /srv/adoption-sentinel)" = preserved ] || die 'adoption lost disk data'
+  if [ "$kind" = container ]; then
+    [ "$(incus query "/1.0/instances/$instance?project=$project" | jq -cS '.devices | with_entries(select(.key|startswith("ws-")))')" = "$bind_before" ] || die 'adoption changed registered bind devices'
+    [ "$(guest cat "/srv/workspaces/bind-$kind/src/bind-sentinel")" = preserved ] || die 'adoption lost bound project data'
+  fi
+  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
+    incus query "/1.0/instances/$instance?project=$project" | jq -e '.devices["subyard-host-memory"] == null and .config["user.subyard.host_memory"] == null' >/dev/null || die 'adoption mutated absent telemetry'
+  fi
   [ "$(incus project get "$project" user.subyard.installation)" = adopted-v1 ] || die 'missing versioned adoption provenance'
   yard init --yes
+  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
+    incus query "/1.0/instances/$instance?project=$project" | jq -e '.config["user.subyard.host_memory"] == "v1" and .devices["subyard-host-memory"] == {type:"disk",source:"/proc/meminfo",path:"/var/lib/subyard/host-meminfo",readonly:"true"}' >/dev/null || die 'ordinary init did not reconcile telemetry'
+    guest cat /var/lib/subyard/host-meminfo >/dev/null || die 'reconciled telemetry is unreadable'
+    printf 'evidence: synthetic_profile_absent_telemetry_adoption_then_ordinary_init=PASS\n'
+  fi
   [ "$(incus project get "$project" user.subyard.installation)" = adopted-v1 ] || die 'ordinary init erased adoption provenance'
   yard stop --yes
   yard init --adopt --yes

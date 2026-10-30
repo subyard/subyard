@@ -974,6 +974,15 @@ Unknown workloads, snapshots, uninventoried enabled namespaces, noncanonical
 devices, temporary configuration overrides and partial or foreign ownership
 are refused. The existing project policy must already be converged.
 
+Existing project bind devices are supported when the protected local registry
+ties their exact generated name, source, destination and options to the selected
+yard. Adoption binds those records before consent; an unknown `ws-` device name
+does not establish ownership. Selected physical-memory telemetry may be absent
+or retain a recognized interrupted installation state when its owning validator
+proves that ordinary init can finish safely. Unmarked existing mounts, foreign
+markers, inherited devices and occupied telemetry paths are refused. Adoption
+leaves telemetry unchanged; the subsequent plain init reconciles it.
+
 The operation atomically publishes complete project registration with adopted
 provenance. It preserves the instance, disks, running workloads and desired
 power state. Run plain `yard init` afterwards to reconcile configuration or

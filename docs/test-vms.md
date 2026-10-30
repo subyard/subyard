@@ -39,6 +39,23 @@ seeding only their project ownership metadata. It checks UUID, disk data, active
 workload continuity, desired stopped state, and subsequent ordinary init.
 This seeded native regression does not prove an authenticated historical upgrade.
 
+The same fixture accepts `SUBYARD_E2E_ADOPTION_HOST_MEMORY_PROFILE=adoption-telemetry`
+for a separate synthetic-profile candidate. Prepare that candidate from a disposable
+plain source copy using the ordinary `dev/release-acceptance.py prepare` command;
+add only `config/profiles/adoption-telemetry/profile.conf` containing
+`PROFILE_NAME=adoption-telemetry` and `YARD_CAPS=host-memory`, plus an executable
+`provision.sh` containing `#!/bin/sh`, `# subyard-provision-check-v1`, and `exit 0`.
+Add nonempty `tests/e2e/acceptance.not-applicable` and
+`tests/run.not-applicable` files explaining that the core yard-adoption fixture
+owns this synthetic contract, so the normal profile inventory remains complete.
+Use the same version as the ordinary candidate and set
+`SUBYARD_E2E_ADOPTION_ENGINE_SHA256` to the ordinary candidate's engine checksum.
+The fixture requires the installed synthetic candidate's engine to match exactly,
+labels the added profile in evidence, and checks metadata-only adoption of absent
+selected telemetry followed by its reconciliation through ordinary init. It also
+retains the registered-bind, container and VM checks. Keep both original candidate
+receipts; synthetic profile assets do not establish shipped-profile acceptance.
+
 When a selected check needs real GNU/Linux hosts, use an allocated `test-vms` slot.
 The operator owns outer-yard start, stop and teardown; the
 root broker owns inner slot create, start and stop; agents acquire leases only.

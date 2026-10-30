@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -572,5 +575,132 @@ func TestYardAdoptionSSHNativeBoundary(t *testing.T) {
 				t.Fatal("unexpected SSH proxy boundary admitted")
 			}
 		})
+	}
+}
+
+func TestYardAdoptionRegisteredBindDevices(t *testing.T) {
+	for _, scenario := range []string{"legacy", "current", "unregistered", "other-yard", "sync", "source", "path", "options", "expanded", "inherited", "collision", "symlink", "malformed", "unsafe-directory", "stale-record"} {
+		t.Run(scenario, func(t *testing.T) {
+			program, execution, fake := adoptionFixture(t)
+			runtime := execution.platform.(reconcileruntime.Runtime)
+			record := domain.ProjectRecord{Schema: 1, ProjectID: "Demo.Project", Name: "Demo", HostPath: "/host/project", YardPath: "/srv/workspaces/Demo.Project/src", Mode: domain.ProjectBind, SSHHost: runtime.Yard.SSHHost}
+			if scenario == "current" {
+				record.IdentityVersion = 2
+				record.Name = record.ProjectID
+			}
+			if scenario == "other-yard" {
+				record.SSHHost = "other-yard"
+			}
+			if scenario == "sync" {
+				record.Mode = domain.ProjectSync
+			}
+			directory := runtime.Yard.Paths.StateDir
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, record.ProjectID+".json")
+			payload, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, path, payload, 0600)
+			if scenario == "unregistered" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "symlink" {
+				target := filepath.Join(testkit.TempDir(t), "record")
+				testkit.WriteFile(t, target, payload, 0600)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "malformed" {
+				testkit.WriteFile(t, path, []byte("{}"), 0600)
+			}
+			if scenario == "unsafe-directory" {
+				if err := os.Chmod(directory, 0777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "collision" {
+				other := record
+				other.ProjectID = "Demo_Project"
+				other.Name = "Other"
+				other.YardPath = "/srv/workspaces/Demo_Project/src"
+				data, _ := json.Marshal(other)
+				testkit.WriteFile(t, filepath.Join(directory, other.ProjectID+".json"), data, 0600)
+			}
+			name := state.WorkspaceDeviceFor(record)
+			device := map[string]string{"type": "disk", "source": record.HostPath, "path": record.YardPath, "shift": "true"}
+			switch scenario {
+			case "source":
+				device["source"] = "/host/other"
+			case "path":
+				device["path"] = "/other"
+			case "options":
+				device["readonly"] = "true"
+			}
+			fake.Reconcile.Instance.LocalDevices[name] = device
+			fake.Reconcile.Instance.Devices[name] = maps.Clone(device)
+			if scenario == "expanded" {
+				fake.Reconcile.Instance.Devices[name]["source"] = "/other"
+			}
+			if scenario == "inherited" {
+				delete(fake.Reconcile.Instance.LocalDevices, name)
+			}
+			before := operationStateDigest(fake.Reconcile.Instance)
+			err = program.prepareLegacyContinuation(context.Background(), execution, initArguments{adopt: true})
+			success := scenario == "legacy" || scenario == "current" || scenario == "stale-record"
+			if (err == nil) != success {
+				t.Fatalf("eligible=%t: %v", success, err)
+			}
+			if !success {
+				if fake.writes != 0 {
+					t.Fatal("refusal mutated project")
+				}
+				return
+			}
+			if scenario == "stale-record" {
+				record.ImportedAt = "changed-after-assessment"
+				payload, _ = json.Marshal(record)
+				testkit.WriteFile(t, path, payload, 0600)
+				if err := execution.run(context.Background(), program, io.Discard); !errors.Is(err, domain.ErrPlanStale) || fake.writes != 0 {
+					t.Fatalf("registry change not rejected: %v", err)
+				}
+				return
+			}
+			if err := execution.run(context.Background(), program, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if operationStateDigest(fake.Reconcile.Instance) != before || fake.writes != 1 {
+				t.Fatal("bind adoption changed workload")
+			}
+		})
+	}
+}
+
+func TestYardAdoptionAllowsAbsentSelectedTelemetry(t *testing.T) {
+	_, execution, fake := adoptionFixture(t)
+	runtime := execution.platform.(reconcileruntime.Runtime)
+	runtime.RepositoryRoot = testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(runtime.RepositoryRoot, "config/profiles/telemetry"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "config/profiles/telemetry/profile.conf"), []byte("YARD_CAPS=host-memory\n"), 0600)
+	runtime.Environment = append(runtime.Environment, "ENVIRONMENT_PROFILES=telemetry")
+	before := operationStateDigest(fake.Reconcile.Instance)
+	if _, _, _, _, err := runtime.InspectYardAdoption(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runtime.InspectLegacyContinuation(context.Background()); err == nil {
+		t.Fatal("continuation admitted unconverged telemetry")
+	}
+	if operationStateDigest(fake.Reconcile.Instance) != before || fake.writes != 0 {
+		t.Fatal("telemetry adoption mutated workload")
 	}
 }

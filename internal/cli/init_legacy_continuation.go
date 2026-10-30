@@ -298,6 +298,13 @@ func assessLegacyYard(ctx context.Context, runtime reconcileruntime.Runtime, hos
 	if err != nil {
 		return nil, err
 	}
+	var adoptionProjects []domain.ProjectRecord
+	if adopt {
+		adoptionProjects, err = runtime.YardAdoptionProjects(ctx, state.Instance)
+		if err != nil {
+			return nil, err
+		}
+	}
 	epoch, err := uninstall.ReadOwnerEpoch(runtime.Yard.Paths.DataHome)
 	if err != nil {
 		return nil, err
@@ -305,7 +312,8 @@ func assessLegacyYard(ctx context.Context, runtime reconcileruntime.Runtime, hos
 	native := operationStateDigest(struct {
 		State     ports.ReconcileState
 		Resources []ports.TeardownResource
-	}{state, resources})
+		Projects  []domain.ProjectRecord
+	}{state, resources, adoptionProjects})
 	binding, err := runtime.LegacyContinuationSecurityBinding(state)
 	if err != nil {
 		return nil, err

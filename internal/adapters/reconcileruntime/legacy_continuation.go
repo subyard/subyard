@@ -248,7 +248,11 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			return err
 		}
 	}
-	if err := testvmsruntime.HostMemoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"); err != nil {
+	memoryPolicy := testvmsruntime.HostMemoryPolicy
+	if adopt {
+		memoryPolicy = testvmsruntime.HostMemoryAdoptionPolicy
+	}
+	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"); err != nil {
 		return err
 	}
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
@@ -399,6 +403,10 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		desired[parts[0]] = device
 	}
 	for name, device := range instance.LocalDevices {
+		if adopt && strings.HasPrefix(name, "ws-") {
+			// Registry authority is checked below; a prefix grants no ownership.
+			continue
+		}
 		switch name {
 		case "subyard-host-memory":
 			// The owning host-memory validator checked marker, shape and effective identity.
@@ -453,6 +461,11 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 		}
 		if !maps.Equal(device, desired[name]) {
 			return fmt.Errorf("legacy continuation refuses unsupported local device %q", name)
+		}
+	}
+	if adopt {
+		if _, err := runtime.YardAdoptionProjects(ctx, instance); err != nil {
+			return err
 		}
 	}
 	for name, device := range desired {

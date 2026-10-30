@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/state"
 )
 
 // InspectYardAdoption shares the configured native capability validators with
@@ -104,6 +106,63 @@ func (runtime Runtime) InspectYardAdoption(ctx context.Context) (ports.Reconcile
 		}
 	}
 	return state, resources, metadata, before, nil
+}
+
+// YardAdoptionProjects proves existing workspace devices from the selected
+// operator's registry. Callers bind these records into the pre-consent snapshot.
+// It never imports guest observations or repairs registry permissions.
+func (runtime Runtime) YardAdoptionProjects(ctx context.Context, instance ports.InstanceInfo) ([]domain.ProjectRecord, error) {
+	present := false
+	for name := range instance.LocalDevices {
+		present = present || strings.HasPrefix(name, "ws-")
+	}
+	if !present {
+		return nil, nil
+	}
+	store, err := state.NewFileStore(runtime.Yard.Paths.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	records, err := store.ListReadOnly(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("yard adoption project registry: %w", err)
+	}
+	byDevice := map[string]domain.ProjectRecord{}
+	for _, record := range records {
+		if record.SSHHost != runtime.Yard.SSHHost || record.Mode != domain.ProjectBind {
+			continue
+		}
+		name := state.WorkspaceDeviceFor(record)
+		if _, duplicate := byDevice[name]; duplicate {
+			return nil, fmt.Errorf("yard adoption project registry has ambiguous device %q", name)
+		}
+		byDevice[name] = record
+	}
+	selected := []domain.ProjectRecord{}
+	// Preserve registry order so the consent binding is deterministic.
+	for _, record := range records {
+		name := state.WorkspaceDeviceFor(record)
+		device, exists := instance.LocalDevices[name]
+		if !exists || byDevice[name].ProjectID != record.ProjectID {
+			continue
+		}
+		if !filepath.IsAbs(record.HostPath) || filepath.Clean(record.HostPath) != record.HostPath {
+			return nil, fmt.Errorf("yard adoption refuses noncanonical registered bind source for %q", name)
+		}
+		desired := map[string]string{"type": "disk", "source": record.HostPath, "path": record.YardPath, "shift": "true"}
+		if !maps.Equal(device, desired) || !maps.Equal(instance.Devices[name], desired) {
+			return nil, fmt.Errorf("yard adoption refuses changed registered bind device %q", name)
+		}
+		selected = append(selected, record)
+	}
+	for name := range instance.LocalDevices {
+		if strings.HasPrefix(name, "ws-") {
+			if _, registered := byDevice[name]; !registered {
+				return nil, fmt.Errorf("yard adoption refuses unregistered local device %q", name)
+			}
+		}
+	}
+	return selected, nil
 }
 
 func (runtime Runtime) adoptionKindPolicy(state ports.ReconcileState, configuration map[string]string) error {
