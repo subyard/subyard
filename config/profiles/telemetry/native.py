@@ -2,6 +2,7 @@
 """CAS ownership of native exporter leaves; preserve unrelated settings and analytics intent."""
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -9,6 +10,20 @@ import tempfile
 import tomllib
 
 CONFIG_LIMIT = 4*1024*1024
+
+
+def semantic_equal(left, right):
+    # Native booleans are distinct from numbers; unrelated TOML NaNs stay equal
+    # across the snapshot copy even though ordinary float equality rejects them.
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(semantic_equal(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(semantic_equal(a, b) for a, b in zip(left, right))
+    if isinstance(left, float) and math.isnan(left) and math.isnan(right):
+        return True
+    return left == right
 
 
 def safe(path):
@@ -104,6 +119,7 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
         obj = (json.loads(before) if agent == 'claude' else tomllib.loads(before.decode())) if before else {}
         if not isinstance(obj, dict) or not isinstance(obj.get(section, {}), dict):
             raise ValueError('invalid native configuration')
+        previous = copy.deepcopy(obj)
         group = obj.setdefault(section, {})
         want = desired(agent, endpoint, token) if enabled else {}
         final, transitional = {}, {}
@@ -112,13 +128,13 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
             allowed = [old['managed'], *old.get('previous', [])]
             current = {'present': key in group, 'value': group.get(key)}
             prior = {'present': old['present'], 'value': old['value']}
-            if current != prior and not (key in group and group[key] in allowed):
+            if not semantic_equal(current, prior) and not (key in group and any(semantic_equal(group[key], item) for item in allowed)):
                 raise ValueError('native exporter ownership conflict')
             final[key] = {'present': old['present'], 'value': old['value'], 'managed': value}
             transitional[key] = {**final[key], 'previous': allowed}
             group[key] = value
         for key, old in owned.items():
-            if key not in want and key in group and group[key] in [old['managed'], *old.get('previous', [])]:
+            if key not in want and key in group and any(semantic_equal(group[key], item) for item in [old['managed'], *old.get('previous', [])]):
                 if old['present']:
                     group[key] = old['value']
                 else:
@@ -130,11 +146,11 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
             pending['agents'][agent] = transitional
         else:
             next_state['agents'].pop(agent, None)
-        content = (json.dumps(obj, indent=2)+'\n').encode() if agent == 'claude' else writer.dumps(obj).encode()
-        if before != content:
+        if not semantic_equal(previous, obj):
+            content = (json.dumps(obj, indent=2)+'\n').encode() if agent == 'claude' else writer.dumps(obj).encode()
             edits.append((path, content, before))
     if check:
-        return not edits and baseline == next_state
+        return not edits and semantic_equal(baseline, next_state)
     publish(state, (json.dumps(pending)+'\n').encode(), original)
     for path, content, before in edits:
         publish(path, content, before, uid, gid)
@@ -160,6 +176,6 @@ def relinquish_openlit(home, legacy, writer, uid, gid):
         for key, entry in owned.items():
             prior = {'present': entry['present'], 'value': entry['value']}
             current = {'present': key in group, 'value': group.get(key)}
-            if current != prior and not (key in group and group[key] in [entry['managed'], *entry.get('previous', [])]):
+            if not semantic_equal(current, prior) and not (key in group and any(semantic_equal(group[key], item) for item in [entry['managed'], *entry.get('previous', [])])):
                 raise ValueError('legacy native exporter changed')
     reconcile(home, legacy, [], '', '', writer, uid, gid)
