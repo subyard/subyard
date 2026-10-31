@@ -4,6 +4,8 @@ import "github.com/Subyard/Subyard/internal/domain"
 
 func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 	definitions := []domain.ActionDefinition{
+		{Action: "service.unregister", Summary: "Retire absent infrastructure service registration", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible},
+		{Action: "service.register", Summary: "Register infrastructure service runtime", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata}, Recovery: domain.RecoveryReversible},
 		{Action: "client.projects-export", Summary: "Export yard projects to a desktop client", Effect: domain.ActionBoundedWrite, Recovery: domain.RecoveryNotNeeded},
 		{Action: "profile.reconcile", Summary: "Reconcile one yard profile", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactYardRuntime, domain.ImpactAccess}, Recovery: domain.RecoveryReversible},
 		{Action: "profile.setup", Summary: "Configure a profile connection on the owner host", Effect: domain.ActionMutation, Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactTrust, domain.ImpactAccess}, Recovery: domain.RecoveryReversible},

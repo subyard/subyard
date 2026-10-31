@@ -137,7 +137,11 @@ func (source cliOwnerSource) Runtime(
 	if err != nil {
 		return application.OwnerYardRuntime{}, err
 	}
-	return application.OwnerYardRuntime{State: instance.Status,
+	role, service, pool, roleErr := source.cli.serviceRuntimeRole(yard, instance.Config["volatile.uuid"])
+	if roleErr != nil {
+		return application.OwnerYardRuntime{}, roleErr
+	}
+	return application.OwnerYardRuntime{Role: role, Service: service, Pool: pool, State: instance.Status,
 		ResolvedYardImage: domain.ResolvedYardImage(instance.Config["volatile.base_image"]),
 		StartState:        startState, WaitingForAddresses: waiting,
 		DeferredPublications: ownerpublication.Deferred(instance)}, nil

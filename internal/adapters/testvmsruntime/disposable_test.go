@@ -195,7 +195,7 @@ func TestDisposableDeletionRequiresEveryExactMarkerAndVerifiedStop(t *testing.T)
 
 func TestFutureLeaseSchemaCannotBeOverwrittenByRecovery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "leases.json")
-	original := []byte(`{"schema_version":` + strconv.Itoa(LeaseSchemaVersion+1) + `,"resource_type":"agent-e2e","resource_id":"test-vms"}`)
+	original := []byte(`{"schema_version":` + strconv.Itoa(LeaseFencedSchemaVersion+1) + `,"resource_type":"agent-e2e","resource_id":"test-vms"}`)
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
 	}

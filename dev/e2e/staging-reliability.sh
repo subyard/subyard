@@ -23,7 +23,7 @@ done
 TOKEN="${TOKEN:-$(date +%s)$$}"
 # Reuse the existing marker-owned owner bootstrap without its broad dispatcher.
 # shellcheck disable=SC1090
-. <(sed '/^  case "$MODE" in/,$d; /^ROOT=/d' "$ROOT/dev/e2e/p0-guest.sh") staging-reliability "$TOKEN"
+. <(sed '/^  case "$MODE" in/,$d; /^ROOT=/d; /^owner_cleanup() {/,/^}/ s|\./bin/yard|runtime_yard|' "$ROOT/dev/e2e/p0-guest.sh") staging-reliability "$TOKEN"
 PROJECT=subyard-test-yard
 INSTANCE=yard-test-yard
 YARD=test-yard
@@ -40,6 +40,8 @@ RELEASE_STAGED=0
 MINIMAL_OWNER=0
 SUPPORTED_UPGRADE_BOUND=0
 OWNER_BASE_IMAGE_FINGERPRINT=''
+BOOTSTRAP_ENGINE_SHA256=''
+BOOTSTRAP_ENGINE_VERSION=''
 FAULT_INSTALLED=0
 FAULT_ROOT=/run/subyard-staging-incus-fault
 # Consumed by existing holder and monotonic recovery helpers.
@@ -391,11 +393,12 @@ reclaim_supported_upgrade_inputs() {
   fi
   # These transfers have been consumed by extraction and the successful native
   # update/binding. Keep installed current/previous, release caches and all source.
-  python3 - "$ROOT" "$OWNER_ROOT" <<'PYCONSUMED' || return
+  python3 - "$ROOT" "$OWNER_ROOT" "$BOOTSTRAP_ENGINE_SHA256" "$BOOTSTRAP_ENGINE_VERSION" <<'PYCONSUMED' || return
 import hashlib,json,os,pathlib,re,runpy,shutil,stat,sys
-root,owner=map(pathlib.Path,sys.argv[1:])
+root,owner=map(pathlib.Path,sys.argv[1:3])
+bootstrap_sha,bootstrap_version=sys.argv[3:]
 targets=[root/'.subyard-acceptance/runtime',root/'.subyard-acceptance/release',
-         root.parent/'worktree.tar.gz',owner/'baseline-0.19.0']
+         root.parent/'worktree.tar.gz',root/'.build/yard',owner/'baseline-0.19.0']
 def owned(path):
     info=path.lstat()
     if path.resolve()!=path or info.st_uid!=os.geteuid():
@@ -417,7 +420,7 @@ for target in targets:
         if parent==boundary: break
     if any(mount==target or target in mount.parents for mount in mounts):
         raise RuntimeError('consumed input contains a mount')
-    if target.is_dir()!=(target!=targets[2]):
+    if target.is_dir()!=(target not in (targets[2],targets[3])):
         raise RuntimeError('consumed input has an unexpected type')
     entries=[target,*target.rglob('*')] if target.is_dir() else [target]
     allocated[target.name]=sum(owned(path).st_blocks*512 for path in entries)
@@ -435,10 +438,18 @@ if pathlib.Path(runtime).name!=runtime or runtime in ('','.','..'):
 with (targets[1]/runtime).open('rb') as stream:
     if hashlib.file_digest(stream,'sha256').hexdigest()!=metadata['runtime_sha256']:
         raise RuntimeError('consumed candidate checksum changed')
+if (not re.fullmatch('[a-f0-9]{64}',bootstrap_sha)
+    or not re.fullmatch(r'yard [A-Za-z0-9._+-]{1,100}',bootstrap_version)
+    or stat.S_IMODE(owned(targets[3]).st_mode)!=0o755):
+    raise RuntimeError('bootstrap engine creation receipt is invalid')
+with targets[3].open('rb') as stream:
+    if hashlib.file_digest(stream,'sha256').hexdigest()!=bootstrap_sha:
+        raise RuntimeError('run-built bootstrap engine changed')
 for target in targets:
     if target.is_dir(): shutil.rmtree(target)
     else: target.unlink()
-print('STAGING_CONSUMED_INPUTS='+json.dumps({'allocated_bytes':allocated,'total_allocated_bytes':sum(allocated.values())}))
+print('STAGING_CONSUMED_INPUTS='+json.dumps({'allocated_bytes':allocated,'total_allocated_bytes':sum(allocated.values()),
+      'bootstrap_engine':{'path':'.build/yard','sha256':bootstrap_sha,'version':bootstrap_version}}))
 PYCONSUMED
   # Reuse the existing recovery reclaim, addressing the exact captured image
   # fingerprint so alias drift cannot delete another image.
@@ -969,6 +980,7 @@ CLOUDOWNER
 # The normal staging fixture retains its independent synthetic owner history.
 prepare_supported_upgrade_owner() {
   local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state
+  local retained_sha baseline_engine_sha retained_version retained_config_sha
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
@@ -996,17 +1008,20 @@ PYBASELINE
     bash "$installer" --version "$baseline" --yes
   baseline_owner="$SUBYARD_HOME/runtime/current/bin/yard"
   [ "$("$baseline_owner" --version)" = "yard $baseline" ] || die 'authentic predecessor was not installed'
-  # Reuse the focused owner bootstrap with the authentic predecessor assets.
-  # Its shipped provision hook invokes the predecessor's native reconcile-pool;
-  # unrelated core/Docker tooling is outside this broker acceptance contract.
+  # Broker-only history uses authenticated predecessor adapters and recipe,
+  # without unrelated core/Docker setup or a service ownership claim.
   prepare_minimal_owner
   [ "$(runtime_yard --version)" = "yard $baseline" ] || die 'owner bootstrap replaced authentic predecessor'
+  before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+  [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] || die 'predecessor broker owner missing'
   verify_broker_installation || die 'predecessor broker does not match its runtime'
   outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
     | jq -e '.status=="ok" and .pool.resource_type=="agent-e2e" and
       .pool.resource_id=="test-vms" and (.pool.slots | length)==1 and
       .pool.slots[0].state=="available"' >/dev/null || die 'native predecessor broker state is not available'
-  printf 'STAGING_BASELINE_BROKER={"version":"%s","native_owner_state":true}\n' "$baseline"
+  [ -z "$(outer_exec incus list --all-projects --format csv -c n)" ] || die 'predecessor init warmed a nested VM or builder'
+  BROKER_INSTALLED=1
+  printf 'STAGING_BASELINE_BROKER={"version":"%s","native_owner_state":true,"vm_and_base_absent":true}\n' "$baseline"
   # Run the exact candidate Git configuration read as its real guest user.
   # The production leaf drops root to dev; a version string would miss this dependency.
   outer_exec python3 - /home/dev off check \
@@ -1015,10 +1030,20 @@ PYBASELINE
   printf 'STAGING_UPDATER_PREREQUISITE={"git_configuration_operation":true,"execution_user":"dev"}\n'
   before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
   [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] || die 'predecessor broker owner missing'
+  outer_exec sh -eu -c 'target=/usr/local/libexec/subyard/.service-retained-v019-worker; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0700 /usr/local/libexec/subyard/test-vms-inner "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:700:1 ]'
+  outer_exec sh -eu -c 'target=/var/lib/subyard/test-vms/.service-retained-v019.env; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0600 /etc/subyard/test-vms.env "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:600:1 ]'
+  baseline_engine_sha="$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)"
+  retained_sha="$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker | cut -d' ' -f1)"
+  [ "$retained_sha" = "$baseline_engine_sha" ] || die 'retained broker is not the authenticated predecessor engine'
+  retained_version="$("$SUBYARD_HOME/runtime/current/bin/yard-engine" --version)"
+  retained_config_sha="$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-v019.env | cut -d' ' -f1)"
+  printf 'STAGING_RETAINED_BINARY='
+  jq -cn --arg baseline "$baseline" --arg sha256 "$retained_sha" --arg version "$retained_version" --arg config_sha256 "$retained_config_sha" \
+    '{baseline:$baseline,sha256:$sha256,version:$version,config_sha256:$config_sha256}'
   before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   [[ "$before_state" =~ ^[a-f0-9]{64}$ ]] || die 'predecessor lease state missing'
   runtime_yard -Y test-yard test-vms status --json \
-    | jq -e '(.resources.bases // []) | length == 0' >/dev/null || die 'predecessor broker already has a cached base'
+    | jq -e '.resources.bases | type=="array" and length==0' >/dev/null || die 'predecessor broker already has a cached base'
   # Stage only verified frozen assets into the normal release cache. Keep the
   # authentic caller and installed broker state intact until its supported update.
   install -d -m 0700 "$SUBYARD_HOME/releases/$P0_OWNER_VERSION"
@@ -1036,6 +1061,47 @@ PYBASELINE
   after_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   [ "$before_owner" = "$after_owner" ] && [ "$before_state" = "$after_state" ] \
     || die 'upgrade replaced retained broker owner or lease state'
+  # Actual predecessor writers must refuse the fenced schema under their normal
+  # lease lock, instead of rewriting it without the admission guard.
+  local fence_binding fenced_before fenced_after old_writer_rc=0
+  outer_exec python3 - <<'PYRETAINED_CONFIG'
+import pathlib,shlex
+def state(path):
+    values={}
+    for line in pathlib.Path(path).read_text().splitlines():
+        line=line.strip()
+        if not line or line.startswith('#'): continue
+        key,separator,value=line.partition('=')
+        if separator and key in {'NESTED_E2E_VMS','E2E_VM_STATE_DIR'}:
+            values[key]=shlex.split(value)[0]
+    assert values.get('NESTED_E2E_VMS')=='1'
+    return values.get('E2E_VM_STATE_DIR','/var/lib/subyard/test-vms')+'/leases.json'
+assert state('/etc/subyard/test-vms.env')==state('/var/lib/subyard/test-vms/.service-retained-v019.env')=='/var/lib/subyard/test-vms/leases.json'
+PYRETAINED_CONFIG
+  [ "$retained_config_sha" = "$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-v019.env | cut -d' ' -f1)" ] \
+    && [ "$retained_sha" = "$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker | cut -d' ' -f1)" ] \
+    || die 'retained predecessor inputs changed during update'
+  fence_binding="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
+    | python3 -c 'import json,runpy,sys; helper=runpy.run_path("config/profiles/test-vms/service-binding.py"); print(helper["project_pool"](json.load(sys.stdin))["binding"])')"
+  outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker "fence-pool-expected-$fence_binding"
+  fenced_before="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
+  outer_exec env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-v019.env \
+    /usr/local/libexec/subyard/.service-retained-v019-worker _test-vms-worker gc \
+    > "$STATE_PARENT/retained-writer.log" 2>&1 || old_writer_rc=$?
+  fenced_after="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
+  printf 'STAGING_RETAINED_ATTEMPT='
+  jq -cn --arg command 'env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-v019.env /usr/local/libexec/subyard/.service-retained-v019-worker _test-vms-worker gc' \
+    --arg binary_sha256 "$retained_sha" --arg before_sha256 "$fenced_before" --arg after_sha256 "$fenced_after" \
+    --argjson native_exit "$old_writer_rc" \
+    '{command:$command,binary_sha256:$binary_sha256,before_sha256:$before_sha256,after_sha256:$after_sha256,native_exit:$native_exit}'
+  printf 'STAGING_RETAINED_OUTPUT_BEGIN\n'
+  head -c 4096 "$STATE_PARENT/retained-writer.log"
+  printf '\nSTAGING_RETAINED_OUTPUT_END\n'
+  [ "$old_writer_rc" != 0 ] && grep -Fq 'unsupported lease state' "$STATE_PARENT/retained-writer.log" \
+    || die 'retained authentic broker writer did not refuse fenced pool schema'
+  [ "$fenced_before" = "$fenced_after" ] || die 'retained writer changed fenced lease state'
+  outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker resume-admission
+  printf 'STAGING_RETAINED_WRITER={"baseline":"0.19.0","fenced_schema":3,"native_exit":%s,"state_retained":true}\n' "$old_writer_rc"
   printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","retained_owner":true}\n' \
     "$baseline" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
   outer_exec cat /usr/local/libexec/subyard/e2e-recipes/manifest.sha256 \
@@ -1050,6 +1116,13 @@ prepare_owner_go_cache
 STATE_PARENT="$OWNER_ROOT/staging-reliability"
 p0_capacity_prepare_subtree "$STATE_PARENT"
 YARD_BUILD_VERSION="$P0_OWNER_VERSION" dev/build-engine.sh --force >/dev/null
+[ -f "$ROOT/.build/yard" ] && [ ! -L "$ROOT/.build/yard" ] && [ -O "$ROOT/.build/yard" ] \
+  && [ "$(stat -c %a:%h "$ROOT/.build/yard")" = 755:1 ] || die 'run-built bootstrap engine is unsafe'
+BOOTSTRAP_ENGINE_VERSION="$("$ROOT/.build/yard" --version)"
+[ "$BOOTSTRAP_ENGINE_VERSION" = "yard $P0_OWNER_VERSION" ] || die 'run-built bootstrap engine version differs'
+BOOTSTRAP_ENGINE_SHA256="$(sha256sum "$ROOT/.build/yard" | cut -d' ' -f1)"
+printf 'STAGING_BOOTSTRAP_ENGINE='
+jq -cn --arg sha256 "$BOOTSTRAP_ENGINE_SHA256" --arg version "$BOOTSTRAP_ENGINE_VERSION" '{sha256:$sha256,version:$version}'
 ensure_owner_incus
 # These fields are consumed by the sourced marker-owned cleanup and registration.
 # shellcheck disable=SC2034

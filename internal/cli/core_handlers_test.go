@@ -66,6 +66,7 @@ func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			infrastructureFixture(t, program, incus, "test-vms")
 			code := program.Run(context.Background())
 			if tc.failure {
 				if code == 0 || !strings.Contains(stdout.String()+stderr.String(), output) {
@@ -76,11 +77,20 @@ func TestTestVMStatusFormatsPublicOutput(t *testing.T) {
 			if code != 0 || stderr.Len() != 0 {
 				t.Fatalf("status: code=%d stderr=%q", code, stderr.String())
 			}
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := response["service"]; !ok {
+				t.Fatal("service identity missing")
+			}
+			delete(response, "service")
+			actual, _ := json.Marshal(response)
 			var compact bytes.Buffer
-			if err := json.Compact(&compact, stdout.Bytes()); err != nil || compact.String() != payload {
+			if err := json.Compact(&compact, actual); err != nil || !sameJSON(compact.Bytes(), []byte(payload)) {
 				t.Fatalf("status data changed: %q (%v)", stdout.String(), err)
 			}
-			if tc.json && stdout.String() != payload+"\n" || !tc.json && !strings.Contains(stdout.String(), "\n  \"pool\": {\n    \"slots\": [") {
+			if tc.json && strings.Count(stdout.String(), "\n") != 1 || !tc.json && !strings.Contains(stdout.String(), "\n  \"pool\": {\n    \"slots\": [") {
 				t.Fatalf("wrong formatting: %q", stdout.String())
 			}
 		})
@@ -111,6 +121,7 @@ func TestTestVMsUsesTypedWorkerInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms failed with %d", code)
 	}
@@ -212,6 +223,7 @@ func TestTestVMRecoverVerifiesCompletedRecoveryIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			infrastructureFixture(t, program, incus, "test-vms")
 			code := program.Run(context.Background())
 			if tc.wantOK {
 				if code != 0 {
@@ -251,6 +263,7 @@ func TestTestVMsMapsWorkerStaleIdentityToPlanStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 1 ||
 		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -270,7 +283,7 @@ func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sshLog := writeStructuredOwnerFixture(t, fakeBin, "test-vms", []string{"revoke", "--slot", "2"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
+	sshLog := writeStructuredOwnerFixture(t, fakeBin, "test-vms", []string{"revoke", "--slot", "2", "--expect-owner", "fixture-owner"}, []domain.OperationStep{{ID: "lease.revoke", Target: "inner/test-vms/slot-002", Observed: "held generation 7 epoch 3", Desired: "release generation 7 epoch 3", Decision: domain.StepApply, Verify: "native lease identity is revoked", Consequence: "revoke slot 2 generation 7 epoch 3"}}, "revoke slot 2 generation 7 epoch 3")
 
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	environment = append(environment,
@@ -283,13 +296,14 @@ func TestRemoteTestVMsForwardsConfirmedLeaseIdentity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
-		Arguments:   []string{"-Y", "remote", "test-vms", "revoke", "--slot", "2"},
+		Arguments:   []string{"test-vms", "revoke", "--slot", "2", "--owner", "fixture-owner"},
 		Environment: environment, WorkingDir: root, ProjectData: probe,
 		Prompt: prompt, Stdout: &stdout, Stderr: &stderr,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStructuredOwnerFixture(t, program, "fixture-owner", "owner.example")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("remote test-vms: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -435,6 +449,7 @@ func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms status failed with %d", code)
 	}
@@ -450,18 +465,20 @@ func TestTestVMStatusExecutesReadOnlyWorkerWithoutConfirmation(t *testing.T) {
 
 func TestTestVMsRejectsStoppedYardBeforePrompt(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
+	incus := lifecycleIncus()
 	environment = append(environment, "NESTED_E2E_VMS=1")
 	prompt := &testkit.Prompt{}
 	runner := &testkit.ScriptedAdapter{}
 	var stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"test-vms", "recover", "--slot", "2"},
-		Environment: environment, WorkingDir: root, Incus: lifecycleIncus(), AdapterRunner: runner,
+		Environment: environment, WorkingDir: root, Incus: incus, AdapterRunner: runner,
 		Prompt: prompt, Stderr: &stderr,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 2 || !strings.Contains(stderr.String(), "must be running") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -489,6 +506,7 @@ func TestTestVMsDeclineLeavesWorkerUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), "operation declined") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -516,6 +534,7 @@ func TestTestVMRevokeAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
 	}
@@ -546,6 +565,7 @@ func TestTestVMRecoverAvailableSlotIsNoOpBeforeConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
 	}
@@ -572,6 +592,7 @@ func TestTestVMRecoverInProgressIsNoOpBeforeConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("test-vms returned %d", code)
 	}
@@ -620,6 +641,7 @@ func TestTestVMPreflightRejectsNoncanonicalSlotInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			infrastructureFixture(t, program, incus, "test-vms")
 			if code := program.Run(context.Background()); code != 2 ||
 				!strings.Contains(stderr.String(), "invalid status response") {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -1212,6 +1234,7 @@ func TestLegacyVMRetirementRequiresDefaultNoAndExactIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("retirement returned %d: %s", code, stderr.String())
 	}

@@ -20,6 +20,7 @@ type MetadataData struct {
 	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
 	OwnerService               string                         `json:"owner_service,omitempty"`
+	InfrastructureService      *InfrastructureService         `json:"infrastructure_service,omitempty"`
 	InstancePublication        *RevisionedSettingsPublication `json:"instance_publication,omitempty"`
 	LifecycleOnly              bool                           `json:"lifecycle_only,omitempty"`
 	FullCleanup                string                         `json:"full_cleanup,omitempty"`
@@ -66,9 +67,14 @@ func (metadata Metadata) Data() (MetadataData, error) {
 }
 func (metadata Metadata) definition() Definition {
 	data := cloneMetadataData(metadata.data)
-	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, Disabled: data.Disabled, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, InstancePublication: data.InstancePublication, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
+	return Definition{SchemaVersion: data.SchemaVersion, Name: data.Name, DefaultYards: data.DefaultYards, Disabled: data.Disabled, DisabledWhen: data.DisabledWhen, SelectedProvisionOnly: data.SelectedProvisionOnly, OwnerService: data.OwnerService, LifecycleOnly: data.LifecycleOnly, InfrastructureService: data.InfrastructureService, InstancePublication: data.InstancePublication, FullCleanup: data.FullCleanup, FullCleanupEnvironment: data.FullCleanupEnvironment, Native: data.Native, Consumers: data.Consumers, CredentialImportExclusions: data.CredentialImportExclusions, ManagedPaths: data.ManagedPaths, Setup: data.Setup, Settings: data.Settings, Runtime: data.Runtime, GuestEnvironment: data.GuestEnvironment, Dashboard: data.Dashboard}
 }
 func cloneMetadataData(data MetadataData) MetadataData {
+	if data.InfrastructureService != nil {
+		value := *data.InfrastructureService
+		value.RequiredSettings = maps.Clone(value.RequiredSettings)
+		data.InfrastructureService = &value
+	}
 	if data.InstancePublication != nil {
 		copy := *data.InstancePublication
 		copy.Settings = slices.Clone(copy.Settings)
@@ -209,12 +215,19 @@ func cloneSettings(settings []Setting) []Setting {
 // ValidateMetadata checks operation-local ownership collisions independently of
 // package files. Zero metadata and invalid snapshots fail closed.
 func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) error {
+	serviceIDs := map[string]bool{}
 	keys, dashboardKeys := map[string]bool{}, map[string]bool{}
 	consumers, setupPaths, settings, activations := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, metadata := range profiles {
 		definition, err := metadata.Data()
 		if err != nil {
 			return err
+		}
+		if service := definition.InfrastructureService; service != nil {
+			if serviceIDs[service.ID] {
+				return errors.New("duplicate infrastructure service ID")
+			}
+			serviceIDs[service.ID] = true
 		}
 		if publication := definition.InstancePublication; publication != nil {
 			for _, key := range []string{publication.SchemaKey, publication.RevisionKey} {
@@ -290,7 +303,7 @@ func ValidateMetadata(profiles []Metadata, integrations []IntegrationMetadata) e
 }
 
 func (declaration Definition) metadataData() MetadataData {
-	return MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, Disabled: declaration.Disabled, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}
+	return MetadataData{SchemaVersion: declaration.SchemaVersion, Name: declaration.Name, DefaultYards: declaration.DefaultYards, Disabled: declaration.Disabled, DisabledWhen: declaration.DisabledWhen, SelectedProvisionOnly: declaration.SelectedProvisionOnly, OwnerService: declaration.OwnerService, LifecycleOnly: declaration.LifecycleOnly, InfrastructureService: declaration.InfrastructureService, InstancePublication: declaration.InstancePublication, FullCleanup: declaration.FullCleanup, FullCleanupEnvironment: declaration.FullCleanupEnvironment, Native: declaration.Native, Consumers: declaration.Consumers, CredentialImportExclusions: declaration.CredentialImportExclusions, ManagedPaths: declaration.ManagedPaths, Setup: declaration.Setup, Settings: declaration.Settings, Runtime: declaration.Runtime, GuestEnvironment: declaration.GuestEnvironment, Dashboard: declaration.Dashboard}
 }
 
 // Clone returns an independent declaration, preserving its inspected package binding.

@@ -1074,6 +1074,7 @@ E2E_DISK_RESERVE=512MiB
 E2E_CACHE_BUDGET=4GiB
 CONFIG
 p0_retry_init_after_plan_stale fixture_yard -Y test-yard init --yes
+fixture_yard service register test-vms --yard test-yard --yes >/dev/null
 # Init canonicalizes a flat registration and archives its original file.
 REGISTRATION="$OWNER_YARD_DIR/test-yard.env"
 if [ -e "$OWNER_YARD_DIR/test-yard/config.env" ] || [ -L "$OWNER_YARD_DIR/test-yard/config.env" ]; then

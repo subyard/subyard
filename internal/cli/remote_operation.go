@@ -24,6 +24,7 @@ import (
 
 const exactPlanCapability = "operation-exact-plan-v1"
 const operationStepsCapability = "operation-steps-v1"
+const ownerServicesCapability = "owner-services-v1"
 
 func ownerPreparedInvocation(definition command.Definition, arguments []string) bool {
 	if definition.Handler == "@config" {
@@ -39,7 +40,7 @@ func ownerPreparedInvocation(definition command.Definition, arguments []string) 
 		return false
 	}
 	switch definition.Handler {
-	case "@integration", "@init", "@lifecycle", "@teardown":
+	case "@integration", "@init", "@lifecycle", "@teardown", "@service":
 		return true
 	case "@provision":
 		return !slices.Contains(arguments, "--list") && !slices.Contains(arguments, "-l")
@@ -270,6 +271,9 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 	if err = session.negotiate(ctx); err != nil {
 		return err
 	}
+	if (prepared.Definition.Handler == "@service" || prepared.Definition.Handler == "@test-vms") && !slices.Contains(session.capabilities, ownerServicesCapability) {
+		return errors.New("owner service routing unavailable; update Subyard on the owner host")
+	}
 	if err = session.requireOperationSteps(); err != nil {
 		return err
 	}
@@ -282,6 +286,12 @@ func (prepared *preparedCommand) prepareRemoteOperation(ctx context.Context) err
 		}
 		prepared.displayOnly = func() { cli.printIntegrationStatus(status, request.json) }
 		return nil
+	}
+	if prepared.Definition.Handler == "@service" || prepared.Definition.Handler == "@test-vms" {
+		if cli.serviceExpectedOwner == "" {
+			return errors.New("selected service owner identity is unavailable")
+		}
+		prepared.Arguments = append(slices.Clone(prepared.Arguments), "--expect-owner", cli.serviceExpectedOwner)
 	}
 	var exact exactOperationPlan
 	params := struct {

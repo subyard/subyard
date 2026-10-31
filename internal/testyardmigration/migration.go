@@ -1026,6 +1026,12 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 				return registrationSet{}, err
 			}
 			if !recognized {
+				recognized, err = resetEmptyYardDirectory(options, LegacyYard, legacyDirectory)
+				if err != nil {
+					return registrationSet{}, err
+				}
+			}
+			if !recognized {
 				return registrationSet{}, fmt.Errorf(
 					"yard registration directory %q is incomplete",
 					LegacyYard,
@@ -1041,6 +1047,12 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 				return registrationSet{}, err
 			}
 			if !recognized {
+				recognized, err = resetEmptyYardDirectory(options, CurrentYard, currentDirectory)
+				if err != nil {
+					return registrationSet{}, err
+				}
+			}
+			if !recognized {
 				return registrationSet{}, fmt.Errorf(
 					"yard registration directory %q is incomplete",
 					CurrentYard,
@@ -1049,6 +1061,20 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 		}
 	}
 	return result, nil
+}
+
+// Reset removes authored files after native teardown and keeps its ownership
+// marker outside the yard directory. That protected intent plus an already
+// validated empty directory is retired state, not an incomplete registration.
+func resetEmptyYardDirectory(options Options, name, directory string) (bool, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) != 0 {
+		return false, nil
+	}
+	return config.YardFallbackReset(options.ConfigHome, name)
 }
 
 func run(

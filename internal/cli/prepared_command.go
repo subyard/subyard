@@ -62,6 +62,9 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 			}
 			return actions
 		}
+	case "@service":
+		behavior.prepare = (*preparedCommand).prepareService
+		behavior.shellActions = lifecycleShellActions
 	case "@test-vms":
 		behavior.prepare = (*preparedCommand).prepareTestVMs
 		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
@@ -319,6 +322,27 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	}
 	if behavior.prepare == nil {
 		return nil, fmt.Errorf("command has no prepared execution: %s", behavior.nonRPCReason)
+	}
+	if request.Definition.Handler == "@service" && request.Loaded.Context.AccessKind == domain.AccessLocal {
+		yard, _, resolveErr := cli.selectServiceInvocation(ctx, request.Definition, request.Arguments)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		request.Loaded, request.Bootstrap, err = cli.loadServiceContext(yard, request.Arguments)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if request.Definition.Handler == "@test-vms" && request.Loaded.Context.AccessKind == domain.AccessLocal {
+		selection, resolveErr := cli.resolveServiceCommand(request.Definition.Name, request.Arguments)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		request.Loaded, err = cli.loadServiceYard(selection.record.Yard)
+		if err != nil {
+			return nil, err
+		}
+		cli.serviceSelection = selection
 	}
 	cli.ensureOperationID()
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: request.Definition,
@@ -957,11 +981,39 @@ func (prepared *preparedCommand) prepareProvision(ctx context.Context, _ *initBo
 
 func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBootstrap) error {
 	prepared.stepsComplete = true
-	execution, err := prepared.CLI.prepareTestVMExecution(ctx, prepared.Loaded, prepared.Arguments)
+	if prepared.Loaded.Context.AccessKind == domain.AccessRemote && testVMStatusInvocation(prepared.Arguments) {
+		session, err := prepared.CLI.openOwnerRPC(ctx, prepared.Loaded.Context)
+		if err != nil {
+			return err
+		}
+		defer session.close()
+		if err := session.negotiate(ctx); err != nil {
+			return err
+		}
+		if !slices.Contains(session.capabilities, ownerServicesCapability) {
+			return errors.New("owner service routing unavailable; update Subyard on the owner host")
+		}
+		if prepared.CLI.serviceExpectedOwner == "" {
+			return errors.New("selected service owner identity is unavailable")
+		}
+		prepared.Arguments = append(slices.Clone(prepared.Arguments), "--expect-owner", prepared.CLI.serviceExpectedOwner)
+	}
+	selection := prepared.CLI.serviceSelection
+	_, nativeArguments, err := serviceOptions(prepared.Arguments)
+	if err != nil {
+		return err
+	}
+	if selection != nil {
+		if err := prepared.CLI.checkServiceSelection(ctx, prepared.Loaded, selection); err != nil {
+			return err
+		}
+	}
+	execution, err := prepared.CLI.prepareTestVMExecution(ctx, prepared.Loaded, nativeArguments)
 	if err != nil {
 		return err
 	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }
+	execution.service = selection
 	prepared.exactState = execution.binding()
 	prepared.steps = execution.steps
 	prepared.executeNoOp = true
@@ -972,7 +1024,7 @@ func (prepared *preparedCommand) prepareTestVMs(ctx context.Context, _ *initBoot
 	return nil
 }
 
-func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBootstrap) error {
+func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBootstrap) error {
 	prepared.stepsComplete = true
 	prepared.executeNoOp = true
 	execution, err := prepareTeardownExecution(prepared.Arguments)
@@ -1039,6 +1091,9 @@ func (prepared *preparedCommand) prepareTeardown(_ context.Context, _ *initBoots
 			err = prepared.CLI.finishTeardownRepair(ctx, permit)
 		}
 		return result, err
+	}
+	if !execution.full {
+		return prepared.bindServiceTeardown(ctx)
 	}
 	return nil
 }

@@ -101,6 +101,10 @@ type Options struct {
 }
 
 type CLI struct {
+	serviceExpectedOwner string
+	serviceRemote        *config.Loaded
+	serviceSelection     *serviceSelection
+
 	catalog                      config.Catalog
 	provisionEndpointAddresses   func() ([]hostruntime.OwnerIPv4, error)
 	options                      Options
@@ -233,14 +237,16 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 }
 
 type mutationGateOutcome struct {
-	Status      releasetransition.PublicStatus   `json:"status"`
-	Code        releasetransition.OutcomeCode    `json:"code"`
-	Active      releasetransition.ReleaseID      `json:"active"`
-	Previous    *releasetransition.ReleaseID     `json:"previous"`
-	Target      releasetransition.ReleaseID      `json:"target"`
-	Transaction *releasetransition.TransactionID `json:"transaction"`
-	Message     string                           `json:"message,omitempty"`
-	Action      string                           `json:"action"`
+	Status      releasetransition.PublicStatus       `json:"status"`
+	Code        releasetransition.OutcomeCode        `json:"code"`
+	Active      releasetransition.ReleaseID          `json:"active"`
+	Previous    *releasetransition.ReleaseID         `json:"previous"`
+	Target      releasetransition.ReleaseID          `json:"target"`
+	Transaction *releasetransition.TransactionID     `json:"transaction"`
+	Message     string                               `json:"message,omitempty"`
+	Action      string                               `json:"action"`
+	Decisions   []releasetransition.RedactedDecision `json:"decisions,omitempty"`
+	Blockers    []releasetransition.Blocker          `json:"blockers,omitempty"`
 }
 
 func publicMutationGateOutcome(outcome releasetransition.Outcome) mutationGateOutcome {
@@ -250,6 +256,17 @@ func publicMutationGateOutcome(outcome releasetransition.Outcome) mutationGateOu
 		Transaction: outcome.Transaction, Message: outcome.Message,
 		Action: releaseruntime.CurrentReleaseRetry(outcome),
 	}
+}
+
+// publicInspectedMutationGateOutcome retains diagnostics only for the exact
+// refused observation. Recovery may replace the outcome with a different gate.
+func publicInspectedMutationGateOutcome(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) mutationGateOutcome {
+	result := publicMutationGateOutcome(*outcome)
+	if inspection != nil && inspection.Outcome == outcome {
+		result.Decisions = append([]releasetransition.RedactedDecision(nil), inspection.Decisions...)
+		result.Blockers = append([]releasetransition.Blocker(nil), inspection.Blockers...)
+	}
+	return result
 }
 
 func (cli *CLI) mutationGateReleaseOptions() (migration.ReleaseOptions, bool, error) {
@@ -296,13 +313,18 @@ func (cli *CLI) mutationGateReleaseOptions() (migration.ReleaseOptions, bool, er
 	}, true, nil
 }
 
-func (cli *CLI) inspectMutationGate(
+func (cli *CLI) inspectMutationGate(ctx context.Context, yard string) (*releasetransition.Outcome, error) {
+	outcome, _, err := cli.inspectMutationGateInspection(ctx, yard)
+	return outcome, err
+}
+
+func (cli *CLI) inspectMutationGateInspection(
 	ctx context.Context,
 	yard string,
-) (*releasetransition.Outcome, error) {
+) (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
-		return nil, err
+		return nil, nil, err
 	}
 	runtime := releaseruntime.New(releaseruntime.Config{
 		Inputs:  cli.commandInputs,
@@ -310,24 +332,24 @@ func (cli *CLI) inspectMutationGate(
 		Stderr:  cli.options.Stderr,
 	})
 	defer runtime.Close()
-	v2, err := runtime.InspectMutationGate(
+	v2, err := runtime.InspectMutationGateInspection(
 		ctx, options.RuntimeRoot, options.ConfigHome, "default",
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if v2 != nil {
-		return v2, nil
+	if v2 != nil && v2.Outcome.Status != releasetransition.StatusReady {
+		return v2.Outcome, v2, nil
 	}
 	legacy, err := migration.InspectMutationGate(ctx, options)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return legacy, nil
+	return legacy, nil, nil
 }
 
-func mutationGateRPCError(outcome releasetransition.Outcome) *rpc.Error {
-	payload, err := json.Marshal(publicMutationGateOutcome(outcome))
+func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
+	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
 	if err != nil {
 		return &rpc.Error{Code: string(outcome.Code), Message: outcome.Message}
 	}
@@ -511,6 +533,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		return 0
 	}
+	if core && (definition.Handler == "@service" || definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments)) && !commandHelpRequested(commandArguments) {
+		selected, arguments, selectionErr := cli.selectServiceInvocation(ctx, definition, commandArguments)
+		if selectionErr != nil {
+			return cli.reportServiceError(commandArguments, selectionErr)
+		}
+		yard, explicit, commandArguments = selected, true, arguments
+	}
 	configSync, configSyncCheck, configSyncStatus := false, false, false
 	registrationRepair := core && definition.Handler == "@config" && configRegistrationRepairInvocation(commandArguments)
 	if core && definition.Handler == "@config" {
@@ -598,7 +627,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	// uses its own ownership and cleanup guards without requiring migrations.
 	if !readOnlyInvocation && !registrationRepair && !cli.releaseTransitionChild &&
 		(!core || definition.Name != "update" && definition.Handler != "@teardown") {
-		outcome, gateErr := cli.inspectMutationGate(ctx, yard)
+		outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
 		if gateErr != nil {
 			cli.errorf("inspect release transition: %v", gateErr)
 			return 1
@@ -657,7 +686,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 				}
 			}
 			if encodeErr := json.NewEncoder(cli.options.Stderr).Encode(
-				publicMutationGateOutcome(*outcome),
+				publicInspectedMutationGateOutcome(outcome, gateInspection),
 			); encodeErr != nil {
 				cli.errorf("write release transition outcome: %v", encodeErr)
 			}
@@ -733,7 +762,13 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	var loaded config.Loaded
 	var bootstrap *initBootstrap
-	if core && definition.Handler == "@client-projects" {
+	if cli.serviceRemote != nil {
+		loaded = *cli.serviceRemote
+	} else if core && definition.Handler == "@service" && !commandHelpRequested(commandArguments) {
+		loaded, bootstrap, err = cli.loadServiceContext(yard, commandArguments)
+	} else if core && definition.Handler == "@test-vms" && !testVMLogsInvocation(commandArguments) && !commandHelpRequested(commandArguments) {
+		loaded, err = cli.loadServiceYard(yard)
+	} else if core && definition.Handler == "@client-projects" {
 		loaded, err = cli.loadContext("default")
 	} else if core && definition.Handler == "@init" && !commandHelpRequested(commandArguments) {
 		loaded, bootstrap, err = cli.loadInitContext(yard, explicit, commandArguments)
@@ -749,7 +784,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.env["SUBYARD_YARD"] = yard
 		loaded, err = cli.loadContext(yard)
 	}
-	if strings.Contains(yard, "/") && !(core && (definition.Handler == "@list" ||
+	if cli.serviceRemote == nil && strings.Contains(yard, "/") && !(core && (definition.Handler == "@list" ||
 		definition.Handler == "@status" || definition.Handler == "@yards" || definition.Handler == "@client-projects")) {
 		canonical := yard
 		base, baseErr := cli.loadContext("default")
@@ -835,7 +870,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
 		} else if !cli.releaseTransitionChild {
-			outcome, gateErr := cli.inspectMutationGate(ctx, yard)
+			outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
 			if gateErr != nil {
 				cli.errorf("inspect release transition: %v", gateErr)
 				return 1
@@ -848,7 +883,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 				}
 				cli.teardownRepair = permit
 				if permit == nil {
-					if err := json.NewEncoder(cli.options.Stderr).Encode(publicMutationGateOutcome(*outcome)); err != nil {
+					if err := json.NewEncoder(cli.options.Stderr).Encode(publicInspectedMutationGateOutcome(outcome, gateInspection)); err != nil {
 						cli.errorf("write release transition outcome: %v", err)
 					}
 					return 1
@@ -1100,9 +1135,12 @@ func (cli *CLI) Run(ctx context.Context) int {
 		fmt.Fprintln(cli.options.Stdout, "Existing profiles are preserved. Profiles without an install hook only reconcile the yard; dedicated-role restrictions still apply.")
 		fmt.Fprintln(cli.options.Stdout, "Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.")
 		return 0
+	case "@service":
+		fmt.Fprintf(cli.options.Stdout, "Usage: %s service <register|install|start|stop|update|remove> ID [--owner ID] [--pool ID] [--yard NAME] [--yes]\n", cli.options.Program)
+		return 0
 	case "@test-vms":
 		fmt.Fprintf(cli.options.Stdout,
-			"Usage: %s test-vms <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>\n",
+			"Usage: %s test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>\n",
 			cli.options.Program)
 		return 0
 	case "@teardown":
@@ -1749,6 +1787,9 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 	}
 	results := cli.allOwnerInventoriesForQueries(ctx, loaded, false)
 	type yardOutput struct {
+		Role                 string                   `json:"role,omitempty"`
+		Service              string                   `json:"service,omitempty"`
+		Pool                 string                   `json:"pool,omitempty"`
 		YardRef              domain.YardRef           `json:"yardRef"`
 		AccessKind           domain.AccessKind        `json:"accessKind"`
 		YardKind             domain.YardKind          `json:"yardKind"`
@@ -1800,7 +1841,7 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 			if stateValue == "" {
 				stateValue = "?"
 			}
-			rows = append(rows, yardOutput{
+			rows = append(rows, yardOutput{Role: yard.Role, Service: yard.Service, Pool: yard.Pool,
 				YardRef:    domain.YardRef{HostID: result.inventory.HostID, YardName: yard.Name},
 				AccessKind: accessKind, YardKind: domain.YardKind(yard.Kind),
 				YardInstanceName: yard.Instance, State: stateValue, Projects: len(yard.Projects),
@@ -1820,19 +1861,19 @@ func (cli *CLI) runYards(ctx context.Context, loaded config.Loaded, arguments []
 	}
 	if verbose {
 		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %-8s %-24s %-24s %s\n",
-			"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS", "DESIRED IMAGE", "RESOLVED IMAGE", "OWNER ENDPOINT")
+			"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS", "DESIRED IMAGE", "RESOLVED IMAGE", "OWNER ENDPOINT / ROLE")
 		for _, row := range rows {
 			fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %-8d %-24s %-24s %s\n",
 				row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, displayYardState(row.State, row.StartState),
-				row.Projects, row.YardImageRef, row.ResolvedYardImage, row.OwnerEndpoint)
+				row.Projects, row.YardImageRef, row.ResolvedYardImage, strings.TrimSpace(row.OwnerEndpoint+" "+row.Role))
 		}
 		return code
 	}
 	fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %s\n",
-		"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS")
+		"NAME", "ACCESS", "KIND", "INSTANCE", "STATE", "PROJECTS / ROLE")
 	for _, row := range rows {
-		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %d\n",
-			row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, displayYardState(row.State, row.StartState), row.Projects)
+		fmt.Fprintf(cli.options.Stdout, "%-24s %-6s %-9s %-16s %-19s %d %s\n",
+			row.YardRef.String(), row.AccessKind, row.YardKind, row.YardInstanceName, displayYardState(row.State, row.StartState), row.Projects, row.Role)
 	}
 	return code
 }
@@ -4011,14 +4052,19 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		return 2
 	}
 	loaded, err := cli.loadContext(yard)
+	ownerServicesOnly := false
 	if err != nil {
-		cli.errorf("load RPC context: %v", err)
-		return 2
+		loaded, err = cli.ownerServiceContext()
+		if err != nil {
+			cli.errorf("RPC owner configuration is unavailable or invalid")
+			return 2
+		}
+		ownerServicesOnly = true
 	}
 	// The session context remains immutable. Exact named-yard bootstrap retains
 	// its own native context without switching the query session.
 	cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
-	handler := &rpcHandler{cli: cli, loaded: loaded, plans: make(map[string]*preparedCommand)}
+	handler := &rpcHandler{cli: cli, loaded: loaded, ownerServicesOnly: ownerServicesOnly, plans: make(map[string]*preparedCommand)}
 	defer handler.closePlans()
 	session := rpc.Session{Handler: handler, EngineVersion: Version, Capabilities: []string{
 		"snapshot", "ordered-events", "cancellation", "deadlines", "commands", "context",
@@ -4027,8 +4073,11 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 		ownerinventory.ReleaseReadinessCapability,
 		profileListCapability, settingsListCapability, hostSyncStatusCapability, sessionPrepareCapability,
 		yardBootstrapCapability,
-		credentialPrepareCapability, exactPlanCapability, operationStepsCapability,
+		credentialPrepareCapability, exactPlanCapability, operationStepsCapability, ownerServicesCapability,
 	}, DrainOnEOF: true}
+	if ownerServicesOnly {
+		session.Capabilities = []string{"cancellation", "deadlines", "operation-plan", "operation-execute", exactPlanCapability, operationStepsCapability, ownerServicesCapability}
+	}
 	if err := session.Serve(ctx, cli.options.Stdin, cli.options.Stdout); err != nil {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 			cli.errorf("RPC session: %v", err)
@@ -4039,6 +4088,7 @@ func (cli *CLI) serveRPC(ctx context.Context, yard string, arguments []string) i
 }
 
 type rpcHandler struct {
+	ownerServicesOnly   bool
 	cli                 *CLI
 	loaded              config.Loaded
 	plansMu             sync.Mutex
@@ -4126,6 +4176,13 @@ func operationRPCError(fallback string, err error) *rpc.Error {
 }
 
 func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.Emit) (any, error) {
+	if handler.ownerServicesOnly {
+		switch call.Method {
+		case "operation.plan", "operation.execute", "operation.discard":
+		default:
+			return nil, &rpc.Error{Code: "owner_configuration_invalid", Message: "workspace configuration is unavailable; only declared owner service operations are supported"}
+		}
+	}
 	switch call.Method {
 	case "integration.status":
 		var params struct {
@@ -4217,6 +4274,9 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if !ok || definition.Visibility != command.VisibilityPublic {
 			return nil, &rpc.Error{Code: "command_not_found", Message: params.Command}
 		}
+		if handler.ownerServicesOnly && !handler.cli.declaredServiceCommand(definition) {
+			return nil, &rpc.Error{Code: "owner_configuration_invalid", Message: "workspace configuration is unavailable; only declared owner service operations are supported"}
+		}
 		if definition.Effect != command.EffectMutate {
 			return nil, &rpc.Error{Code: "command_not_mutating", Message: params.Command}
 		}
@@ -4248,6 +4308,24 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		operationCLI := handler.cli.rpcOperation(call.OperationID)
 		operationLoaded := handler.loaded
 		var bootstrap *initBootstrap
+		if operationCLI.declaredServiceCommand(definition) {
+			yard, arguments, selectionErr := operationCLI.selectServiceInvocation(ctx, definition, params.Arguments)
+			if selectionErr != nil {
+				return nil, preparationRPCError(definition, selectionErr)
+			}
+			params.Arguments = arguments
+			if definition.Handler == "@service" {
+				operationLoaded, bootstrap, err = operationCLI.loadServiceContext(yard, params.Arguments)
+			} else {
+				operationLoaded, err = operationCLI.loadServiceYard(yard)
+			}
+			if err != nil {
+				return nil, preparationRPCError(definition, err)
+			}
+			if operationLoaded.Context.AccessKind != domain.AccessLocal {
+				return nil, &rpc.Error{Code: "remote_owner_required", Message: "request the service operation on its owner host"}
+			}
+		}
 		if params.TargetYard != nil {
 			// Reload from original command inputs, never inherited settings of the
 			// session yard. Native init owns preset validation and registration.
@@ -4263,7 +4341,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			}
 		}
 		if !releaseRecoveryCommand(definition) {
-			outcome, gateErr := operationCLI.inspectMutationGate(
+			outcome, gateInspection, gateErr := operationCLI.inspectMutationGateInspection(
 				ctx, operationLoaded.Context.YardName,
 			)
 			if gateErr != nil {
@@ -4278,7 +4356,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 					}
 				}
 				if outcome != nil {
-					return nil, mutationGateRPCError(*outcome)
+					return nil, mutationGateRPCError(outcome, gateInspection)
 				}
 			}
 		}
@@ -4381,7 +4459,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
 		}
 		if !releaseRecoveryCommand(planned.Definition) {
-			outcome, gateErr := planned.CLI.inspectMutationGate(
+			outcome, gateInspection, gateErr := planned.CLI.inspectMutationGateInspection(
 				ctx, planned.Loaded.Context.YardName,
 			)
 			if gateErr != nil {
@@ -4390,7 +4468,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 			if outcome != nil {
 				if planned.Definition.Handler != "@init" || planned.CLI.profileInitRepair == nil ||
 					!sameConfigApplyGate(planned.CLI.profileInitRepair.gate, *outcome) {
-					return nil, mutationGateRPCError(*outcome)
+					return nil, mutationGateRPCError(outcome, gateInspection)
 				}
 			}
 		}

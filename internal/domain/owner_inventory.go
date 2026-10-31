@@ -20,6 +20,9 @@ type OwnerProject struct {
 }
 
 type OwnerYard struct {
+	Role                 string            `json:"role,omitempty"`
+	Service              string            `json:"service,omitempty"`
+	Pool                 string            `json:"pool,omitempty"`
 	Name                 string            `json:"name"`
 	Kind                 string            `json:"kind"`
 	Instance             string            `json:"instance"`
@@ -57,6 +60,10 @@ func (inventory OwnerInventory) Validate() error {
 	yards := make(map[string]struct{}, len(inventory.Yards))
 	projects := make(map[string]struct{})
 	for _, yard := range inventory.Yards {
+		if yard.Role != "" && yard.Role != "infrastructure-service" || (yard.Role == "infrastructure-service") != (yard.Service != "" && yard.Pool != "") || yard.Service != "" && !SafeName(yard.Service) || yard.Pool != "" && !SafeName(yard.Pool) {
+			return errors.New("invalid owner yard service role")
+		}
+
 		if (yard.StartState != "" && yard.StartState != StartWaitingForAddress) ||
 			(yard.StartState == StartWaitingForAddress) != (len(yard.WaitingForAddresses) != 0) ||
 			len(yard.WaitingForAddresses) > 1024 {

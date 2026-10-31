@@ -123,6 +123,7 @@ check_go_race() {
     './internal/adapters/testvmsruntime:TestBackendApplyInstallsCurrentEngineAndPublishesRoute|TestBrokerInputPublicationAndDirectory' \
     './internal/adapters/configmaterial:TestTOMLMaterializationPreservesRuntimeFields' \
     './internal/ownerinventory:TestCacheUsesPrivateAtomicFile' \
+    './internal/ownerservice:TestRegistryInterruptedPublicationAndGenerationCAS' \
     './internal/sshtrust:TestFirstTrustConsentAndVerification' \
     './internal/audit:TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes'
 }

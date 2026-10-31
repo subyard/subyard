@@ -8,6 +8,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 . "$REPO_ROOT/scripts/lib/runtime.sh"
 
 E2E_YARD="${SUBYARD_E2E_YARD:-test-yard}"
+E2E_LEGACY_ROUTE=0
+E2E_OWNER=""
+E2E_POOL=""
+E2E_SERVICE_GENERATION=""
+E2E_CAPTURED_ROUTE_DIRECTORY=""
 BASTION_USER="${SUBYARD_E2E_BASTION_USER:-subyard-e2e-agent}"
 STATE_BASE="${SUBYARD_E2E_STATE_DIR:-${SUBYARD_HOME:-$(subyard_operator_home)/.subyard}/e2e}"
 BASTION_ROUTE=""
@@ -91,7 +96,11 @@ configure_yard_scope() {
     '' | *[!a-z0-9_-]* | _* | -*) die "unsafe yard selector '$E2E_YARD'" ;;
   esac
   BASTION_ROUTE="${SUBYARD_E2E_BASTION_ROUTE:-yard-$E2E_YARD}"
-  STATE_ROOT="${SUBYARD_E2E_YARD_STATE_DIR:-$STATE_BASE/yards/$E2E_YARD}"
+  if [ -n "$E2E_SERVICE_GENERATION" ]; then
+    STATE_ROOT="$STATE_BASE/services/$E2E_OWNER/$E2E_POOL/$E2E_SERVICE_GENERATION"
+  else
+    STATE_ROOT="${SUBYARD_E2E_YARD_STATE_DIR:-$STATE_BASE/yards/$E2E_YARD}"
+  fi
   IDENTITY="${SUBYARD_E2E_IDENTITY:-$STATE_BASE/id_ed25519}"
   CLIENT_CONFIG="$STATE_ROOT/ssh_config"
   GUEST_KNOWN_HOSTS="$STATE_ROOT/guest_known_hosts"
@@ -102,22 +111,24 @@ configure_yard_scope
 usage() {
   cat <<'EOF'
 Usage:
-  dev/agent-e2e.sh [--yard NAME] --prepare
-  dev/agent-e2e.sh [--yard NAME] --status [--json]
-  dev/agent-e2e.sh [--yard NAME] --logs [--slot N] [-n 1..200] [--json]
-  dev/agent-e2e.sh [--yard NAME] --observe CURSOR|-
-  dev/agent-e2e.sh [--yard NAME] --incident ID
-  dev/agent-e2e.sh [--yard NAME] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--yard NAME] --slot N [--vm-count 1|2] --verify-boundary
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --prepare
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --status [--json]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
 first builds the explicit development candidate in that run directory. --ssh opens an ordinary guest
 terminal or runs a command with stdin closed. --ssh-stdin explicitly forwards stdin to a command.
-NAME defaults to test-yard. During a temporary migration, select the old yard explicitly with
-`--yard e2e-yard`; route and generated client state remain isolated per yard.
+The default resolves the trusted owner service publication independently of the work yard.
+Use --owner ID and --pool ID for an exact service selection; ambiguity never selects the first pool.
+--yard NAME explicitly selects a pre-registration route for operator-controlled rollout only.
+Controller and lease state are isolated by owner, pool and registration generation.
 
 --prepare creates or verifies the shared controller identity at ~/.subyard/e2e/id_ed25519. P1
 accepts standard controller keys through the bounded forced-command facade. Every run creates a
@@ -191,11 +202,20 @@ known_host_lookup_name() {
 }
 
 resolve_bastion_route() {
+  # A held lease and its keeper retain the exact pinned endpoint captured before acquire.
+  [ -z "$E2E_SERVICE_GENERATION" ] || [ -z "$BASTION_KNOWN_HOSTS" ] || return 0
+  if [ -n "$E2E_SERVICE_GENERATION" ] && [ -n "${SUBYARD_E2E_BASTION_HOSTNAME:-}" ]; then
+    die 'service routes require the trusted publication; explicit transport overrides require --yard'
+  fi
   local rendered key value rest lookup candidate route_config="${SUBYARD_E2E_ROUTE_CONFIG:-${HOME:?}/.ssh/config}"
   local explicit_known="${SUBYARD_E2E_BASTION_KNOWN_HOSTS:-}"
   local registry="${SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes}"
   local route_file="$registry/$E2E_YARD/current/route.tsv"
   local known_file="$registry/$E2E_YARD/current/known_hosts"
+  if [ -n "$E2E_CAPTURED_ROUTE_DIRECTORY" ]; then
+    route_file="$E2E_CAPTURED_ROUTE_DIRECTORY/route.tsv"
+    known_file="$E2E_CAPTURED_ROUTE_DIRECTORY/known_hosts"
+  fi
   local header route_key route_value route_extra hostname_seen=0 port_seen=0 alias_seen=0
   local -a known_candidates=()
   local -a extra_known_candidates=()
@@ -226,6 +246,7 @@ resolve_bastion_route() {
     [ "$hostname_seen$port_seen$alias_seen" = 111 ] || die "test environment route is incomplete"
     known_candidates=("$known_file")
   else
+    [ -z "$E2E_SERVICE_GENERATION" ] || die 'test environment unavailable: service_unavailable (published route absent)'
     [ -r "$route_config" ] || route_config=/dev/null
     rendered="$(ssh -G -F "$route_config" "$BASTION_ROUTE" 2>/dev/null)" \
       || die "cannot resolve SSH route '$BASTION_ROUTE'"
@@ -259,6 +280,14 @@ resolve_bastion_route() {
     fi
   done
   [ -n "$BASTION_KNOWN_HOSTS" ] || die "test environment unavailable: no pinned host key for $lookup"
+  if [ -n "$E2E_SERVICE_GENERATION" ]; then
+    local captured_known
+    captured_known="$(mktemp "$STATE_ROOT/.bastion-known.XXXXXX")"
+    cat -- "$BASTION_KNOWN_HOSTS" > "$captured_known"
+    chmod 0600 "$captured_known"
+    mv -f -- "$captured_known" "$STATE_ROOT/bastion_known_hosts"
+    BASTION_KNOWN_HOSTS="$STATE_ROOT/bastion_known_hosts"
+  fi
 }
 
 ssh_config_value() {
@@ -1537,7 +1566,9 @@ main() {
   local -a selected=() command=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --yard) [ "$#" -ge 2 ] || die "--yard needs a yard name"; E2E_YARD="$2"; shift 2 ;;
+      --yard) [ "$#" -ge 2 ] || die "--yard needs a yard name"; E2E_YARD="$2"; E2E_LEGACY_ROUTE=1; shift 2 ;;
+      --owner) [ "$#" -ge 2 ] && [ -z "$E2E_OWNER" ] || die '--owner requires one owner ID'; E2E_OWNER="$2"; shift 2 ;;
+      --pool) [ "$#" -ge 2 ] && [ -z "$E2E_POOL" ] || die '--pool requires one pool ID'; E2E_POOL="$2"; shift 2 ;;
 	    --slot)
 	      [ "$#" -ge 2 ] || die "--slot needs a number from 1 to 999"
 	      [ -z "$slot_value" ] || die "--slot may be specified only once"
@@ -1617,6 +1648,20 @@ main() {
   if [ "$VM_COUNT" = 1 ]; then
     [ "$selector" != 2 ] && [ "$selector" != both ] && [ "$ssh_vm" != 2 ] \
       || die 'one-VM allocation has only VM 1; selectors 2 and both are invalid'
+  fi
+  case "$mode" in
+    run|ssh|verify) [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease" ;;
+  esac
+  if [ "$E2E_LEGACY_ROUTE" = 0 ] && [ "$mode" != prepare ]; then
+    local service_route _runtime_uuid route_generation
+    service_route="$(python3 "$REPO_ROOT/config/profiles/test-vms/service-route.py" \
+      --registry "${SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes}" \
+      --owner "$E2E_OWNER" --pool "$E2E_POOL")" || die 'test environment unavailable: owner service resolution failed'
+    IFS=$'\t' read -r E2E_OWNER E2E_POOL E2E_YARD E2E_SERVICE_GENERATION _runtime_uuid route_generation <<< "$service_route"
+    [[ "$route_generation" =~ ^\.route-[A-Za-z0-9_-]+$ ]] || die 'test environment unavailable: unsafe service route generation'
+    E2E_CAPTURED_ROUTE_DIRECTORY="${SUBYARD_E2E_ROUTE_REGISTRY:-/var/lib/subyard/e2e-routes}/$E2E_YARD/$route_generation"
+  elif [ "$E2E_LEGACY_ROUTE" = 1 ] && { [ -n "$E2E_OWNER" ] || [ -n "$E2E_POOL" ]; }; then
+    die '--yard cannot be combined with --owner or --pool'
   fi
   configure_yard_scope
   [ -z "$diagnostic_mode" ] || [ "$diagnostic_mode" = "$mode" ] || die 'diagnostic reads cannot be combined with another mode'

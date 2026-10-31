@@ -178,7 +178,11 @@ class SinkOwnershipTests(unittest.TestCase):
 class RecipePreflightTests(unittest.TestCase):
     def test_installer_precedes_required_recipe_cases_and_failures_stop(self):
         required = ["TestBaseRecipeInstallerContract", "TestBaseRecipeInstallerContract/subyard-pair",
-                    "TestBaseRecipeInstallerContract/android-test"]
+                    "TestBaseRecipeInstallerContract/android-test",
+                    "TestServicePoolFenceIsAtomicWithAdmissionAndDoesNotRevokeBeforeStop",
+                    "TestServiceProfileAndNativePoolBindingAgree",
+                    "TestServiceContextRereadsShippedPresetAndPreservesCustomPort",
+                    "TestServiceRemovedRuntimeIsAbsentForReleaseAdmission"]
         for kind in ("pass", "missing", "skip", "installer-failure"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir="/tmp") as directory:
                 root = pathlib.Path(directory)
@@ -189,6 +193,7 @@ class RecipePreflightTests(unittest.TestCase):
                 (root / "tests/install-incus-data-home.sh").write_text(
                     'printf "installer\\n" >> "$CHECK_ORDER"\nexit "${INSTALLER_EXIT:-0}"\n')
                 (runner.parent / "test_full_cleanup.py").write_text('')
+                (runner.parent / "test_service_route.py").write_text('')
                 observer = root / "dev/e2e/staging-reliability-test.py"
                 observer.parent.mkdir(parents=True)
                 observer.write_text('')
@@ -239,12 +244,13 @@ exit "${CONTROLLER_EXIT:-0}"
         preflight = self.root / "config/profiles/test-vms/tests/run.sh"
         preflight.write_text('exit "${PREFLIGHT_EXIT:-0}"\n')
         broker = self.root / "dev/agent-e2e.sh"
-        broker.write_text('printf "%s\\n" "$@" > "$CONTROLLER_STATE/broker-argv"\nexit "${BROKER_EXIT:-0}"\n')
+        broker.write_text('printf "%s\\n" "$@" > "$CONTROLLER_STATE/broker-argv"\nprintf "invocation\\n" >> "$CONTROLLER_STATE/broker-history"\nprintf "%s\\n" "$@" >> "$CONTROLLER_STATE/broker-history"\nexit "${BROKER_EXIT:-0}"\n')
         self.bundle = self.root / "candidate.tar.gz"
         self.bundle.write_bytes(b"frozen candidate")
         self.environment = dict(os.environ, CONTROLLER_STATE=str(self.root),
                                 SUBYARD_E2E_CANDIDATE_BUNDLE=str(self.bundle),
                                 SUBYARD_E2E_CANDIDATE_SHA256=hashlib.sha256(self.bundle.read_bytes()).hexdigest())
+        self.environment.pop("SUBYARD_E2E_ROLLOUT_YARD", None)
 
     def test_full_uninstall_lane_slot_and_native_exit_are_preserved(self):
         for code in (0, 23):
@@ -258,14 +264,27 @@ exit "${CONTROLLER_EXIT:-0}"
                 self.assertTrue(result.stdout.endswith("controller output\n"))
                 self.assertEqual(result.stderr, "controller error\n")
 
-    def test_default_preserves_both_required_lanes(self):
+    def test_default_preserves_all_required_lanes(self):
         result = subprocess.run(["bash", str(self.runner), "--slot", "2"],
                                 env=self.environment, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        arguments = (self.root / "broker-argv").read_text().splitlines()
+        invocations = (self.root / "broker-history").read_text().split("invocation\n")[1:]
+        self.assertEqual(len(invocations), 2)
+        arguments = invocations[0].splitlines()
         self.assertEqual(arguments[:8], ["--slot", "2", "--type", "android-test", "--purpose", "broker-cold-upgrade", "--vm", "1"])
         self.assertEqual(arguments[-2:], ["dev/e2e/staging-reliability.sh", "--supported-upgrade"])
+        service_arguments = invocations[1].splitlines()
+        self.assertEqual(service_arguments[:8], ["--slot", "2", "--type", "android-test", "--purpose", "service-container", "--vm", "1"])
+        self.assertEqual(service_arguments[-1], "config/profiles/test-vms/tests/e2e/service-container-guest.sh")
         self.assertEqual((self.root / "argv").read_text().splitlines(), ["--slot", "2", "--lane", "full-uninstall"])
+
+    def test_explicit_rollout_route_is_preserved(self):
+        result = subprocess.run(["bash", str(self.runner), "--slot", "2", "--lane", "service-container"],
+                                env=dict(self.environment, SUBYARD_E2E_ROLLOUT_YARD="existing-broker"),
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = (self.root / "broker-argv").read_text().splitlines()
+        self.assertEqual(arguments[:4], ["--yard", "existing-broker", "--slot", "2"])
 
     def test_failed_prerequisite_or_cold_lane_stops_dependent_work(self):
         for setting in ({"PREFLIGHT_EXIT": "23"}, {"BROKER_EXIT": "23"},

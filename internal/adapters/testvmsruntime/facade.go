@@ -71,7 +71,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1", "service-admission-fence-v1"}, Pool: &pool, Resources: resources,
 		})
 	case "observe-v1":
 		if len(fields) != 4 || facade.Events == nil {

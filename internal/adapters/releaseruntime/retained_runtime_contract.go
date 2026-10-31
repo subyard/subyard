@@ -21,7 +21,7 @@ func retainedRuntimeApplicable(root string) (bool, error) {
 		return false, err
 	}
 	for _, definition := range definitions {
-		if definition.Runtime != nil {
+		if definition.Runtime != nil || definition.InfrastructureService != nil {
 			return true, nil
 		}
 	}

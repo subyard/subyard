@@ -20,6 +20,7 @@ const provisioningSafetyMargin = 30 * time.Minute
 
 const (
 	LeaseSchemaVersion            = 2
+	LeaseFencedSchemaVersion      = 3
 	LeaseProtocolVersion          = 1
 	LeaseRecoverySchemaVersion    = 1
 	LeaseAttributionSchemaVersion = 2
@@ -121,10 +122,11 @@ type LeaseSlot struct {
 }
 
 type LeasePool struct {
-	SchemaVersion int         `json:"schema_version"`
-	ResourceType  string      `json:"resource_type"`
-	ResourceID    string      `json:"resource_id"`
-	Slots         []LeaseSlot `json:"slots"`
+	AdmissionClosed bool        `json:"admission_closed,omitempty"`
+	SchemaVersion   int         `json:"schema_version"`
+	ResourceType    string      `json:"resource_type"`
+	ResourceID      string      `json:"resource_id"`
+	Slots           []LeaseSlot `json:"slots"`
 }
 
 type leaseRecoveryJournal struct {
@@ -340,6 +342,9 @@ func (store LeaseStore) acquireSlot(
 	err := store.withLock(true, func(pool *LeasePool) error {
 		now := store.now()
 		expireStale(pool, now)
+		if pool.AdmissionClosed {
+			return &SlotUnavailableError{State: SlotUnavailable, Reason: "unavailable"}
+		}
 		for index := range pool.Slots {
 			slot := &pool.Slots[index]
 			if slot.SlotID != requestedSlot {
@@ -504,6 +509,41 @@ func (store LeaseStore) FinishDrain(slotID string, stopErr error) error {
 		}
 		clearLease(slot)
 		slot.State = SlotAvailable
+		return nil
+	})
+}
+
+// PoolOperationBinding is the public, stable allocation scope used by the
+// profile's operator service hook. Heartbeat and expiry telemetry is excluded.
+func PoolOperationBinding(pool LeasePool) string {
+	slots := make([]map[string]any, 0, len(pool.Slots))
+	for _, slot := range pool.Slots {
+		slots = append(slots, map[string]any{"slot_id": slot.SlotID, "resource_generation": slot.ResourceGeneration, "lease_epoch": slot.LeaseEpoch, "state": slot.State, "lease_id": slot.LeaseID})
+	}
+	sort.Slice(slots, func(i, j int) bool { return slots[i]["slot_id"].(string) < slots[j]["slot_id"].(string) })
+	payload, _ := json.Marshal(slots)
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+// FenceExpectedPool closes new admission atomically with checking the approved
+// allocation scope. Existing renew/release remain valid. The ordinary broker
+// drain owns physical cleanup; no post-fence acquire can reuse a captured slot.
+func (store LeaseStore) FenceExpectedPool(expected string) error {
+	return store.withLock(true, func(pool *LeasePool) error {
+		if len(expected) != 64 || PoolOperationBinding(*pool) != expected {
+			return ErrLeaseTargetStale
+		}
+		pool.AdmissionClosed = true
+		pool.SchemaVersion = LeaseFencedSchemaVersion
+		return nil
+	})
+}
+
+func (store LeaseStore) OpenAdmission() error {
+	return store.withLock(true, func(pool *LeasePool) error {
+		pool.AdmissionClosed = false
+		pool.SchemaVersion = LeaseSchemaVersion
 		return nil
 	})
 }
@@ -855,7 +895,12 @@ func (store LeaseStore) load() (LeasePool, error) {
 		}
 		pool.SchemaVersion = LeaseSchemaVersion
 	}
-	if pool.SchemaVersion != LeaseSchemaVersion {
+	if pool.SchemaVersion == LeaseFencedSchemaVersion {
+		pool.AdmissionClosed = true
+	} else if pool.SchemaVersion != LeaseSchemaVersion {
+		return pool, ErrUnsupportedLeaseState
+	}
+	if pool.AdmissionClosed && pool.SchemaVersion != LeaseFencedSchemaVersion {
 		return pool, ErrUnsupportedLeaseState
 	}
 	if pool.ResourceType != "agent-e2e" || pool.ResourceID != "test-vms" {

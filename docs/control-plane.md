@@ -558,6 +558,8 @@ Activation observers do not print diagnostics. Return expected drift as
 failures as errors. The operation boundary renders current `Outcome.Warnings`
 once, sorted and deduplicated. Public error details use `ActivationDiagnostic`;
 raw guest errors stay private.
+Mutation refusals retain the verified inspection’s public decisions and blockers;
+a later readiness observation does not replace the refused resource or reason.
 
 The historical AI Observer [typed observation pilot](reference/typed-semantic-observations.md)
 used one package-owned Go producer for native projection and semantic hashes.
@@ -1895,3 +1897,52 @@ receive only an exact conditional root approval; the privileged leaf durably pub
 native metadata before its first unlink. Fresh-process retries permit disappearing approved
 entries and refuse replacements, additions, unsafe permissions, symlink ancestors and mounted
 owned descendants. Explicit owner namespaces preserve unrecorded content in custom roots.
+
+### Owner infrastructure services
+
+A shipped profile can declare `infrastructure_service` with a unique `id`, `default_yard`,
+`required_settings`, relative `route_root` and optional executable `binding_handler`. This is a runtime
+role; ordinary prepared init, power and teardown remain its lifecycle owners. Core never identifies
+services from a container or profile name. The test-vms profile owns its broker and allocation semantics.
+
+The protected owner registry is `$SUBYARD_HOME/services/SERVICE/POOL.json`. Each binding carries
+owner HostID, exact yard/project/instance, native UUID, stable installation ownership digest and a random
+registration generation. Registration verifies native ownership again under the ordinary owner mutation
+barrier. A same-name resource cannot replace it. The safe public projection is published under the
+profile's `route_root/services/SERVICE/POOL.json`; it contains only those public identities and a yard
+route locator. It contains no full `Context`, configuration roots, owner SSH endpoint or lease authority.
+Readers require exact protected modes and ownership. A registration written before an interrupted
+public publication remains unavailable until repeating registration repairs that same generation.
+
+`yard service` manages the generic binding and delegates install/start/stop/update/remove to the
+existing prepared lifecycle. Service address resolution precedes workspace configuration inspection;
+remote owners use their registered trusted connection and the same exact owner plan/execute protocol.
+Plans bind registration generation and native runtime identity. Ordinary teardown retires captured
+service metadata after native cleanup; full uninstall includes the registry and profile publication paths.
+Retained runtime admission refuses loss of an installed service declaration/publication contract.
+
+The optional binding handler observes through `--project NAME --instance NAME`. It emits
+bounded JSON `{schema_version:1,binding:SHA256,facts:[SAFE_TEXT]}`. Core pins its source and validates
+its bounded public output, captures its digest/facts for service stop/removal and compares them before
+effects. After consent, `--apply-binding SHA256` must fence admission atomically with its native scope
+check; it returns exit 75 for stale scope. `--resume` reopens admission after explicit service start.
+The ordinary lifecycle retains physical drain/cleanup. A stopped runtime uses the existing exact native ownership/no-op rules. The test-vms handler
+projects allocation state, slot generation and lease epoch, excluding heartbeats/deadlines and secret
+capabilities. Agents consume only the trusted public facade publication, retaining the captured route
+for their existing lease. They gain no owner lifecycle, Incus or service-container shell access.
+
+The test-vms native fence uses the existing lease lock and publishes pool schema 3 only while
+admission is closed. New readers support normal schema 2 and fenced schema 3. Old readers reject
+schema 3 before writes, so retained workers cannot drop the admission guard. Existing holders remain
+renewable/releasable through the current worker. Normal broker startup and explicit service start
+restore schema 2/admission; registration and ordinary unfenced operation retain schema 2. If stop is
+interrupted after fencing, admission stays closed until explicit start or a completed stop/start retry.
+An older installed broker can be registered and observed without restart; fencing refuses until
+`service update` installs the supported broker. Remote service callers also require `owner-services-v1`
+before using old command names, preventing fallback to a historical owner's selected-yard routing.
+Owner-service SSH transport uses trusted installation paths independently of the controller's workspace
+configuration. If the RPC session yard is invalid, the existing stdio endpoint advertises a reduced
+capability set and accepts only declared owner-service plan, execute and discard calls. Other reads
+and mutations return `owner_configuration_invalid` before native effects. A service plan resolves its
+real runtime context before the existing release/admission gates; the restricted session does not
+bypass those gates. Remote status validates native service settings on the selected owner.

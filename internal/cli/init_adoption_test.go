@@ -432,7 +432,7 @@ func TestYardAdoptionPreparedCommandRequiresConsent(t *testing.T) {
 }
 
 func TestYardAdoptionAdmitsConfiguredNativeKinds(t *testing.T) {
-	for _, kind := range []string{"nested", "no-host", "vm", "base-image", "foreign-image", "duplicate-image"} {
+	for _, kind := range []string{"nested", "unselected-memory", "no-host", "vm", "base-image", "foreign-image", "duplicate-image"} {
 		t.Run(kind, func(t *testing.T) {
 			_, execution, fake := adoptionFixture(t)
 			runtime := execution.platform.(reconcileruntime.Runtime)
@@ -464,6 +464,14 @@ func TestYardAdoptionAdmitsConfiguredNativeKinds(t *testing.T) {
 					instance.Devices[name] = maps.Clone(device)
 				}
 			}
+			if kind == "nested" || kind == "unselected-memory" {
+				for _, values := range []map[string]string{instance.Config, instance.LocalConfig} {
+					values["user.subyard.host_memory"] = "v1"
+				}
+				device := map[string]string{"type": "disk", "source": "/proc/meminfo", "path": "/var/lib/subyard/host-meminfo", "readonly": "true"}
+				instance.LocalDevices["subyard-host-memory"] = device
+				instance.Devices["subyard-host-memory"] = maps.Clone(device)
+			}
 			if kind == "no-host" {
 				runtime.Environment = append(runtime.Environment, "ALLOWS_HOST_ACCESS=false", "HOST_MOUNTS=")
 				for name := range instance.LocalDevices {
@@ -479,7 +487,7 @@ func TestYardAdoptionAdmitsConfiguredNativeKinds(t *testing.T) {
 				instance.LocalConfig["volatile.vsock_id"] = "42"
 			}
 			_, _, _, _, err := runtime.InspectYardAdoption(context.Background())
-			if kind == "foreign-image" || kind == "duplicate-image" {
+			if kind == "foreign-image" || kind == "duplicate-image" || kind == "unselected-memory" {
 				if err == nil {
 					t.Fatal("unproven image cache admitted")
 				}

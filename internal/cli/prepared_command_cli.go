@@ -9,9 +9,14 @@ import (
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerservice"
 )
 
 func (cli *CLI) reportPreparationError(definition command.Definition, err error) int {
+	if definition.Handler == "@test-vms" && cli.serviceSelection != nil && slices.Contains(cli.options.Arguments, "--json") {
+		record := cli.serviceSelection.record
+		return cli.reportServiceError(cli.options.Arguments, &ownerservice.ResolutionError{Code: "service_unavailable", Owner: record.Owner, Service: record.Service, Pool: record.Pool, Candidates: []ownerservice.Public{record.Public}})
+	}
 	behavior, _ := resolveCoreCommand(definition)
 	code := 1
 	prefix := "prepare " + definition.Name

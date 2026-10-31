@@ -16,7 +16,7 @@ func fullRootNamespaces(root string, installation uninstall.Installation, execut
 	switch root {
 	case installation.DataHome:
 		scoped = true
-		owned = []string{uninstall.ManifestName, "runtime", "releases", "ownership", "logs", "ssh", "owner-inventory", "exports", "cache", "recovery", "workspaces", "tools", "keys", "state", "projects", "space.cache", "space.cache.lock", "space.cache.tmp"}
+		owned = []string{uninstall.ManifestName, "runtime", "releases", "ownership", "logs", "ssh", "owner-inventory", "services", "exports", "cache", "recovery", "workspaces", "tools", "keys", "state", "projects", "space.cache", "space.cache.lock", "space.cache.tmp"}
 		for _, yard := range execution.Yards {
 			if yard.Context.YardName != "default" {
 				suffix := "space-" + yard.Context.YardName + ".cache"

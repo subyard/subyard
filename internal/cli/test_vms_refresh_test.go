@@ -32,6 +32,7 @@ func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			infrastructureFixture(t, program, incus, "test-vms")
 			code := program.Run(context.Background())
 			if (accept && code != 0) || (!accept && code != 1) {
 				t.Fatalf("exit=%d: %s", code, stderr.String())

@@ -185,6 +185,12 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	if _, err := runtime.Runner.LookPath(runtime.Config.Incus); err != nil {
 		return errors.New("inner Incus is not installed")
 	}
+	if strings.HasPrefix(action, "fence-pool-expected-") {
+		return (LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}).FenceExpectedPool(strings.TrimPrefix(action, "fence-pool-expected-"))
+	}
+	if action == "resume-admission" {
+		return (LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}).OpenAdmission()
+	}
 	if strings.HasPrefix(action, "refresh-") {
 		if !yes {
 			return errors.New("confirmation required (re-run with --yes for automation)")
@@ -276,8 +282,10 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	case "gc":
 		return runtime.runGC(ctx)
 	case "broker-start":
-		_, err := runtime.eventRecorder().Record(BrokerEvent{Kind: "broker.start"})
-		return err
+		if _, err := runtime.eventRecorder().Record(BrokerEvent{Kind: "broker.start"}); err != nil {
+			return err
+		}
+		return (LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}).OpenAdmission()
 	case "drain-all":
 		return runtime.DrainAll(ctx, LeaseStore{
 			Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now,

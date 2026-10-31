@@ -64,13 +64,13 @@ done
     esac
   }
   configure_yard_scope() { :; }
-  output="$(main --logs --slot 2 -n 2)"
+  output="$(main --yard test-yard --logs --slot 2 -n 2)"
   [ "$(wc -l <<<"$output")" = 2 ] && grep -Fq 'fixture.last' <<<"$output" \
     || fail 'lease log rendering lost events'
   LEASE_REQUESTED_SLOT=''
-  [ "$(main --logs --json)" = '[]' ] || fail 'empty lease history is not valid JSON'
-  [ -z "$(main --logs)" ] || fail 'empty lease history failed or printed output'
-  grep -Fq 'fixture failure' <<<"$(main --incident "$incident_id")" \
+  [ "$(main --yard test-yard --logs --json)" = '[]' ] || fail 'empty lease history is not valid JSON'
+  [ -z "$(main --yard test-yard --logs)" ] || fail 'empty lease history failed or printed output'
+  grep -Fq 'fixture failure' <<<"$(main --yard test-yard --incident "$incident_id")" \
     || fail 'incident rendering lost diagnostics'
   ! grep -Eq '^(acquire|renew|release)' "$TMP/log-requests" \
     || fail 'diagnostic read changed lease lifecycle'
@@ -78,12 +78,12 @@ done
     '--logs --incident bad-id' '--incident ../bad' '--logs --purpose test' '--logs --vm-count 1'; do
     rc=0
     # shellcheck disable=SC2086
-    (main $args) > "$TMP/log-invalid" 2>&1 || rc=$?
+    (main --yard test-yard $args) > "$TMP/log-invalid" 2>&1 || rc=$?
     [ "$rc" = 2 ] || fail "invalid diagnostic selection accepted: $args"
   done
   facade_request() { printf '%s\n' '{"schema_version":1,"status":"ok","capabilities":[]}'; }
   rc=0
-  (main --logs) > "$TMP/log-old-broker" 2>&1 || rc=$?
+  (main --yard test-yard --logs) > "$TMP/log-old-broker" 2>&1 || rc=$?
   [ "$rc" = 2 ] && grep -Fq 'lease-logs-v1' "$TMP/log-old-broker" \
     || fail 'older broker diagnostic capability was silently ignored'
 ) || fail 'controller lease log contract failed'
@@ -1920,6 +1920,7 @@ case "$*" in
     [ "$(tail -n 1 "$CASE_ROOT/calls")" = public-owner-install ] || exit 42
     printf 'init\n' >> "$CASE_ROOT/calls"
     [ "$SCENARIO" != init-failure ] || exit 23;;
+  'service register test-vms --yard test-yard --yes') printf 'service-register\n' >> "$CASE_ROOT/calls";;
   '-Y test-yard check') printf 'check\n' >> "$CASE_ROOT/calls";;
   '-Y test-yard start --yes') printf 'start\n' >> "$CASE_ROOT/calls"; touch "$CASE_ROOT/running";;
   '-Y test-yard status') printf 'status\n' >> "$CASE_ROOT/calls";;
@@ -1963,7 +1964,7 @@ YARD
   [ "$(cat "$CASE_ROOT/version")" = "$P0_OWNER_VERSION" ] || exit 1
   if [ "$scenario" = ready ]; then
     [ -f "$CASE_ROOT/running" ] && [ "$(cat "$CASE_ROOT/marker")" = "$MARKER" ] || exit 1
-    [ "$(cat "$CASE_ROOT/calls")" = $'base\ncanonical\ncache\nregistration\npublic-owner-install\ninit\ncheck\nstart\nstatus\ninfo\nmarker\nnamed' ] || exit 1
+    [ "$(cat "$CASE_ROOT/calls")" = $'base\ncanonical\ncache\nregistration\npublic-owner-install\ninit\nservice-register\ncheck\nstart\nstatus\ninfo\nmarker\nnamed' ] || exit 1
   else
     [ ! -s "$CASE_ROOT/marker" ] || exit 1
   fi
@@ -3658,7 +3659,7 @@ run_runner_fixture() {
     FAKE_ACQUIRE_COUNT="$RUNNER_FIXTURE/acquire-count" \
     FAKE_SCENARIO="$scenario" \
     FAKE_BUNDLE_HASH="$candidate_hash" \
-    "$RUNNER_UNDER_TEST" "$@"
+    "$RUNNER_UNDER_TEST" --yard test-yard "$@"
 }
 
 # The lease invariant must survive sourcing: no key creation or facade probe without an exact slot.

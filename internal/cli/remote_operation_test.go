@@ -366,7 +366,7 @@ while True:
  if not header:break
  req=json.loads(sys.stdin.buffer.read(struct.unpack('>I',header)[0]))
  with open(root+'/owner-calls','a') as out:out.write(json.dumps(req)+'\n')
- if req['method']=='rpc.negotiate':send(req,{'capabilities':['operation-exact-plan-v1','operation-steps-v1']})
+ if req['method']=='rpc.negotiate':send(req,{'capabilities':['operation-exact-plan-v1','operation-steps-v1','owner-services-v1']})
  elif req['method']=='operation.plan':
   if req['params']!=expected:sys.exit(4)
   plan['plan']['operationId']=req['operationId'];send(req,plan)

@@ -52,6 +52,7 @@ type Definition struct {
 	DisabledWhen               map[string]string              `json:"disabled_when,omitempty"`
 	SelectedProvisionOnly      bool                           `json:"selected_provision_only,omitempty"`
 	OwnerService               string                         `json:"owner_service,omitempty"`
+	InfrastructureService      *InfrastructureService         `json:"infrastructure_service,omitempty"`
 	InstancePublication        *RevisionedSettingsPublication `json:"instance_publication,omitempty"`
 	LifecycleOnly              bool                           `json:"lifecycle_only,omitempty"`
 	FullCleanup                string                         `json:"full_cleanup,omitempty"`
@@ -122,6 +123,11 @@ func (definition Definition) ValidationInputs() []string {
 func shippedName(path string) string { return filepath.Base(filepath.Dir(path)) }
 
 func (definition *Definition) validatePackage() error {
+	if service := definition.InfrastructureService; service != nil && service.BindingHandler != "" {
+		if err := definition.validateExecutable(service.BindingHandler); err != nil {
+			return fmt.Errorf("infrastructure service binding handler: %w", err)
+		}
+	}
 	if definition.OwnerService != "" {
 		info, err := os.Lstat(filepath.Join(definition.Root, definition.OwnerService))
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {

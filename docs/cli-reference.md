@@ -163,12 +163,20 @@ Existing profiles are preserved. Profiles without an install hook only reconcile
 Without a profile, install the selected toolchains without changing profile selection. --list lists available install hooks.
 ```
 
-## test-vms
+## service
 
-manage leased nested VM slots and read the owner-wide broker log.
+manage owner infrastructure service runtimes.
 
 ```text
-Usage: yard test-vms <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>
+Usage: yard service <register|install|start|stop|update|remove> ID [--owner ID] [--pool ID] [--yard NAME] [--yes]
+```
+
+## test-vms
+
+manage the selected owner test VM service and read its broker log.
+
+```text
+Usage: yard test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>
 ```
 
 ## stop

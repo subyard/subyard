@@ -1100,13 +1100,17 @@ with tempfile.TemporaryDirectory(prefix='subyard-predecessor-broker-', dir='/tmp
     launcher.parent.mkdir(parents=True)
     launcher.write_text('#!/bin/bash\nprintf "yard 0.19.0\\n"\n')
     launcher.chmod(0o700)
+    engine = launcher.with_name('yard-engine')
+    engine.write_bytes(launcher.read_bytes())
+    engine.chmod(0o700)
+    engine_sha = hashlib.sha256(engine.read_bytes()).hexdigest()
     leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
     leaf.parent.mkdir(parents=True)
     leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
     for failure in ['', 'version', 'worker', 'native-state', 'git-operation']:
         log = root / ('calls-' + (failure or 'success'))
         script = f"""set -euo pipefail
-ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner
+ROOT={str(root)!r}; SUBYARD_HOME={str(root)!r}; OWNER_CONFIG_HOME={str(root / 'config')!r}; baseline=0.19.0; PROJECT=fixture; INSTANCE=owner
 prepare_minimal_owner() {{ printf 'minimal\n' >> '{log}'; }}
 runtime_yard() {{ if [ "$*" = --version ]; then printf '%s\n' 'yard {"0.22.0" if failure == "version" else "0.19.0"}'; else printf '%s\n' '{{"resources":{{"bases":[]}}}}'; fi; }}
 verify_broker_installation() {{ printf 'verified\n' >> '{log}'; return {1 if failure == 'worker' else 0}; }}
@@ -1114,6 +1118,9 @@ outer_exec() {{
   case "$*" in
     'python3 - /home/dev off check') printf 'git-operation\n' >> '{log}'; cat >/dev/null; return {1 if failure == 'git-operation' else 0} ;;
     *'_test-vms-worker status') printf 'native-state\n' >> '{log}'; printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}}}}' ;;
+    'incus list --all-projects --format csv -c n') return 0 ;;
+    'sha256sum /usr/local/libexec/subyard/.service-retained-v019-worker') printf '%s  retained\\n' '{engine_sha}' ;;
+    *'install -m 0700'*|*'install -m 0600'*) return 0 ;;
     *sha256sum*) printf '%s  leases.json\n' '{"a"*64}' ;;
     *) return 99 ;;
   esac
@@ -1129,7 +1136,7 @@ die() {{ exit 2; }}
                           'git-operation':['minimal','verified','native-state','git-operation'],
                           '':['minimal','verified','native-state','git-operation']}[failure], calls
         assert ('STAGING_BASELINE_BROKER=' in result.stdout) == (failure in ['', 'git-operation']), result
-print('shared minimal preparation retains authentic predecessor and requires native broker ownership before upgrade')
+print('focused predecessor setup retains authentic runtime and requires native broker identity and cold state before upgrade')
 
 # Execute the candidate's real Git configuration function as the process user.
 # Physical preflight uses the same leaf's CLI, which drops to native guest dev.
@@ -1157,35 +1164,43 @@ print('actual updater Git configuration operation rejects missing Git and preser
 # Exercise consumed-input cleanup on real private files, including all-or-nothing
 # refusal before deletion. Installed history and controller/source bytes survive.
 consumed = fixture.split("<<'PYCONSUMED'",1)[1].split('\n',1)[1].split('\nPYCONSUMED',1)[0]
-for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-digest', 'baseline-digest']:
+for fault in ['', 'symlink', 'hardlink', 'mount', 'foreign-owner', 'candidate-digest', 'baseline-digest', 'bootstrap-digest', 'bootstrap-missing', 'bootstrap-link', 'bootstrap-hardlink', 'bootstrap-mount']:
     with tempfile.TemporaryDirectory(prefix='subyard-worktree.',dir='/tmp') as directory:
         parent=pathlib.Path(directory); root=parent/'src'; owner=parent/'owner'
         runtime=root/'.subyard-acceptance/runtime'; release=root/'.subyard-acceptance/release'; baseline=owner/'baseline-0.19.0'
-        for target in [runtime,release,baseline,root/'dev',owner/'installed/current',owner/'installed/previous']:
+        for target in [runtime,release,baseline,root/'dev',root/'.build',owner/'installed/current',owner/'installed/previous']:
             target.mkdir(parents=True,exist_ok=True)
         for target in [runtime/'engine',release/'runtime.tar.gz',baseline/'archive',owner/'installed/current/engine',owner/'installed/previous/engine',parent/'worktree.tar.gz']:
             target.write_bytes(b'verified fixture bytes')
         digest=hashlib.sha256(b'verified fixture bytes').hexdigest()
+        bootstrap=root/'.build/yard'; bootstrap.write_bytes(b'verified fixture bytes'); bootstrap.chmod(0o755)
         (root/'.subyard-acceptance/candidate.json').write_text(json.dumps({'runtime_file':'runtime.tar.gz','runtime_sha256':digest}))
         (root/'dev/verify-release-upgrades.py').write_text("import hashlib\nDIRECT_BASELINE='0.19.0'\nDIRECT_BASELINE_SHA256={'amd64':"+repr(digest)+"}\ndef baseline_assets(owner,path,version,hashes,arch):\n    assert hashlib.sha256((path/'archive').read_bytes()).hexdigest()==hashes[arch]\n")
         if fault=='symlink': (runtime/'foreign').symlink_to(owner/'installed/current')
         if fault=='hardlink': os.link(owner/'installed/current/engine',runtime/'foreign')
         if fault=='candidate-digest': (release/'runtime.tar.gz').write_bytes(b'changed')
         if fault=='baseline-digest': (baseline/'archive').write_bytes(b'changed')
+        if fault=='bootstrap-digest': bootstrap.write_bytes(b'changed')
+        if fault=='bootstrap-missing': bootstrap.unlink()
+        if fault=='bootstrap-link': bootstrap.unlink(); bootstrap.symlink_to(owner/'installed/current/engine')
+        if fault=='bootstrap-hardlink': bootstrap.unlink(); os.link(owner/'installed/current/engine',bootstrap)
         prefix=''
-        if fault=='mount':
-            prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(runtime))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
+        if fault in ['mount','bootstrap-mount']:
+            mounted=bootstrap if fault=='bootstrap-mount' else runtime
+            prefix="from unittest import mock\n_original_read=pathlib.Path.read_text\ndef read(path,*a,**kw):\n    if str(path)=='/proc/self/mountinfo': return '1 0 0:1 / '+"+repr(str(mounted))+"+' rw - ext4 none rw\\n'\n    return _original_read(path,*a,**kw)\nmock.patch.object(pathlib.Path,'read_text',read).start()\n"
         if fault=='foreign-owner': prefix='from unittest import mock\nmock.patch.object(os,\'geteuid\',return_value=os.geteuid()+1).start()\n'
-        program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:])')
-        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner)],capture_output=True,text=True,timeout=5)
+        program=consumed.replace('root,owner=map(pathlib.Path,sys.argv[1:3])',prefix+'root,owner=map(pathlib.Path,sys.argv[1:3])')
+        result=subprocess.run([sys.executable,'-c',program,str(root),str(owner),digest,'yard 0.11.1-p0.owner'],capture_output=True,text=True,timeout=5)
         assert (result.returncode==0)==(fault==''),(fault,result)
         for target in [runtime,release,baseline,parent/'worktree.tar.gz']:
             assert target.exists()==bool(fault),(fault,target,result)
+        assert bootstrap.exists()==bool(fault and fault!='bootstrap-missing'),(fault,bootstrap,result)
         assert (root/'dev/verify-release-upgrades.py').exists()
         assert all((owner/f'installed/{history}/engine').read_bytes()==b'verified fixture bytes' for history in ['current','previous'])
         if not fault:
             receipt=json.loads(result.stdout.split('STAGING_CONSUMED_INPUTS=',1)[1])
             assert receipt['total_allocated_bytes']==sum(receipt['allocated_bytes'].values())>0,receipt
+            assert receipt['bootstrap_engine']=={'path':'.build/yard','sha256':digest,'version':'yard 0.11.1-p0.owner'},receipt
 
 reclaim = re.search(r'^reclaim_supported_upgrade_inputs\(\) \{\n.*?^\}',fixture,re.MULTILINE|re.DOTALL)[0]
 fingerprint='a'*64
@@ -1195,6 +1210,7 @@ ROOT=/tmp/subyard-worktree.fixture/src; OWNER_ROOT=/tmp/owner
 SUPPORTED_UPGRADE=1; SUPPORTED_UPGRADE_BOUND={0 if fault=='unbound' else 1}
 OWNER_BASE_IMAGE_CREATED=1; OWNER_BASE_IMAGE_FINGERPRINT={fingerprint}
 OWNER_BASELINE_IMAGES={'a'*64 if fault=='baseline-image' else ''}
+BOOTSTRAP_ENGINE_SHA256={'a'*64}; BOOTSTRAP_ENGINE_VERSION='yard 0.11.1-p0.owner'
 p0_capacity_assert_root_marker() {{ return {1 if fault=='marker' else 0}; }}
 verify_broker_installation() {{ return {1 if fault=='identity' else 0}; }}
 incus() {{ printf '%s\\n' '[{{"aliases":[{{"name":"subyard-e2e-debian-13-cloud-container"}}],"fingerprint":"{'b'*64 if fault=='alias' else fingerprint}"}}]'; }}
@@ -1206,3 +1222,41 @@ reclaim_broker_recovery_capacity() {{ [ "$OWNER_BASE_IMAGE" = {fingerprint} ]; e
     assert ('consumed' in result.stdout)==(fault==''),(fault,result)
     assert ('STAGING_CONSUMED_OWNER_IMAGE=' in result.stdout)==(fault==''),(fault,result)
 print('verified consumed upgrade inputs reclaim allocated bytes; foreign/link/mount/digest/identity/image drift refuses before deletion')
+
+# The current canonical service fixture owns default published-route isolation;
+# historical cold-upgrade remains on its explicit pre-registration transport.
+service = pathlib.Path('config/profiles/test-vms/tests/e2e/service-container-guest.sh').read_text()
+boundary = service.index('"$RUNNER" --pool default --slot 1 --vm-count 1 --verify-boundary')
+assert service.index("HOLDER_PID=''", service.index(': > "$STATE_PARENT/holder.release"')) < boundary
+assert boundary < service.index('fixture_yard service stop test-vms --yes')
+assert 'SERVICE_CONTAINER_BOUNDARY=' in service[boundary:]
+assert 'adopt_supported_upgrade_owner' not in fixture
+assert 'runtime_yard service register' not in fixture
+assert '--verify-boundary' not in fixture
+print('current canonical service lane owns default-route singleton negative boundary after release; historical cold keeps explicit transport')
+
+boundary_proof = service.split("<<'PYBOUNDARY'\n",1)[1].split('\nPYBOUNDARY',1)[0]
+for fault in ['', 'missing', 'generation', 'pin', 'mode', 'link', 'hardlink']:
+    with tempfile.TemporaryDirectory(prefix='subyard-service-boundary-',dir='/tmp') as directory:
+        root=pathlib.Path(directory); routes=root/'routes'; controller=root/'controller'
+        publication=routes/'services/test-vms/default.json'; publication.parent.mkdir(parents=True)
+        record=dict(schema_version=1,service='test-vms',pool='default',yard='test-yard',owner='fixture-owner',registration_generation='a'*64)
+        publication.write_text(json.dumps(record))
+        published=routes/'test-yard/current/known_hosts'; published.parent.mkdir(parents=True)
+        published.write_bytes(b'fixture public host pin\n')
+        state=controller/'services'/record['owner']/record['pool']/record['registration_generation']; state.mkdir(parents=True)
+        for name in ('bastion_known_hosts','client-id'):
+            path=state/name; path.write_bytes(b'fixture public host pin\n' if name=='bastion_known_hosts' else b'fixture private client id\n'); path.chmod(0o600)
+        pin=state/'bastion_known_hosts'
+        if fault=='missing': pin.unlink()
+        if fault=='generation': record['registration_generation']='b'*64; publication.write_text(json.dumps(record))
+        if fault=='pin': pin.write_bytes(b'foreign public pin\n')
+        if fault=='mode': pin.chmod(0o644)
+        if fault=='link': pin.unlink(); pin.symlink_to(published)
+        if fault=='hardlink': pin.unlink(); os.link(published,pin)
+        # Released lease ssh_config is intentionally absent; only persistent
+        # scoped public pins and client identity metadata authorize this proof.
+        result=subprocess.run([sys.executable,'-c',boundary_proof,str(publication),str(controller)],capture_output=True,text=True,timeout=5)
+        assert (result.returncode==0)==(fault==''),(fault,result)
+        assert ('SERVICE_CONTAINER_BOUNDARY=' in result.stdout)==(fault==''),(fault,result)
+print('post-release boundary proof binds persistent owner/pool/generation pins and refuses missing, changed, unsafe or linked receipts without reading client identity')

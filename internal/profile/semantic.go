@@ -22,6 +22,11 @@ func (definition *Definition) validateSemantic() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported profile schema or name")
 	}
+	if definition.InfrastructureService != nil {
+		if err := definition.InfrastructureService.validate(); err != nil {
+			return err
+		}
+	}
 	if definition.InstancePublication != nil {
 		if err := definition.InstancePublication.validate(definition.Name); err != nil {
 			return err

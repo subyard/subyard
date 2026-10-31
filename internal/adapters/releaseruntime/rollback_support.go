@@ -13,6 +13,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ownerservice"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -43,6 +44,32 @@ func CaptureRollbackSupport(ctx context.Context, configuration Config, sourceRoo
 		return result, err
 	}
 	facts := map[string]any{}
+	dataHome := configuration.Context.DataHome
+	if dataHome == "" {
+		dataHome = configuration.Inputs.environment(configuration.Context)["SUBYARD_HOME"]
+	}
+	if dataHome != "" {
+		registry := ownerservice.Registry{Root: filepath.Join(dataHome, "services")}
+		for _, definition := range active {
+			service := definition.InfrastructureService
+			if service == nil {
+				continue
+			}
+			records, err := registry.List(service.ID)
+			if err != nil {
+				return result, err
+			}
+			if len(records) == 0 {
+				continue
+			}
+			retained := targets[definition.Name].InfrastructureService
+			if retained == nil || retained.ID != service.ID || retained.RouteRoot != service.RouteRoot || retained.BindingHandler != service.BindingHandler {
+				return result, errors.New("retained release cannot manage an installed infrastructure service")
+			}
+			facts["service:"+service.ID] = records
+		}
+	}
+
 	if applicable {
 		environment := configuration.Inputs.environment(configuration.Context)
 		operator := first(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"])

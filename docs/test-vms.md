@@ -1,6 +1,7 @@
 # Agent E2E VM pool
 
-The `test-vms` profile runs a root-owned lease broker inside a trusted outer yard. Its configured
+The `test-vms` profile declares an owner infrastructure service and runs a root-owned lease broker
+inside its dedicated service container. Its configured
 pool contains one or more shared slots and defaults to two. Each lease selects `subyard-pair`
 (one or two standard VMs) or `android-test` (one larger VM). Slots own isolated inner Incus projects and networks;
 each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
@@ -134,20 +135,63 @@ release acceptance.
 
 ## Operator setup
 
-Configure the `default` yard with the profile in `~/.config/subyard/yards/default/config.env`:
-
-```env
-YARD_TEMPLATE=test-vms
-SSH_PORT=2223
-```
-
-Then initialize it interactively:
+Install the service on the local owner:
 
 ```sh
-yard -Y default init
-yard -Y default status
-yard -Y default test-vms status
+yard service install test-vms
+yard test-vms status
+yard test-vms revoke --slot 2
 ```
+
+The creation preset supplies the new service's `test-yard` name, SSH port `2223`, and
+guest UID `1001`, avoiding the shipped cloud image's UID `1000`. Workspace
+selection, including `-Y` and `SUBYARD_YARD`, does not select the service. Ordinary init
+checks owner port collisions before effects. Existing runtimes keep their configured
+settings, including an implicit UID from their existing template configuration.
+
+Adopt an already owned broker without initialization, container restart or lease interruption:
+
+```sh
+yard service register test-vms --yard test-yard
+```
+
+Registration verifies installation ownership and the native instance UUID. A name or profile
+match alone grants no authority. Repeat registration to repair an interrupted public route
+publication; an unchanged registration keeps its generation. After an owner HostID rename, normal resolution
+returns `service_owner_changed`; repeat explicit registration to prove the same installation/UUID
+and republish the owner metadata with a new registration generation. Existing leases are retained.
+
+`--owner ID` selects an explicitly registered owner connection; omission selects this installation's
+local owner. `--pool ID` selects an exact registered pool. One registration is automatic; multiple
+registrations return `service_ambiguous` until an exact pool is supplied. `service_absent` and
+`service_unavailable` distinguish a missing registration from an unavailable runtime/publication.
+Status JSON includes `service` with owner, service/pool, yard/project/instance, native UUID and
+registration generation. Error JSON contains the same safe candidate identities. Resolution never
+selects another owner, pool or workspace after failure.
+
+Operator lifecycle uses the existing prepared yard reconciler:
+
+```sh
+yard service stop test-vms
+yard service start test-vms
+yard service update test-vms
+yard service remove test-vms
+```
+
+`service update` reconciles this container against the currently installed runtime. Ordinary
+`yard update` installs runtime releases. Stop drains active leases through the existing broker
+boundary. Stop/removal plans bind the profile's slot generations and lease epochs; heartbeat
+timestamps do not invalidate unchanged allocations. Registration/runtime or allocation drift refuses
+the captured operation. Native fencing closes new admission under the lease lock before drain;
+retained workers cannot rewrite the incompatible fenced schema. If stop fails after fencing,
+existing leases keep their keys and explicit `service start` resumes admission. An older broker
+requires `service update` before a fenced stop/removal; registration/status remain available. Removal retires the exact registration and public route after native cleanup.
+Repeat removal to finish metadata cleanup when the original runtime is already absent. Ordinary
+named-yard teardown and full uninstall also include owned service metadata.
+
+For an additional pool, configure a distinct named yard with the profile and a nonconflicting SSH
+port, then use `service install test-vms --yard NAME --pool ID`. Owner inventory labels registered
+service runtimes `infrastructure-service`.
 
 `test-vms status` prints JSON with indentation and line breaks. Add `--json` for compact
 machine output; both formats contain the same fields.
@@ -156,7 +200,7 @@ A `test-vms` initialization also converges a root-owned physical-host log sink a
 timer. The outer yard receives no mount or socket that can write the host log root.
 
 A fresh yard with the effective `test-vms` capability starts with desired power `running`. Later
-`yard -Y default stop` and `start` persist the normal managed power intent. Agent acquire never
+`yard service stop test-vms` and `service start test-vms` persist the normal managed power intent. Agent acquire never
 changes it. Stopping the outer yard drains all active slots before shutdown.
 
 `E2E_VM_SLOT_COUNT` defaults to `2`. Slots are shared between environment types, rather than
@@ -295,8 +339,8 @@ base image, subject to the ordinary refresh and cache-retention policy.
 Refresh a type explicitly through the normal operator action flow:
 
 ```sh
-yard -Y default test-vms refresh subyard-pair
-yard -Y default test-vms refresh android-test
+yard test-vms refresh subyard-pair
+yard test-vms refresh android-test
 ```
 
 Refresh reserves private builder resources, asks for confirmation with a default of Yes, and
@@ -313,7 +357,7 @@ normal agent acquisition never deletes an unclassified legacy allocation. An act
 can renew and release, but release retains its old disks until explicit operator retirement:
 
 ```sh
-yard -Y default test-vms retire-legacy --slot N
+yard test-vms retire-legacy --slot N
 ```
 
 This operation asks for destructive confirmation with a default of No. Review and preserve any
@@ -336,6 +380,15 @@ physical isolation evidence. The operator-owned outer broker's successful lease 
 the candidate broker code.
 
 ## Agent workflow
+
+The agent resolves the owner's trusted public service registration and its pinned restricted
+SSH facade route. `--owner ID` and `--pool ID` are exact selectors. The default has no yard-name or
+SSH-config fallback. The operator's public route mount contains no owner configuration or lease
+credentials. Controller state is isolated by owner, pool and registration generation; an acquired
+lease keeps its captured endpoint and host-key pin through renewal/release even if publication changes.
+Explicit `--yard NAME` remains available for operator-controlled pre-registration rollout transport.
+It cannot be combined with service selectors and grants no container lifecycle or shell access.
+
 
 Prepare the persistent controller identity once:
 
@@ -967,6 +1020,24 @@ Standalone runs execute fresh prerequisites. A failed or unknown binding refuses
 The pair checks actual installed runtime admission, the real user manager and an observable due-peer
 result; local passes do not establish those facts. Other units retain their own physical lanes.
 
+For owner service registration, held-lease adoption, stale routing and container lifecycle, use
+one Android disposable stage:
+
+```sh
+bash config/profiles/test-vms/tests/e2e/acceptance.sh --slot "$slot" --lane service-container --preflight
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  bash config/profiles/test-vms/tests/e2e/acceptance.sh --slot "$slot" --lane service-container
+```
+
+The lane installs the frozen current candidate in a marker-owned fixture, holds an allocation
+across registration, verifies container/broker/guest continuity and the shared agent route, rejects
+a stale exact service plan, then checks stop/start/reconcile/removal, verifies that an unconfirmed
+fresh install creates no configuration or runtime, and installs/removes the declared service again.
+For a pre-registration allocation owner, set
+`SUBYARD_E2E_ROLLOUT_YARD=NAME` to pass an explicit outer route. This is rollout transport only
+and never registers or updates the operator-owned allocation pool.
+
 For the broker recipe and supported-upgrade boundary, use the test-vms owning controller:
 
 ```sh
@@ -1410,7 +1481,7 @@ or capacity failure delays recovery; it does not turn quarantine into a permanen
 The manual command starts the same slot recovery workflow immediately:
 
 ```sh
-yard -Y default test-vms recover --slot "$slot"
+yard test-vms recover --slot "$slot"
 ```
 
 ## Broker diagnostics

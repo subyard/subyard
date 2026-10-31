@@ -360,6 +360,7 @@ canonical_broker_release_migration_contract() {
   incus exec yard-test-yard --project subyard-test-yard -- \
     systemctl is-active --quiet subyard-test-vms-broker.service \
     || die 'release migration did not restore the active broker service'
+  "$runtime_root/current/bin/yard" service register test-vms --yard test-yard --yes >/dev/null
   "$runtime_root/current/bin/yard" -Y test-yard test-vms status >/dev/null \
     || die 'release migration did not restore broker facade status'
 
@@ -481,6 +482,7 @@ owner_release_contract() {
   [ "$("$yard" --version)" = "yard $P0_OWNER_VERSION" ] \
     || die 'current owner runtime was not installed'
   p0_retry_init_after_plan_stale "$yard" -Y test-yard init --yes
+  "$yard" service register test-vms --yard test-yard --yes >/dev/null
   "$yard" -Y test-yard check
   "$yard" -Y test-yard start --yes
   "$yard" -Y test-yard status >/dev/null
@@ -683,8 +685,10 @@ owner() (
     bash dev/e2e/seed-test-vms-legacy-state.sh subyard-test-yard yard-test-yard
   p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
   ./bin/yard -Y test-yard check
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
   ! incus exec yard-test-yard --project subyard-test-yard -- \
     test -s /var/lib/subyard/e2e-agent/.ssh/authorized_keys \
     || die 'legacy static controller key survived test-vms reconciliation'
@@ -755,10 +759,12 @@ broker_recovery_owner() (
   write_owner_registration test-yard test-vms 2224 3
   p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
   run_nested_broker_acceptance dev/e2e/p1-lease-acceptance.sh
   write_owner_registration test-yard test-vms 2224 2
   p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
+  ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
   reclaim_broker_recovery_capacity
   run_nested_broker_acceptance dev/e2e/p0-broker-recovery.sh
   ./bin/yard -Y test-yard teardown --yes

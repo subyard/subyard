@@ -252,7 +252,8 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 	if adopt {
 		memoryPolicy = testvmsruntime.HostMemoryAdoptionPolicy
 	}
-	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"); err != nil {
+	hostMemory := runtime.Yard.NestedE2EVMs || extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1"
+	if err := memoryPolicy(instance.LocalConfig, instance.LocalDevices, instance.Devices, hostMemory); err != nil {
 		return err
 	}
 	for key, setting := range map[string]string{"limits.cpu": "LIMITS_CPU", "limits.memory": "LIMITS_MEMORY"} {
@@ -286,7 +287,7 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 			if expected, ok := extraConfig[key]; ok && expected != "" && value == expected {
 				continue
 			}
-			if key == "user.subyard.host_memory" && extras["SUBYARD_EXTRAS_HOST_MEMORY"] == "1" {
+			if key == "user.subyard.host_memory" && hostMemory {
 				continue
 			}
 			switch key {

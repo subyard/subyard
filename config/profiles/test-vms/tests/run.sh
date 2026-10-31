@@ -32,13 +32,13 @@ else
   rc=$?; cat "$log"; exit "$rc"
 fi
 selection=()
-[ "$preflight" = 0 ] || selection=(-run '^TestBaseRecipeInstallerContract$')
+[ "$preflight" = 0 ] || selection=(-run '^(TestBaseRecipeInstallerContract|TestServicePoolFenceIsAtomicWithAdmissionAndDoesNotRevokeBeforeStop|TestServiceProfileAndNativePoolBindingAgree|TestServiceContextRereadsShippedPresetAndPreservesCustomPort|TestServiceRemovedRuntimeIsAbsentForReleaseAdmission)$')
 if go -C "$ROOT" test -json -count=1 ./config/profiles/test-vms "${selection[@]}" >"$log"; then :; else
   rc=$?; cat "$log"; exit "$rc"
 fi
 python3 - "$log" <<'PYCOUNT'
 import json,sys
-required={'TestBaseRecipeInstallerContract','TestBaseRecipeInstallerContract/subyard-pair','TestBaseRecipeInstallerContract/android-test'}
+required={'TestBaseRecipeInstallerContract','TestBaseRecipeInstallerContract/subyard-pair','TestBaseRecipeInstallerContract/android-test','TestServicePoolFenceIsAtomicWithAdmissionAndDoesNotRevokeBeforeStop','TestServiceProfileAndNativePoolBindingAgree','TestServiceContextRereadsShippedPresetAndPreservesCustomPort','TestServiceRemovedRuntimeIsAbsentForReleaseAdmission'}
 passed=set(); skipped=[]
 for line in open(sys.argv[1]):
     event=json.loads(line)
@@ -48,6 +48,7 @@ if not passed or required-passed or skipped:
     raise SystemExit('FAIL: missing or skipped test-vms recipe cases: '+','.join(sorted(required-passed)+skipped))
 print(f'test-vms Go tests: passed={len(passed)} required_recipe_cases={len(required)} skips=0')
 PYCOUNT
+python3 -B "$PROFILE/tests/test_service_route.py"
 python3 -B "$PROFILE/tests/test_full_cleanup.py"
 python3 -B "$ROOT/dev/e2e/staging-reliability-test.py"
 python3 -B "$ROOT/dev/e2e/pregrant-creation-observer-test.py"

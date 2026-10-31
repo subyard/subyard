@@ -32,8 +32,13 @@ func testVMLogsInvocation(arguments []string) bool {
 }
 
 func testVMStatusInvocation(arguments []string) bool {
-	for _, argument := range arguments {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
 		if argument == "-y" || argument == "--yes" {
+			continue
+		}
+		if argument == "--owner" || argument == "--pool" || argument == "--expect-owner" {
+			index++
 			continue
 		}
 		return argument == "status"
@@ -152,6 +157,7 @@ func (cli *CLI) runTestVMLogs(ctx context.Context, arguments []string) int {
 }
 
 type testVMExecution struct {
+	service        *serviceSelection
 	json           bool
 	environment    string
 	action         string
@@ -179,10 +185,10 @@ func (cli *CLI) prepareTestVMExecution(
 	loaded config.Loaded,
 	arguments []string,
 ) (*testVMExecution, error) {
-	if !loaded.Context.NestedE2EVMs {
+	if loaded.Context.AccessKind != domain.AccessRemote && !loaded.Context.NestedE2EVMs {
 		return nil, errors.New("nested E2E VMs are disabled for this yard")
 	}
-	if loaded.Context.YardKind != domain.YardContainer {
+	if loaded.Context.AccessKind != domain.AccessRemote && loaded.Context.YardKind != domain.YardContainer {
 		return nil, errors.New("nested E2E VMs require a container yard")
 	}
 	action := ""
@@ -398,7 +404,7 @@ func (cli *CLI) probeTestVMPool(ctx context.Context, loaded config.Loaded) (*tes
 		return nil, fmt.Errorf("decode test VM broker status: %w", err)
 	}
 	if response.SchemaVersion != testvmsruntime.LeaseProtocolVersion || response.Status != "ok" ||
-		response.Pool == nil || (response.Pool.SchemaVersion != 1 && response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion) ||
+		response.Pool == nil || (response.Pool.SchemaVersion != 1 && response.Pool.SchemaVersion != testvmsruntime.LeaseSchemaVersion && response.Pool.SchemaVersion != testvmsruntime.LeaseFencedSchemaVersion) ||
 		response.Pool.ResourceType != "agent-e2e" || response.Pool.ResourceID != "test-vms" {
 		return nil, errors.New("test VM broker returned an invalid status response")
 	}
@@ -506,6 +512,11 @@ func (cli *CLI) executeTestVMs(
 	if execution == nil {
 		return domain.AdapterResult{}, errors.New("test-vms execution is required")
 	}
+	if execution.service != nil {
+		if err := cli.checkServiceSelection(ctx, loaded, execution.service); err != nil {
+			return domain.AdapterResult{}, err
+		}
+	}
 	if execution.snapshot != nil {
 		current, err := cli.probeTestVMSlot(ctx, loaded, execution.slot)
 		if err != nil {
@@ -565,6 +576,15 @@ func (cli *CLI) executeTestVMs(
 		Context: structuredCommandContext(loaded),
 	}
 	result, stderr, err := orchestrator.RunAdapter(ctx, plan, request, nil)
+	if execution.action == "status" && execution.service != nil && err == nil {
+		var response map[string]json.RawMessage
+		if json.Unmarshal([]byte(stderr), &response) == nil {
+			response["service"], _ = json.Marshal(execution.service.record.Public)
+			if payload, marshalErr := json.Marshal(response); marshalErr == nil {
+				stderr = string(payload) + "\n"
+			}
+		}
+	}
 	if execution.action == "status" && !execution.json {
 		var formatted bytes.Buffer
 		if json.Indent(&formatted, []byte(stderr), "", "  ") == nil {
@@ -611,6 +631,14 @@ func testVMPoolBinding(pool testvmsruntime.LeasePool) string {
 	return operationStateDigest(bindings)
 }
 func (execution *testVMExecution) binding() string {
+	if execution.service != nil {
+		copy := *execution
+		copy.service = nil
+		return operationStateDigest(struct {
+			Service any
+			Slot    string
+		}{execution.service.record, copy.binding()})
+	}
 	if execution.snapshot != nil {
 		return testVMSlotBinding(*execution.snapshot)
 	}
@@ -620,6 +648,11 @@ func (execution *testVMExecution) binding() string {
 	return operationStateDigest(struct{ Action, Environment string }{execution.action, execution.environment})
 }
 func (execution *testVMExecution) steps() []domain.OperationStep {
+	if execution.service != nil && execution.action != "status" {
+		copy := *execution
+		copy.service = nil
+		return append([]domain.OperationStep{execution.service.step()}, copy.steps()...)
+	}
 	decision := domain.StepApply
 	if execution.noOp {
 		decision = domain.StepSkip

@@ -19,6 +19,9 @@
       "items": {
         "type": "object",
         "properties": {
+          "role": {"enum": ["infrastructure-service"]},
+          "service": {"type": "string", "maxLength": 128},
+          "pool": {"type": "string", "maxLength": 128},
           "name": {
             "type": "string",
             "maxLength": 8192

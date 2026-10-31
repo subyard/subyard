@@ -1,6 +1,14 @@
 {
   "schema_version": 1,
+  "infrastructure_service": {
+    "id": "test-vms",
+    "default_yard": "test-yard",
+    "required_settings": {"NESTED_E2E_VMS": "1", "YARD_KIND": "container"},
+    "route_root": "e2e/routes",
+    "binding_handler": "service-binding.py"
+  },
   "managed_paths": [
+    {"root":"data", "path":"e2e/routes/services"},
     {
       "root": "data",
       "path": "e2e/routes/{yard}"

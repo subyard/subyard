@@ -263,7 +263,7 @@ func preparationProject(
 }
 
 func preparationHeldTestVMSlot(
-	_ *testing.T, _ string, environment []string, _ string,
+	t *testing.T, root string, environment []string, _ string,
 ) ([]string, *testkit.Incus, ports.YardExecutor, ports.InitPlatform) {
 	environment = append(environment, "NESTED_E2E_VMS=1")
 	incus := lifecycleIncus()
@@ -271,6 +271,11 @@ func preparationHeldTestVMSlot(
 	instance.Status = "Running"
 	incus.Instances["subyard/yard"] = instance
 	probe := preparationParityProbe{output: []byte(`{"schema_version":1,"status":"ok","pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":7,"lease_epoch":3,"state":"held"}]}}`)}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: incus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infrastructureFixture(t, program, incus, "test-vms")
 	return environment, incus, probe, nil
 }
 

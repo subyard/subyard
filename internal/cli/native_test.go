@@ -2897,6 +2897,7 @@ func installUnfinishedV2MutationGateFixture(
 	root string,
 	environment []string,
 	runtimeRoot string,
+	engineTransforms ...func(string) string,
 ) (string, string) {
 	t.Helper()
 	target := "1.2.3-aaaaaaaaaaaa"
@@ -2920,7 +2921,7 @@ func installUnfinishedV2MutationGateFixture(
 	}
 	capture := filepath.Join(root, "v2-candidate-inspections")
 	engine := filepath.Join(runtimeRoot, "releases", target, "bin", "yard-engine")
-	writeCLIFile(t, engine, `#!/bin/sh
+	enginePayload := `#!/bin/sh
 case "${1:-}" in
 --version) printf 'yard-engine 1.2.3\n' ;;
 _release-transition)
@@ -2944,7 +2945,11 @@ printf '{"schemaVersion":1,"activationReconciliationOwned":false,"inspection":{"
 ;;
 *) exit 64 ;;
 esac
-`, 0o700)
+`
+	for _, transform := range engineTransforms {
+		enginePayload = transform(enginePayload)
+	}
+	writeCLIFile(t, engine, enginePayload, 0o700)
 	payload, err := os.ReadFile(engine)
 	if err != nil {
 		t.Fatal(err)
@@ -3103,6 +3108,7 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	infrastructureFixture(t, testVMStatus, testVMIncus, "test-vms")
 	if code := testVMStatus.Run(context.Background()); code != 0 || len(testVMRunner.Requests) != 1 {
 		t.Fatalf("test-vms status during v2 recovery: code=%d requests=%#v stderr=%q",
 			code, testVMRunner.Requests, testVMStderr.String())

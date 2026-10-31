@@ -19,6 +19,7 @@ type OwnerYardSource interface {
 }
 
 type OwnerYardRuntime struct {
+	Role, Service, Pool  string
 	State                string
 	ResolvedYardImage    domain.ResolvedYardImage
 	StartState           domain.StartState
@@ -63,7 +64,7 @@ func (builder OwnerInventoryBuilder) Read(ctx context.Context) (domain.OwnerInve
 		if err != nil {
 			return domain.OwnerInventory{}, fmt.Errorf("read state for yard %q: %w", yard.YardName, err)
 		}
-		entry := domain.OwnerYard{
+		entry := domain.OwnerYard{Role: runtime.Role, Service: runtime.Service, Pool: runtime.Pool,
 			Name: yard.YardName, Kind: string(yard.YardKind), Instance: yard.YardInstanceName,
 			State: strings.ToUpper(runtime.State), SSHPort: yard.SSHPort, DevUser: yard.DevUser,
 			YardImageRef: yard.YardImageRef, ResolvedYardImage: runtime.ResolvedYardImage,

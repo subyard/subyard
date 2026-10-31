@@ -94,8 +94,7 @@ Each yard has its own settings, including `default`:
 
 ```sh
 # ~/.config/subyard/yards/default/config.env
-SSH_PORT=2223
-YARD_TEMPLATE=test-vms
+SSH_PORT=2222
 ```
 
 Scalar precedence is:
