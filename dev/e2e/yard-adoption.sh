@@ -109,13 +109,15 @@ for kind in container vm; do
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
   port=$((35000 + $$ % 10000))
   [ "$kind" != vm ] || port=$((port + 1))
+  fixture_profiles=''
+  [ "$kind" != container ] || fixture_profiles="$telemetry_profile"
   cat > "$SUBYARD_CONFIG_HOME/yards/$name/config.env" <<EOF
 SSH_PORT=$port
 YARD_KIND=$kind
 YARD_IMAGE=images:debian/13/cloud
 YARD_IMAGE_FALLBACK=images:debian/13/cloud
 CODING_TOOL_INTEGRATIONS=
-ENVIRONMENT_PROFILES=
+ENVIRONMENT_PROFILES=$fixture_profiles
 DEV_USER=dev
 DEV_UID=1001
 HOST_BASE=$STATE/host-$kind
@@ -160,14 +162,16 @@ EOF
     bind_before="$(incus query "/1.0/instances/$instance?project=$project" | jq -cS '.devices | with_entries(select(.key|startswith("ws-")))')"
     [ "$bind_before" != '{}' ] || die 'supported bind did not create a workspace device'
   fi
-  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
-    # Introduce a desired telemetry capability while its optional device is
-    # absent. Adoption must leave it absent; ordinary init owns hotplug repair.
-    printf '\nENVIRONMENT_PROFILES=%s\n' "$telemetry_profile" >> "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
-    [ -z "$(incus config get "$instance" user.subyard.host_memory --project "$project")" ] || die 'telemetry fixture was not initially absent'
-  fi
   uuid="$(incus config get "$instance" volatile.uuid --project "$project")"
   pid="$(incus query "/1.0/instances/$instance/state?project=$project" | jq -r .pid)"
+  if [ "$kind" = container ] && [ -n "$telemetry_profile" ]; then
+    # Seed native absence without changing the approved profile selection or
+    # guest facts. Adoption leaves it absent; ordinary init owns hotplug repair.
+    incus query "/1.0/instances/$instance?project=$project" | jq -e '.config["user.subyard.host_memory"] == "v1" and .devices["subyard-host-memory"] == {type:"disk",source:"/proc/meminfo",path:"/var/lib/subyard/host-meminfo",readonly:"true"}' >/dev/null || die 'telemetry fixture does not have the managed device'
+    incus config device remove "$instance" subyard-host-memory --project "$project"
+    incus config unset "$instance" user.subyard.host_memory --project "$project"
+    incus query "/1.0/instances/$instance?project=$project" | jq -e '(.config | has("user.subyard.host_memory") | not) and (.devices | has("subyard-host-memory") | not)' >/dev/null || die 'telemetry fixture was not initially absent'
+  fi
   # Model the unmarked native boundary without claiming an authenticated old release.
   project_seed_config="$(incus query "/1.0/projects/$project" | jq -c '{description,config:(.config|with_entries(select(.key|startswith("user.subyard.")|not)))}')"
   incus query --request PUT "/1.0/projects/$project" --data "$project_seed_config" >/dev/null

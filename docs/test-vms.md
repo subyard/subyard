@@ -51,7 +51,10 @@ owns this synthetic contract, so the normal profile inventory remains complete.
 Use the same version as the ordinary candidate and set
 `SUBYARD_E2E_ADOPTION_ENGINE_SHA256` to the ordinary candidate's engine checksum.
 The fixture requires the installed synthetic candidate's engine to match exactly,
-labels the added profile in evidence, and checks that one `init --adopt` registers
+labels the added profile in evidence, and selects it during initial container setup.
+It verifies the managed telemetry device before removing its device and ownership
+marker to seed native absence, preserving the approved profile selection and guest facts.
+It checks that one `init --adopt` registers
 the yard and reconciles absent selected telemetry through ordinary init. It also
 retains the registered-bind, container and VM checks. Keep both original candidate
 receipts; synthetic profile assets do not establish shipped-profile acceptance.

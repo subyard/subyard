@@ -11,7 +11,6 @@ fixture_functions() { # source file, then function names
   shift
   for name; do sed -n "/^$name() {/,/^}$/p" "$source"; done
 }
-bash "$ROOT/tests/agent-e2e-acquire-session.sh"
 bash "$ROOT/tests/helpers/vm-page-reporting.sh"
 bash "$ROOT/tests/proxy-address-boot-controller.sh"
 export SUBYARD_E2E_STATE_DIR="$TMP/client"

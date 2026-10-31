@@ -41,7 +41,12 @@ func (runtime Runtime) guestFactsConverged(ctx context.Context) (bool, error) {
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
 		Command: []string{"python3", "-B", "-c", string(program), "check"}, Stdin: runtime.guestRuntimeFacts(),
 	})
-	if err != nil {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false, err
+	}
+	// Native Incus returns the completed guest exit code together with an error.
+	// Transport failures without a completed guest result must remain failures.
+	if err != nil && result.ExitCode == 0 {
 		return false, err
 	}
 	switch result.ExitCode {
@@ -50,6 +55,9 @@ func (runtime Runtime) guestFactsConverged(ctx context.Context) (bool, error) {
 	case 1, 10:
 		return false, nil // Missing, invalid, incomplete or expected snapshot drift.
 	default:
+		if err != nil {
+			return false, err
+		}
 		return false, errors.New("guest runtime facts check failed")
 	}
 }

@@ -1,4 +1,5 @@
 # CLI, context, registry, convergence and policy contracts.
+agent-e2e-acquire-session.sh
 agent-e2e.sh
 cli-contract.sh
 command-registry.sh

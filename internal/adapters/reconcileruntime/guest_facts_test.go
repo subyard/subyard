@@ -3,11 +3,14 @@ package reconcileruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/incusclient"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -49,15 +52,44 @@ func TestGuestFactsUsesEngineVersionAndOwnEffectiveSelection(t *testing.T) {
 func TestGuestFactsReadinessDistinguishesSnapshotDriftAndExecutionFailure(t *testing.T) {
 	runtime := Runtime{RepositoryRoot: "../../..", Yard: domain.Context{IncusProject: "own-project", YardInstanceName: "own-yard"}}
 	for _, exit := range []int{0, 1, 10, 2, 127} {
-		incus := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: exit}}}}
-		runtime.Executor = incus
-		ready, err := runtime.guestFactsConverged(context.Background())
-		if ready != (exit == 0) || (err != nil) != (exit != 0 && exit != 1 && exit != 10) {
-			t.Fatalf("exit=%d ready=%v err=%v", exit, ready, err)
-		}
-		call := incus.ExecCalls[0]
-		if call.Project != "own-project" || call.Name != "own-yard" || string(call.Request.Stdin) != string(runtime.guestRuntimeFacts()) {
-			t.Fatalf("wrong guest facts binding: %#v", call)
-		}
+		t.Run(fmt.Sprint(exit), func(t *testing.T) {
+			server, err := testkit.NewIncusServer(testkit.TempDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			server.QueueExec(testkit.IncusServerExecStep{ExitCode: exit})
+			runtime.Executor = incusclient.New(server.SocketPath)
+			ready, err := runtime.guestFactsConverged(context.Background())
+			if ready != (exit == 0) || (err != nil) != (exit != 0 && exit != 1 && exit != 10) {
+				t.Fatalf("exit=%d ready=%v err=%v", exit, ready, err)
+			}
+			call := server.ExecCalls()[0]
+			if call.Project != "own-project" || call.Name != "own-yard" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
+				t.Fatalf("wrong guest facts binding: %#v", call)
+			}
+		})
+	}
+}
+
+func TestGuestFactsReadinessPreservesExecutionErrors(t *testing.T) {
+	transportErr := errors.New("transport disconnected")
+	for _, scenario := range []struct {
+		name string
+		exit int
+		err  error
+	}{
+		{"transport", 0, transportErr},
+		{"unexpected-exit", 2, transportErr},
+		{"canceled-drift", 10, fmt.Errorf("wait: %w", context.Canceled)},
+		{"deadline-missing", 1, fmt.Errorf("wait: %w", context.DeadlineExceeded)},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			runtime := Runtime{RepositoryRoot: "../../..", Executor: &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: scenario.exit}, Err: scenario.err}}}}
+			ready, err := runtime.guestFactsConverged(context.Background())
+			if ready || !errors.Is(err, scenario.err) {
+				t.Fatalf("ready=%v err=%v; want execution error %v", ready, err, scenario.err)
+			}
+		})
 	}
 }
