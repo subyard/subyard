@@ -1,6 +1,7 @@
 package testvmsruntime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,15 +12,17 @@ import (
 )
 
 type Facade struct {
+	Context         context.Context
+	Input           io.Reader
 	OnStatus        func(LeasePool) ResourceStatus
 	OnObserve       func([]LeaseSlot) []ResourceObservation
 	EnvironmentSpec func(string) (EnvironmentSpec, error)
 	Store           LeaseStore
 	Output          io.Writer
 	Events          *EventRecorder
-	OnAcquire       func(LeaseGrant, string) (LeaseGrant, error)
-	OnRelease       func(LeaseGrant) error
-	OnQuarantine    func(LeaseGrant, error) error
+	OnAcquire       func(context.Context, LeaseGrant, string) (LeaseGrant, error)
+	OnRelease       func(context.Context, LeaseGrant) error
+	OnQuarantine    func(context.Context, LeaseGrant, error) error
 }
 
 type facadeResponse struct {
@@ -40,7 +43,10 @@ type facadeResponse struct {
 	Incident      *IncidentArtifact   `json:"incident,omitempty"`
 }
 
-func (facade Facade) Run(originalCommand string) error {
+func (facade Facade) Run(originalCommand string) (runErr error) {
+	if facade.Context == nil {
+		facade.Context = context.Background()
+	}
 	if facade.Output == nil {
 		facade.Output = io.Discard
 	}
@@ -65,7 +71,7 @@ func (facade Facade) Run(originalCommand string) error {
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok",
-			Capabilities: []string{"attribution-v2", "environment-acquire-v3", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1"}, Pool: &pool, Resources: resources,
+			Capabilities: []string{"attribution-v2", "environment-acquire-v3", "process-acquire-v4", DisposableLifecycle, "vm-count-v1", "lease-logs-v1", "resource-observe-v1"}, Pool: &pool, Resources: resources,
 		})
 	case "observe-v1":
 		if len(fields) != 4 || facade.Events == nil {
@@ -148,7 +154,7 @@ func (facade Facade) Run(originalCommand string) error {
 		return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Events: &events})
 	case "acquire", "acquire-v2":
 		return facade.writeAcquireError("invalid_request", "unsupported_acquire", "use acquire-v3 with an explicit environment type")
-	case "acquire-v3":
+	case "acquire-v3", "acquire-v4":
 		if len(fields) == 10 {
 			return facade.writeAcquireError("invalid_request", "missing_slot_id", "acquire-v3 requires TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id")
 		}
@@ -180,6 +186,13 @@ func (facade Facade) Run(originalCommand string) error {
 		if _, keyErr := normalizedPublicKey(publicKey); keyErr != nil || fields[8] != "ssh-ed25519" {
 			return facade.writeError("invalid_request", "lease key must be Ed25519")
 		}
+		if fields[0] == "acquire-v4" {
+			owner, err := currentAcquireOwner()
+			if err != nil {
+				return facade.writeError("unavailable", "requester identity unavailable")
+			}
+			facade.Store.AcquireOwner = &owner
+		}
 		grant, err := facade.Store.AcquireV3Slot(spec, fields[2], fields[3], fields[4], fields[5], fields[6], fields[7], fields[10])
 		if err != nil {
 			var unavailable *SlotUnavailableError
@@ -198,8 +211,17 @@ func (facade Facade) Run(originalCommand string) error {
 			_ = facade.quarantine(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
+		var session *acquireSession
+		if fields[0] == "acquire-v4" {
+			session = facade.newAcquireSession(grant)
+			defer func() { runErr = errors.Join(runErr, session.close()) }()
+			facade.Context = session.context
+			if err := facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "reserved", Grant: &grant}); err != nil {
+				return err
+			}
+		}
 		if facade.OnAcquire != nil {
-			grant, err = facade.OnAcquire(grant, publicKey)
+			grant, err = facade.OnAcquire(facade.Context, grant, publicKey)
 			if err != nil {
 				var capacity *CapacityError
 				if errors.As(err, &capacity) || errors.Is(err, ErrLegacyRetained) {
@@ -219,6 +241,12 @@ func (facade Facade) Run(originalCommand string) error {
 					return facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion,
 						Status: "error", Code: "capacity", Reason: capacity.Resource, Message: message})
 				}
+				if session != nil {
+					slot, inspectErr := storeSlot(facade.Store, grant.SlotID)
+					if session.context.Err() != nil || (inspectErr == nil && slot.State == SlotDraining) {
+						return facade.writeError("cancelled", "acquisition cancelled; cleanup required")
+					}
+				}
 				_ = facade.quarantine(grant, err)
 				return facade.writeError("quarantined", "slot provisioning failed")
 			}
@@ -227,9 +255,16 @@ func (facade Facade) Run(originalCommand string) error {
 			_ = facade.quarantine(grant, eventErr)
 			return facade.writeError("quarantined", "durable broker event failed")
 		}
-		return facade.write(facadeResponse{
-			SchemaVersion: LeaseProtocolVersion, Status: "ok", Grant: &grant,
-		})
+		if session != nil {
+			close(session.ready)
+		}
+		if err := facade.write(facadeResponse{SchemaVersion: LeaseProtocolVersion, Status: "ok", Grant: &grant}); err != nil {
+			return err
+		}
+		if session != nil {
+			return session.handoff()
+		}
+		return nil
 	case "renew":
 		grant, err := parseGrant(fields)
 		if err != nil {
@@ -251,7 +286,7 @@ func (facade Facade) Run(originalCommand string) error {
 		if facade.OnRelease == nil {
 			return facade.writeError("unavailable", "physical lease lifecycle is unavailable")
 		}
-		if err := facade.OnRelease(grant); err != nil {
+		if err := facade.OnRelease(facade.Context, grant); err != nil {
 			if errors.Is(err, ErrLeaseLost) {
 				return facade.writeError("lease_lost", "lease is no longer current")
 			}
@@ -269,7 +304,7 @@ func (facade Facade) quarantine(grant LeaseGrant, cause error) error {
 	if facade.OnQuarantine == nil {
 		return facade.Store.Quarantine(grant, cause)
 	}
-	return facade.OnQuarantine(grant, cause)
+	return facade.OnQuarantine(facade.Context, grant, cause)
 }
 
 func (facade Facade) recordGrantFailure(
@@ -362,6 +397,7 @@ func redactPool(pool *LeasePool) {
 		slot.ClientID = ""
 		slot.ControllerFingerprint = ""
 		slot.FailureReason = ""
+		slot.AcquireOwner = nil
 	}
 }
 

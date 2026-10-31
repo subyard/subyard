@@ -50,3 +50,4 @@ print(f'test-vms Go tests: passed={len(passed)} required_recipe_cases={len(requi
 PYCOUNT
 python3 -B "$PROFILE/tests/test_full_cleanup.py"
 python3 -B "$ROOT/dev/e2e/staging-reliability-test.py"
+python3 -B "$ROOT/dev/e2e/pregrant-creation-observer-test.py"

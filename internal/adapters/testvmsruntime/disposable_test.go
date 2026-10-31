@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 )
 
 func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
@@ -34,7 +36,7 @@ func TestFacadeDisposableAdmissionAndLegacyRequestRejection(t *testing.T) {
 		}
 		output.Reset()
 	}
-	facade.OnAcquire = func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+	facade.OnAcquire = func(_ context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 		if grant.Environment == nil || grant.Environment.Name != EnvironmentAndroid || grant.Environment.Count != 1 {
 			t.Fatalf("environment = %#v", grant.Environment)
 		}
@@ -143,6 +145,8 @@ func TestDisposableDeletionRequiresEveryExactMarkerAndVerifiedStop(t *testing.T)
 					return []byte(cfg.Project + "\n"), nil, nil
 				case "project get " + cfg.Project + " user.subyard.managed":
 					return []byte(managedMarker), nil, nil
+				case "operation list --project " + cfg.Project + " --format json":
+					return []byte("[]"), nil, nil
 				case "list --project " + cfg.Project + " -f csv -c n":
 					if mismatch == "inventory" {
 						return nil, nil, errors.New("inventory unavailable")
@@ -228,5 +232,133 @@ func TestRecoveryPreservesLegacyDataUntilExplicitRetirement(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatal("stale retirement touched retained data")
+	}
+}
+
+func TestCancelledAllocationWaitsForNativeCreationAndFencesLateGuest(t *testing.T) {
+	for _, initial := range []string{"active", "unknown", "unavailable", "late-operation", "late-completed"} {
+		t.Run(initial, func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			spec, _ := cfg.EnvironmentSpec(EnvironmentPair)
+			cfg = cfg.withEnvironment(spec)
+			store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+			grant, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "tests", "slot-001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.mutateOwned(grant, func(slot *LeaseSlot, _ time.Time) error {
+				slot.Reserved = true
+				slot.BaseFingerprint = "base"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.BeginDrain(grant); err != nil {
+				t.Fatal(err)
+			}
+			phase := initial
+			operationReads := 0
+			initContext, cancelInit := context.WithCancel(context.Background())
+			defer cancelInit()
+			exists, deleted, foreign := false, false, true
+			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				command := strings.Join(args, " ")
+				switch command {
+				case "project list --format csv -c n":
+					return []byte(cfg.Project), nil, nil
+				case "project get " + cfg.Project + " user.subyard.managed":
+					return []byte(managedMarker), nil, nil
+				case "operation list --project " + cfg.Project + " --format json":
+					operationReads++
+					if phase == "late-completed" && operationReads == 2 {
+						exists = true // Creation finished between the earlier inventory and terminal proof.
+					}
+					if phase == "late-operation" && operationReads == 1 {
+						return []byte("[]"), nil, nil
+					}
+					switch phase {
+					case "active", "late-operation":
+						return []byte(`[{"class":"task","description":"Creating instance","status_code":103}]`), nil, nil
+					case "unknown":
+						return []byte(`null`), nil, nil
+					case "unavailable":
+						return nil, nil, errors.New("native operation inventory unavailable")
+					}
+					return []byte(`[{"class":"task","description":"Creating instance","status_code":200}]`), nil, nil
+				case "list --project " + cfg.Project + " -f csv -c n":
+					if exists && !deleted {
+						return []byte(cfg.vm(1)), nil, nil
+					}
+					return nil, nil, nil
+				case "config get " + cfg.vm(1) + " user.subyard.managed --project " + cfg.Project:
+					return []byte(managedMarker), nil, nil
+				case "config get " + cfg.vm(1) + " user.subyard.generation --project " + cfg.Project:
+					value := grant.ResourceGeneration
+					if foreign {
+						value++
+					}
+					return []byte(strconv.FormatUint(value, 10)), nil, nil
+				case "config get " + cfg.vm(1) + " user.subyard.lease-epoch --project " + cfg.Project:
+					return []byte(strconv.FormatUint(grant.LeaseEpoch, 10)), nil, nil
+				case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c s":
+					return []byte("STOPPED"), nil, nil
+				case "delete " + cfg.vm(1) + " --project " + cfg.Project:
+					deleted = true
+					return nil, nil, nil
+				}
+				if strings.HasPrefix(command, "init ") {
+					for _, marker := range []string{"user.subyard.generation=" + strconv.FormatUint(grant.ResourceGeneration, 10), "user.subyard.lease-epoch=" + strconv.FormatUint(grant.LeaseEpoch, 10)} {
+						if !strings.Contains(command, marker) {
+							t.Fatalf("native init omitted atomic allocation marker %s", marker)
+						}
+					}
+					cancelInit() // The server accepted creation before its native client died.
+					return nil, nil, context.Canceled
+				}
+				return nil, nil, fmt.Errorf("unexpected native call %s", command)
+			}}
+			runtime := Runtime{Config: cfg, Runner: runner, allocation: &LeaseIdentity{SlotID: grant.SlotID, ResourceGeneration: grant.ResourceGeneration, LeaseEpoch: grant.LeaseEpoch}}
+			if err := runtime.initVM(initContext, cfg.vm(1)); !errors.Is(err, context.Canceled) || initContext.Err() == nil {
+				t.Fatalf("native init cancellation missing: %v", err)
+			}
+			cleanupErr := runtime.deleteAllocation(context.Background())
+			if cleanupErr == nil {
+				t.Fatal("cancelled init was treated as absent while native creation was active or unknown")
+			}
+			if err := store.FinishDrain(grant.SlotID, cleanupErr); err != nil {
+				t.Fatal(err)
+			}
+			slot, err := storeSlot(store, grant.SlotID)
+			if err != nil || slot.State != SlotQuarantined || !slot.Reserved || slot.BaseFingerprint != "base" || deleted {
+				t.Fatalf("uncertain creation released accounting: %#v %v", slot, err)
+			}
+			if _, err := store.AcquireV3Slot(spec, "next", "SHA256:next", "yard", "Project", "next", "tests", "slot-001"); !errors.Is(err, ErrLeaseBusy) {
+				t.Fatalf("uncertain slot was reusable: %v", err)
+			}
+			// The server finishes after its client died. A late VM must still carry this
+			// exact allocation's markers before recovery may delete it and clear budget.
+			phase = "terminal"
+			exists = true
+			if err := runtime.deleteAllocation(context.Background()); err == nil || deleted {
+				t.Fatalf("late foreign generation was deleted: %v", err)
+			}
+			foreign = false
+			if _, _, err := store.BeginScheduledRecovery(grant.SlotID, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.deleteAllocation(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !deleted {
+				t.Fatal("late matching guest survived recovery")
+			}
+			if _, err := store.FinishRecovery(grant.SlotID, nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			slot, err = storeSlot(store, grant.SlotID)
+			if err != nil || slot.State != SlotAvailable || slot.Reserved || slot.BaseFingerprint != "" {
+				t.Fatalf("verified cleanup did not clear budget: %#v %v", slot, err)
+			}
+		})
 	}
 }

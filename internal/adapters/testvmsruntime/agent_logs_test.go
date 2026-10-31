@@ -55,7 +55,7 @@ func TestAgentLogsOwnFailedAndReleasedLeasesSurviveSinkAcknowledgement(t *testin
 	}
 	second := acquire(other, "slot-001") // Same slot and display metadata, different lease owner.
 	_ = acquire(other, "slot-002")
-	facade.OnAcquire = func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+	facade.OnAcquire = func(_ context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 		return grant, errors.New("fixture provisioning failed")
 	}
 	if err := store.AbortProvisioning(*second); err != nil {

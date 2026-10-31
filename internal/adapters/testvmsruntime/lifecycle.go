@@ -2,6 +2,7 @@ package testvmsruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -167,15 +168,25 @@ func (runtime *Runtime) ReleaseSlot(
 	if _, err := slotNumber(grant.SlotID, runtime.Config.SlotCount); err != nil {
 		return err
 	}
+	// Publish cancellation before waiting for provisioning's physical lifecycle lock.
+	if err := store.BeginDrain(grant); err != nil {
+		return err
+	}
 	return withFileLock(
 		runtime.slotLifecycleLock(grant.SlotID),
 		func() error {
-			if err := store.BeginDrain(grant); err != nil {
-				return err
-			}
 			slot, err := storeSlot(store, grant.SlotID)
 			if err != nil {
 				return err
+			}
+			if slot.LeaseEpoch != grant.LeaseEpoch {
+				return ErrLeaseLost
+			}
+			if slot.State == SlotAvailable {
+				return nil
+			}
+			if slot.LeaseID != grant.LeaseID || slot.CapabilityHash != capabilityDigest(grant.Capability) || slot.State != SlotDraining {
+				return ErrLeaseLost
 			}
 			_, _ = runtime.eventRecorder().Record(BrokerEvent{
 				Kind:               "lease.release",
@@ -354,16 +365,19 @@ func (runtime *Runtime) RevokeExpectedSlot(
 	if _, err := slotNumber(expected.SlotID, runtime.Config.SlotCount); err != nil {
 		return err
 	}
+	shouldDrain, err := store.BeginExpectedDrain(expected, "operator revoke")
+	if err != nil || !shouldDrain {
+		return err
+	}
 	return withFileLock(
 		runtime.slotLifecycleLock(expected.SlotID),
 		func() error {
-			shouldDrain, err := store.BeginExpectedDrain(expected, "operator revoke")
-			if err != nil || !shouldDrain {
-				return err
-			}
 			slot, err := storeSlot(store, expected.SlotID)
 			if err != nil {
 				return err
+			}
+			if slotMatchesLeaseIdentity(slot, expected) && slot.State == SlotAvailable {
+				return nil
 			}
 			if !slotMatchesLeaseIdentity(slot, expected) || slot.State != SlotDraining {
 				return fmt.Errorf("%w: slot %s identity changed", ErrLeaseTargetStale, expected.SlotID)
@@ -806,6 +820,9 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 	if err := runtime.requireProjectMarker(ctx); err != nil {
 		return err
 	}
+	if err := runtime.requireAllocationIdle(ctx); err != nil {
+		return err
+	}
 	names, err := runtime.projectInstances(ctx)
 	if err != nil {
 		return err
@@ -830,12 +847,36 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 			return err
 		}
 	}
+	// A late creation can finish during cleanup. Prove native tasks terminal
+	// before taking the final instance inventory, so its VM cannot be missed.
+	if err := runtime.requireAllocationIdle(ctx); err != nil {
+		return err
+	}
 	remaining, err := runtime.projectInstances(ctx)
 	if err != nil {
 		return err
 	}
 	if len(remaining) != 0 {
 		return errors.New("allocation instances remain after deletion")
+	}
+	return nil
+}
+
+// Killing the Incus client does not cancel its server-side creation task. Empty
+// instance inventory proves cleanup only once this allocation project is idle.
+func (runtime *Runtime) requireAllocationIdle(ctx context.Context) error {
+	body, err := runtime.incus(ctx, "operation", "list", "--project", runtime.Config.Project, "--format", "json")
+	if err != nil {
+		return err
+	}
+	var operations []incusOperation
+	if err := json.Unmarshal([]byte(body), &operations); err != nil || operations == nil {
+		return errors.New("allocation operation inventory unavailable")
+	}
+	for _, operation := range operations {
+		if operation.StatusCode < 200 {
+			return errors.New("allocation operation still in progress")
+		}
 	}
 	return nil
 }

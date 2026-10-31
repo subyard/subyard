@@ -386,14 +386,38 @@ still resolves and validates that checkout and its project metadata; this does n
 source root copied to guests.
 
 The runner requires `attribution-v2`, `environment-acquire-v3` and `disposable-v1` from read-only
-status before it sends the exact typed `acquire-v3` request. Legacy acquire is not supported, and the runner never downgrades in
-response to status or acquire failure. Only a typed busy response plus bounded `--wait` permits
+status. When the broker advertises `process-acquire-v4`, the runner uses `acquire-v4` with the
+same arguments as `acquire-v3`. Otherwise it retains the released `acquire-v3` protocol; that
+older broker cannot provide immediate pre-grant cancellation. Legacy acquire is not supported,
+and the runner never switches protocols in response to acquire failure. Only a typed busy response plus bounded `--wait` permits
 another request for the same slot; a transport failure or any other unknown outcome ends the
 attempt. A `held` busy response
 contains exactly the safe owner fields `display_label`, `yard`, `project`, `run`, `purpose`,
 `acquired_at` and `expires_at`. Other unavailable states carry no owner object. The runner validates
 the complete response before retrying; a missing, extra or malformed owner field makes the outcome
 unknown and prevents another acquire.
+
+
+`acquire-v4` streams a `reserved` grant before provisioning and an `ok` grant when ready.
+The wrapper retains the early credentials for immediate release and acknowledges the ready grant
+with `ack` after validation and keeper startup; held lease expiry then follows the existing policy.
+Until ACK, the lease records its worker PID, start time and boot identity. The guard checks the
+wrapper/requester each second; EOF, invalid frames, fifteen seconds without keepalive, explicit
+release, or worker loss initiate cleanup. Release publishes `DRAINING` before waiting for the
+lifecycle lock, allowing provisioning to observe cancellation within one second.
+
+Cleanup uses a separate bounded context and preserves recovery state on failure. `AVAILABLE`
+requires terminal native operations and verified absence of owned guests; empty inventory alone
+cannot close a late Incus creation. Late guests retain generation/epoch checks. Lost replies use
+the same recovery path, and the wrapper distinguishes unknown server cleanup from local cleanup.
+
+`dev/e2e/broker-memory-boundary.sh --pregrant-cancellation` checks early TERM/KILL, native working
+creation cancellation, zero pending VM/builder memory, and fresh acquire/release. Its native
+subscription is confirmed on a held warm guest; a bounded lifecycle-lock barrier binds the exact
+requester/allocation before the observer signals on a matching live project/resource event.
+The owning preflight covers JSON separators and bounded observer diagnostics. Add
+`--working-creation-only` for that case's fresh warmup/cancel/reacquire sequence. Neither mode
+runs unrelated pressure, update/rollback or held-expiry checks.
 
 Explicit `--vm-count` requests additionally require `vm-count-v1`. The facade accepts
 `acquire-v3 TYPE client_id fingerprint yard project run purpose key_type key_blob slot_id [vm_count]`.

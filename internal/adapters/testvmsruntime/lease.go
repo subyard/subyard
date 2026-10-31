@@ -88,6 +88,7 @@ type LeaseOwnerSnapshot struct {
 }
 
 type LeaseSlot struct {
+	AcquireOwner          *AcquireOwner    `json:"acquire_owner,omitempty"`
 	Environment           *EnvironmentSpec `json:"environment,omitempty"`
 	BaseFingerprint       string           `json:"base_fingerprint,omitempty"`
 	Reserved              bool             `json:"reserved,omitempty"`
@@ -192,9 +193,10 @@ type LeaseTarget struct {
 }
 
 type LeaseStore struct {
-	Path      string
-	SlotCount int
-	Now       func() time.Time
+	AcquireOwner *AcquireOwner
+	Path         string
+	SlotCount    int
+	Now          func() time.Time
 }
 
 func (store LeaseStore) now() time.Time {
@@ -364,6 +366,7 @@ func (store LeaseStore) acquireSlot(
 			}
 			slot.LeaseEpoch++
 			slot.State = SlotProvisioning
+			slot.AcquireOwner = store.AcquireOwner
 			slot.ClientID = clientID
 			slot.ControllerFingerprint = fingerprint
 			slot.DisplayLabel = label
@@ -587,6 +590,10 @@ func (store LeaseStore) BeginRecovery(slotID string) error {
 
 func (store LeaseStore) Quarantine(grant LeaseGrant, cause error) error {
 	return store.mutateOwned(grant, func(slot *LeaseSlot, now time.Time) error {
+		// A cancellation already published by another request owns the drain.
+		if slot.State == SlotDraining {
+			return ErrLeaseLost
+		}
 		slot.State = SlotQuarantined
 		slot.FailureReason = boundedReason(cause.Error())
 		slot.NextRecoveryAt = now
@@ -1096,6 +1103,11 @@ func (store LeaseStore) CommitResize() error {
 func expireStale(pool *LeasePool, now time.Time) {
 	for index := range pool.Slots {
 		slot := &pool.Slots[index]
+		if slot.AcquireOwner != nil && (slot.State == SlotProvisioning || slot.State == SlotHeld) && !slot.AcquireOwner.alive() {
+			slot.State = SlotDraining
+			slot.FailureReason = "acquire requester lost; cleanup required"
+			continue
+		}
 		if slot.ExpiresAt.IsZero() || now.Before(slot.ExpiresAt) {
 			continue
 		}
@@ -1121,6 +1133,7 @@ func findSlot(pool *LeasePool, id string) (*LeaseSlot, error) {
 
 func clearLease(slot *LeaseSlot) {
 	slot.Environment = nil
+	slot.AcquireOwner = nil
 	slot.BaseFingerprint = ""
 	slot.Reserved = false
 	slot.ClientID = ""

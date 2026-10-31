@@ -173,6 +173,7 @@ func main() {
 				Path: cfg.LeaseStatePath(), SlotCount: cfg.SlotCount,
 			}
 			err = (testvmsruntime.Facade{
+				Context: ctx, Input: os.Stdin,
 				OnObserve: func(slots []testvmsruntime.LeaseSlot) []testvmsruntime.ResourceObservation {
 					return runtime.Observe(ctx, slots)
 				},
@@ -183,15 +184,15 @@ func main() {
 				Store:           store,
 				Output:          os.Stdout,
 				Events:          events,
-				OnAcquire: func(grant testvmsruntime.LeaseGrant, publicKey string) (
+				OnAcquire: func(ctx context.Context, grant testvmsruntime.LeaseGrant, publicKey string) (
 					testvmsruntime.LeaseGrant, error,
 				) {
 					return runtime.AcquireSlot(ctx, store, grant, publicKey)
 				},
-				OnRelease: func(grant testvmsruntime.LeaseGrant) error {
+				OnRelease: func(ctx context.Context, grant testvmsruntime.LeaseGrant) error {
 					return runtime.ReleaseSlot(ctx, store, grant)
 				},
-				OnQuarantine: func(grant testvmsruntime.LeaseGrant, cause error) error {
+				OnQuarantine: func(ctx context.Context, grant testvmsruntime.LeaseGrant, cause error) error {
 					return runtime.QuarantineSlot(ctx, store, grant, cause)
 				},
 			}).Run(os.Getenv("SSH_ORIGINAL_COMMAND"))

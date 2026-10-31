@@ -8,13 +8,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
 [ "${SUBYARD_E2E_VM:-}" = 1 ] && sudo -n test -f /run/subyard-e2e-lease.json \
   || { printf 'broker-memory-boundary: run on allocated VM1 through dev/agent-e2e.sh\n' >&2; exit 2; }
+PREGRANT_ONLY=0
+PREGRANT_WORKING_ONLY=0
 TELEMETRY_ONLY=0
 HELD_DIAGNOSTIC=0
 TELEMETRY_FLAG=--telemetry-resources
 case "${1:-}" in
+  --pregrant-cancellation) PREGRANT_ONLY=1; shift ;;
   --telemetry-resources) TELEMETRY_ONLY=1; shift ;;
   --telemetry-held-diagnostic) TELEMETRY_ONLY=1; HELD_DIAGNOSTIC=1; TELEMETRY_FLAG="$1"; shift ;;
 esac
+if [ "$PREGRANT_ONLY" = 1 ] && [ "${1:-}" = --working-creation-only ]; then
+  PREGRANT_WORKING_ONLY=1
+  shift
+fi
 if [ "$HELD_DIAGNOSTIC" = 1 ]; then
   [ -n "${SUBYARD_E2E_RESOURCE_OBSERVER:-}" ] && [ -n "${SUBYARD_AGENT_RUN_ID:-}" ] && [ -n "${SUBYARD_TELEMETRY_DATA_DIR:-}" ] || {
     printf 'broker-memory-boundary: held diagnostic requires the managed telemetry observer\n' >&2; exit 2;
@@ -30,13 +37,17 @@ TOKEN="${1:-$(date +%s)$$}"
   "$ROOT/dev/e2e/p0-guest.sh") memory-boundary "$TOKEN"
 
 PROJECT=subyard-test-yard
-INSTANCE=yard-test-yard
+INSTANCE='yard-test-yard'
 DEVICE=subyard-host-memory
 TELEMETRY=/var/lib/subyard/host-meminfo
 ENGINE=/usr/local/libexec/subyard/test-vms-inner
 HOLDER_PID=''
 ORPHAN_WORKER_PID=''
 PRESSURE_PID=''
+CREATION_MONITOR_PID=''
+CREATION_LOCK_PID=''
+CREATION_LOCK_START=''
+CREATION_LOCK_TRANSPORT_PID=''
 STATE_PARENT=''
 HOLDER_STARTED_PID=''
 # Consumed by the sourced holder cleanup functions.
@@ -77,7 +88,13 @@ prepare_native_route() {
 # never the shared helper's broader owner lane. Keep its existing ownership token.
 reexec_with_incus_group() {
   local command
-  if [ "$TELEMETRY_ONLY" = 1 ]; then
+  if [ "$PREGRANT_ONLY" = 1 ]; then
+    if [ "$PREGRANT_WORKING_ONLY" = 1 ]; then
+      printf -v command 'exec bash %q --pregrant-cancellation --working-creation-only %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+    else
+      printf -v command 'exec bash %q --pregrant-cancellation %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
+    fi
+  elif [ "$TELEMETRY_ONLY" = 1 ]; then
     printf -v command 'exec bash %q %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TELEMETRY_FLAG" "$TOKEN"
   else
     printf -v command 'exec bash %q %q' "$ROOT/dev/e2e/broker-memory-boundary.sh" "$TOKEN"
@@ -89,6 +106,11 @@ cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  release_creation_barrier || rc=3
+  if [ -n "$CREATION_MONITOR_PID" ]; then
+    kill "$CREATION_MONITOR_PID" >/dev/null 2>&1
+    wait "$CREATION_MONITOR_PID" >/dev/null 2>&1
+  fi
   if [ -n "$PRESSURE_PID" ]; then
     kill "$PRESSURE_PID" >/dev/null 2>&1
     wait "$PRESSURE_PID" >/dev/null 2>&1
@@ -718,20 +740,301 @@ PY_ORPHAN
   printf '  [ ok ] clean reacquire advanced epoch; disposable data absent; release succeeded\n'
 }
 
+
+release_creation_barrier() {
+  [ -n "$CREATION_LOCK_PID" ] || return 0
+  timeout --signal=TERM --kill-after=5 10 incus exec "$INSTANCE" --project "$PROJECT" -- \
+    python3 - "$CREATION_LOCK_PID" "$CREATION_LOCK_START" <<'PYUNLOCK'
+import os,pathlib,signal,sys
+path=pathlib.Path('/proc',sys.argv[1],'stat')
+if path.exists():
+    fields=path.read_text().rsplit(') ',1)[1].split()
+    if fields[0] not in ('Z','X') and fields[19]==sys.argv[2]: os.kill(int(sys.argv[1]),signal.SIGTERM)
+PYUNLOCK
+  wait "$CREATION_LOCK_TRANSPORT_PID" || return 1
+  CREATION_LOCK_PID=''; CREATION_LOCK_START=''; CREATION_LOCK_TRANSPORT_PID=''
+}
+
+creation_observer_failure() {
+  local message="$1" observer_rc="${2:-0}"
+  if [ -n "$CREATION_MONITOR_PID" ]; then
+    kill -TERM "$CREATION_MONITOR_PID" 2>/dev/null || true
+    if [ "$observer_rc" = 0 ]; then wait "$CREATION_MONITOR_PID" 2>/dev/null || observer_rc=$?; fi
+    CREATION_MONITOR_PID=''
+  fi
+  printf 'broker-memory-boundary: creation observer exit_code=%s\n' "$observer_rc" >&2
+  # The helper emits fixed fields only; never relay native event payloads/stderr.
+  python3 - "$STATE_PARENT/working-creation.events" <<'PYOBSERVERDIAG'
+import json,pathlib,sys
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines()[-8:]:
+    try: row=json.loads(line)
+    except ValueError: continue
+    if row.get('stage')!='terminal': continue
+    keep=('signalled','error_class','native_exit_code','events','blank_lines','project_mismatch','resource_mismatch','creating')
+    print(json.dumps({key:row[key] for key in keep if key in row}),file=sys.stderr)
+PYOBSERVERDIAG
+  die "$message"
+}
+
+pregrant_child_failure() {
+  local client="$1" message="$2" child_rc=0
+  wait "$HOLDER_PID" 2>/dev/null || child_rc=$?
+  HOLDER_PID=''
+  printf 'broker-memory-boundary: pregrant child outcome: client=%s exit_code=%s\n' "$client" "$child_rc" >&2
+  holder_failure "$message" "$client"
+}
+
+wait_pregrant_holder() {
+  local client="$1" failure="$2" timeout_message="$3" deadline=$((SECONDS + 1800))
+  while [ "$SECONDS" -lt "$deadline" ] && [ ! -s "$STATE_PARENT/$client.ready" ]; do
+    kill -0 "$HOLDER_PID" >/dev/null 2>&1 || pregrant_child_failure "$client" "$failure"
+    sleep 1
+  done
+  [ -s "$STATE_PARENT/$client.ready" ] || die "$timeout_message"
+}
+
+pregrant_client() {
+  local client="$1"
+  export SUBYARD_E2E_STATE_DIR="$STATE_PARENT/$client"
+  export SUBYARD_E2E_YARD=test-yard
+  # shellcheck source=dev/agent-e2e.sh
+  . "$RUNNER"
+  LOCAL_TEMP="$(mktemp -d /tmp/subyard-agent-e2e.XXXXXX)"
+  LEASE_REQUESTED_SLOT='slot-001'
+  LEASE_PURPOSE=pregrant-cancellation
+  printf '%s\n' "$BASHPID" > "$STATE_PARENT/$client.pid"
+  trap cleanup_on_exit EXIT
+  trap 'cleanup_on_exit interrupted 143' TERM
+  acquire_lease
+  : > "$STATE_PARENT/$client.unexpected-ready"
+  exit 1
+}
+
+wait_pregrant_cleanup() {
+  local client="$1" signal="$2" deadline status worker_pid worker_start
+  deadline=$((SECONDS + 180))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    status="$(runtime_yard -Y test-yard test-vms status --json)"
+    if jq -e 'all(.pool.slots[]; .state == "available") and
+      .resources.memory_admission.pending_vm_bytes == 0 and
+      .resources.memory_admission.pending_builder_bytes == 0' <<<"$status" >/dev/null; then break; fi
+    sleep 1
+  done
+  jq -e 'all(.pool.slots[]; .state == "available") and
+    .resources.memory_admission.pending_vm_bytes == 0 and
+    .resources.memory_admission.pending_builder_bytes == 0' <<<"$status" >/dev/null \
+    || die 'pregrant cancellation did not restore the slot and memory within 180 seconds'
+  outer_exec python3 - <<'PYPREGRANT'
+import json, pathlib, subprocess
+root=pathlib.Path('/var/lib/subyard/test-vms')
+slot=json.loads((root/'leases.json').read_text())['slots'][0]
+assert slot['state']=='available' and not slot.get('reserved') and not slot.get('acquire_owner')
+projects=json.loads(subprocess.check_output(['incus','project','list','--format','json']))
+for project in ('subyard-e2e-vms-slot-1','subyard-e2e-vms-builder'):
+    if any(row['name']==project for row in projects):
+        assert not subprocess.check_output(['incus','list','--project',project,'--format','csv','-c','n']).strip(), 'owned provisioning guest remains'
+        operations=json.loads(subprocess.check_output(['incus','operation','list','--project',project,'--format','json']))
+        assert isinstance(operations,list) and all(row.get('status_code',0)>=200 for row in operations), 'native provisioning operation remains'
+PYPREGRANT
+  read -r worker_pid worker_start < "$STATE_PARENT/$client.worker"
+  outer_exec python3 - "$worker_pid" "$worker_start" <<'PYPREGRANTPROCESS'
+import pathlib,sys,time
+path=pathlib.Path('/proc',sys.argv[1],'stat')
+deadline=time.monotonic()+20
+while path.exists():
+    try: fields=path.read_text().rsplit(') ',1)[1].split()
+    except FileNotFoundError: break
+    if fields[0]=='Z' or fields[19]!=sys.argv[2]: break
+    assert time.monotonic()<deadline, 'owned acquire worker survived cleanup'
+    time.sleep(.1)
+PYPREGRANTPROCESS
+  printf '  [ ok ] pregrant client %s: slot available, pending VM/builder memory zero, owned guests absent\n' "$signal"
+}
+
+assert_pregrant_cancellation() {
+  local signal client pid status prior_epoch=0 deadline seen
+  for signal in TERM KILL; do
+    [ "$PREGRANT_WORKING_ONLY" = 0 ] || break
+    client="pregrant-$signal"
+    start_holder_child pregrant_client "$client" > "$STATE_PARENT/$client.log" 2>&1
+    HOLDER_PID="$HOLDER_STARTED_PID"
+    seen=0
+    deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      [ ! -e "$STATE_PARENT/$client.unexpected-ready" ] || die 'pregrant interruption missed provisioning'
+      kill -0 "$HOLDER_PID" >/dev/null 2>&1 || pregrant_child_failure "$client" 'pregrant client exited before cancellation'
+      status="$(runtime_yard -Y test-yard test-vms status --json)"
+      if jq -e '.pool.slots[] | select(.slot_id == "slot-001") | .state == "provisioning"' <<<"$status" >/dev/null &&
+        jq -e '.resources.memory_admission | .pending_vm_bytes > 0 or .pending_builder_bytes > 0' <<<"$status" >/dev/null; then
+        prior_epoch="$(jq -r '.pool.slots[] | select(.slot_id == "slot-001") | .lease_epoch' <<<"$status")"
+        seen=1
+        break
+      fi
+      sleep 0.1
+    done
+    [ "$seen" = 1 ] || die 'pregrant request never reserved real provisioning memory'
+    read -r pid < "$STATE_PARENT/$client.pid"
+    outer_exec python3 - <<'PYPREGRANTOWNER' > "$STATE_PARENT/$client.worker"
+import json,pathlib
+slot=json.loads(pathlib.Path('/var/lib/subyard/test-vms/leases.json').read_text())['slots'][0]
+owner=slot.get('acquire_owner')
+assert slot['state']=='provisioning' and owner, 'broker did not use process-acquire-v4'
+print(owner['pid'],owner['start'])
+PYPREGRANTOWNER
+    kill -"$signal" "$pid"
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=''
+    wait_pregrant_cleanup "$client" "$signal"
+  done
+  start_holder_child hold_lease pregrant-reuse pregrant-clean-reuse slot-001 > "$STATE_PARENT/pregrant-reuse.log" 2>&1
+  HOLDER_PID="$HOLDER_STARTED_PID"
+  wait_pregrant_holder pregrant-reuse 'fresh acquire failed after pregrant cleanup' 'fresh acquire did not become ready'
+  runtime_yard -Y test-yard test-vms status --json | jq -e --argjson epoch "$prior_epoch" '
+    .pool.slots[] | select(.slot_id == "slot-001") | .state == "held" and .lease_epoch > $epoch' >/dev/null \
+    || die 'fresh acquire reused cancelled lease identity'
+  # Subscribe before another acquire, and prove that the native subscription is
+  # live using an exec event on this still-held, marker-owned warm allocation.
+  : > "$STATE_PARENT/working-creation.events"
+  chmod 0600 "$STATE_PARENT/working-creation.events"
+  python3 -u "$ROOT/dev/e2e/pregrant-creation-observer.py" \
+    --project subyard-e2e-vms-slot-1 --binding "$STATE_PARENT/working-creation.binding" --timeout 180 \
+    -- incus exec "$INSTANCE" --project "$PROJECT" -- \
+      timeout --signal=TERM --kill-after=5 180 incus monitor --project subyard-e2e-vms-slot-1 --type=operation --format=json \
+    > "$STATE_PARENT/working-creation.events" 2> "$STATE_PARENT/working-creation.log" &
+  CREATION_MONITOR_PID=$!
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if jq -es 'any(.[]; .stage == "ready")' "$STATE_PARENT/working-creation.events" >/dev/null; then break; fi
+    kill -0 "$CREATION_MONITOR_PID" >/dev/null 2>&1 || creation_observer_failure 'native working-creation observer failed'
+    outer_exec incus exec e2e-vm-1 --project subyard-e2e-vms-slot-1 -- true
+    sleep 0.1
+  done
+  jq -es 'any(.[]; .stage == "ready")' "$STATE_PARENT/working-creation.events" >/dev/null \
+    || creation_observer_failure 'native operation subscription was not confirmed'
+  : > "$STATE_PARENT/pregrant-reuse.release"
+  wait "$HOLDER_PID" || die 'fresh acquire release failed'
+  HOLDER_PID=''
+  # This is the physical lifecycle lock, separate from lease/status metadata.
+  # Reservation remains visible while native preparation waits behind it.
+  timeout --signal=TERM --kill-after=5 125 incus exec "$INSTANCE" --project "$PROJECT" -- \
+    python3 -u - <<'PYCREATELOCK' > "$STATE_PARENT/working-creation.lock-owner" &
+import fcntl,json,os,pathlib,signal,stat
+root=pathlib.Path('/var/lib/subyard/test-vms')
+assert all(row['state']=='available' for row in json.loads((root/'leases.json').read_text())['slots'])
+path=root/'lifecycle/slot-001.lock'
+info=path.lstat()
+assert stat.S_ISREG(info.st_mode) and not path.is_symlink() and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600
+def done(*_): raise SystemExit(0)
+signal.signal(signal.SIGTERM,done)
+signal.signal(signal.SIGALRM,done)
+signal.alarm(120)
+with path.open('r+') as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    start=pathlib.Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19]
+    print(os.getpid(),start,flush=True)
+    signal.pause()
+PYCREATELOCK
+  CREATION_LOCK_TRANSPORT_PID=$!
+  deadline=$((SECONDS + 30))
+  while [ ! -s "$STATE_PARENT/working-creation.lock-owner" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    kill -0 "$CREATION_LOCK_TRANSPORT_PID" >/dev/null 2>&1 || die 'native creation barrier failed'
+    sleep 0.05
+  done
+  read -r CREATION_LOCK_PID CREATION_LOCK_START < "$STATE_PARENT/working-creation.lock-owner"
+  [[ "$CREATION_LOCK_PID:$CREATION_LOCK_START" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || die 'native creation barrier identity unavailable'
+  client=pregrant-working-init
+  start_holder_child pregrant_client "$client" > "$STATE_PARENT/$client.log" 2>&1
+  HOLDER_PID="$HOLDER_STARTED_PID"
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    status="$(runtime_yard -Y test-yard test-vms status --json)"
+    if jq -e '.pool.slots[] | select(.slot_id == "slot-001") | .state == "provisioning"' <<<"$status" >/dev/null; then break; fi
+    kill -0 "$HOLDER_PID" >/dev/null 2>&1 || pregrant_child_failure "$client" 'working requester failed behind creation barrier'
+    sleep 0.05
+  done
+  # Capture exact server allocation/worker while the barrier prevents creation.
+  outer_exec python3 - <<'PYCREATEBIND' > "$STATE_PARENT/working-creation.server-binding"
+import json,pathlib
+slot=json.loads(pathlib.Path('/var/lib/subyard/test-vms/leases.json').read_text())['slots'][0]
+owner=slot.get('acquire_owner')
+assert slot['slot_id']=='slot-001' and slot['state']=='provisioning' and owner
+worker=pathlib.Path('/proc',str(owner['pid']),'stat').read_text().rsplit(') ',1)[1].split()
+assert worker[0] not in ('Z','X') and worker[19]==owner['start']
+print(json.dumps(dict(project='subyard-e2e-vms-slot-1',state=slot['state'],epoch=slot['lease_epoch'],generation=slot['resource_generation'],worker_pid=owner['pid'],worker_start=owner['start'])))
+PYCREATEBIND
+  read -r pid < "$STATE_PARENT/$client.pid"
+  python3 - "$pid" "$HOLDER_PID" "$STATE_PARENT/working-creation.server-binding" "$STATE_PARENT/working-creation.binding" <<'PYLOCALBIND'
+import json,os,pathlib,sys
+pid=int(sys.argv[1]); assert pid==int(sys.argv[2]) and pid>1
+fields=pathlib.Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()
+assert fields[0] not in ('Z','X') and int(fields[1])==os.getppid()
+row=json.loads(pathlib.Path(sys.argv[3]).read_text());row.update(pid=pid,start=fields[19])
+path=pathlib.Path(sys.argv[4]);temp=path.with_suffix('.tmp')
+with temp.open('x') as out:
+    os.fchmod(out.fileno(),0o600);json.dump(row,out)
+temp.replace(path)
+PYLOCALBIND
+  deadline=$((SECONDS + 30))
+  until jq -es 'any(.[]; .stage == "armed")' "$STATE_PARENT/working-creation.events" >/dev/null; do
+    kill -0 "$CREATION_MONITOR_PID" >/dev/null 2>&1 || creation_observer_failure 'native creation observer failed before arm'
+    [ "$SECONDS" -lt "$deadline" ] || creation_observer_failure 'native creation observer did not arm'
+    sleep 0.05
+  done
+  release_creation_barrier || die 'native creation barrier release failed'
+  deadline=$((SECONDS + 180))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if jq -es 'any(.[]; .stage == "creating")' "$STATE_PARENT/working-creation.events" >/dev/null; then break; fi
+    kill -0 "$CREATION_MONITOR_PID" >/dev/null 2>&1 || creation_observer_failure 'native creation observer failed before signal'
+
+    [ ! -e "$STATE_PARENT/$client.unexpected-ready" ] || creation_observer_failure 'working creation interruption missed provisioning'
+    sleep 0.05
+  done
+  jq -es 'any(.[]; .stage == "creating")' "$STATE_PARENT/working-creation.events" >/dev/null \
+    || creation_observer_failure 'working-slot native creation was not observed'
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=''
+  if wait "$CREATION_MONITOR_PID"; then :; else
+    creation_observer_failure 'native working-creation observer failed' "$?"
+  fi
+  CREATION_MONITOR_PID=''
+  jq -r 'select(.stage == "creating") | [.worker_pid,.worker_start] | @tsv' \
+    "$STATE_PARENT/working-creation.events" > "$STATE_PARENT/$client.worker"
+  prior_epoch="$(jq -r 'select(.stage == "creating") | .epoch' "$STATE_PARENT/working-creation.events")"
+  wait_pregrant_cleanup "$client" KILL-during-working-init
+  start_holder_child hold_lease pregrant-final pregrant-final-reuse slot-001 > "$STATE_PARENT/pregrant-final.log" 2>&1
+  HOLDER_PID="$HOLDER_STARTED_PID"
+  wait_pregrant_holder pregrant-final 'fresh acquire failed after working creation cancellation' 'fresh acquire did not become ready after working creation cleanup'
+  runtime_yard -Y test-yard test-vms status --json | jq -e --argjson epoch "$prior_epoch" '
+    .pool.slots[] | select(.slot_id == "slot-001") | .state == "held" and .lease_epoch > $epoch' >/dev/null \
+    || die 'fresh acquire reused cancelled working creation identity'
+  : > "$STATE_PARENT/pregrant-final.release"
+  wait "$HOLDER_PID" || die 'final fresh acquire release failed'
+  HOLDER_PID=''
+  if [ "$PREGRANT_WORKING_ONLY" = 1 ]; then
+    printf 'ok: native working creation cancellation and fresh acquire/release (early cases not run)\n'
+  else
+    printf 'ok: pregrant SIGTERM, requester loss, native working creation cancellation and fresh acquire/release\n'
+  fi
+}
+
 holder_failure() {
+  local client="${2:-holder}"
+  case "$client" in holder|pregrant-TERM|pregrant-KILL|pregrant-working-init|pregrant-reuse|pregrant-final) ;; *) die 'invalid fixture client diagnostic selection' ;; esac
   # Preserve bounded controller diagnostics before marker-owned cleanup. Never
   # print the private lease/config store or arbitrary provisioning output.
-  if [ -f "$STATE_PARENT/holder.log" ]; then
-    awk '
+  if [ -f "$STATE_PARENT/$client.log" ]; then
+    tail -n 240 "$STATE_PARENT/$client.log" | awk '
       /^agent-e2e: retryable capacity refusal for slot-[0-9][0-9][0-9]: resource=(memory|disk); retry after resources become available$/ { print; next }
       /^agent-e2e: broker capability probe failed$/ { print; next }
+      /[.]pub.*No such file or directory|No such file or directory.*[.]pub/ { print "controller public identity unavailable before acquire"; next }
+      /^agent-e2e: (incomplete agent identity|cannot read the agent private identity|agent identity public and private halves do not match)/ { print "controller identity preparation failed"; next }
+      /^agent-e2e: lease acquire outcome is unknown; refusing a second allocation$/ { print "pregrant acquire transport outcome unknown"; next }
       /^agent-e2e: test environment unavailable: no pinned host key for / { print "holder has no pinned SSH host key"; next }
       /^agent-e2e: (cannot canonicalize|E2E runner must execute|managed workspace|project metadata)/ { print "holder workspace attribution failed"; next }
       /Permission denied \(publickey\)/ { print "holder SSH authentication failed"; next }
       /^ssh:/ { print "holder SSH transport failed"; next }
       /: unbound variable$/ { print "holder shell variable was unset" }
-    ' \
-      "$STATE_PARENT/holder.log" >&2
+    ' >&2
   fi
   die "$1"
 }
@@ -756,7 +1059,7 @@ OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
 install_owner_runtime
 [ -x "$SUBYARD_HOME/runtime/current/config/profiles/github/bin/broker" ] \
   || die 'installed owner runtime lacks its required native GitHub helper'
-if [ "$TELEMETRY_ONLY" = 0 ]; then prepare_broker_recovery_update; fi
+if [ "$TELEMETRY_ONLY" = 0 ] && [ "$PREGRANT_ONLY" = 0 ]; then prepare_broker_recovery_update; fi
 prepare_owner_image_cache_project "$PROJECT"
 write_owner_registration test-yard test-vms 2224 1
 REGISTRATION="$OWNER_YARD_DIR/test-yard.env"
@@ -855,7 +1158,7 @@ incus project set "$PROJECT" user.subyard.p0-image-cache="$MARKER"
 assert_owned_device
 OUTER_BEFORE="$(outer_identity)"
 assert_memory_accounting
-if [ "$TELEMETRY_ONLY" = 0 ]; then
+if [ "$TELEMETRY_ONLY" = 0 ] && [ "$PREGRANT_ONLY" = 0 ]; then
 remove_owned_device
 assert_unverified_source_rejected
 reject_snapshot_source
@@ -898,6 +1201,10 @@ export SUBYARD_E2E_PROJECT_YARD=test-yard
 export SUBYARD_E2E_YARD=test-yard
 prepare_native_route
 SUBYARD_E2E_STATE_DIR="$STATE_PARENT/holder" "$RUNNER" --yard test-yard --prepare >/dev/null
+if [ "$PREGRANT_ONLY" = 1 ]; then
+  assert_pregrant_cancellation
+  exit
+fi
 if [ "$HELD_DIAGNOSTIC" = 0 ] && [ -n "${SUBYARD_E2E_NATIVE_EXERCISE:-}" ]; then
   SUBYARD_E2E_STATE_DIR="$STATE_PARENT/holder" python3 -B "$SUBYARD_E2E_NATIVE_EXERCISE" --exercise \
     --state "$STATE_PARENT/telemetry-native" --data-dir "$SUBYARD_TELEMETRY_DATA_DIR" --source "$ROOT" --kind vm -- \

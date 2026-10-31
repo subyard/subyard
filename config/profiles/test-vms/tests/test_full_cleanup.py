@@ -192,6 +192,7 @@ class RecipePreflightTests(unittest.TestCase):
                 observer = root / "dev/e2e/staging-reliability-test.py"
                 observer.parent.mkdir(parents=True)
                 observer.write_text('')
+                (observer.parent / 'pregrant-creation-observer-test.py').write_text('')
                 tools = root / "tools"
                 tools.mkdir()
                 events = [dict(Action="skip" if kind == "skip" and index == 1 else "pass", Test=name)

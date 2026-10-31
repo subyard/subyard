@@ -30,6 +30,10 @@ LEASE_ID=""
 LEASE_EPOCH=""
 LEASE_CAPABILITY=""
 LEASE_KEEPER_PID=""
+LEASE_ACQUIRE_PID=""
+LEASE_ACQUIRE_ACK=""
+LEASE_ACQUIRE_REPLY=""
+LEASE_ACQUIRE_PROTOCOL=acquire-v3
 LEASE_KEEPER_LOG=""
 LEASE_YARD=""
 LEASE_PROJECT=""
@@ -523,7 +527,8 @@ derive_purpose() {
 lease_acquire_request() {
   local client="$1" fingerprint="$2" key_type="$3" key_blob="$4"
   [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease"
-  printf 'acquire-v3 %s %s %s %s %s %s %s %s %s %s' \
+  printf '%s %s %s %s %s %s %s %s %s %s %s' \
+    "$LEASE_ACQUIRE_PROTOCOL" \
     "$ENVIRONMENT_TYPE" "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
     "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
   [ -z "$VM_COUNT_REQUESTED" ] || printf ' %s' "$VM_COUNT_REQUESTED"
@@ -552,12 +557,118 @@ facade_request() {
   VM_IP=(); VM_HOST_KEY=()
   render_client_config > "$bootstrap"
   chmod 0600 "$bootstrap"
-  if [ -n "${2:-}" ]; then
+  if [ "${3:-}" = stream ]; then
+    ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" || rc=$?
+  elif [ -n "${2:-}" ]; then
     timeout --signal=TERM --kill-after=5 "$2" ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" </dev/null || rc=$?
   else
     ssh -F "$bootstrap" -T subyard-e2e-bastion -- "$command" </dev/null || rc=$?
   fi
   rm -f "$bootstrap"
+  return "$rc"
+}
+
+
+# One owned acquire session publishes credentials before its long provisioning work.
+# The existing PID/start watcher also closes this session when the wrapper is killed.
+lease_acquire_input() {
+  while lease_keeper_owner_alive; do
+    if [ -e "$LEASE_ACQUIRE_ACK" ]; then printf 'ack\n'; return; fi
+    printf 'keepalive\n' || return
+    sleep 1
+  done
+}
+
+
+lease_keeper_stop_jobs() {
+  local pid
+  for pid in "$keeper_timer_pid" "$keeper_job_pid"; do
+    [ -z "$pid" ] || { kill -KILL -- "-$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; }
+  done
+}
+
+lease_acquire_guard() {
+  local owner_pid="$1" owner_identity="$2" requester_pid="$3" requester_identity="$4" request="$5"
+  local keeper_timer_pid='' keeper_job_pid='' rc=0 reservation
+  set -m
+  trap lease_keeper_stop_jobs EXIT
+  trap 'exit 0' INT TERM
+  # A refusal closes stdin before the next heartbeat; keep the SSH exit status.
+  (set +m; set +o pipefail; lease_acquire_input | facade_request "$request" '' stream) > "$LEASE_ACQUIRE_REPLY" &
+  keeper_job_pid=$!
+  if lease_keeper_wait; then
+    wait "$keeper_job_pid" || rc=$?
+    keeper_job_pid=''
+    return "$rc"
+  fi
+  kill -KILL -- "-$keeper_job_pid" >/dev/null 2>&1 || true
+  wait "$keeper_job_pid" >/dev/null 2>&1 || true
+  keeper_job_pid=''
+  # EOF already asks the server to drain. Confirm cleanup when early credentials arrived.
+  if IFS= read -r reservation < "$LEASE_ACQUIRE_REPLY" && parse_lease_reservation "$reservation"; then
+    release_lease || printf 'agent-e2e: interrupted acquire cleanup remains unconfirmed: slot=%s run=%s\n' "$LEASE_SLOT" "$LEASE_RUN" >&2
+  fi
+  return 1
+}
+
+parse_lease_reservation() {
+  local response="$1"
+  jq -e '.schema_version == 1 and .status == "reserved" and
+    (.grant.slot_id | type == "string" and test("^slot-[0-9]{3}$")) and
+    (.grant.lease_id | type == "string" and test("^[0-9a-f]+$")) and
+    (.grant.lease_epoch | type == "number" and . >= 1 and . == floor) and
+    (.grant.capability | type == "string" and test("^[0-9a-f]+$"))' <<<"$response" >/dev/null 2>&1 || return 1
+  LEASE_SLOT="$(jq -r '.grant.slot_id' <<<"$response")"
+  LEASE_ID="$(jq -r '.grant.lease_id' <<<"$response")"
+  LEASE_EPOCH="$(jq -r '.grant.lease_epoch' <<<"$response")"
+  LEASE_CAPABILITY="$(jq -r '.grant.capability' <<<"$response")"
+}
+
+lease_acquire_stream() {
+  local request="$1" owner_pid="$BASHPID" owner_identity requester_pid requester_identity response fd partial=''
+  owner_identity="$(lease_process_identity "$owner_pid")" || return 1
+  requester_pid="${owner_identity#*:}"
+  [ "$requester_pid" -gt 1 ] && requester_identity="$(lease_process_identity "$requester_pid")" || return 1
+  LEASE_ACQUIRE_REPLY="$LOCAL_TEMP/acquire-replies"
+  LEASE_ACQUIRE_ACK="$LOCAL_TEMP/acquire-ack"
+  : > "$LEASE_ACQUIRE_REPLY"
+  chmod 0600 "$LEASE_ACQUIRE_REPLY"
+  lease_acquire_guard "$owner_pid" "$owner_identity" "$requester_pid" "$requester_identity" "$request" &
+  LEASE_ACQUIRE_PID=$!
+  exec {fd}< "$LEASE_ACQUIRE_REPLY"
+  while true; do
+    if IFS= read -r response <&"$fd"; then
+      response="$partial$response"
+      partial=''
+      if [ "$(jq -r '.status // empty' <<<"$response")" = reserved ]; then
+        parse_lease_reservation "$response" || { exec {fd}<&-; return 1; }
+        [ "$LEASE_SLOT" = "$LEASE_REQUESTED_SLOT" ] || { exec {fd}<&-; return 1; }
+      else
+        ACQUIRE_RESPONSE="$response"
+        exec {fd}<&-
+        return 0
+      fi
+    else
+      partial+="$response"
+      [ "${#partial}" -le 65536 ] || { exec {fd}<&-; return 1; }
+      if ! kill -0 "$LEASE_ACQUIRE_PID" >/dev/null 2>&1; then
+        wait "$LEASE_ACQUIRE_PID" 2>/dev/null || true
+        LEASE_ACQUIRE_PID=''
+        exec {fd}<&-
+        return 1
+      else
+        sleep 0.1
+      fi
+    fi
+  done
+}
+
+finish_acquire_session() {
+  [ -n "$LEASE_ACQUIRE_PID" ] || return 0
+  : > "$LEASE_ACQUIRE_ACK"
+  local rc=0
+  wait "$LEASE_ACQUIRE_PID" || rc=$?
+  LEASE_ACQUIRE_PID=''
   return "$rc"
 }
 
@@ -814,6 +925,7 @@ acquire_lease() {
     || die "an exact --slot is required before acquiring an E2E lease"
   command -v jq >/dev/null 2>&1 || die "jq is required"
   [ -n "$LOCAL_TEMP" ] || die "lease temporary directory is not initialized"
+  ensure_identity
   CLIENT_CONFIG="$LOCAL_TEMP/ssh_config"
   GUEST_KNOWN_HOSTS="$LOCAL_TEMP/guest_known_hosts"
   resolve_bastion_route
@@ -840,6 +952,10 @@ acquire_lease() {
     jq -e '(.capabilities // []) | index("vm-count-v1") != null' <<<"$status_response" >/dev/null \
       || die 'broker does not support explicit VM counts (vm-count-v1)'
   fi
+  LEASE_ACQUIRE_PROTOCOL=acquire-v3
+  if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
+    LEASE_ACQUIRE_PROTOCOL=acquire-v4
+  fi
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
@@ -852,7 +968,10 @@ acquire_lease() {
       return 4
     fi
     attempt=$((attempt + 1))
-    if ! response="$(facade_request "$request")"; then
+    if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
+      lease_acquire_stream "$request" || die "lease acquire outcome is unknown; refusing a second allocation"
+      response="$ACQUIRE_RESPONSE"
+    elif ! response="$(facade_request "$request")"; then
       die "lease acquire outcome is unknown; refusing a second allocation"
     fi
     jq -e 'type == "object" and .schema_version == 1 and
@@ -879,10 +998,18 @@ acquire_lease() {
       resolve_lease_generation
       telemetry_correlation held
       write_client_config
+      if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
+        start_lease_keeper
+        finish_acquire_session || die "lease acquire handoff is unknown; cleanup required"
+      fi
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
       printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
       return 0
+    fi
+    if [ -n "$LEASE_ACQUIRE_PID" ]; then
+      wait "$LEASE_ACQUIRE_PID" || die "lease acquire outcome is unknown; refusing a second allocation"
+      LEASE_ACQUIRE_PID=''
     fi
     reason="$(jq -r '.reason // empty' <<<"$response")"
     state="$(jq -r '.state // empty' <<<"$response")"
@@ -894,6 +1021,8 @@ acquire_lease() {
         (.message | type == "string" and length > 0 and length <= 1024 and test("^[^\\x00-\\x1f\\x7f]+$"))
       ' <<<"$response" >/dev/null 2>&1 \
         || die "lease acquire outcome is unknown; refusing a second allocation"
+      # A validated capacity refusal confirms the broker aborted before creating guests.
+      [ "$LEASE_ACQUIRE_PROTOCOL" != acquire-v4 ] || LEASE_ID=''
       printf 'agent-e2e: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
       local admission_snapshot
@@ -1005,17 +1134,11 @@ lease_keeper_wait() {
 
 lease_keeper() {
   local owner_pid="$1" owner_identity="$2" requester_pid="$3" requester_identity="$4"
-  local response response_file keeper_timer_pid='' keeper_job_pid='' renew_rc=0 pid
+  local response response_file keeper_timer_pid='' keeper_job_pid='' renew_rc=0
   # Separate background process groups let cleanup close every transport descendant's streams.
   set -m
   response_file="$(mktemp "${LOCAL_TEMP:-/tmp}/.subyard-lease-renew.XXXXXX")"
-  trap 'for pid in "$keeper_timer_pid" "$keeper_job_pid"; do
-    [ -z "$pid" ] || {
-      kill -KILL -- "-$pid" >/dev/null 2>&1 || true
-      wait "$pid" >/dev/null 2>&1 || true
-    }
-  done
-  rm -f "$response_file"' EXIT
+  trap 'lease_keeper_stop_jobs; rm -f "$response_file"' EXIT
   trap 'exit 0' INT TERM
   # Exit the background child directly, keeping local PIDs in scope for its EXIT trap.
   while true; do
@@ -1048,6 +1171,7 @@ lease_keeper() {
 }
 
 start_lease_keeper() {
+  [ -z "$LEASE_KEEPER_PID" ] || return 0
   local owner_pid="$BASHPID" owner_identity requester_pid requester_identity
   owner_identity="$(lease_process_identity "$owner_pid")" \
     || die 'cannot identify lease-owning wrapper'
@@ -1226,13 +1350,22 @@ cleanup_on_exit() {
   for vm in "${!GUEST_DIRS[@]}"; do
     cleanup_guest "$vm" quiet >/dev/null || cleanup_failed=1
   done
+  if [ -n "$LEASE_ACQUIRE_PID" ] && [ -z "$LEASE_ID" ]; then
+    printf 'agent-e2e: acquire cleanup remains unconfirmed: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
+    cleanup_failed=1
+  fi
+  release_lease || cleanup_failed=1
+  if [ -n "$LEASE_ACQUIRE_PID" ]; then
+    kill "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
+    wait "$LEASE_ACQUIRE_PID" >/dev/null 2>&1 || true
+    LEASE_ACQUIRE_PID=''
+  fi
   if [ -n "$LOCAL_TEMP" ]; then
     case "$LOCAL_TEMP" in /tmp/subyard-agent-e2e.*|"${TMPDIR:-/tmp}"/subyard-agent-e2e.*)
       find "$LOCAL_TEMP" -depth -delete >/dev/null 2>&1 || cleanup_failed=1
       ;;
     esac
   fi
-  release_lease || cleanup_failed=1
   # Keep the workload/signal outcome; cleanup has its own terminal phase.
   [ "$cleanup_failed" = 0 ] || [ "$rc" != 0 ] || rc=3
   phase_marker cleanup/release end "$((SECONDS - started))" "$((cleanup_failed * 3))"

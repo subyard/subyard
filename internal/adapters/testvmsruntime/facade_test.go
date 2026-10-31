@@ -2,6 +2,7 @@ package testvmsruntime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,11 +206,11 @@ func TestFacadeRejectsAndroidOnArmBeforeLeaseMutation(t *testing.T) {
 		EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
 			return cfg.environmentSpecForArch(name, "arm64")
 		},
-		OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+		OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 			provisioned = true
 			return grant, nil
 		},
-		OnQuarantine: func(LeaseGrant, error) error {
+		OnQuarantine: func(context.Context, LeaseGrant, error) error {
 			quarantined = true
 			return nil
 		},
@@ -259,7 +260,7 @@ func TestFacadeExactSlotAcquireDoesNotFallback(t *testing.T) {
 	var provisioned []string
 	facade := Facade{
 		Store: store, Output: &output,
-		OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+		OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 			provisioned = append(provisioned, grant.SlotID)
 			expires, err := store.MarkHeld(grant)
 			grant.ExpiresAt = expires
@@ -546,7 +547,7 @@ func TestFacadeRequestedVMCount(t *testing.T) {
 				EnvironmentSpec: func(name string) (EnvironmentSpec, error) {
 					return cfg.environmentSpecForArch(name, "amd64")
 				},
-				OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+				OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 					provisioned = true
 					return grant, nil
 				},
@@ -588,12 +589,12 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 	var output bytes.Buffer
 	facade := Facade{
 		Store: store, Output: &output,
-		OnAcquire: func(grant LeaseGrant, _ string) (LeaseGrant, error) {
+		OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
 			expires, err := store.MarkHeld(grant)
 			grant.ExpiresAt = expires
 			return grant, err
 		},
-		OnRelease: func(grant LeaseGrant) error {
+		OnRelease: func(ctx context.Context, grant LeaseGrant) error {
 			if err := store.BeginDrain(grant); err != nil {
 				return err
 			}
