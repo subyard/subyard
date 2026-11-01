@@ -1,6 +1,6 @@
 # Developer role
 
-Implement one bounded Subyard block in the selected role pilot.
+Implement one bounded Subyard block assigned by the coordinator.
 
 You are the developer; report to the coordinator named in your assignment.
 Read AGENTS.md, optional private/AGENTS.md and task-relevant engineering/testing rules

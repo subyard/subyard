@@ -9,6 +9,16 @@ This skill is the authoritative source for development workflow and test-selecti
 The linked guides describe commands, evidence, tools and environment constraints; they do not
 add automatic test gates. Explicit user instructions take precedence over this skill.
 
+Terms used below:
+
+- **Candidate:** the exact public source being checked or reviewed, including uncommitted and
+  untracked files; its identity is the recorded hash/manifest of those inputs.
+- **Freeze:** stop editing and record or package the final candidate so later checks use the same bytes.
+- **Native terminal outcome:** the client's own final result object for a command (exit code,
+  output, duration), not a summary or log tail.
+- **Receipt:** the result file a runner writes for a check, with its status and candidate binding.
+- **Evidence pointer:** a path to logs, receipts or bundles, given instead of copied content.
+
 ## Read the relevant sources
 
 Read by task; links are relative to this skill.
@@ -35,8 +45,8 @@ coordinator, and do not create or close shared task files or start another full 
 
 1. Establish the requested outcome, scope, plan steps, and acceptance checks before
    editing. Unless other instructions specify a location, keep task plans in
-   `private/tasks/`, creating it as needed; it is gitignored and needs no separate
-   private repository. Follow the overlay's task-file workflow when present. Keep
+   `private/tasks/`, creating it as needed; `private/` is gitignored by the public repository
+   and may be its own repository. Follow the overlay's task-file workflow when present. Keep
    remaining steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
@@ -50,12 +60,12 @@ coordinator, and do not create or close shared task files or start another full 
    Planned checks on available allocated VMs are agent work: complete them before
    reporting readiness.
 4. Use `rg` and targeted excerpts. Set a total output budget before batching independent
-   reads/searches or short checks; use `Promise.allSettled` where available and inspect every
+   reads/searches or short checks; run independent ones in parallel and inspect every
    result/exit. Broaden reads for new evidence or insufficient excerpts, rather than rereading
    truncated batches. Keep dependencies, edits, approvals and decisions sequential.
 5. Before handoff or compaction, update the concise task plan: remaining work, decisions,
    evidence and candidate identities. Preserve required rules and relevant architecture,
-   without a chat journal or full history; leave compaction defaults unchanged.
+   without a chat journal or full history.
 
 ## Choose checks by risk
 
@@ -85,22 +95,13 @@ coordinator, and do not create or close shared task files or start another full 
   only for an explicit request or concrete cross-domain lifecycle/recovery coupling that targeted
   lanes cannot adequately cover. Explain that reason before the expensive run; availability of
   VMs alone does not justify using them.
-- Keys sync unit/sandbox, installer/refresh and shared runtime/credential admission changes require
-  `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`, including changes
-  to called validators. This existing owning mode checks a real user manager and installed worker
-  with its SSH/SOPS peer; a host-free systemctl stub cannot close that contract. Select other units'
-  existing owning systemd lanes separately. Follow the explicit dependency map in
+- Select required owning lanes, including profile-owned lanes, from the explicit dependency map in
   [coverage ownership](../../../docs/testing.md#coverage-ownership); there is no automatic
-  changed-file selector. Run the mode's local prerequisites before its allocation.
-- Runtime releases default to the existing host-free/CI checks, local adapters and full
-  released-caller compatibility check in [Development](../../../docs/development.md).
-  Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
-  Available slots alone do not request a VM run. Unrequested VM checks remain `not-run`,
-  never passed; requested incomplete or failed checks block acceptance/publication.
-  Optional external checks follow the
-  [release contract](../../../docs/reference/release-publication.md#external-checks).
-  Existing CI/merge checks and risk-based development validation are unchanged.
+  changed-file selector. Include transitive validator changes and run a lane's local prerequisites
+  before its allocation. Mocks and host-free stubs cannot close a contract the map assigns to a
+  physical lane.
+- For release preparation, acceptance and publication, follow the
+  [agent release workflow](../../../docs/reference/release-publication.md#agent-release-workflow).
 - Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
   risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
   the full lifecycle or release gate passed.
@@ -110,15 +111,6 @@ coordinator, and do not create or close shared task files or start another full 
 - For acceptance, check prerequisites and capacity first; ARM runs in GitHub CI only.
   Repair with targeted checks, then freeze the final candidate. Run the original regression
   before the remaining required gates; a blocked check is incomplete, never passed.
-- For release repairs, accumulate fixes and commit the verified set at the end. Before preparation
-  CI, run the [publication preflight](../../../docs/reference/release-publication.md#operator-commands-and-retained-state)
-  and assign every required local check and explicitly requested VM gate in the existing task plan:
-  frozen local candidate, full command, slot budget and runner owner. Build locally and start ready
-  requested gates alongside CI; a targeted lane does not complete full release smoke. Do not
-  allocate VMs without an explicit request or wait for CI artifacts to begin
-  checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
-  then transfer equivalent complete original PASS evidence through the reviewed workflow.
-  Rerun only affected or missing gates.
 - Keep passed, failed and pending segments in the current task plan with the tested source hash,
   environment/base fingerprint and controller evidence paths. Reassess affected results when those
   identities change; use the testing guide's [evidence handoff](../../../docs/testing.md#evidence-handoff-and-cache-cleanup)
@@ -131,12 +123,12 @@ coordinator, and do not create or close shared task files or start another full 
 
 ## Test execution and delegation
 
-Keep short mechanical/doc edits and read-only answers direct; add review for a concrete risk.
-For substantial changes in an explicitly selected, bounded role pilot, use one sole writer and
-one independent reviewer. The governing task owns eligible blocks, deadline and quality/rollback
-conditions; this does not claim universal savings or promote the pilot to a global default. Add a
-second reviewer only for an explicit two-axis request or a concrete independent risk. Preserve
-the risk-based checks above; orchestration does not add acceptance runs.
+Keep short mechanical/doc edits, small focused fixes and read-only answers direct; add review
+for a concrete risk. Substantial changes use one sole writer (developer) and one independent
+reviewer by default. A change is substantial when it adds or changes behavior across components,
+or touches permissions, data retention, migrations, atomic updates or recovery. Add a second
+reviewer only for an explicit two-axis request or a concrete independent risk. Preserve the
+risk-based checks above; orchestration does not add acceptance runs.
 
 Role-specific obligations live in the client-neutral [developer](roles/developer.md),
 [reviewer](roles/reviewer.md) and [observer](roles/observer.md) contracts. They are not
@@ -146,8 +138,9 @@ history. Spawn settings by client; record a comparable available alternative if 
 
 | Client | Developer and fresh reviewer | Long-check observer | Resume the same worker |
 | --- | --- | --- | --- |
-| Codex | `model="gpt-6.1-sol"`, `reasoning_effort="high"`, `fork_turns="none"` | `gpt-6-luna`/`medium`, `fork_turns="none"` | `followup_task` |
-| Claude Code | Agent tool, `general-purpose`, strongest available model | `general-purpose`, a faster model | `SendMessage` to the agent |
+| Any | Strongest available model, high reasoning effort | A faster model, medium effort | Same worker, not a new one |
+| Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `fork_turns="none"`, faster `model`, `reasoning_effort="medium"` | `followup_task` |
+| Claude Code | Agent tool, `general-purpose`, strongest `model` | `general-purpose`, faster `model` | `SendMessage` to the agent |
 
 Neither client enforces the reviewer's read-only rule through these settings; the contract text
 carries it. A necessary long check may use one observer; run it directly if unavailable.
@@ -186,7 +179,7 @@ bound. Loss of context and missed deadlines never imply success or a silent exte
 
 Execution, polling/cursors, native outcomes, repair and evidence handling belong to the testing
 guide's [execution protocol](../../../docs/testing.md#execution-and-reporting-principles).
-Keep compaction defaults, global settings and existing runner infrastructure unchanged.
+Keep global settings and existing runner infrastructure unchanged.
 
 ## Boundaries
 

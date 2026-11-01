@@ -270,6 +270,29 @@ restriction. `GITHUB_TOKEN` cannot grant it. Resolve the permission failure thro
 authorized credentials/workflow policy while retaining the pinned SHA and unfinished state;
 never substitute current branch HEAD.
 
+## Agent release workflow
+
+Agents preparing a release apply the
+[development workflow](../../.agents/skills/subyard-dev-flow/SKILL.md) together with these rules.
+
+- Runtime releases default to the existing host-free/CI checks, local adapters and full
+  released-caller compatibility check in [Development](../development.md).
+  Long VM smoke and shipped-profile VM checks run only on explicit operator request:
+  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
+  Available slots alone do not request a VM run. Unrequested VM checks remain `not-run`,
+  never passed; requested incomplete or failed checks block acceptance/publication.
+  Optional external checks follow [external checks](#external-checks).
+  Existing CI/merge checks and risk-based development validation are unchanged.
+- For release repairs, accumulate fixes and commit the verified set at the end. Before preparation
+  CI, run the [publication preflight](#operator-commands-and-retained-state)
+  and assign every required local check and explicitly requested VM gate in the existing task plan:
+  frozen local candidate, full command, slot budget and runner owner. Build locally and start ready
+  requested gates alongside CI; a targeted lane does not complete full release smoke. Do not
+  allocate VMs without an explicit request or wait for CI artifacts to begin
+  checks that can use the local build. After CI, compare binaries and consumed runtime inputs/modes,
+  then transfer equivalent complete original PASS evidence through the reviewed workflow.
+  Rerun only affected or missing gates.
+
 ## Development verification
 
 `TMPDIR=/tmp bash tests/release-acceptance.sh` and

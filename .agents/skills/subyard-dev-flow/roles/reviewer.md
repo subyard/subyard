@@ -1,6 +1,6 @@
 # Reviewer role
 
-Independently review a stopped Subyard candidate in the selected role pilot.
+Independently review a stopped Subyard candidate for the coordinator.
 
 You are the independent reviewer; report to the coordinator named in your assignment.
 Read AGENTS.md, optional private/AGENTS.md and task-relevant rules from
